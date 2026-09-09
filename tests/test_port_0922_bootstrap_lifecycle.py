@@ -1181,6 +1181,23 @@ class BootstrapLifecycleTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, modules):
             self.assertTrue(bootstrap._validate_restored_garage(snapshot))
 
+    def test_transferred_crew_restores_with_original_training(self):
+        bootstrap, snapshot, modules = self._restorable(
+            save_mode='new_account', starters=self.STARTER_NAMES)
+        record = snapshot['vehicles'][0]
+        tankman_id = record['crew'][0]
+        original = record['tankmen'][tankman_id]
+        nation, trained_type, remainder = original.split(b':', 2)
+        self.assertNotEqual(b'12', trained_type)
+        record['tankmen'][tankman_id] = b':'.join((nation, b'12', remainder))
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(bootstrap._validate_restored_garage(snapshot))
+            for invalid in (b'9:12:' + remainder,
+                            nation + b':12:wrong_role'):
+                record['tankmen'][tankman_id] = invalid
+                with self.assertRaises(ValueError):
+                    bootstrap._validate_restored_garage(snapshot)
+
     def test_a_restored_device_is_removed_from_the_published_depot(self):
         bootstrap, snapshot, modules = self._restorable(
             save_mode='new_account', starters=self.STARTER_NAMES)

@@ -1065,6 +1065,20 @@ class GarageStateTests(unittest.TestCase):
         self.assertEqual(
             {101: b'tman:101'}, state.snapshot()['barracksTankmen'])
 
+    def test_direct_transfer_remembers_the_source_seat(self):
+        state = self._two_vehicle_state()
+        state.equip_tankman(9, 0, 201)
+        self.assertEqual([201, None],
+                         state.snapshot()['vehicles'][1]['lastCrew'])
+        self.assertEqual([201], state.return_crew(10))
+        self.assertEqual([201, 202], state.snapshot()['vehicles'][1]['crew'])
+
+    def test_transfer_preserves_another_vehicle_training(self):
+        state = self._two_seat_state(barracks={201: b'tman:201@2'})
+        state.equip_tankman(9, 0, 201)
+        self.assertEqual(b'tman:201@2',
+                         state.snapshot()['vehicles'][0]['tankmen'][201])
+
     def test_a_full_barracks_refuses_the_move_rather_than_lose_the_occupant(
             self):
         state = self._two_vehicle_state(berths=0)
@@ -1522,16 +1536,12 @@ class GarageStateTests(unittest.TestCase):
         self.assertEqual(
             100000 - 20000, state.snapshot()['wallet']['credits'])
 
-    def test_a_seated_crew_member_is_not_retrained_out_of_their_seat(self):
-        """The restore boundary needs every seated crew member to match."""
+    def test_seated_training_can_differ_from_the_current_vehicle(self):
         state = self._recruiting_state(unlocks=(50001, 50002))
-
-        with self.assertRaises(self.garage.GarageError):
-            state.retrain_tankman(101, 1, 50002)
-
+        state.retrain_tankman(101, 1, 50002)
         self.assertEqual(
-            b'tman:101', state.snapshot()['vehicles'][0]['tankmen'][101])
-        self.assertEqual(100000, state.snapshot()['wallet']['credits'])
+            b'tman:101@2|', state.snapshot()['vehicles'][0]['tankmen'][101])
+        self.assertEqual(80000, state.snapshot()['wallet']['credits'])
 
     def test_retraining_for_the_vehicle_they_are_already_in_is_allowed(self):
         state = self._recruiting_state()
@@ -1778,6 +1788,30 @@ class FittingRequestTests(unittest.TestCase):
             customizations_module=_Customizations)
         self.context['garage'] = self.state
         return self.state
+
+    def test_failed_refresh_finishes_accepted_crew_change_without_rollback(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['accountBerths'] = 4
+        vehicles, tankmen = _modules()
+        self.state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        self.context['garage'] = self.state
+        completions = []
+        callbacks = []
+        def push(diff, after_publish, after_failure):
+            self.pushed.append(diff)
+            callbacks.extend((after_publish, after_failure))
+            return True
+        self.context['push_update_and_wait'] = push
+        result = self._dispatch(self.commands.CMD_EQUIP_TMAN, (9, 0, -1))
+        result.before_response(lambda: completions.append(result.result_id))
+        self.assertEqual([], completions)
+        callbacks[1]('listener failed')
+        callbacks[0]()
+        self.assertEqual([self.commands.RES_FAILURE], completions)
+        self.assertIn('GARAGE_REFRESH_FAILED', result.error)
+        self.assertEqual([None, 102], self.state.snapshot()['vehicles'][0]['crew'])
+        self.assertEqual(b'tman:101', self.state.snapshot()['barracksTankmen'][101])
 
     def test_equip_eqs_decodes_the_exact_1513_payload(self):
         result = self._dispatch(

@@ -142,6 +142,12 @@ class _NativeLong(int):
 
 class AccountRpcTests(unittest.TestCase):
     def setUp(self):
+        refresh = mock.patch(
+            'gui.mods.offline_lan_0922.account_rpc.server._refresh_garage_views',
+            side_effect=lambda diff, after_refresh, after_failure=None, is_current=None:
+                after_refresh())
+        refresh.start()
+        self.addCleanup(refresh.stop)
         self.pending = []
         self.player = _Player()
         self.server = FakeServer(lambda: self.player,
@@ -290,7 +296,7 @@ class AccountRpcTests(unittest.TestCase):
         with mock.patch(
                 'gui.mods.offline_lan_0922.account_rpc.server.'
                 '_refresh_garage_views',
-                side_effect=lambda diff, after_refresh: completed.append(
+                side_effect=lambda diff, after_refresh, after_failure=None, is_current=None: completed.append(
                     after_refresh)):
             self.server._push_update(diff)
             self.server._push_update(diff)
@@ -326,7 +332,7 @@ class AccountRpcTests(unittest.TestCase):
         with mock.patch(
                 'gui.mods.offline_lan_0922.account_rpc.server.'
                 '_refresh_garage_views',
-                side_effect=lambda diff, after_refresh: completed.append(
+                side_effect=lambda diff, after_refresh, after_failure=None, is_current=None: completed.append(
                     after_refresh)):
             self.server._push_update(
                 {'inventory': {}}, after_publish=queue_another)
@@ -344,10 +350,43 @@ class AccountRpcTests(unittest.TestCase):
         self.server._context['on_inventory_refreshed'] = refreshed
         self.player.update = mock.Mock(side_effect=RuntimeError('retired update'))
         self.server._push_update({'inventory': {}})
-        with self.assertRaises(RuntimeError):
-            self._run()
+        self._run()
         self.assertFalse(self.server.inventory_refresh_pending)
         refreshed.assert_not_called()
+
+    def test_failed_crew_refresh_answers_failure_once(self):
+        self.player.update = mock.Mock(side_effect=ValueError('crew listener'))
+        result = account_requests.Result(commands.RES_SUCCESS)
+
+        def publish(complete):
+            def failed(error):
+                result.result_id = commands.RES_FAILURE
+                result.error = str(error)
+                complete()
+            self.server._push_update(
+                {'inventory': {}}, after_publish=lambda player: complete(),
+                after_failure=failed)
+        result.before_response = publish
+        result.wait_for_before_response = True
+        with mock.patch.object(account_requests, 'dispatch', return_value=result):
+            self.server.doCmdInt3(41, commands.CMD_EQUIP_TMAN, 9, 0, -1)
+        while self.pending:
+            self._run()
+        self.assertEqual(
+            [(41, commands.RES_FAILURE, 'crew listener')], self.player.responses)
+        self.assertFalse(self.server.inventory_refresh_pending)
+
+    def test_inventory_builder_failure_answers_instead_of_stranding_request(self):
+        result = account_requests.Result(
+            commands.RES_SUCCESS,
+            before_response=mock.Mock(side_effect=ValueError('bad crew diff')),
+            wait_for_before_response=True)
+        with mock.patch.object(account_requests, 'dispatch', return_value=result):
+            self.server.doCmdInt3(42, commands.CMD_EQUIP_TMAN, 9, 0, -1)
+        self._run()
+        self.assertEqual(1, len(self.player.responses))
+        self.assertEqual((42, commands.RES_FAILURE), self.player.responses[0][:2])
+        self.assertIn('bad crew diff', self.player.responses[0][2])
 
     def test_stats_update_does_not_run_the_inventory_refresh_fallback(self):
         with mock.patch(
@@ -446,7 +485,8 @@ class AccountRpcTests(unittest.TestCase):
         self.player.onCmdResponse = (
             lambda *args: trace.append('response'))
 
-        def delayed_refresh(unused_diff, after_refresh=None):
+        def delayed_refresh(unused_diff, after_refresh=None, after_failure=None,
+                            is_current=None):
             trace.append('refresh-start')
 
             def complete():
@@ -1487,7 +1527,7 @@ class DepotTests(unittest.TestCase):
     def test_purchase_publishes_balance_before_acknowledgement(self):
         state = self._garage(item_type=11)
         events = []
-        def publish(diff, after_publish):
+        def publish(diff, after_publish, after_failure=None):
             self.assertEqual({'credits': 60000}, diff['stats'])
             self.assertEqual(2, diff['inventory'][11][4444])
             events.append('update')
@@ -1646,3 +1686,101 @@ class DepotTests(unittest.TestCase):
             snapshot, validate=False)['inventory']
 
         self.assertEqual(370, published[10][11010])
+
+
+class GarageRefreshCompletionTests(unittest.TestCase):
+    """Model #1513's callback dispatch outside the waiting generator."""
+
+    def setUp(self):
+        self.timers = {}
+        self.waiting = []
+        self.success = mock.Mock()
+        self.failure = mock.Mock()
+        self.manager = mock.Mock()
+        self.current = True
+        self.cache = types.SimpleNamespace(
+            update=lambda *args: lambda callback: self.waiting.append(callback))
+
+        def schedule(delay, callback):
+            self.assertGreater(delay, 0.0)
+            self.timers[1] = callback
+            return 1
+
+        def process(fn):
+            def start():
+                generator = fn()
+                def step(value=None):
+                    try:
+                        operation = generator.send(value)
+                    except StopIteration:
+                        return
+                    operation(step)
+                step()
+            return start
+
+        modules = {
+            'BigWorld': types.SimpleNamespace(
+                callback=schedule,
+                cancelCallback=lambda key: self.timers.pop(key)),
+            'adisp': types.SimpleNamespace(process=process),
+            'gui.ClientUpdateManager': types.SimpleNamespace(
+                g_clientUpdateManager=self.manager),
+            'gui.shared.items_cache': types.SimpleNamespace(
+                CACHE_SYNC_REASON=types.SimpleNamespace(CLIENT_UPDATE=1)),
+            'gui.shared.personality': types.SimpleNamespace(
+                ServicesLocator=types.SimpleNamespace(itemsCache=self.cache)),
+        }
+        patcher = mock.patch.dict(sys.modules, modules)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def start(self):
+        from gui.mods.offline_lan_0922.account_rpc.server import _refresh_garage_views
+        return _refresh_garage_views(
+            {'inventory': {}}, after_refresh=self.success,
+            after_failure=self.failure, is_current=lambda: self.current)
+
+    def test_account_replaced_during_refresh_does_not_update_new_views(self):
+        self.start()
+        self.current = False
+        self.waiting[0]()
+        self.failure.assert_called_once()
+        self.success.assert_not_called()
+        self.manager.update.assert_not_called()
+        self.assertEqual({}, self.timers)
+
+    def test_delayed_refresh_completes_once_and_cancels_deadline(self):
+        self.start()
+        self.success.assert_not_called()
+        self.waiting[0]()
+        self.success.assert_called_once_with()
+        self.failure.assert_not_called()
+        self.assertEqual({}, self.timers)
+        self.manager.update.assert_called_once()
+
+    def test_lost_callback_times_out_and_late_completion_cannot_succeed(self):
+        self.start()
+        # An onSyncCompleted listener can raise before the stock dispatcher
+        # reaches the stored callback. No exception enters the generator.
+        self.timers.pop(1)()
+        self.failure.assert_called_once()
+        self.success.assert_not_called()
+        self.waiting[0]()
+        self.failure.assert_called_once()
+        self.success.assert_not_called()
+        self.manager.update.assert_not_called()
+
+    def test_synchronous_cache_failure_ends_wait_and_cancels_deadline(self):
+        self.cache.update = mock.Mock(side_effect=ValueError('bad inventory'))
+        self.start()
+        self.failure.assert_called_once()
+        self.success.assert_not_called()
+        self.assertEqual({}, self.timers)
+
+    def test_view_listener_failure_is_reported_as_failure(self):
+        self.manager.update.side_effect = ValueError('crew view failed')
+        self.start()
+        self.waiting[0]()
+        self.failure.assert_called_once()
+        self.success.assert_not_called()
+        self.assertEqual({}, self.timers)
