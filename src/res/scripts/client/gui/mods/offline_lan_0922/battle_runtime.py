@@ -16593,28 +16593,47 @@ class BattleRuntime(object):
                 str(commit_status or '-')))
         return True
 
-    def _report_local_motion_stall(self, start, end, dt, throttle, path):
+    def _report_local_motion_stall(self, start, end, dt, throttle, path,
+                                   before=None, drive=None, pitch=None,
+                                   contact=None):
         """Record bounded pose evidence when powered travel cannot advance."""
         if dt <= 0.0 or abs(throttle) <= 0.01:
             return False
         dx, dz = end[0] - start[0], end[2] - start[2]
-        if dx * dx + dz * dz > (0.2 * dt) ** 2:
+        stalled = dx * dx + dz * dz <= (0.2 * dt) ** 2
+        contact_limited = path not in (None, 'still', 'advance')
+        losing_speed = (before is not None and throttle * before > 0.0 and
+                        abs(self._local_speed) + 0.1 < abs(before))
+        if not (stalled or contact_limited or losing_speed):
             return False
         now = self._clock()
         if now < getattr(self, '_next_local_stall_report', 0.0):
             return False
         self._next_local_stall_report = now + 2.0
         sys.stdout.write(
-            '[Offline LAN 0.9.22] LOCAL STALL '
+            '[Offline LAN 0.9.22] LOCAL %s '
             'pos=(%.3f,%.3f,%.3f) yaw=%.3f pitch=%.3f roll=%.3f '
             'throttle=%.2f speed=%.3f vertical=%.3f '
             'path=%s world=%s kinds=%s support_blocked=%s airborne=%s\n' % (
+                'STALL' if stalled else 'SLOWDOWN',
                 end[0], end[1], end[2], self._local_yaw,
                 self._local_pitch, self._local_roll, throttle,
                 self._local_speed, self._local_vertical_speed,
                 path or 'still', self._local_motion_status,
                 self._local_motion_kinds, self._local_support_rise_blocked,
                 self._local_airborne))
+        if before is not None:
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] LOCAL DRIVE '
+                'before=%.4f drive=%.4f final=%.4f pitch=%.4f '
+                'travel=%.4f dt=%.4f plane=%s\n' % (
+                    before, drive, self._local_speed, pitch,
+                    math.sqrt(dx * dx + dz * dz), dt,
+                    json.dumps(self._local_ground_plane, sort_keys=True)))
+        trace = contact or getattr(self, '_local_world_collision_trace', None)
+        if trace and trace.get('reason'):
+            sys.stdout.write('[Offline LAN 0.9.22] LOCAL HARD CONTACT %s\n' %
+                             json.dumps(trace, sort_keys=True))
         return True
 
     def _report_local_contact_tick(self, path, before, pitch, rise):
@@ -17064,12 +17083,18 @@ class BattleRuntime(object):
         return self._commit_ground_plane(plane, force_raw=force_raw)
 
     def _drive_pitch(self, position, yaw):
-        """Copy the 0.8.2 close-range drive slope probe exactly.
+        """Use contacted terrain for drive gravity, then the legacy probe.
 
-        This is deliberately separate from the four-point visual hull pose.
-        The drive law skips bridge decks above the hull and clamps walls and
-        cliff faces before their gradient reaches longitudinal physics.
+        A centre-line probe may fall into a trench while the tracks still
+        bridge its banks. That floor is not the grade carrying this vehicle.
+        The suspension plane excludes unsupported samples and body rocking.
         """
+        if (self._local_suspension_params is not None and
+                not self._local_suspension_disabled):
+            supported_pitch = vehicle_physics.suspension_drive_pitch(
+                self._local_ground_plane, yaw)
+            if supported_pitch is not None:
+                return supported_pitch
         sine, cosine = math.sin(yaw), math.cos(yaw)
         distance = 2.0
         wall_rise = distance * 1.43
@@ -17614,6 +17639,7 @@ class BattleRuntime(object):
         self._local_motion_cap_crushed = False
         self._local_motion_kinds = '-'
         self._local_motion_status = 'clear'
+        self._local_world_collision_trace = {}
         if not self._arena_motion_is_clear(
                 entity, position, yaw, speed, dt, hull_yaw=hull_yaw):
             self._local_motion_kinds = 'arena'
@@ -17718,7 +17744,8 @@ class BattleRuntime(object):
                     entity.typeDescriptor, self._local_airborne, dt, True,
                     True, kinetic_speed, commit_enabled=False,
                     pitch=self._local_pitch, roll=self._local_roll,
-                    motion_yaw=world_motion_yaw)
+                    motion_yaw=world_motion_yaw,
+                    trace=self._local_world_collision_trace)
                 if isinstance(world_status, bool):
                     world_status = 'hard' if world_status else 'clear'
                 if world_status not in ('clear', 'kinetic'):
@@ -17736,7 +17763,8 @@ class BattleRuntime(object):
             bool(kinetic_speed is not None), kinetic_speed,
             commit_enabled=False,
             pitch=self._local_pitch, roll=self._local_roll,
-            motion_yaw=world_motion_yaw)
+            motion_yaw=world_motion_yaw,
+            trace=self._local_world_collision_trace)
         if isinstance(world_status, bool):
             world_status = 'hard' if world_status else 'clear'
         if world_status == 'hard':
@@ -20193,6 +20221,8 @@ class BattleRuntime(object):
                 slope_pitch, dt, self._local_airborne, 0,
                 handbrake)
 
+        drive_speed = self._local_speed
+        primary_contact = None
         if abs(self._local_speed) > 0.0001 and dt > 0.0:
             if self._motion_is_clear(
                     entity, position, yaw, self._local_speed, dt,
@@ -20205,6 +20235,10 @@ class BattleRuntime(object):
                 self._local_grind = max(0, self._local_grind - 1)
                 contact_path = 'advance'
             elif not self._local_airborne:
+                # Keep the first blocking witness: a later clear deflection
+                # probe must not erase the reason this drive slice slowed.
+                primary_contact = dict(getattr(
+                    self, '_local_world_collision_trace', None) or {})
                 if self._local_motion_cap_crushed:
                     # The speed cap only proves that this vehicle may crush the
                     # exact item.  It is never copied vehicle momentum.  Keep
@@ -20365,7 +20399,8 @@ class BattleRuntime(object):
             position[1] - tick_pose[1])
         self._local_position, self._local_yaw = position, yaw
         self._report_local_motion_stall(
-            tick_pose, position, dt, throttle, contact_path)
+            tick_pose, position, dt, throttle, contact_path,
+            previous_speed, drive_speed, slope_pitch, primary_contact)
         presentation_position = self._update_local_presentation(entity, dt)
         self._avatar.updateOwnVehiclePosition(
             presentation_position,
