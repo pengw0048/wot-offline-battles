@@ -23758,6 +23758,20 @@ class BattleRuntime(object):
             # without seeding the turret's filter from the vehicle's own,
             # never-fed ``WGVehicleFilter``.
             entity._Vehicle__turretDetachmentConfirmed = True
+            launched = self._run_optional_feature(
+                'ammo-bay turret detachment',
+                self._detached_turrets.launch,
+                (turret_plan, self._turret_detachment_seed(engine_id),
+                 self._clock()),
+                disable=False)
+            if not launched:
+                # No wreck assembler has been requested yet. Restore the
+                # burn-off state before the single native health callback.
+                entity._Vehicle__turretDetachmentConfirmed = False
+                native_health = int(
+                    self._runtime.constants.SPECIAL_VEHICLE_HEALTH
+                    .AMMO_BAY_DESTROYED)
+                entity.health = native_health
         health_changed = getattr(entity, 'onHealthChanged', None)
         if (not suppress_combat_presentation and
                 callable(health_changed)):
@@ -23770,13 +23784,6 @@ class BattleRuntime(object):
             notifier = getattr(entity, 'set_health', None)
             if callable(notifier):
                 notifier(previous)
-        if turret_plan:
-            self._run_optional_feature(
-                'ammo-bay turret detachment',
-                self._detached_turrets.launch,
-                (turret_plan, self._turret_detachment_seed(engine_id),
-                 self._clock()),
-                disable=False)
         previous_crew_active = getattr(entity, 'isCrewActive', crew_active)
         entity.isCrewActive = crew_active
         if (previous_crew_active != crew_active and

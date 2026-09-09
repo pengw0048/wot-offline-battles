@@ -223,7 +223,8 @@ def resolve_flight(origin, velocity, collide, clearance=0.0,
             part_time = following
             continue
         point = _vector3(contact)
-        travelled = _segment_fraction(current, nxt, point)
+        travelled = _segment_fraction(
+            current, nxt, (point[0], point[1] + clearance, point[2]))
         hit_time = part_time + (following - part_time) * travelled
         impact = flight_velocity(part_velocity, hit_time)
         if impact[1] > -WALL_DESCENT_LIMIT and deflections_left > 0:

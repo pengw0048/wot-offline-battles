@@ -37,8 +37,7 @@ from gui.mods.offline_lan_0922 import turret_detachment
 # One detached turret owns a turret plus gun compound for the rest of the
 # round.  The client is 32-bit and has run out of address space on a single
 # large texture reservation before, so bound how many can be resident at
-# once; beyond the cap the vehicle still becomes the retail exploded wreck,
-# it just does not throw a visible turret.
+# once; beyond the cap the vehicle keeps its burn-off wreck and turret.
 MAX_ACTIVE_TURRETS = 12
 
 _TURRET_PART_NAME = 'turret'
@@ -170,9 +169,8 @@ class DetachedTurretPresentation(object):
             }
             self._turrets.append(turret)
         except Exception as error:
-            # The vehicle is already the retail exploded wreck.  Roll back
-            # only this entity so a failed resource request cannot leave an
-            # untracked DetachedTurret in the battle space.
+            # Retire any allocated entity before the caller restores the
+            # burn-off health and requests the wreck assembler.
             if entity_id is not None:
                 self._destroy_entity(int(entity_id))
             self._note('detached turret creation failed', error)

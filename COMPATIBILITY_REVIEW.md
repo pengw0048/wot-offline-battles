@@ -2318,8 +2318,11 @@ runs synchronously inside `createEntity` and, while
 own never-fed `WGVehicleFilter`. The runtime therefore writes -13 and
 pre-sets `_Vehicle__turretDetachmentConfirmed` -- whose only writer in #1513
 is `confirmTurretDetachment`, which is that flag plus a models refresh --
-before calling `onHealthChanged`. That collapses retail's two refreshes into
-the one `onHealthChanged` already performs, so a turretless assembler cannot
+before creating the turret and calling `onHealthChanged`. Creation is
+attempted before the health callback requests a wreck assembler; a failed
+launch restores -5 and clears the confirmation flag first. That collapses
+retail's two refreshes into the one `onHealthChanged` already performs, so a
+turretless assembler cannot
 lose a background-load race against a turreted one for the same `exploded`
 model state, and it keeps that native call from happening at all. An unseen
 target detaches nothing: retail has no `DetachedTurret` in AOI for a vehicle

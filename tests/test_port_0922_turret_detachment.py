@@ -99,6 +99,17 @@ class FlightResolutionTest(unittest.TestCase):
         self.assertAlmostEqual(flight['contact'][1], 0.0, places=6)
         self.assertAlmostEqual(flight['rest'][1], 0.85, places=6)
 
+    def test_clearance_does_not_shift_the_contact_time(self):
+        # Translating the origin and underside together must leave the
+        # queried arc, contact time, and impact energy unchanged.
+        reference = turret_detachment.resolve_flight(
+            (0.0, 2.0, 0.0), (2.0, 6.0, 0.0), _flat_ground())
+        lifted = turret_detachment.resolve_flight(
+            (0.0, 2.85, 0.0), (2.0, 6.0, 0.0), _flat_ground(),
+            clearance=0.85)
+        self.assertAlmostEqual(reference['duration'], lifted['duration'])
+        self.assertAlmostEqual(reference['energy'], lifted['energy'])
+
     def test_impact_energy_is_the_specific_kinetic_energy(self):
         self.assertAlmostEqual(
             turret_detachment.impact_energy((3.0, -4.0, 0.0)), 12.5)

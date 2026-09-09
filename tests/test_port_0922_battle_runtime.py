@@ -5618,7 +5618,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
                 'critical': {'ammo_rack_death': True}}
 
     def test_ammo_bay_death_detaches_the_turret_in_the_stock_order(self):
-        """One refresh, already turretless, then the flying entity.
+        """Create the flying entity, then one refresh, already turretless.
 
         #1513 selects the ``exploded`` wreck and the missing turret purely
         from ``health`` and the private confirmation flag, and
@@ -5645,13 +5645,35 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual(
             order,
             [('prepare', 500, False),
-             ('health', _TURRET_DETACHED, True),
-             ('launch', _TURRET_DETACHED, True)])
+             ('launch', _TURRET_DETACHED, True),
+             ('health', _TURRET_DETACHED, True)])
         self.assertEqual(vehicle.health, _TURRET_DETACHED)
         self.assertTrue(vehicle.isTurretMarkedForDetachment)
         self.assertFalse(vehicle.isTurretDetachmentConfirmationNeeded)
         self.assertEqual(
             turrets.launch.call_args[0][0], {'plan': True})
+
+    def test_failed_turret_launch_preserves_the_burn_off_wreck(self):
+        for failure in (False, RuntimeError('collision query failed')):
+            with self.subTest(failure=failure):
+                battle, record, vehicle = self._ammo_bay_death_battle()
+                turrets = mock.Mock()
+                turrets.prepare.return_value = {'plan': True}
+                if isinstance(failure, Exception):
+                    turrets.launch.side_effect = failure
+                else:
+                    turrets.launch.return_value = failure
+                battle._detached_turrets = turrets
+                observed = []
+                vehicle.onHealthChanged = lambda health, attacker, reason: \
+                    observed.append((health,
+                                     vehicle._Vehicle__turretDetachmentConfirmed))
+
+                battle._apply_health(record, self._ammo_bay_death_state())
+
+                self.assertEqual(vehicle.health, _AMMO_BAY_DESTROYED)
+                self.assertFalse(vehicle._Vehicle__turretDetachmentConfirmed)
+                self.assertEqual(observed, [(_AMMO_BAY_DESTROYED, False)])
 
     def test_a_replayed_terminal_snapshot_keeps_the_turret_detached(self):
         """-13 must not be demoted to -5 and refresh the compound again."""
