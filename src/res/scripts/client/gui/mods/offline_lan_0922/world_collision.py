@@ -287,18 +287,19 @@ def _lane_ground_ahead(spaceID, Math, pos, start_x, start_z,
 		# have no descending pose trend even when a trench lies below them.
 		# Pulling their end down to that floor invents a collision with the lip.
 		return None
-	if descending and start_ground is not None and footprint_ground is not None:
-		# A crest can already lie beneath the front of the footprint while
-		# the body is still supported behind it. A chord through that lower
-		# floor is outside the occupied hull. Confirm the middle of the
-		# support chord before allowing it to pull a descending ray down.
+	if (start_ground is not None and footprint_ground is not None and
+			(descending or float(footprint_ground) < float(start_ground))):
+		# The ground may descend even while the hull lane rises. Before
+		# extrapolating that descent, require the middle to agree with the
+		# same support chord. Either a high crest or a low trench sample
+		# breaks continuity; neither may bend the occupied ray into a lip.
 		middle_ground = _ground_top(
 			spaceID, Math, pos, (start_x + footprint_x) * 0.5,
 			(start_z + footprint_z) * 0.5, look, ground_plane,
 			collision_filter)
 		if (middle_ground is None or
-				float(middle_ground) >
-				(float(start_ground) + float(footprint_ground)) * 0.5 +
+				abs(float(middle_ground) -
+					(float(start_ground) + float(footprint_ground)) * 0.5) >
 				_GROUND_HIT_EPSILON):
 			return None
 	try:

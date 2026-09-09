@@ -1791,6 +1791,64 @@ class WorldCollisionTests(unittest.TestCase):
                             roll=mirror * 0.08774969656052144, trace=trace)
                         self.assertEqual('hard' if wall else 'clear', status, trace)
 
+    def test_rising_hull_lane_cannot_extrapolate_a_trench_floor(self):
+        # #1513 Type 62 at 20:28:54: the drive law retained 16.51 m/s,
+        # then an artificial downward chord hit a near-horizontal trench lip
+        # and deflection cut travel to 8.31 m/s. The occupied hull rises along
+        # this lane, so the old descending-only midpoint guard never ran.
+        extents = (1.4029690027236938, 2.885922908782959, 2.7345070838928223)
+        for mirror in (-1.0, 1.0):
+            yaw = mirror * 3.0657583005906637
+            pos = _Vector(mirror * 160.1546630859375,
+                          75.01629638671875, 182.86094665527344)
+            sx, sz = math.sin(yaw), math.cos(yaw)
+            for wall in (False, True):
+                def collide(space, start, end, mask, *filters):
+                    u0 = (start.x - pos.x) * sx + (start.z - pos.z) * sz
+                    u1 = (end.x - pos.x) * sx + (end.z - pos.z) * sz
+                    du, dy = u1 - u0, end.y - start.y
+                    slope, lip = 0.1, 75.07
+                    hits = []
+                    denominator = dy - slope * du
+                    if abs(denominator) > 1.0e-9:
+                        for base, low, high in ((lip, -100.0, 0.3),
+                                               (lip - 1.54, 0.3, 3.2),
+                                               (lip, 3.2, 100.0)):
+                            t = (base + slope * u0 - start.y) / denominator
+                            u = u0 + t * du
+                            if 0.0 <= t <= 1.0 and low <= u <= high:
+                                hits.append((t, _Vector(-slope * sx, 1.0, -slope * sz)))
+                    if abs(du) > 1.0e-9:
+                        faces = [(0.3, lip - 1.54, lip),
+                                 (3.2, lip - 1.54, lip)]
+                        if wall:
+                            faces.append((2.4, lip - 1.54, lip + 1.2))
+                        for face, bottom, top in faces:
+                            t = (face - u0) / du
+                            height = start.y + t * dy - slope * face
+                            if 0.0 <= t <= 1.0 and bottom <= height <= top:
+                                hits.append((t, _Vector(-sx, 0.0, -sz)))
+                    if not hits:
+                        return None
+                    t, normal = min(hits, key=lambda row: row[0])
+                    return start + (end - start).scale(t), normal, 0
+                scene = types.SimpleNamespace(wg_collideSegment=collide,
+                    wg_getMatInfoNearPoint=_miss_mat_info_1513)
+                trace = {}
+                with self.subTest(mirror=mirror, wall=wall), \
+                        mock.patch.object(world_collision, '_vehicle_motion_extents',
+                                          return_value=extents), \
+                        mock.patch.object(world_collision, '_destroy_and_recast',
+                                          return_value=False):
+                    self.assertEqual('hard' if wall else 'clear',
+                        world_collision.check_horizontal_collision(
+                            scene, types.SimpleNamespace(Vector3=_Vector),
+                            1, pos, yaw, 16.51405163142728, None, False,
+                            0.01800537109375, True, commit_enabled=False,
+                            pitch=-0.10736769659612626,
+                            roll=mirror * -0.010139458485721595, trace=trace),
+                        trace)
+
     def test_departed_hull_cannot_follow_a_floor_below_its_support_start(self):
         scene = types.SimpleNamespace(wg_collideSegment=self._pitched_hull_scene(-0.4),
             wg_getMatInfoNearPoint=_miss_mat_info_1513)
