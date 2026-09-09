@@ -744,7 +744,12 @@ EXPECTED_ABI = {
         'DamageFromShotDecoder.decodeSegment': (
             'segment', 'vehicleDescr'),
     },
+    'scripts/client/vehicle_systems/vehicle_damage_state.pyc': {
+        'VehicleDamageState.update': (
+            'self', 'health', 'isCrewActive', 'isUnderWater'),
+    },
     'scripts/client/vehicle_systems/CompoundAppearance.pyc': {
+        'CompoundAppearance.updateTurretVisibility': ('self',),
         'CompoundAppearance.start': ('self', 'prereqs'),
         'CompoundAppearance.__linkCompound': ('self',),
         'CompoundAppearance.__onModelsRefresh': (
@@ -1763,7 +1768,14 @@ EXPECTED_CODE_NAMES = {
         'encodeFragile': ('int',),
         'decodeFragile': ('bool',),
     },
+    'scripts/client/vehicle_systems/vehicle_damage_state.pyc': {
+        'VehicleDamageState.update': (
+            'getState', 'getStateParams', '_VehicleDamageState__state',
+            '_VehicleDamageState__model', '_VehicleDamageState__effect'),
+    },
     'scripts/client/vehicle_systems/CompoundAppearance.pyc': {
+        'CompoundAppearance.updateTurretVisibility': (
+            '_CompoundAppearance__requestModelsRefresh',),
         'CompoundAppearance': (
             'waterSensor', 'isInWater', 'isUnderwater'),
         'CompoundAppearance.start': ('getHitTesters', 'loadBspModel'),

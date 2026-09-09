@@ -23575,6 +23575,50 @@ class BattleRuntime(object):
             return int(special.TURRET_DETACHED)
         return int(special.AMMO_BAY_DESTROYED)
 
+    def _detach_late_ammo_turret(self, record, entity):
+        """Complete a late terminal cause without repeating vehicle death."""
+        if (self._detached_turrets is None or
+                record.get('_ammo_turret_attempted') or
+                bool(getattr(entity, 'isTurretMarkedForDetachment', False)) or
+                not self._turret_detachment_drawn(record)):
+            return False
+        appearance = getattr(entity, 'appearance', None)
+        damage_state = getattr(appearance, 'damageState', None)
+        update_damage = getattr(damage_state, 'update', None)
+        confirm = getattr(entity, 'confirmTurretDetachment', None)
+        water = getattr(appearance, 'waterSensor', None)
+        if not callable(update_damage) or not callable(confirm) or water is None:
+            return False
+        plan = self._run_optional_feature(
+            'ammo-bay turret detachment', self._detached_turrets.prepare,
+            (entity,), disable=False)
+        if not plan:
+            return False
+        # Creation can synchronously enter stock SynchronousDetachment.
+        # Install the terminal identity before that call and admit one launch.
+        record['_ammo_turret_attempted'] = True
+        previous_health = entity.health
+        entity.health = int(
+            self._runtime.constants.SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED)
+        entity._Vehicle__turretDetachmentConfirmed = True
+        launched = self._run_optional_feature(
+            'ammo-bay turret detachment', self._detached_turrets.launch,
+            (plan, self._turret_detachment_seed(record['engine_id']),
+             self._clock()), disable=False)
+        if not launched:
+            entity._Vehicle__turretDetachmentConfirmed = False
+            entity.health = previous_health
+            return False
+        # Exact #1513 onVehicleHealthChanged also invokes inputHandler death
+        # and processVehicleDeath. Update only its damage-state data, then use
+        # confirmTurretDetachment's single turretless model refresh instead.
+        def refresh():
+            update_damage(entity.health, entity.isCrewActive, water.isUnderWater)
+            confirm()
+        self._run_optional_feature(
+            'late ammo-bay wreck refresh', refresh, (), disable=False)
+        return True
+
     def _turret_detachment_drawn(self, record):
         """Whether this target is drawn, so retail would have a turret at all.
 
@@ -23656,8 +23700,10 @@ class BattleRuntime(object):
                 entity = self._server_entity(engine_id)
                 if entity is None:
                     return
+                previous_native_health = entity.health
+                self._detach_late_ammo_turret(record, entity)
                 native_health = self._ammo_bay_special_health(entity)
-                if entity.health != native_health:
+                if previous_native_health != native_health:
                     entity.health = native_health
                     # A terminal snapshot may arrive before the critical
                     # cause. Correct the bar without replaying native death,
@@ -23770,6 +23816,7 @@ class BattleRuntime(object):
             # without seeding the turret's filter from the vehicle's own,
             # never-fed ``WGVehicleFilter``.
             entity._Vehicle__turretDetachmentConfirmed = True
+            record['_ammo_turret_attempted'] = True
             launched = self._run_optional_feature(
                 'ammo-bay turret detachment',
                 self._detached_turrets.launch,

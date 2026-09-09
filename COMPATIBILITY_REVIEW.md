@@ -2354,6 +2354,20 @@ target detaches nothing: retail has no `DetachedTurret` in AOI for a vehicle
 never spotted. A missing exploded model, a full turret budget or a failed
 `createEntity` leaves exactly the -5 burn-off wreck the port produced before.
 
+A late ammo-bay cause can arrive after the ordinary death edge. It now admits
+one detachment from the existing wreck's turret pose, even though the health
+signature is already terminal. A per-record launch attempt fence and the
+native detached-health flag suppress repeated snapshot launches. Successful
+creation updates `appearance.damageState` with the special health, crew state
+and water state, then calls `Vehicle.confirmTurretDetachment` for its single
+model refresh. Exact #1513 `CompoundAppearance.onVehicleHealthChanged` also
+calls the input-handler death hook and `processVehicleDeath`; the late path
+must not call it or replay `Vehicle.onHealthChanged`, kill credit or death
+feedback. Failed creation keeps the burn-off wreck and does not retry on every
+snapshot. The original reported match did not log terminal-cause ordering,
+so this repairs a reproduced ordering gap without claiming that match's root
+cause is established.
+
 The ABI audit pins all of it against `scripts.pkg`: the 22 `DetachedTurret`
 signatures, `Vehicle.confirmTurretDetachment`, both special health constants,
 the three `AMMOBAY_DESTRUCTION_MODE` values and the effect's energy window.

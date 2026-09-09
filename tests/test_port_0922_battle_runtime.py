@@ -5619,6 +5619,63 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         return {'health': 0, 'alive': False,
                 'critical': {'ammo_rack_death': True}}
 
+    def test_late_ammo_bay_cause_detaches_once_without_repeating_death(self):
+        for local in (False, True):
+            with self.subTest(local=local):
+                battle, record, vehicle = self._ammo_bay_death_battle()
+                record['local'] = local
+                turrets = mock.Mock()
+                turrets.prepare.return_value = {'plan': True}
+                turrets.launch.return_value = True
+                battle._detached_turrets = turrets
+                vehicle.onHealthChanged = mock.Mock(wraps=vehicle.onHealthChanged)
+                battle._apply_health(record, {'health': 0, 'alive': False})
+                health_calls = vehicle.onHealthChanged.call_count
+                kill_calls = battle._binding.arena_vehicle_killed.call_count
+                order = []
+                appearance = vehicle.appearance
+                appearance.onVehicleHealthChanged = mock.Mock()
+                appearance.damageState = mock.Mock()
+                appearance.waterSensor = mock.Mock(isUnderWater=False)
+                appearance.damageState.update.side_effect = lambda *args: order.append(
+                    ('damage', args))
+                vehicle.confirmTurretDetachment = mock.Mock(side_effect=lambda:
+                    order.append(('refresh', vehicle.health,
+                                  vehicle._Vehicle__turretDetachmentConfirmed)))
+                turrets.launch.side_effect = lambda *args: order.append(
+                    ('launch', vehicle.health,
+                     vehicle._Vehicle__turretDetachmentConfirmed)) or True
+                state = self._ammo_bay_death_state()
+                battle._apply_health(record, state)
+                battle._apply_health(record, state, force_cause=True)
+                self.assertEqual(_TURRET_DETACHED, vehicle.health)
+                self.assertEqual([
+                    ('launch', _TURRET_DETACHED, True),
+                    ('damage', (_TURRET_DETACHED, False, False)),
+                    ('refresh', _TURRET_DETACHED, True)], order)
+                turrets.launch.assert_called_once()
+                vehicle.confirmTurretDetachment.assert_called_once()
+                appearance.onVehicleHealthChanged.assert_not_called()
+                self.assertEqual(health_calls, vehicle.onHealthChanged.call_count)
+                self.assertEqual(kill_calls, battle._binding.arena_vehicle_killed.call_count)
+
+    def test_late_ammo_bay_failed_launch_is_not_retried_by_snapshots(self):
+        battle, record, vehicle = self._ammo_bay_death_battle()
+        battle._apply_health(record, {'health': 0, 'alive': False})
+        vehicle.appearance.damageState = mock.Mock()
+        vehicle.appearance.waterSensor = mock.Mock(isUnderWater=False)
+        vehicle.confirmTurretDetachment = mock.Mock()
+        turrets = mock.Mock()
+        turrets.prepare.return_value = {'plan': True}
+        turrets.launch.return_value = False
+        battle._detached_turrets = turrets
+        battle._apply_health(record, self._ammo_bay_death_state())
+        battle._apply_health(record, self._ammo_bay_death_state())
+        self.assertEqual(_AMMO_BAY_DESTROYED, vehicle.health)
+        self.assertFalse(vehicle._Vehicle__turretDetachmentConfirmed)
+        turrets.launch.assert_called_once()
+        vehicle.confirmTurretDetachment.assert_not_called()
+
     def test_ammo_bay_death_detaches_the_turret_in_the_stock_order(self):
         """Create the flying entity, then one refresh, already turretless.
 
