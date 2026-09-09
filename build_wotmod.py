@@ -15,8 +15,10 @@ import zipfile
 
 try:
     _STRING_TYPES = (basestring,)
+    _INTEGER_TYPES = (int, long)
 except NameError:
     _STRING_TYPES = (str,)
+    _INTEGER_TYPES = (int,)
 
 
 _SCHEMA_ROOT = os.path.join(
@@ -44,7 +46,7 @@ FOLIAGE_FORMAT = 'offline-lan-0922-foliage'
 FOLIAGE_VERSION = 4
 FOLIAGE_MANIFEST_FORMAT = FOLIAGE_FORMAT + '-manifest'
 DESTRUCTIBLE_FORMAT = 'offline-lan-0922-destructible-catalog'
-DESTRUCTIBLE_VERSION = 8
+DESTRUCTIBLE_VERSION = 9
 DESTRUCTIBLE_MANIFEST_FORMAT = DESTRUCTIBLE_FORMAT + '-manifest'
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 LEGAL_FILES = (
@@ -570,6 +572,17 @@ def _validate_destructibles(destructible_root):
                 if wire in seen_instance_wires:
                     raise ValueError('duplicated tree instance wire')
                 seen_instance_wires.add(wire)
+            excluded = data.get('excluded_instances')
+            if not isinstance(excluded, list):
+                raise ValueError('excluded instance index is unavailable')
+            for row in excluded:
+                if (not isinstance(row, list) or len(row) != 3 or
+                        any(type(value) not in _INTEGER_TYPES or value < 0
+                            for value in row) or
+                        row[0] > 0xFFFFFFFF or row[2] > 0xFFFFFFFF or row[2] & 1 or
+                        tuple(row[:2]) in seen_instance_wires):
+                    raise ValueError('invalid excluded instance row')
+                seen_instance_wires.add(tuple(row[:2]))
             previous_signature = None
             ambiguous_candidate_count = 0
             for row in ambiguous_instances:

@@ -18,6 +18,57 @@ class ErrorReportTest(unittest.TestCase):
     SESSION_1 = "20260823T120000Z-111111111111"
     SESSION_2 = "20260823T130000Z-222222222222"
 
+    def test_retention_keeps_latest_three_without_a_prompt_response(self):
+        directory = error_reports._prepare_reports_directory()
+        paths = []
+        for index in range(6):
+            path = os.path.join(directory,
+                "wot-error-report-20260909-12000%d-111111111111.zip" % index)
+            self._write(path, b"completed report")
+            os.utime(path, (100 + index, 100 + index))
+            paths.append(path)
+        protected = ["notes.zip", "wot-error-report-20260909-120009-111111111111.zip.tmp-work",
+                     "hidden-worker.dmp"]
+        for name in protected:
+            self._write(os.path.join(directory, name), b"preserve")
+        self.assertEqual(set(paths[:3]), set(error_reports.cleanup_reports()))
+        self.assertTrue(all(os.path.isfile(path) for path in paths[3:]))
+        self.assertTrue(all(os.path.isfile(os.path.join(directory, name))
+                            for name in protected))
+        self.assertEqual((), error_reports.cleanup_reports())
+
+    def test_report_creation_prunes_old_reports_before_returning_to_ui(self):
+        visible = self._game_log(error_reports.ROLE_VISIBLE_CLIENT)
+        session = error_reports.begin_session(self.game, session_id=self.SESSION_1)
+        self._write(visible, b"new session log")
+        error_reports.finalize_session(session)
+        paths = []
+        for index in range(5):
+            report = error_reports.create_report(
+                now=datetime.datetime(2026, 9, 9, 12, 0, index))
+            paths.append(report['path'])
+            self.assertTrue(os.path.isfile(report['path']))
+        self.assertFalse(any(os.path.exists(path) for path in paths[:2]))
+        self.assertTrue(all(os.path.isfile(path) for path in paths[2:]))
+
+    def test_retention_retries_locked_report_later(self):
+        directory = error_reports._prepare_reports_directory()
+        paths = []
+        for index in range(5):
+            path = os.path.join(directory,
+                "wot-error-report-20260909-12000%d-111111111111.zip" % index)
+            self._write(path, b"report")
+            os.utime(path, (100 + index, 100 + index))
+            paths.append(path)
+        original = error_reports.delete_report
+        def delete(path):
+            if path == paths[1]:
+                raise core.LauncherError("locked")
+            return original(path)
+        with mock.patch.object(error_reports, "delete_report", side_effect=delete):
+            self.assertEqual((paths[0],), error_reports.cleanup_reports())
+        self.assertEqual((paths[1],), error_reports.cleanup_reports())
+
     def test_streamed_report_member_can_cross_zip64_limit(self):
         payload = b"diagnostic dump data\n" * 32
         output = io.BytesIO()

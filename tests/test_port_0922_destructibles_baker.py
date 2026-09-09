@@ -49,7 +49,8 @@ class _FakeStrings:
 class _FakeBSMI:
     def __init__(self, model_ids, transforms):
         self._ids = list(model_ids)
-        self._data = {'transforms': [tuple(row) for row in transforms]}
+        self._data = {'transforms': [tuple(row) for row in transforms],
+                      'visibility_masks': [0xffffffff] * len(transforms)}
 
     def model_ids(self):
         return list(self._ids)
@@ -128,7 +129,7 @@ def _synthetic_scene():
         'BSMI': _FakeBSMI([0, 1, 2, 3], transforms),
         'BSMO': _FakeSection(bsmo),
         'WGDE': _FakeSection(wgde),
-        'SpTr': _FakeSection({'speedtree_list': [{'transform': _transform(0, 0, 0), 'spt_fnv': 4}]}),
+        'SpTr': _FakeSection({'speedtree_list': [{'transform': _transform(0, 0, 0), 'spt_fnv': 4, 'visibility_mask': 0xffffffff}]}),
     }
     return sections, descriptors
 
@@ -141,7 +142,7 @@ class DestructiblesBaker0922Tests(unittest.TestCase):
     def test_contract_is_pinned_to_client_1513(self):
         self.assertEqual('offline-lan-0922-destructible-catalog',
                          self.baker.FORMAT_NAME)
-        self.assertEqual(8, self.baker.FORMAT_VERSION)
+        self.assertEqual(9, self.baker.FORMAT_VERSION)
         self.assertEqual(
             'offline-lan-0922-destructible-catalog-manifest',
             self.baker.MANIFEST_FORMAT)
@@ -611,12 +612,12 @@ class DestructiblesBaker0922Tests(unittest.TestCase):
         # (world Y differs only 7.6e-06) and safely shares the same box index.
         self.assertEqual(535, fragile_locator_instance_count)
         self.assertEqual(103, falling_locator_instance_count)
-        self.assertEqual(61625, manifest['census']['instance_signatures'])
+        self.assertEqual(61539, manifest['census']['instance_signatures'])
         self.assertEqual(5754,
                          manifest['census']['falling_instance_signatures'])
-        self.assertEqual(52853,
+        self.assertEqual(52828,
                          manifest['census']['fragile_instance_signatures'])
-        self.assertEqual(3018,
+        self.assertEqual(2957,
                          manifest['census']['structure_instance_signatures'])
         self.assertEqual(11,
                          manifest['census'][
@@ -1017,6 +1018,30 @@ class DestructiblesBaker0922Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'SpeedTree wire is shared'):
             self._bake_synthetic(sections, descriptors)
 
+    def test_visibility_filter_preserves_native_indices_and_removes_model_boxes(self):
+        sections, descriptors = _synthetic_scene()
+        sections['SpTr']._data['speedtree_list'][0]['visibility_mask'] = 0x7fff4000
+        sections['BSMI']._data['visibility_masks'][0] = 2
+        data = self._bake_synthetic(sections, descriptors)
+        self.assertEqual([], data['tree_instances'])
+        self.assertEqual([[100, 0, 0x7fff4000], [100, 1, 2]],
+                         data['excluded_instances'])
+        self.assertNotIn(SYNTH_FRAGILE, data['resources'])
+        self.assertEqual({(200, 0), (200, 1)},
+                         {tuple(row[14:16]) for row in data['instances']})
+
+    def test_visibility_filter_rejects_partially_visible_structure(self):
+        sections, descriptors = _synthetic_scene()
+        sections['BSMI']._data['visibility_masks'][1] = 2
+        with self.assertRaisesRegex(ValueError, 'mixes active and excluded'):
+            self._bake_synthetic(sections, descriptors)
+
+    def test_crashing_prohorovka_tree_is_absent_in_standard_battle(self):
+        data = json.loads((DATA_ROOT / '05_prohorovka.json').read_text())
+        self.assertIn([32639, 31, 0x7fff4000], data['excluded_instances'])
+        self.assertNotIn((32639, 31),
+                         {tuple(row[13:15]) for row in data['tree_instances']})
+
     def test_all_map_tree_identities_are_typed_disjoint_and_runtime_loadable(self):
         sys.path.insert(0, str(CLIENT_SCRIPTS))
         from gui.mods.offline_lan_0922 import destructibles_sensor
@@ -1029,6 +1054,9 @@ class DestructiblesBaker0922Tests(unittest.TestCase):
                     tree_wires = {tuple(row[13:15]) for row in data['tree_instances']}
                     self.assertEqual(len(tree_wires), len(data['tree_instances']))
                     self.assertFalse(model_wires & tree_wires)
+                    excluded = {tuple(row[:2]) for row in data['excluded_instances']}
+                    self.assertFalse(excluded & (model_wires | tree_wires))
+                    self.assertTrue(all(not row[2] & 1 for row in data['excluded_instances']))
                     self.assertEqual(len(tree_wires), data['census']['tree_instances'])
                     destructibles_sensor.set_catalog(data)
                     prepared = destructibles_sensor._destructible_catalog

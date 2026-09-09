@@ -261,7 +261,7 @@ def foliage_instance(bounds, transform):
 
 
 def decode_speedtrees_and_wires(space_data):
-    """Decode SpTr rows and their exact streamed destructible wires."""
+    """Decode SpTr wires; keep excluded rows as holes in source-index order."""
     compiled = CompiledSpace(io.BytesIO(space_data), DECODER_VERSION,
                              DECODER_REGION,
                              ['BWST', 'BSMI', 'WGDE', 'SpTr'])
@@ -279,7 +279,8 @@ def decode_speedtrees_and_wires(space_data):
         transform = tuple(float(value) for value in row['transform'])
         if len(transform) != 16:
             raise ValueError('SpTr row %d has an invalid transform' % index)
-        result.append((resource, transform))
+        result.append((resource, transform) if int(row['visibility_mask']) & 1
+                      else None)
     unused_rows, unused_wire_rows, speedtree_wires = native_wires(
         compiled, len(list(compiled.sections['BSMI'].model_ids())))
     return result, speedtree_wires
@@ -317,7 +318,10 @@ def bake_speedtrees(resources, map_name, tokens, speedtrees,
     nonconcealing_fallable_trees = 0
     tree_records = tree_records or {}
     speedtree_wires = speedtree_wires or {}
-    for source_index, (resource, transform) in enumerate(speedtrees):
+    for source_index, entry in enumerate(speedtrees):
+        if entry is None:
+            continue
+        resource, transform = entry
         normalized = str(resource).replace('\\', '/')
         folded = normalized.lower()
         ctree = os.path.splitext(resource)[0] + '.ctree'

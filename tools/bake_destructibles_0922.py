@@ -40,7 +40,7 @@ import navigation_graph_schema
 
 
 FORMAT_NAME = 'offline-lan-0922-destructible-catalog'
-FORMAT_VERSION = 8
+FORMAT_VERSION = 9
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 GAME_VERSION = '0.9.22.0.1-cn-1513'
 DECODER_VERSION = '0.9.22.0.1'
@@ -406,6 +406,20 @@ def bake_compiled_map(map_name, map_package_data, space_data,
         raise ValueError('BSMI model ids do not match transforms')
     row_wires, wire_rows, speedtree_wires = native_wires(
         compiled, len(model_ids))
+    # Visibility removes scene objects, not WGDE slots: assign wires first.
+    masks = bsmi._data['visibility_masks']
+    if len(masks) != len(model_ids):
+        raise ValueError('BSMI visibility masks do not match transforms')
+    excluded_instances = []
+    for wire, rows in sorted(wire_rows.items()):
+        active = {bool(int(masks[index]) & 1) for index in rows}
+        if len(active) != 1:
+            raise ValueError('WGDE item mixes active and excluded models')
+        if not next(iter(active)):
+            mask = 0
+            for index in rows:
+                mask |= int(masks[index])
+            excluded_instances.append([wire[0], wire[1], mask])
     tree_instances = []
     tree_wires = set()
     tree_descriptors = dict((filename.lower(), (filename, descriptor))
@@ -413,6 +427,13 @@ def bake_compiled_map(map_name, map_package_data, space_data,
                             if descriptor['kind'] == 'tree')
     for source_index, wire in sorted(speedtree_wires.items()):
         row = compiled.sections['SpTr']._data['speedtree_list'][source_index]
+        if wire in tree_wires or wire in wire_rows:
+            raise ValueError('WGDE SpeedTree wire is shared: %r' % (wire,))
+        tree_wires.add(wire)
+        if not int(row['visibility_mask']) & 1:
+            excluded_instances.append(
+                [wire[0], wire[1], int(row['visibility_mask'])])
+            continue
         filename = strings.get(row['spt_fnv'])
         # Preserve the XML spelling for the case-sensitive Python descriptor
         # dictionary (e.g. Tundra's compiled Thicket_Bush vs Thicket_bush).
@@ -421,14 +442,14 @@ def bake_compiled_map(map_name, map_package_data, space_data,
             raise ValueError('WGDE SpeedTree has no tree descriptor: %r' %
                              filename)
         filename, descriptor = matched
-        if wire in tree_wires or wire in wire_rows:
-            raise ValueError('WGDE SpeedTree wire is shared: %r' % (wire,))
-        tree_wires.add(wire)
         tree_instances.append(list(_locator_signature(row['transform'])) +
                               [filename, wire[0], wire[1]])
     instance_counts = {}
     instances_by_model = {}
-    for model_id, transform in zip(model_ids, bsmi._data['transforms']):
+    for model_id, transform, mask in zip(
+            model_ids, bsmi._data['transforms'], masks):
+        if not int(mask) & 1:
+            continue
         instance_counts[model_id] = instance_counts.get(model_id, 0) + 1
         instances_by_model.setdefault(model_id, []).append(transform)
 
@@ -589,6 +610,8 @@ def bake_compiled_map(map_name, map_package_data, space_data,
     instance_rows = {}
     for row_index, (model_id, transform) in enumerate(
             zip(model_ids, bsmi._data['transforms'])):
+        if not int(masks[row_index]) & 1:
+            continue
         model_resource = instance_model_resources.get(model_id)
         if model_resource is None:
             continue
@@ -684,9 +707,11 @@ def bake_compiled_map(map_name, map_package_data, space_data,
         'resources': resources,
         'instances': instances,
         'tree_instances': tree_instances,
+        'excluded_instances': sorted(excluded_instances),
         'ambiguous_instances': ambiguous_instances,
         'census': {
             'tree_instances': len(tree_instances),
+            'excluded_instances': len(excluded_instances),
             'source_type1_models': type1_models,
             'source_type2_models': type2_models,
             'ignored_entry_types': ignored_entry_types,
@@ -773,7 +798,8 @@ def write_json(path, data):
 
 
 def _aggregate_census(data_by_map):
-    keys = ('tree_instances', 'resources', 'falling_resources', 'fragile_resources',
+    keys = ('excluded_instances', 'tree_instances', 'resources',
+            'falling_resources', 'fragile_resources',
             'structure_resources', 'boxes', 'falling_boxes',
             'fragile_boxes', 'structure_boxes', 'instances',
             'falling_instances', 'fragile_instances', 'structure_instances',
