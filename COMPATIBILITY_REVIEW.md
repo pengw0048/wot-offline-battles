@@ -2709,6 +2709,18 @@ operation is forbidden, not unlimited.
 - Incremental Account updates publish current balances, changed inventory,
   crew and XP before command completion; growing unlock/elite sets carry only
   additions, matching `Stats.synchronize` and avoiding repeated notifications.
+- Crew placement checks nation and primary role, while preserving the original
+  training specialization across vehicle transfers and save restoration.
+  Moving a seated crew member records the source seat in `lastCrew` so the
+  stock return-crew action can find them again.
+- In #1513, `ItemsCache.__invalidateData.cbWrapper` invokes `onSyncCompleted`
+  before the adisp completion callback. An exception in that event can strand
+  a waiting generator. Account publication exceptions now return command
+  failure; the cache-refresh fallback also has a ten-second failure deadline.
+  Late callbacks and callbacks from a replaced account cannot report success
+  or refresh the new account's views. Accepted inventory mutations remain
+  saved when presentation fails; the failure does not claim a successful
+  refresh or roll back a potentially published change.
 
 This is a functional offline progression loop, not the proprietary retail
 server economy. Reward coefficients and premium-vehicle credit bonuses remain

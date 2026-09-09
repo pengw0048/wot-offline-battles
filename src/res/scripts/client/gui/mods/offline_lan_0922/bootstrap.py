@@ -311,7 +311,6 @@ def _validate_restored_vehicle(record, vehicles, tankmen, customizations):
             continue
         tankman = tankmen.TankmanDescr(crew[tankman_id])
         if (int(tankman.nationID) != int(nation_id) or
-                int(tankman.vehicleTypeID) != int(vehicle_type_id) or
                 tankman.role != roles[slot][0]):
             raise ValueError(
                 'saved crew member does not match the vehicle slot')
