@@ -7967,6 +7967,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             crewLevelIncrease=10.0)
         runtime.vehicles.g_cache.equipments = lambda: {401: descriptor}
         battle = BattleRuntime(runtime)
+        battle._client_ready_received = True
         battle.client = _Client()
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
@@ -8086,9 +8087,54 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(snapshot, restored.snapshot(500.0))
         self.assertEqual(4, battle._equipment_revision)
 
+    def test_loading_equipment_survives_stock_vehicle_visual_clear(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.client = types.SimpleNamespace(player_id=7)
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle.state = 'loading_entities'
+        controller = {}
+        updates = []
+
+        def update(vehicle_id, compact, quantity, stage, remaining):
+            controller[compact] = (quantity, stage)
+            updates.append(compact)
+
+        battle._avatar.updateVehicleAmmo = update
+        snapshots = []
+        for index, (name, tag) in enumerate((
+                ('largeRepairkit', 'repairkit'),
+                ('largeMedkit', 'medkit'), ('chocolate', 'food'))):
+            descriptor = types.SimpleNamespace(
+                id=(11, 41 + index), compactDescr=441 + index,
+                name=name, tags=(tag,), reuseCount=-1,
+                cooldownSeconds=90.0, repairAll=True)
+            snapshots.append(equipment_mechanics.EquipmentState(
+                equipment_mechanics.project_equipment(descriptor)).snapshot())
+        message = {'players': [{
+            'id': 7, 'equipment_revision': 1,
+            'equipment_states': snapshots}]}
+
+        battle._restore_local_equipment_snapshot(message, present=True)
+        self.assertEqual(3, len(battle._equipment_state))
+        self.assertEqual([], updates)
+        self.assertIsNone(battle._equipment_signature)
+        # Exact #1513 __startVehicleVisual clears the controller before the
+        # bridge can publish native client readiness. A loading snapshot must
+        # not populate the deduplication cache on the earlier side.
+        controller.clear()
+        battle._client_ready_received = True
+        battle._restore_local_equipment_snapshot(message, present=True)
+        self.assertEqual({441, 442, 443}, set(controller))
+        for unused in range(100):
+            battle._restore_local_equipment_snapshot(message, present=True)
+        self.assertEqual([441, 442, 443], updates)
+
     def test_equipment_snapshots_preserve_expanded_selection_keys(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
+        battle._client_ready_received = True
         battle.client = types.SimpleNamespace(player_id=7)
         battle._avatar = runtime.bigworld.avatar
         battle._server = types.SimpleNamespace(vehicle_id=10)
@@ -27387,6 +27433,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
     def test_equipment_activation_decodes_extra_and_enters_cooldown(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
+        battle._client_ready_received = True
         battle.state = 'running'
         battle._avatar = runtime.bigworld.avatar
         send_intent = mock.Mock(side_effect=(1, 2, 3, 4))

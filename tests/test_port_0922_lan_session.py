@@ -98,11 +98,12 @@ class _Client(object):
         self.leave_calls += 1
         return True
 
-    def select_vehicle(self, vehicle, max_health):
+    def select_vehicle(self, vehicle, max_health, outfits=None,
+                       vehicle_compact_descr=None, effective_params=None):
         if not self.ready or self.phase != 'waiting':
             return False
         if vehicle == self.vehicle and max_health == self.max_health:
-            return False
+            return True
         self.selections.append((vehicle, max_health))
         self.vehicle = vehicle
         self.max_health = max_health
@@ -329,6 +330,75 @@ class LANSessionTests(unittest.TestCase):
         if 'players' in message:
             self.client.roster = list(message['players'])
         self.client.on_event(kind, message)
+
+    def test_start_publishes_current_loadout_before_start_message(self):
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        calls = []
+        self.session._effective_params_provider = lambda: {'equipment': [441]}
+        self.client.select_vehicle = lambda *args: calls.append(
+            ('select', args[-1])) or True
+        self.client.request_start = lambda *args: calls.append(('start', args)) or True
+        self.assertTrue(self.session.request_start('01_karelia'))
+        self.assertEqual(['select', 'start'], [call[0] for call in calls])
+        self.assertEqual({'equipment': [441]}, calls[0][1])
+
+    def test_inventory_refresh_blocks_start_then_publishes_completed_loadout(self):
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        provider = mock.Mock(return_value={'equipment': [441, 442, 443]})
+        self.session._effective_params_provider = provider
+        self.client.select_vehicle = mock.Mock(return_value=True)
+        with mock.patch.object(self.module, '_garage_inventory_refresh_pending',
+                               return_value=True, create=True):
+            self.assertFalse(self.session.request_start('01_karelia'))
+            self.assertFalse(self.session._publish_selected_vehicle())
+        provider.assert_not_called()
+        self.assertEqual([], self.client.requests)
+        self.assertEqual('waiting', self.session.state)
+        self.session.on_inventory_refreshed()
+        self.assertEqual({'equipment': [441, 442, 443]},
+                         self.client.select_vehicle.call_args[0][-1])
+        self.assertTrue(self.session.request_start('01_karelia'))
+
+    def test_start_does_not_use_old_loadout_after_projection_failure(self):
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        self.session._effective_params_provider = mock.Mock(
+            side_effect=ValueError('garage item is unavailable'))
+        self.assertFalse(self.session.request_start('01_karelia'))
+        self.assertEqual([], self.client.requests)
+        self.assertFalse(self.session._start_requested)
+
+    def test_start_requires_loadout_send_to_be_accepted(self):
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        self.client.select_vehicle = mock.Mock(return_value=False)
+        self.assertFalse(self.session.request_start('01_karelia'))
+        self.assertEqual([], self.client.requests)
+
+    def test_selection_type_error_never_retries_with_the_old_loadout(self):
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        self.session._effective_params_provider = lambda: {'equipment': [441]}
+        self.client.select_vehicle = mock.Mock(
+            side_effect=[TypeError('invalid loadout'), True])
+        self.assertFalse(self.session.request_start('01_karelia'))
+        self.assertEqual(1, self.client.select_vehicle.call_count)
+        self.assertEqual([], self.client.requests)
+
+    def test_pending_map_start_also_waits_for_inventory_refresh(self):
+        self.assertTrue(self.session.request_start('01_karelia'))
+        with mock.patch.object(self.module, '_garage_inventory_refresh_pending',
+                               return_value=True):
+            self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        self.assertEqual([], self.client.requests)
+        self.assertFalse(self.session._start_requested)
+
+    def test_inventory_notification_cannot_publish_during_or_after_battle(self):
+        self.client.select_vehicle = mock.Mock(return_value=True)
+        for state in ('battle', 'awaiting_battle_start', 'awaiting_round_end'):
+            self.session.state = state
+            self.assertFalse(self.session.on_inventory_refreshed())
+        self.session.state = 'waiting'
+        self.session._stopped = True
+        self.assertFalse(self.session.on_inventory_refreshed())
+        self.client.select_vehicle.assert_not_called()
 
     def test_waiting_room_team_selection_reaches_the_client(self):
         self.client.ready = True
@@ -2831,6 +2901,7 @@ class LANSessionRoomTests(unittest.TestCase):
             picker_opener=lambda: self.opens.append(True) or True,
             battle_runtime=_BattleRuntime(),
             vehicle_provider=lambda: ('ussr:R11_MS-1', 90),
+            vehicle_compact_provider=lambda: 'YQ==',
             status_notifier=self.statuses.append)
         self.assertTrue(self.session.start())
         # Production only reaches start() from the Battle click, and only that
@@ -3005,6 +3076,7 @@ class LANSessionMapWindowTests(unittest.TestCase):
             cancel_callback=lambda handle: self.scheduled.pop(handle, None),
             battle_runtime=_BattleRuntime(),
             vehicle_provider=lambda: ('ussr:R11_MS-1', 90),
+            vehicle_compact_provider=lambda: 'YQ==',
             status_notifier=lambda unused_message: None)
         self.assertTrue(self.session.start())
         self.session._picker_requested = True

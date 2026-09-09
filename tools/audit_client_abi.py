@@ -813,6 +813,7 @@ EXPECTED_ABI = {
             'self', 'entityName', 'avatar'),
         'EquipmentsController.setEquipment': (
             'self', 'intCD', 'quantity', 'stage', 'timeRemaining'),
+        'EquipmentsController.clear': ('self', 'leave'),
     },
     'scripts/client/OfflineMapCreator.pyc': {
         'OfflineMapCreator.create': ('self', 'mapName'),
@@ -1217,7 +1218,8 @@ EXPECTED_CODE_NAMES = {
             '_PlayerAvatar__onInitStepCompleted'),
         'PlayerAvatar.__startVehicleVisual': (
             '_PlayerAvatar__ownVehicleStabMProv', 'target',
-            'stabilisedMatrix', 'matrix'),
+            'stabilisedMatrix', 'matrix', 'guiSessionProvider', 'shared',
+            'equipments', 'clear', 'setPlayerVehicle'),
         'PlayerAvatar.getOwnVehicleMatrix': (
             'getObservedVehicleMatrix', '_PlayerAvatar__ownVehicleMProv'),
         'PlayerAvatar.getOwnVehicleStabilisedMatrix': (
@@ -1712,6 +1714,7 @@ EXPECTED_CODE_NAMES = {
         '_ExpandedItem.getActivationCode': (
             'isEntityRequired', 'makeExtraName', 'index'),
         '_ExtinguisherItem.getActivationCode': ('id',),
+        'EquipmentsController.clear': ('_order', '_equipments', 'popitem', 'clear'),
     },
     'scripts/client/AreaDestructibles.pyc': {
         '_printErrDescNotAvailable': (
@@ -2427,6 +2430,12 @@ EXPECTED_ORDERED_INSTRUCTION_PATTERNS = {
             )),
     },
     'scripts/client/Avatar.pyc': {
+        'PlayerAvatar.__startVehicleVisual': (
+            'own vehicle visuals clear consumables without leaving battle', 0, (
+                ('LOAD_ATTR', 'value', 'clear'),
+                ('LOAD_GLOBAL', 'value', 'False'),
+                ('CALL_FUNCTION', 'argument', 1),
+            )),
         'PlayerAvatar.updateVehicleHealth': (
             'local death restores raw special health into Vehicle', 0, (
                 ('STORE_FAST', 'value', 'prevHealth'),

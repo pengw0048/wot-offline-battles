@@ -51,6 +51,15 @@ def _load_client():
     return LANClient
 
 
+def _garage_inventory_refresh_pending():
+    try:
+        import BigWorld
+    except ImportError:
+        return False
+    server = getattr(BigWorld.player(), 'fakeServer', None)
+    return bool(getattr(server, 'inventory_refresh_pending', False))
+
+
 def _start_adisp_request(request_results, context, completed):
     """Advance one stock ``@async @process`` request to completion."""
     from adisp import process
@@ -815,6 +824,8 @@ class LANSession(object):
 
     def _publish_selected_vehicle(self):
         """Send the current garage tank so the next round uses it."""
+        if _garage_inventory_refresh_pending():
+            return False
         client = self.client
         select = getattr(client, 'select_vehicle', None)
         if client is None or not callable(select):
@@ -839,10 +850,19 @@ class LANSession(object):
             return bool(select(
                 vehicle, max_health, outfits, vehicle_compact_descr,
                 effective_params))
-        except TypeError:
-            # Test doubles and the first protocol-v5 client accepted only the
-            # original vehicle and max-health arguments.
-            return bool(select(vehicle, max_health))
+        except Exception as error:
+            # A failed modern projection/send must never fall back to a
+            # vehicle-only request that reuses the previous loadout.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] vehicle selection could not be '
+                'published: %s\n' % error)
+            return False
+
+    def on_inventory_refreshed(self):
+        """Publish a completed fitting/resupply without another room click."""
+        if self._stopped or self.state != 'waiting' or self._start_requested:
+            return False
+        return self._publish_selected_vehicle()
 
     def _return_to_join_after_vehicle_selection_error(self):
         self.client = None
@@ -1977,14 +1997,25 @@ class LANSession(object):
                 self._endpoint_value())
             self._close_picker_after_event()
             return True
-        accepted = bool(self.client.request_start(
-            map_name, self._round_seconds))
+        accepted = self._send_start_request(map_name)
         if accepted:
             self._start_requested = True
             self._pending_map = None
             self.state = 'awaiting_battle_start'
             self._close_picker_after_event()
         return accepted
+
+    def _send_start_request(self, map_name):
+        if _garage_inventory_refresh_pending():
+            self._status_notifier(tr(
+                'Vehicle supplies are updating. Try starting again in a moment.'))
+            return False
+        # select_vehicle and start share the transport's ordered send queue.
+        # Never start with an older loadout after a failed garage projection.
+        if not self._publish_selected_vehicle():
+            self._status_notifier(tr(VEHICLE_SELECTION_WARNING))
+            return False
+        return bool(self.client.request_start(map_name, self._round_seconds))
 
     def _stop_active_round(self):
         try:
@@ -2082,8 +2113,7 @@ class LANSession(object):
                         tr('The LAN server does not offer the selected map.'))
                     self._sync_waiting_surface(previous_host_player_id)
                     return
-                if self.client.request_start(pending_map,
-                                             self._round_seconds):
+                if self._send_start_request(pending_map):
                     self._start_requested = True
                     self.state = 'awaiting_battle_start'
                     self._close_picker()

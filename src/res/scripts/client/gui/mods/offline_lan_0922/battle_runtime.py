@@ -7469,7 +7469,10 @@ class BattleRuntime(object):
         return 1, int(stages.READY), 0
 
     def _present_equipments(self, now=None):
-        if self._equipment_state is None:
+        # Loading snapshots can precede stock __startVehicleVisual, which
+        # clears the equipment controller. Do not cache a presentation until
+        # the native enter/ready boundary has passed that last clear.
+        if not self._client_ready_received or self._equipment_state is None:
             return False
         if now is None:
             now = self._clock()
