@@ -10,29 +10,13 @@ on -- is a separate shape.  Those names are exactly the material kinds
 ``scripts/item_defs/vehicles/common/vehicle.xml`` defines for #1513, so the
 surfaces map onto this port's module targets without interpretation.
 
-Nothing here is guessed.  The container layout is the documented Havok
-packfile: a 64-byte header, then 64-byte section headers, then the sections
-with their local, global and virtual fixup tables.  Everything else is
-recovered from those tables rather than from a class layout, because the
-``__types__`` section of these files is empty:
-
-* the virtual fixups name every root object and its class;
-* ``hknpPhysicsSystemData`` holds one 128-byte record per surface; the record
-  carries the shape as a global fixup and, 24 bytes later, the surface name as
-  a local fixup, so surface and shape pair with no ambiguity.  The record
-  array's own offset differs per component -- it sits after the container
-  boilerplate, whose size depends on the object graph -- so it is located by
-  that pointer pairing rather than assumed;
-* each ``hknpCompressedMeshShapeData`` carries its mesh's tight AABB inline as
-  two four-float vectors at ``+32`` and ``+48``;
-* the packed vertices are the one 4-byte-element array in the shape whose
-  11/11/10-bit unpacking saturates that AABB on every axis, which is what
-  identifies it -- a wrong array or a wrong bit split does not.
-
-The AABB alone is not enough for a module built as two separated lobes: an
-IS-7's ammunition racks sit against both hull sides, so their combined box
-spans the full hull width.  Callers wanting that resolved should cluster the
-decoded vertices.
+The reviewed Console layout is 32-bit big-endian hk_2014.2.5-r1.
+Fixups locate the shape data and its section, primitive, packed-vertex and
+shared-vertex arrays. Section codec parameters reconstruct component metres;
+primitive index quadruples retain topology (including disconnected pieces).
+The bit fields are numerical low-to-high x/y/z, independent of byte endian.
+Cross-format resource checks against Console BigWorld meshes validate this
+layout; an enclosing AABB cannot validate vertex interpretation.
 """
 
 import struct
@@ -45,11 +29,8 @@ SECTION_HEADER_SIZE = 64
 RECORD_STRIDE = 128
 # Inside one record, the surface name pointer follows the shape pointer.
 RECORD_NAME_DELTA = 24
-# hknpCompressedMeshShape is a fixed-size header; its data object follows.
-SHAPE_HEADER_SIZE = 176
 DOMAIN_MIN_OFFSET = 32
 DOMAIN_MAX_OFFSET = 48
-VERTEX_BITS = (11, 11, 10)
 
 
 class UnsupportedPackfile(Exception):
@@ -143,63 +124,96 @@ def _plausible_bound(minimum, maximum):
     return True
 
 
-def _unpack_vertex(word, bits=VERTEX_BITS):
-    bits_x, bits_y, bits_z = bits
-    mask_x = (1 << bits_x) - 1
-    mask_y = (1 << bits_y) - 1
-    mask_z = (1 << bits_z) - 1
-    return (float((word >> (bits_z + bits_y)) & mask_x) / mask_x,
-            float((word >> bits_z) & mask_y) / mask_y,
-            float(word & mask_z) / mask_z)
+def _mesh(pack, section, data):
+    """Decode indexed triangles from the reviewed 32-bit static mesh tree."""
+    if pack.contents_version != 'hk_2014.2.5-r1':
+        raise UnsupportedPackfile('unreviewed mesh version: ' + pack.contents_version)
+    blob, base = pack.blob, section['start']
+    local = pack.local_fixups(section)
 
+    def read(fmt, offset):
+        size = struct.calcsize('>' + fmt)
+        if offset < 0 or offset + size > section['local']:
+            raise UnsupportedPackfile('mesh field outside data section')
+        return struct.unpack_from('>' + fmt, blob, base + offset)
 
-def _packed_vertices(pack, section, shape, region_end, minimum, maximum):
-    """The shape's vertices in component-local metres, or () if not found."""
-    blob = pack.blob
-    base = section['start']
-    fixups = sorted((src, dst) for src, dst in pack.local_fixups(section).items()
-                    if shape <= src < region_end)
-    targets = sorted(set(dst for unused_src, dst in fixups))
-    span = [maximum[axis] - minimum[axis] for axis in range(3)]
-    for src, dst in fixups:
-        count = struct.unpack('>i', blob[base + src + 4:base + src + 8])[0]
-        if count <= 0:
-            continue
-        position = targets.index(dst)
-        end = (targets[position + 1] if position + 1 < len(targets)
-               else region_end)
-        if (end - dst) // count != 4:
-            continue
-        words = struct.unpack('>%dI' % count,
-                              blob[base + dst:base + dst + 4 * count])
-        points = [_unpack_vertex(word) for word in words]
-        low = [min(point[axis] for point in points) for axis in range(3)]
-        high = [max(point[axis] for point in points) for axis in range(3)]
-        # Only the real vertex array reaches both ends of the tight AABB;
-        # index and primitive arrays do not.  A nearly flat surface -- a
-        # periscope slit is 6 cm tall -- quantizes too coarsely to saturate
-        # its thin axis, so only axes with real extent are required to.
-        thick = [axis for axis in range(3) if span[axis] > 0.01]
-        if len(thick) < 2:
-            thick = list(range(3))
-        if any(low[axis] > 0.02 for axis in thick):
-            continue
-        if any(high[axis] < 0.98 for axis in thick):
-            continue
-        return tuple(tuple(minimum[axis] + point[axis] * span[axis]
-                           for axis in range(3)) for point in points)
-    return ()
+    def array(field, stride):
+        count = read('i', field + 4)[0]
+        if count < 0:
+            raise UnsupportedPackfile('negative mesh array count')
+        if not count:
+            return 0, 0
+        offset = local.get(field)
+        if offset is None or offset < 0 or offset + count * stride > section['local']:
+            raise UnsupportedPackfile('invalid mesh array fixup or size')
+        return offset, count
+
+    sections, section_count = array(data + 76, 96)
+    primitives, primitive_count = array(data + 88, 4)
+    shared_indices, shared_index_count = array(data + 100, 2)
+    packed, packed_count = array(data + 112, 4)
+    shared, shared_count = array(data + 124, 8)
+    low, high = read('4f', data + 32), read('4f', data + 48)
+    vertices, triangles = [], []
+    used_primitives = set()
+    for i in range(section_count):
+        sec = sections + i * 96
+        codec = read('6f', sec + 48)
+        first, shared_field, primitive_field = read('3I', sec + 72)
+        num_packed, num_shared = read('2B', sec + 88)
+        shared_base = shared_field >> 8
+        primitive_base, num_primitives = primitive_field >> 8, primitive_field & 255
+        if ((shared_field & 255) != num_packed or
+                first + num_packed > packed_count or
+                shared_base + num_shared > shared_index_count or
+                primitive_base + num_primitives > primitive_count):
+            raise UnsupportedPackfile('section vertex or primitive range invalid')
+        start = len(vertices)
+        for j in range(num_packed):
+            word = read('I', packed + (first + j) * 4)[0]
+            xyz = (word & 2047, (word >> 11) & 2047, word >> 22)
+            vertices.append(tuple(codec[a] + xyz[a] * codec[a + 3]
+                                  for a in range(3)))
+        for j in range(num_shared):
+            index = read('H', shared_indices + (shared_base + j) * 2)[0]
+            if index >= shared_count:
+                raise UnsupportedPackfile('shared vertex index invalid')
+            word = read('Q', shared + index * 8)[0]
+            xyz = (word & 2097151, (word >> 21) & 2097151, word >> 42)
+            masks = (2097151, 2097151, 4194303)
+            vertices.append(tuple(low[a] + xyz[a] * (high[a] - low[a]) / masks[a]
+                                  for a in range(3)))
+        for j in range(primitive_base, primitive_base + num_primitives):
+            if j in used_primitives:
+                raise UnsupportedPackfile('overlapping primitive sections')
+            used_primitives.add(j)
+            quad = read('4B', primitives + j * 4)
+            # Havok retains degenerate slots (including 0xDEADDEAD) in
+            # primitive arrays and their BVHs. They contain no triangle.
+            if len(set(quad)) < 3:
+                continue
+            if max(quad) >= num_packed + num_shared:
+                raise UnsupportedPackfile('primitive vertex index invalid')
+            triangles.append(tuple(start + k for k in quad[:3]))
+            if quad[2] != quad[3]:
+                triangles.append(tuple(start + quad[k] for k in (0, 2, 3)))
+    if len(used_primitives) != primitive_count or not triangles:
+        raise UnsupportedPackfile('incomplete mesh topology')
+    for point in vertices:
+        if any(not low[a] - 0.002 <= point[a] <= high[a] + 0.002
+               for a in range(3)):
+            raise UnsupportedPackfile('decoded vertex outside mesh domain')
+    return tuple(vertices), tuple(triangles)
 
 
 def module_surfaces(blob, with_vertices=True):
-    """{surface name: {'minimum', 'maximum', 'vertices'}} for one component."""
+    """{surface name: {'minimum', 'maximum', 'vertices', 'triangles'}} for one component."""
     pack = Packfile(blob)
     section = pack.sections[pack.contents_section]
     base = section['start']
     roots = pack.root_objects(section)
     shape_offsets = set(offset for offset, name in roots.items()
                         if name == 'hknpCompressedMeshShape')
-    starts = sorted(roots)
     local = pack.local_fixups(section)
     globals_ = pack.global_fixups(section)
 
@@ -234,7 +248,9 @@ def module_surfaces(blob, with_vertices=True):
     for shape_pointer in records:
         shape = globals_[shape_pointer]
         name = surface_name(shape_pointer + RECORD_NAME_DELTA)
-        data_object = shape + SHAPE_HEADER_SIZE
+        data_object = globals_.get(shape + 96)
+        if roots.get(data_object) != 'hknpCompressedMeshShapeData':
+            raise UnsupportedPackfile('shape data fixup does not name mesh data')
         minimum = struct.unpack(
             '>4f', pack.blob[base + data_object + DOMAIN_MIN_OFFSET:
                              base + data_object + DOMAIN_MIN_OFFSET + 16])[:3]
@@ -246,17 +262,12 @@ def module_surfaces(blob, with_vertices=True):
             # reads as ~3.4e38.  Drop that surface rather than let a garbage
             # bound through; the rest of the component is still good.
             continue
-        vertices = ()
-        if with_vertices:
-            position = starts.index(shape)
-            region_end = (starts[position + 2] if position + 2 < len(starts)
-                          else section['local'])
-            vertices = _packed_vertices(pack, section, shape, region_end,
-                                        minimum, maximum)
+        vertices, triangles = _mesh(pack, section, data_object)
         surfaces[name] = {
             'minimum': minimum,
             'maximum': maximum,
-            'vertices': vertices,
+            'vertices': vertices if with_vertices else (),
+            'triangles': triangles if with_vertices else (),
         }
     if not surfaces:
         raise UnsupportedPackfile('no named surfaces found')

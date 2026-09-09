@@ -1,251 +1,203 @@
-"""The decoded interior table, and the runtime preferring it over archetypes.
+"""Console mesh data, per-component selection, and immutable runtime geometry.
 
-These are pure-data tests over the baked table plus the resolution path in
-internal_hit_layouts.  They prove the table is internally coherent and that a
-decoded vehicle never falls back to a reconstructed archetype.  They cannot
-prove that a shot into a decoded ammunition rack crits correctly on the exact
-Windows client; that needs the client.
+These prove local geometry/contracts, not original PC-server parity, Windows
+native rendering, or a gameplay damage probability.
 """
 from pathlib import Path
 import sys
+import types
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
-
+sys.path.insert(0, str(ROOT / 'src/res/scripts/client'))
 from gui.mods.offline_lan_0922 import internal_hit_layouts
 from gui.mods.offline_lan_0922 import internal_layout_console
 from gui.mods.offline_lan_0922 import internal_layout_profiles
+from gui.mods.offline_lan_0922 import internal_geometry
+from gui.mods.offline_lan_0922 import internal_mesh
 
 MODULE_ENTITIES = frozenset(internal_hit_layouts.MODULE_TARGETS)
 PARENTS = frozenset(internal_hit_layouts.SUPPORTED_PARENTS)
 
 
-class DecodedInteriorTableTests(unittest.TestCase):
+def all_meshes(record):
+    return ([zone[3] for zone in record[4]] +
+            [zone[2] for alternatives in record[5] for zone in alternatives or ()])
 
+
+def descriptor_for_record(vehicle, record, turret='turret_01'):
+    from test_port_0922_critical_damage import _layout_descriptor
+    descriptor = _layout_descriptor(vehicle, record[2])
+    for geometry in all_meshes(record):
+        part = geometry['part']
+        parent = part.split('_')[0]
+        if parent == 'turret' and part != turret:
+            continue
+        component = getattr(descriptor, parent)
+        component.models = types.SimpleNamespace(undamaged='vehicles/example/normal/lod0/' + part + '.model')
+        component.hitTester.bbox = tuple(geometry['reference_bounds']) + (None,)
+    return descriptor
+
+
+class DecodedInteriorTableTests(unittest.TestCase):
     def setUp(self):
         self.layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
 
-    def test_table_identifies_the_pinned_client_and_its_sources(self):
+    def test_table_identifies_the_pinned_client_and_mesh_schema(self):
         self.assertEqual('0.9.22.0.1', internal_layout_console.CLIENT_VERSION)
         self.assertEqual('1513', internal_layout_console.CLIENT_BUILD)
         self.assertEqual('decoded', internal_layout_console.CONFIDENCE)
-        self.assertEqual(internal_layout_console.DECODED_COUNT,
-                         len(self.layouts))
+        self.assertEqual(1, internal_layout_console.MESH_SCHEMA)
+        self.assertEqual(internal_layout_console.DECODED_COUNT, len(self.layouts))
         self.assertEqual(680, internal_layout_console.CATALOGUE_SIZE)
-        # Provenance must name where the geometry and the reference frame came
-        # from, so a reader can re-derive every number.
         self.assertTrue(internal_layout_console.GEOMETRY_SOURCES)
-        self.assertTrue(internal_layout_console.REFERENCE_FRAME_SOURCE)
-        self.assertGreater(internal_layout_console.MAX_HULL_REGISTRATION_M, 0.0)
+        self.assertEqual('pc9.22.0', internal_layout_console.REFERENCE_FRAME_SOURCE)
 
-    def test_every_record_is_structurally_usable(self):
+    def test_every_record_contains_indexed_source_meshes_or_explicit_holes(self):
+        checked = set()
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
-                self.assertEqual(2, len(key))
-                (vehicle_class, tier, roster, unmodelled, modules,
-                 crew) = record
-                for entity in unmodelled:
-                    self.assertIn(entity, MODULE_ENTITIES)
-                    # An entity is either placed or declared unavailable,
-                    # never both.
-                    self.assertNotIn(entity,
-                                     set(zone[0] for zone in modules))
+                vehicle_class, tier, roster, unmodelled, modules, crew = record
                 self.assertTrue(vehicle_class)
                 self.assertTrue(1 <= tier <= 10)
-                self.assertTrue(roster)
-                self.assertTrue(modules)
-                # One zone per crew slot, in slot order: build_layout indexes
-                # crew_zones by crew index and validates the roster against
-                # the live descriptor.
                 self.assertEqual(len(roster), len(crew))
-                # A crew station the resources do not model is a hole kept in
-                # place, so the list stays indexable by the live descriptor's
-                # crew index.  It must be exactly None -- never a placeholder
-                # box that would read as a real station.
-                self.assertTrue(any(zone is not None for zone in crew),
-                                'a record with no crew station at all is the '
-                                'wrong file, not a hole')
-                for entity, parent, zone_id, centre, half in modules:
+                self.assertTrue(modules)
+                placed = set(zone[0] for zone in modules)
+                self.assertTrue(set(unmodelled).issubset(MODULE_ENTITIES))
+                self.assertTrue(set(unmodelled).isdisjoint(placed))
+                for entity, parent, zone_id, geometry in modules:
                     self.assertIn(entity, MODULE_ENTITIES)
                     self.assertIn(parent, PARENTS)
                     self.assertTrue(zone_id)
-                    self._check_box(centre, half)
-                for zone in crew:
-                    if zone is None:
+                    self.assertIn(geometry['part'].split('_')[0], PARENTS)
+                for index, alternatives in enumerate(crew):
+                    for parent, zone_id, geometry in alternatives or ():
+                        self.assertIn(parent, PARENTS)
+                        self.assertEqual('crew_%02d' % index, zone_id)
+                for geometry in all_meshes(record):
+                    self.assertTrue(geometry['source_package'].startswith('console'))
+                    self.assertTrue(geometry['source_member'].lower().endswith(
+                        (geometry['part'] + '_proxy.hkx', geometry['part'] + '_proxy.primitives')))
+                    self.assertEqual(2, len(geometry['reference_bounds']))
+                    payload = geometry['payload']
+                    if payload in checked:
                         continue
-                    parent, zone_id, centre, half = zone
-                    self.assertIn(parent, PARENTS)
-                    self.assertTrue(zone_id)
-                    self._check_box(centre, half)
+                    checked.add(payload)
+                    vertices, faces = internal_mesh.decode(payload)
+                    self.assertEqual(geometry['vertices'], len(vertices))
+                    self.assertEqual(geometry['triangles'], len(faces))
+                    self.assertTrue(all(len(f) == 3 and min(f) >= 0 and max(f) < len(vertices) for f in faces))
+                    pieces = internal_mesh.prepare(vertices, faces)
+                    self.assertEqual(geometry['closed_pieces'], sum(p['closed'] for p in pieces))
+                    self.assertEqual(geometry['open_pieces'], sum(not p['closed'] for p in pieces))
 
-    def _check_box(self, centre, half):
-        self.assertEqual(3, len(centre))
-        self.assertEqual(3, len(half))
-        for axis in range(3):
-            self.assertGreaterEqual(centre[axis], 0.0)
-            self.assertLessEqual(centre[axis], 1.0)
-            self.assertGreater(half[axis], 0.0)
-            self.assertLessEqual(half[axis], 0.5)
-
-    def test_no_two_crew_share_a_seat(self):
+    def test_no_two_crew_share_a_mesh_in_the_same_component(self):
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
-                centres = [tuple(round(value, 4) for value in zone[2])
-                           for zone in record[5] if zone is not None]
-                self.assertEqual(len(centres), len(set(centres)))
+                seats = [(zone[2]['part'], zone[2]['payload'])
+                         for alternatives in record[5] for zone in alternatives or ()]
+                self.assertEqual(len(seats), len(set(seats)))
 
-    def test_decoded_vehicles_cover_every_module_target(self):
-        # build_layout reports a layout invalid when any module target has no
-        # geometry source, so a decoded record must carry the complete set
-        # less the tracks and gun the client supplies natively.
-        required = ('ammoBay', 'engine', 'fuelTank', 'radio',
-                    'surveyingDevice', 'turretRotator')
+    def test_every_non_native_module_is_placed_or_declared_unavailable(self):
+        required = {'ammoBay', 'engine', 'fuelTank', 'radio', 'surveyingDevice', 'turretRotator'}
         for key, record in self.layouts.items():
             with self.subTest(vehicle=key):
-                entities = set(zone[0] for zone in record[4])
-                # A target is accounted for either by a zone or by being
-                # declared unavailable; validate_layout accepts both and
-                # nothing else.
-                accounted = entities | set(record[3])
-                for entity in required:
-                    self.assertIn(entity, accounted)
+                self.assertTrue(required.issubset(set(z[0] for z in record[4]) | set(record[3])))
 
 
 class DecodedInteriorResolutionTests(unittest.TestCase):
+    def setUp(self):
+        internal_hit_layouts.clear_cache()
+        self.addCleanup(internal_hit_layouts.clear_cache)
 
-    def test_runtime_prefers_decoded_geometry_over_the_archetype(self):
-        layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
-        overlapping = [key for key in layouts
-                       if key in internal_layout_profiles.PROFILES]
-        self.assertTrue(overlapping, 'expected decoded and authored to overlap')
-        key = sorted(overlapping)[0]
-        vehicle = '%s:%s' % key
-        unused_key, profile = internal_hit_layouts._compiled_profile(vehicle)
-        self.assertIsNotNone(profile)
-        self.assertEqual('decoded', profile[3])
-        self.assertTrue(profile[0].startswith('decoded_collision_surfaces'))
-        self.assertIsNot(internal_layout_profiles.PROFILES[key], profile)
-        self.assertEqual(layouts[key][4], profile[5])
-        self.assertEqual(layouts[key][5], profile[6])
-
-    def test_decoded_layout_available_matches_the_table(self):
-        layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
-        key = sorted(layouts)[0]
-        self.assertTrue(internal_hit_layouts.decoded_layout_available(
-            '%s:%s' % key))
-        self.assertFalse(internal_hit_layouts.decoded_layout_available(
-            'ussr:R999_not_a_vehicle'))
-
-    def test_a_vehicle_with_no_source_is_not_invented(self):
-        # These have no counterpart in the source resources.  They must not
-        # acquire decoded geometry, and the audit must say so rather than the
-        # table quietly carrying a guess.
-        for vehicle in ('ussr:R119_Object_777', 'usa:A106_M48A2_120',
-                        'germany:G105_T-55_NVA_DDR'):
-            with self.subTest(vehicle=vehicle):
-                self.assertFalse(
-                    internal_hit_layouts.decoded_layout_available(vehicle))
-
-    def test_a_resolved_decoded_record_never_borrows_from_a_reconstruction(self):
-        # Every zone in a decoded record comes from one source: the decoded
-        # collision surfaces, registered against the PC bounds.  The retained
-        # archetypes are a whole-vehicle fallback and must never be mixed into
-        # a decoded record -- otherwise a reader could only tell real geometry
-        # from a reconstruction by parsing the provenance string.
-        layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
-        checked = 0
-        for key, record in layouts.items():
-            unused_key, profile = internal_hit_layouts._compiled_profile(
-                '%s:%s' % key)
-            self.assertIsNotNone(profile)
-            if not profile[0].startswith('decoded_collision_surfaces'):
-                continue
-            checked += 1
-            with self.subTest(vehicle=key):
-                self.assertNotIn('archetype', profile[0])
-                self.assertEqual(tuple(record[4]), profile[5])
-        self.assertTrue(checked, 'no decoded record resolved')
-
-    def test_an_incomplete_decoded_crew_yields_to_a_complete_archetype(self):
-        # A decoded record whose resources model no station for some crew
-        # leaves those crewmen unhittable.  That is right when the alternative
-        # is no interior, but not when an archetype already seats all of them:
-        # an approximate crew the player can hit is closer to retail than an
-        # exact one he cannot.  A module hole must not trigger this.
-        layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
-        yielded = kept = 0
-        for key, record in layouts.items():
-            holed = any(zone is None for zone in record[5])
-            unused_key, authored = internal_hit_layouts._profile_for_key(key)
-            unused_key, profile = internal_hit_layouts._compiled_profile(
-                '%s:%s' % key)
-            decoded = profile[0].startswith('decoded_collision_surfaces')
-            with self.subTest(vehicle=key):
-                if holed and authored is not None:
-                    self.assertFalse(decoded)
-                    yielded += 1
-                else:
-                    self.assertTrue(decoded)
-                    kept += 1
-        self.assertTrue(yielded, 'expected a vehicle to yield')
-        self.assertTrue(kept, 'expected decoded records to be kept')
-
-    def test_built_fallback_uses_only_the_selected_profile_provenance(self):
-        from test_port_0922_critical_damage import _layout_descriptor
-
-        checked = 0
+    def test_every_decoded_record_wins_even_with_incomplete_crew(self):
+        holed = 0
         for key, record in internal_layout_console.CONSOLE_LAYOUTS_0922.items():
-            vehicle = '%s:%s' % key
-            unused_key, selected = internal_hit_layouts._compiled_profile(vehicle)
-            if selected[0].startswith('decoded_collision_surfaces'):
-                continue
-            checked += 1
-            with self.subTest(vehicle=vehicle):
-                layout = internal_hit_layouts.build_layout(
-                    _layout_descriptor(vehicle, record[2]), log_build=False)
-                self.assertEqual('reconstructed_archetype',
-                                 layout['profile_geometry_provenance'])
-                self.assertEqual((), layout['profile_unmodelled_entities'])
-                self.assertFalse(any(
-                    source['mode'] == 'RESOURCE_GEOMETRY_UNMODELLED'
-                    for source in layout['logical_entity_sources'].values()))
-        self.assertGreater(checked, 0)
+            unused, profile = internal_hit_layouts._compiled_profile('%s:%s' % key)
+            with self.subTest(vehicle=key):
+                self.assertTrue(profile[0].startswith('decoded_collision_surfaces'))
+                self.assertEqual('decoded', profile[3])
+                self.assertEqual(record[4], profile[5])
+                self.assertEqual(record[5], profile[6])
+                holed += any(zone is None for zone in record[5])
+        self.assertGreater(holed, 0)
 
-    def test_an_archetype_only_vehicle_is_labelled_as_reconstructed(self):
-        # The fallback tier must still exist and must still say what it is.
-        decoded = internal_layout_console.CONSOLE_LAYOUTS_0922
-        fallback = sorted(key for key in internal_layout_profiles.PROFILES
-                          if key not in decoded)
-        if not fallback:
-            self.skipTest('every authored profile is now decoded')
-        vehicle = '%s:%s' % fallback[0]
-        self.assertFalse(
-            internal_hit_layouts.decoded_layout_available(vehicle))
-        unused_key, profile = internal_hit_layouts._compiled_profile(vehicle)
+    def test_unavailable_sources_do_not_acquire_decoded_geometry(self):
+        self.assertFalse(internal_hit_layouts.decoded_layout_available('ussr:R999_not_a_vehicle'))
+        for key in internal_layout_console.CONSOLE_LAYOUTS_0922:
+            self.assertTrue(internal_hit_layouts.decoded_layout_available('%s:%s' % key))
+
+    def test_archetype_only_vehicle_is_explicitly_reconstructed(self):
+        key = next(key for key in internal_layout_profiles.PROFILES
+                   if key not in internal_layout_console.CONSOLE_LAYOUTS_0922)
+        unused, profile = internal_hit_layouts._compiled_profile('%s:%s' % key)
         self.assertIsNotNone(profile)
-        self.assertNotIn('decoded_collision_surfaces', profile[0])
+        self.assertNotIn('decoded', profile[0])
 
-    def test_rear_engined_tanks_place_the_engine_at_the_rear(self):
-        # A frame or sign error in registration would not survive this: the
-        # decoded zones are in the component's own bounding box, where +z is
-        # forward, so a rear-engined hull must carry its engine behind centre
-        # and its driver ahead of it.
-        layouts = internal_layout_console.CONSOLE_LAYOUTS_0922
-        checked = 0
-        for vehicle in ('ussr:R45_IS-7', 'ussr:R04_T-34', 'germany:G42_Maus',
-                        'china:Ch01_Type59'):
-            key = internal_hit_layouts._profile_key(vehicle)
-            record = layouts.get(key)
-            if record is None:
+    def test_is7_runtime_retains_eight_full_width_side_racks_and_five_crew_meshes(self):
+        vehicle = 'ussr:R45_IS-7'
+        record = internal_layout_console.CONSOLE_LAYOUTS_0922[internal_hit_layouts._profile_key(vehicle)]
+        descriptor = descriptor_for_record(vehicle, record)
+        layout = internal_hit_layouts.build_layout(descriptor, log_build=False)
+        self.assertTrue(layout['valid'], layout['validation'])
+        rack = next(t for t in layout['targets'] if t['entity'] == 'ammoBay' and t['parent'] == 'hull')
+        self.assertEqual(8, len(rack['primitives']))
+        self.assertAlmostEqual(3.00332598, rack['maximum'][0] - rack['minimum'][0], places=6)
+        self.assertFalse(rack['size_correction_applied'])
+        self.assertIsNone(internal_geometry.target_interval((0., .3, 3.), (0., .3, -2.), rack))
+        self.assertEqual(2, len(internal_geometry.target_intervals((-2., .3, 0.), (2., .3, 0.), rack)))
+        crews = [t for t in layout['targets'] if t['kind'] == 'crew']
+        self.assertEqual(5, len(crews))
+        for target in [rack] + crews:
+            if target['kind'] == 'crew':
+                source = next(g for parent, zone, g in record[5][target['crew_index']]
+                              if parent == target['parent'] and zone == target['zone_id'])
+            else:
+                source = next(g for entity, parent, zone, g in record[4]
+                              if (entity, parent, zone) == (target['entity'], target['parent'], target['zone_id']))
+            vertices, unused = internal_mesh.decode(source['payload'])
+            self.assertEqual(set(vertices), set(v for p in target['primitives'] for v in p['vertices']))
+            self.assertTrue(all(p['shape'] == 'mesh' for p in target['primitives']))
+            self.assertEqual('source_geometry_immutable', target['calibration_status'])
+
+    def test_mismatched_installed_component_is_unavailable_not_scaled_or_reconstructed(self):
+        vehicle = 'ussr:R45_IS-7'
+        record = internal_layout_console.CONSOLE_LAYOUTS_0922[internal_hit_layouts._profile_key(vehicle)]
+        descriptor = descriptor_for_record(vehicle, record)
+        descriptor.turret.models = types.SimpleNamespace(undamaged='vehicles/example/Turret_99.model')
+        layout = internal_hit_layouts.build_layout(descriptor, False)
+        self.assertTrue(layout['valid'], layout['validation'])
+        self.assertFalse(any(t['parent'] == 'turret' for t in layout['targets']))
+        self.assertTrue(any(t['entity'] == 'ammoBay' and t['parent'] == 'hull' for t in layout['targets']))
+        self.assertEqual('RESOURCE_GEOMETRY_UNMODELLED', layout['logical_entity_sources']['commander']['mode'])
+        self.assertTrue(layout['mesh_rejections'])
+        self.assertEqual('decoded_collision_surfaces', layout['profile_geometry_provenance'])
+
+    def test_model_variant_and_reference_bound_both_participate_in_selection(self):
+        checked = False
+        for key, record in internal_layout_console.CONSOLE_LAYOUTS_0922.items():
+            turrets = sorted(set(g['part'] for g in all_meshes(record) if g['part'].startswith('turret_')))
+            if len(turrets) < 2:
                 continue
-            with self.subTest(vehicle=vehicle):
-                engines = [zone for zone in record[4]
-                           if zone[0] == 'engine' and zone[1] == 'hull']
-                self.assertTrue(engines)
-                self.assertLess(min(zone[3][2] for zone in engines), 0.5)
-                checked += 1
-        self.assertTrue(checked, 'none of the sampled hulls were decoded')
+            for part in turrets[:2]:
+                descriptor = descriptor_for_record('%s:%s' % key, record, part)
+                internal_hit_layouts.clear_cache()
+                layout = internal_hit_layouts.build_layout(descriptor, False)
+                self.assertTrue(layout['valid'], layout['validation'])
+                targets = [t for t in layout['targets'] if t['parent'] == 'turret']
+                self.assertTrue(targets)
+                self.assertTrue(all(t['mesh_source']['part'] == part for t in targets))
+            checked = True
+            break
+        self.assertTrue(checked, 'the full roster must include alternate turret meshes')
+
+    def test_rear_engines_keep_negative_component_z_coordinates(self):
+        for vehicle in ('ussr:R45_IS-7', 'ussr:R04_T-34', 'germany:G42_Maus', 'china:Ch01_Type59'):
+            record = internal_layout_console.CONSOLE_LAYOUTS_0922[internal_hit_layouts._profile_key(vehicle)]
+            engines = [internal_mesh.decode(z[3]['payload'])[0]
+                       for z in record[4] if z[0] == 'engine' and z[1] == 'hull']
+            self.assertTrue(engines)
+            self.assertLess(min(v[2] for vertices in engines for v in vertices), 0.)
 
 
 class UnmodelledModuleTests(unittest.TestCase):
@@ -411,8 +363,8 @@ class SameTankAliasTests(unittest.TestCase):
                 # Same modules, same holes, and the same set of crew stations.
                 self.assertEqual(b[4], a[4])
                 self.assertEqual(b[3], a[3])
-                self.assertEqual(sorted(zone[2] for zone in b[5]),
-                                 sorted(zone[2] for zone in a[5]))
+                self.assertEqual(sorted(z[2]['payload'] for alt in b[5] for z in alt or ()),
+                                 sorted(z[2]['payload'] for alt in a[5] for z in alt or ()))
         self.assertTrue(applied, 'no alias pair reached the table')
 
     def test_crew_zones_follow_the_target_roster_order(self):
@@ -424,19 +376,20 @@ class SameTankAliasTests(unittest.TestCase):
             with self.subTest(target=target):
                 roster, crew = record[2], record[5]
                 self.assertEqual(len(roster), len(crew))
-                for index, zone in enumerate(crew):
-                    self.assertEqual('crew_%02d' % index, zone[1])
+                for index, alternatives in enumerate(crew):
+                    for zone in alternatives or ():
+                        self.assertEqual('crew_%02d' % index, zone[1])
 
     def test_the_remap_refuses_a_roster_that_is_not_a_permutation(self):
-        zones = (('hull', 'crew_00', (0.1, 0.2, 0.3), (0.01, 0.02, 0.03)),
-                 ('turret', 'crew_01', (0.4, 0.5, 0.6), (0.04, 0.05, 0.06)))
+        zones = ((('hull', 'crew_00', {'payload': 'driver'}),),
+                 (('turret', 'crew_01', {'payload': 'gunner'}),))
         donor = (('commander',), ('gunner',))
         self.assertIsNotNone(
             self.baker._remap_crew(zones, donor, donor))
         swapped = self.baker._remap_crew(
             zones, donor, (('gunner',), ('commander',)))
-        self.assertEqual((0.4, 0.5, 0.6), swapped[0][2])
-        self.assertEqual('crew_00', swapped[0][1])
+        self.assertEqual({'payload': 'gunner'}, swapped[0][0][2])
+        self.assertEqual('crew_00', swapped[0][0][1])
         self.assertIsNone(self.baker._remap_crew(
             zones, donor, (('driver',), ('commander',))))
         self.assertIsNone(self.baker._remap_crew(
@@ -449,9 +402,8 @@ class HullRegistrationRuleTests(unittest.TestCase):
     The baker gates the hull on its footprint extents and on its shell floor
     sitting on the PC box floor, and deliberately does not gate the height
     extent: an open-topped vehicle's armour shell has no roof while the
-    collision box encloses the compartment, and because ``fractions`` anchors
-    a Console metre coordinate at the box minimum rather than scaling it to
-    the box span, that difference does not move a zone.  These tests pin both
+    collision box encloses the compartment. Vertices remain in source metres,
+    so that difference does not move a zone.  These tests pin both
     halves of that rule, because loosening the wrong half would place
     geometry at the wrong height.
     """
@@ -507,23 +459,14 @@ class HullRegistrationRuleTests(unittest.TestCase):
         self.assertGreater(max(gaps[0], gaps[2]),
                            internal_layout_console.MAX_HULL_REGISTRATION_M)
 
-    def test_anchoring_preserves_a_zone_position_despite_a_span_gap(self):
-        # The reason the height extent need not be gated: fractions() anchors
-        # at the box minimum, and fit_target reconstructs against the same
-        # build's bbox, so metres in equal metres out.
+    def test_bake_preserves_source_mesh_positions_despite_a_span_gap(self):
+        from test_internal_mesh import box
         bound = ((-1.5, 0.0, -3.0), (1.5, 2.0, 3.0))
-        box = ((-0.2, 0.6, -0.4), (0.2, 1.0, 0.4))
-        shaped = self.baker.fractions(box, bound)
-        self.assertIsNotNone(shaped)
-        centre, half = shaped
-        for axis in range(3):
-            span = bound[1][axis] - bound[0][axis]
-            middle = bound[0][axis] + centre[axis] * span
-            extent = half[axis] * span
-            self.assertAlmostEqual(
-                (box[0][axis] + box[1][axis]) * 0.5, middle, places=3)
-            self.assertAlmostEqual(
-                (box[1][axis] - box[0][axis]) * 0.5, extent, places=3)
+        vertices, triangles = box((-.2, .6, -.4), (.2, 1., .4))
+        geometry = self.baker._geometry_record(
+            {'vertices': vertices, 'triangles': triangles}, bound, 'hull')
+        self.assertEqual((vertices, triangles), internal_mesh.decode(geometry['payload']))
+        self.assertEqual(bound, geometry['reference_bounds'])
 
 
 if __name__ == '__main__':

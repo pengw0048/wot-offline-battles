@@ -1,55 +1,26 @@
 #!/usr/bin/env python3
-"""Bake real interior module geometry for the #1513 roster.
+"""Bake Console indexed interiors against the exact PC 9.22 component frames.
 
-No World of Tanks PC client ships interior module geometry: every hit tester
-names a ``collision/`` server model and no package contains one.  The same
-vehicles on World of Tanks Console do ship it, as Havok packfiles whose named
-surfaces are exactly the material kinds
-``scripts/item_defs/vehicles/common/vehicle.xml`` defines for #1513 --
-``ammoBay``, ``engine``, ``transmission``, ``fuelTank``, ``radio``,
-``turretRotator``, ``surveyingDevice``, ``leftTrack``, ``rightTrack``,
-``gun``, and one surface per crew station.  This tool reads those, registers
-them against the PC collision bounds of the same vehicle, and writes the
-result as the port's own normalized zones.
+The pinned PC client's reviewed archives provide exterior collision models,
+not internal module meshes. Console HKX and BigWorld resources provide named
+internal surfaces. Keep their vertices, triangles, separated pieces and
+component-local metres; do not construct bounding-box substitutes.
 
-Nothing is invented.  A vehicle with no source is reported as having none.
+Select the era-closest registering package with the fewest unavailable
+module/crew targets across installed component variants. Retain archive-id
+and member identity checks, explicit same-tank aliases, crew-role remapping,
+hull footprint/floor registration and per-surface containment checks. Only
+pc9.22.0 supplies reference frames. An unsupported component or surface is
+reported, never silently rescaled or replaced.
 
-Provenance of every number this writes:
-
-* geometry: WOTInspector's Armor Inspector data archive.  Each vehicle takes
-  the first package, in order of release distance from this client, that
-  yields a complete layout registering against the PC bounds -- so
-  ``console4.3`` (2018-02-07, six days after this build) wherever it exists,
-  and a later or earlier package only where it does not.  The package used is
-  recorded per vehicle;
-* the reference frame: package ``pc9.22.0`` (2018-02-06), member
-  ``pc/vehicles/<nation>/<code>/collision_client/<Part>.visual_processed``,
-  whose ``<boundingBox>`` is the same bound the running client's hit tester
-  reports, so a zone's fractions are exact rather than approximate;
-* vehicle identity, crew roster and component structure: the pinned client.
-
-The archived ``pc9.22.0`` catalogue is roster-identical to the pinned client --
-all 680 entries, no difference either way -- which is what ties the archive to
-this build.
-
-Hull registration is measured; every other component is checked for frame
-containment.  Both platforms carry the same vehicle's hull shell as ``armor_*``
-surfaces, so the tool compares that shell against the PC hull bounding box:
-the footprint extents must agree, and the shell floor must sit on the box
-floor, both inside one tolerance.  The shell's height extent is deliberately
-not gated -- see ``floor_offset``.  Separately, for every component, the
-decoded surfaces must sit inside the PC bounding box the client reports for
-it; a surface reaching outside is declined rather than costing the vehicle its
-other modules.  Every figure is recorded per vehicle in the report.
-
-Only the hull's shells are comparable directly: a gun component's plates cover
-the breech while its bounding box spans the barrel, and a turret proxy is not
-built to the same silhouette.  So containment is what is known about those
-components -- it bounds the frame they sit in, not the accuracy of the
-interior inside it.
+The report records selected packages/ids, every rejected resource and frame,
+all mesh/crew holes, and open surface-only pieces. A complete client is
+inspected before baking; --scripts-package is a lower-tier resource-only
+mode that checks pinned script contracts and explicitly cannot verify a
+complete client installation or Windows gameplay.
 
     python3 tools/bake_internal_layout_console_0922.py "$WOT_0922_CLIENT" \
-        --cache ~/console-collision-cache
+        --cache DIR --password-file PRIVATE_FILE --output OUT --report REPORT
 """
 
 import argparse
@@ -77,7 +48,7 @@ from bw_primitives_geometry import (UnsupportedPrimitives,
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
-from gui.mods.offline_lan_0922 import internal_hit_layouts
+from gui.mods.offline_lan_0922 import internal_hit_layouts, internal_mesh
 
 TARGET_VERSION = '0.9.22.0.1'
 TARGET_BUILD = '1513'
@@ -112,7 +83,7 @@ CONSOLE_PACKAGES = (
 )
 # The reference frame must stay era-close, because it defines what the baked
 # fractions are fractions of.  pc9.22.0 is this client's own build.
-PC_PACKAGES = ('pc9.22.0', 'pc9.21.0', 'pc9.20.1.1', 'pc9.20.1', 'pc1.0.0')
+PC_PACKAGES = ('pc9.22.0',)
 PC_PACKAGE = PC_PACKAGES[0]
 # The nation order the client uses to build a vehicle's compact descriptor,
 # which is also the id the archive keys its packages on:
@@ -120,14 +91,6 @@ PC_PACKAGE = PC_PACKAGES[0]
 NATIONS = ('ussr', 'germany', 'usa', 'china', 'france', 'uk', 'japan',
            'czech', 'sweden', 'poland')
 ITEM_TYPE_VEHICLE = 1
-# Which component a Console packfile member describes, and the port's parent
-# name for it.
-PART_PARENTS = (
-    ('hull', 'hull'),
-    ('turret_01', 'turret'),
-    ('gun_01', 'gun'),
-    ('chassis', 'chassis'),
-)
 # Console surface name -> the port's module entity.
 MODULE_ENTITIES = {
     'ammoBay': 'ammoBay',
@@ -347,7 +310,8 @@ def _section(node, name):
 def read_client(client_root):
     """Roster, archive id, crew roster and hit-tester parts per vehicle."""
     vehicles = {}
-    with zipfile.ZipFile(str(client_root / SCRIPTS_PACKAGE)) as archive:
+    package_path = client_root if client_root.is_file() else client_root / SCRIPTS_PACKAGE
+    with zipfile.ZipFile(str(package_path)) as archive:
         listings = sorted(name for name in archive.namelist()
                           if name.startswith('scripts/item_defs/vehicles/')
                           and name.endswith('/list.xml')
@@ -396,9 +360,12 @@ def read_client(client_root):
 def fetch(cache, package, archive_id, log):
     """The cached bytes of one archive package, or None when absent."""
     path = cache / ('%s_collision-%d.data' % (package, archive_id))
-    if path.exists():
-        return path.read_bytes() or None
     url = ARCHIVE % (package, archive_id)
+    if path.exists():
+        body = path.read_bytes()
+        log.append({'url': url, 'status': 200 if body else 404,
+                    'bytes': len(body), 'cached': True})
+        return body or None
     try:
         time.sleep(REQUEST_PAUSE)
         with urlopen(url, timeout=60) as response:
@@ -431,44 +398,42 @@ def _open_package(body, password):
     return archive
 
 
-# Console shipped its collision proxies as Havok packfiles up to console4.9
-# and as BigWorld .primitives from console4.10 on, so both containers have to
-# be read to reach the whole roster.  The two decoders were written
-# independently and cross-check exactly: on the AT 7, whose hull is in both
-# console4.3 (Havok) and console4.13 (primitives), all 24 shared surface
-# centres agree to 0.000 m.
-CONTAINERS = (
-    ('.hkx', module_surfaces, UnsupportedPackfile),
-    ('.primitives', primitive_surfaces, UnsupportedPrimitives),
-)
+def _part_parent(part):
+    if part in ('hull', 'chassis'):
+        return part
+    match = re.match(r'^(turret|gun)_\d+$', part)
+    return match.group(1) if match else None
 
 
-def console_parts(body, password=None):
-    """{port parent: decoded surfaces} for one Console collision package."""
+def console_parts(body, password=None, package='', rejected=None):
+    """Decode each exact component variant; never overwrite another turret."""
     parts = {}
+    ambiguous = set()
     with _open_package(body, password) as archive:
         for info in archive.infolist():
             if info.flag_bits & 0x1 and password is None:
-                raise UnsupportedPackfile('encrypted member: '
-                                          + info.filename)
+                raise UnsupportedPackfile('encrypted member: ' + info.filename)
             leaf = info.filename.rsplit('/', 1)[-1].lower()
-            for extension, decode, unsupported in CONTAINERS:
-                matched = None
-                for suffix, parent in PART_PARENTS:
-                    if leaf.endswith('_%s_proxy%s' % (suffix, extension)) or \
-                            leaf.endswith('%s_proxy%s' % (suffix, extension)):
-                        matched = parent
-                        break
-                if matched is None:
-                    continue
-                try:
-                    parts[matched] = decode(archive.read(info))
-                except unsupported:
-                    pass
-                except RuntimeError as error:
-                    raise UnsupportedPackfile('member unreadable: %s'
-                                              % error)
-                break
+            match = re.search(r'(hull|chassis|turret_\d+|gun_\d+)_proxy\.(hkx|primitives)$', leaf)
+            if match is None:
+                continue
+            part, extension = match.groups()
+            decode = module_surfaces if extension == 'hkx' else primitive_surfaces
+            try:
+                surfaces = decode(archive.read(info))
+                if part in parts or part in ambiguous:
+                    parts.pop(part, None)
+                    ambiguous.add(part)
+                    raise UnsupportedPackfile('ambiguous duplicate component: ' + part)
+                for surface in surfaces.values():
+                    surface['source_member'] = info.filename
+                    surface['source_package'] = package
+                parts[part] = surfaces
+            except (UnsupportedPackfile, UnsupportedPrimitives) as error:
+                if rejected is not None:
+                    rejected[info.filename] = str(error)
+            except RuntimeError as error:
+                raise UnsupportedPackfile('member unreadable: %s' % error)
     return parts
 
 
@@ -491,16 +456,11 @@ def pc_bounds(body):
     bounds = {}
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         for info in archive.infolist():
-            if not info.filename.endswith('.visual_processed'):
+            if '/collision_client/' not in info.filename.lower() or not info.filename.endswith('.visual_processed'):
                 continue
             leaf = info.filename.rsplit('/', 1)[-1].lower()
             stem = leaf[:-len('.visual_processed')]
-            parent = None
-            for suffix, candidate in PART_PARENTS:
-                if stem == suffix:
-                    parent = candidate
-                    break
-            if parent is None:
+            if _part_parent(stem) is None:
                 continue
             try:
                 root = read_packed_xml(archive.read(info))
@@ -519,7 +479,7 @@ def pc_bounds(body):
                     if len(parts) == 3:
                         values[key.decode()] = tuple(float(p) for p in parts)
             if 'min' in values and 'max' in values:
-                bounds[parent] = (values['min'], values['max'])
+                bounds[stem] = (values['min'], values['max'])
     return bounds
 
 
@@ -575,23 +535,11 @@ def pc_primitive_hashes(cache, entry):
 
 
 def floor_offset(surfaces, bound):
-    """How far the Console shell's lowest plate sits off the PC box floor.
+    """The Console shell floor relative to the exact PC component origin.
 
-    ``residual`` compares extents, and an extent disagreement is not by
-    itself a registration error: ``fractions`` places a Console metre
-    coordinate into the PC box by anchoring it at the box minimum, and
-    ``fit_target`` reconstructs that against the live bbox of the same
-    build, so a zone's position is preserved exactly.  What has to hold is
-    that the two datasets share an origin on the axis.
-
-    On x and z, matching extents plus containment force that: a shell as wide
-    as the box, inside the box, can only be aligned with it.  On y the
-    extents often disagree because the armour shell of an open-topped
-    vehicle has no roof while the collision box encloses the compartment, and
-    then containment is weak -- a shell 0.8 m shorter fits inside the box at
-    any height.  So measure the vertical origin directly: the belly plate on
-    the box floor, with the whole shortfall at the ceiling, is that
-    open-topped signature and the anchoring holds.
+    Open-topped armour shells may be shorter than the exterior visual box;
+    matching footprint and floor are therefore the useful hull checks.
+    Decoded vertices stay in metres and are never normalized to either box.
     """
     shell = outer_shell(surfaces)
     if shell is None or bound is None:
@@ -618,43 +566,6 @@ def overshoot(surfaces, bound):
             worst = max(worst, bound[0][axis] - item['minimum'][axis],
                         item['maximum'][axis] - bound[1][axis])
     return worst
-
-
-def surface_box(surface):
-    """The surface's exact tight bound, straight out of the resource.
-
-    Deliberately one box per surface rather than one per lobe.  These are
-    surface meshes with sparsely sampled vertices, so a gap between
-    consecutive vertices is not evidence of a void: the IS-7's ammunition
-    racks really do sit against both hull sides, but the same 72-vertex mesh
-    also shows seven other gaps wider than 12 cm that are only sparse
-    sampling.  Separating true lobes needs the triangle connectivity, which
-    this decoder does not read, so guessing them would invent geometry.
-
-    The consequence is stated rather than hidden: a module built as two
-    separated lobes is enclosed by one box that also covers the space between
-    them, which is wider than retail.  The port then applies its own shape
-    hints and per-module physical half-extent caps to that zone, as it does
-    for every other zone.
-    """
-    return (surface['minimum'], surface['maximum'])
-
-
-def fractions(box, bound):
-    """A box in component metres as centre/half fractions of the bounds."""
-    low, high = box
-    span = [bound[1][axis] - bound[0][axis] for axis in range(3)]
-    centre = []
-    half = []
-    for axis in range(3):
-        if span[axis] <= 0.0:
-            return None
-        middle = (low[axis] + high[axis]) * 0.5
-        value = (middle - bound[0][axis]) / span[axis]
-        centre.append(round(min(0.98, max(0.02, value)), 4))
-        extent = (high[axis] - low[axis]) * 0.5 / span[axis]
-        half.append(round(min(0.48, max(0.01, extent)), 4))
-    return tuple(centre), tuple(half)
 
 
 def crew_surface_names(roster):
@@ -722,6 +633,8 @@ def _pc_hull_bound(cache, vehicle, key):
             if not any(vehicle['code'].lower() in member.lower()
                        for member in names):
                 continue
+            if not _package_is_for(body, vehicle['code']):
+                continue
             bounds = pc_bounds(body)
             if 'hull' in bounds:
                 return bounds['hull']
@@ -787,189 +700,117 @@ def _remap_crew(crew_zones, donor_roster, target_roster):
             return None
         available.remove(match)
         order.append(match)
-    # Keep each zone's own id aligned with the slot it now occupies.
-    return tuple(
-        (crew_zones[source][0], 'crew_%02d' % target_index)
-        + tuple(crew_zones[source][2:])
+    # Each crew slot may have one source surface per installed component.
+    return tuple(None if crew_zones[source] is None else tuple(
+        (zone[0], 'crew_%02d' % target_index, zone[2])
+        for zone in crew_zones[source])
         for target_index, source in enumerate(order))
 
 
+def _geometry_record(surface, bound, part):
+    vertices, triangles = surface.get('vertices', ()), surface.get('triangles', ())
+    pieces = internal_mesh.prepare(vertices, triangles)
+    return {
+        'part': part,
+        'reference_bounds': bound,
+        'payload': internal_mesh.encode(vertices, triangles),
+        'source_package': surface.get('source_package', ''),
+        'source_member': surface.get('source_member', ''),
+        'vertices': len(vertices), 'triangles': len(triangles),
+        'closed_pieces': sum(piece['closed'] for piece in pieces),
+        'open_pieces': sum(not piece['closed'] for piece in pieces),
+    }
+
+
 def build_vehicle(key, vehicle, console, pc, max_residual, max_overshoot):
-    """Real module and crew zones for one vehicle, or a rejection reason."""
-    module_zones = []
-    crew_zones = []
-    residuals = {}
-    usable = {}
-    for parent, surfaces in sorted(console.items()):
-        bound = pc.get(parent)
+    """Indexed surfaces in their matching PC component frame, without fitting."""
+    modules, crew, residuals, usable = [], [], {}, {}
+    for part, surfaces in sorted(console.items()):
+        bound = pc.get(part)
         if bound is None:
-            residuals[parent] = 'no_pc_bounds'
+            residuals[part] = {'rejected': 'no_exact_pc_component_bounds'}
             continue
+        parent = _part_parent(part)
         record = {}
         gaps = residual(surfaces, bound) if parent == 'hull' else None
         floor = floor_offset(surfaces, bound) if parent == 'hull' else None
         if gaps is not None:
-            record['shell'] = [round(value, 4) for value in gaps]
+            record['shell'] = [round(value, 6) for value in gaps]
         if floor is not None:
-            record['floor'] = round(floor, 4)
-        # Drop the individual surfaces that reach outside the bound rather
-        # than the whole vehicle: a roof cupola sitting above the hull's
-        # collision box does not mean the frames disagree, and the hull shell
-        # comparison already answers that question.  fractions() clamps to
-        # the component edge anyway, so a dropped surface is one we decline
-        # to place, not one placed wrongly.
-        kept = {}
-        dropped = []
-        for name, item in surfaces.items():
-            if name == 'gun':
-                kept[name] = item
-                continue
-            reach = max([0.0] + [value for axis in range(3)
-                                 for value in (bound[0][axis]
-                                               - item['minimum'][axis],
-                                               item['maximum'][axis]
-                                               - bound[1][axis])])
-            if reach > max_overshoot:
-                dropped.append('%s:%.3f' % (name, reach))
-            else:
-                kept[name] = item
-        if dropped:
-            record['dropped_surfaces'] = sorted(dropped)
-        residuals[parent] = record
-        # The hull registers when the two datasets describe the same
-        # footprint and share a vertical origin, both inside one tolerance.
-        # The height extent is deliberately not gated: see floor_offset.
+            record['floor'] = round(floor, 6)
+        residuals[part] = record
+        if gaps is None and parent == 'hull':
+            record['rejected'] = 'no_console_outer_shell'
+            continue
         if gaps is not None and max(gaps[0], gaps[2]) > max_residual:
+            record['rejected'] = 'hull_footprint_mismatch'
             continue
         if floor is not None and abs(floor) > max_residual:
+            record['rejected'] = 'hull_floor_mismatch'
             continue
+        kept, dropped = {}, {}
+        for name, item in sorted(surfaces.items()):
+            if name not in MODULE_ENTITIES and name not in CREW_SURFACES:
+                continue
+            reach = max([0.0] + [value for axis in range(3) for value in (
+                bound[0][axis] - item['minimum'][axis],
+                item['maximum'][axis] - bound[1][axis])])
+            if reach > max_overshoot:
+                dropped[name] = 'outside_component:%.6f_m' % reach
+                continue
+            try:
+                kept[name] = _geometry_record(item, bound, part)
+            except ValueError as error:
+                dropped[name] = 'invalid_mesh:' + str(error)
+        record['dropped_surfaces'] = dropped
         if kept:
-            usable[parent] = (kept, bound)
-
+            usable[part] = kept
     if 'hull' not in usable:
-        return None, 'hull_unregistered', residuals
+        return None, 'hull_unregistered_or_no_interior_mesh', residuals
+    for part, surfaces in sorted(usable.items()):
+        for name, geometry in sorted(surfaces.items()):
+            if name in MODULE_ENTITIES:
+                modules.append((MODULE_ENTITIES[name], _part_parent(part),
+                                name, geometry))
+    for index, surface in enumerate(crew_surface_names(vehicle['crew'])):
+        alternatives = tuple((_part_parent(part), 'crew_%02d' % index, surfaces[surface])
+                             for part, surfaces in sorted(usable.items())
+                             if surface in surfaces)
+        crew.append(alternatives or None)
+    located = set(zone[0] for zone in modules)
+    unmodelled = tuple(entity for entity in REQUIRED_ENTITIES if entity not in located)
+    if not modules:
+        return None, 'no_module_meshes', residuals
+    return ((tuple(modules), tuple(crew), tuple(sorted(unmodelled))), None, residuals)
 
-    for parent in sorted(usable):
-        surfaces, bound = usable[parent]
-        for name in sorted(surfaces):
-            entity = MODULE_ENTITIES.get(name)
-            if entity is None:
-                continue
-            shaped = fractions(surface_box(surfaces[name]), bound)
-            if shaped is None:
-                continue
-            module_zones.append((entity, parent, name,
-                                 shaped[0], shaped[1]))
 
-    absent = []
-    for slot_index, surface in enumerate(crew_surface_names(vehicle['crew'])):
-        placed = None
-        for parent in ('turret', 'hull', 'gun', 'chassis'):
-            if parent not in usable or surface not in usable[parent][0]:
-                continue
-            surfaces, bound = usable[parent]
-            shaped = fractions((surfaces[surface]['minimum'],
-                                surfaces[surface]['maximum']), bound)
-            if shaped is None:
-                continue
-            placed = (parent, 'crew_%02d' % slot_index, shaped[0], shaped[1])
-            break
-        if placed is None:
-            # Keep the crew list positional -- build_layout indexes it by the
-            # live descriptor's crew index -- and mark the station a hole.
-            absent.append(surface)
-            crew_zones.append(None)
-        else:
-            crew_zones.append(placed)
-
-    if len(absent) == len(crew_zones):
-        # No crew surface at all is not a hole, it is the wrong file.
-        return None, 'crew_surfaces_absent:' + ','.join(absent), residuals
-    # build_layout requires a geometry source for every module target it does
-    # not get natively -- the tracks come from the collision extras and the
-    # gun from the installed gun model, the rest must be here -- and reports
-    # the layout invalid otherwise.  So a vehicle enters the table only with
-    # the complete set: a casemate tank destroyer with no turretRotator
-    # surface falls back to the retained archetype in full rather than
-    # shipping a layout the runtime would reject.
-    # Console models no traverse mechanism for a casemate tank destroyer, and
-    # sometimes no separate optic.  Discarding a vehicle's four decoded
-    # modules over the one it does not model would be worse than filling that
-    # one from the retained archetype, so each entity keeps its own
-    # provenance and the record says which were not decoded.
-    located = set(zone[0] for zone in module_zones)
-    unmodelled = []
-    for entity in REQUIRED_ENTITIES:
-        if entity in located:
-            continue
-        # Deliberately no archetype fill.  Console models no traverse
-        # mechanism for a fixed superstructure and often no separate optic, in
-        # every package it ships -- opening the encrypted 2018-2020 packages
-        # raised the fill from 96 records to 101 rather than removing it, so
-        # it is a property of Console's modelling, not of which package is
-        # read.  Borrowing those two zones from the hand-authored archetypes
-        # would put a second, reconstructed kind of source inside a record
-        # whose every other number is decoded, and the reader could only tell
-        # them apart by the provenance string.  So a decoded record now takes
-        # every zone from one source, and a module that source does not model
-        # is a named hole.  The retained archetypes stay as a whole-vehicle
-        # fallback for vehicles with no decoded geometry at all, where they
-        # are labelled reconstructed_archetype and mix with nothing.
-        #
-        # No decoded surface and no archetype either.  Declare the entity
-        # explicitly unavailable rather than discarding the vehicle: the port
-        # already has that contract for the tracks it scores natively, and
-        # `validate_layout` accepts a target whose source says so.  The
-        # alternative is what this tool used to do -- throw away a complete
-        # decoded ammunition rack, engine, fuel tank, radio and crew because
-        # Console models no traverse mechanism for a fixed superstructure --
-        # which leaves the vehicle with no interior at all.  Nothing is
-        # invented for it and the record names it, so a reader can tell an
-        # unhittable module from a placed one.
-        unmodelled.append(entity)
-    if not module_zones:
-        return None, 'no_module_surfaces', residuals
-    return ((tuple(module_zones), tuple(crew_zones),
-             tuple(sorted(unmodelled))), None, residuals)
+def _coverage_holes(built, pc):
+    """Account for every installed turret variant, not just the first one."""
+    modules, crew, unused_unmodelled = built
+    turrets = sorted(part for part in pc if _part_parent(part) == 'turret') or [None]
+    holes = 0
+    for turret in turrets:
+        active = set(('hull', 'chassis', turret))
+        located = set(zone[0] for zone in modules if zone[3]['part'] in active)
+        holes += len(set(REQUIRED_ENTITIES) - located)
+        holes += sum(not any(zone[2]['part'] in active for zone in (alternatives or ()))
+                     for alternatives in crew)
+    return holes
 
 
 HEADER = '''# -*- coding: utf-8 -*-
-"""Generated interior geometry for the #1513 roster, decoded not reconstructed.
+"""Generated Console indexed interiors, registered to exact PC 9.22 components.
 
-Do not edit by hand.  Run
-``tools/bake_internal_layout_console_0922.py "$WOT_0922_CLIENT" --cache DIR``
-to regenerate it.
-
-Every zone here is a decoded collision surface, not an archetype.  No World of
-Tanks PC client ships interior module geometry -- each hit tester names a
-``collision/`` server model that no package contains -- so the surfaces come
-from the same vehicles on World of Tanks Console, whose Havok collision
-packfiles name them with exactly the material kinds
-``item_defs/vehicles/common/vehicle.xml`` defines for #1513.
-
-Centres and half extents are fractions of the component's PC collision
-bounding box, the same bound the running client's hit tester reports, so
-``internal_geometry.fit_target`` resolves them to the metres this client
-actually uses.  One zone per decoded surface, carrying that
-surface's exact tight bound.  A module built as two separated lobes is
-enclosed by a single box that also covers the space between them: separating
-lobes would need triangle connectivity this decoder does not read, and
-guessing them would invent geometry.
-
-Hull registration is measured; every other component is checked for frame
-containment.  Both platforms carry the same vehicle's outer shell as
-``armor_*`` surfaces, so the hull's two shells are directly comparable: a
-vehicle whose footprint extents disagreed by more than
-MAX_HULL_REGISTRATION_M, or whose shell floor sat that far off the PC box
-floor, was rejected rather than used.  The shell's *height* extent is not
-gated, because the armour shell of an open-topped vehicle has no roof while
-the collision box encloses the compartment; positions are anchored at the box
-minimum rather than scaled to its span, so that difference does not move a
-zone.  A turret or gun shell is not built to the same silhouette as its
-bounding box, so those components are checked only by containment -- which
-bounds the frame, not the interior.
+Regenerate with tools/bake_internal_layout_console_0922.py; do not edit.
+Every mesh retains component-local decoded vertices and indexed triangles,
+losslessly compressed as IM01. Reference bounds identify the PC component;
+they never scale, cap, recenter or enclose the geometry for final collision.
+Crew slots contain alternative meshes for their actual component variants.
+Missing slots/modules are explicit. Open pieces have surface-only collision.
+This is Console geometry, not original PC server geometry or Windows acceptance.
 """
 
+MESH_SCHEMA = 1
 CLIENT_VERSION = %(version)r
 CLIENT_BUILD = %(build)r
 GEOMETRY_SOURCES = %(sources)r
@@ -1014,7 +855,8 @@ def render(version, build, catalogue, decoded, max_residual, sources):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    parser.add_argument('client_root')
+    parser.add_argument('client_root', nargs='?')
+    parser.add_argument('--scripts-package', help='resource-only bake from an extracted scripts.pkg; does not verify a complete client')
     parser.add_argument('--cache', required=True,
                         help='directory for downloaded archive packages')
     parser.add_argument('--output', default=None)
@@ -1037,9 +879,30 @@ def main():
                         help='stop after this many vehicles, for a probe')
     args = parser.parse_args()
 
-    client_root = Path(args.client_root).resolve()
+    if bool(args.client_root) == bool(args.scripts_package):
+        parser.error('provide client_root or --scripts-package, exclusively')
+    client_root = Path(args.client_root or args.scripts_package).resolve()
     password = read_password(args)
-    version, build = _client_identity(client_root)
+    if args.scripts_package:
+        # An extracted resource archive is sufficient for roster/crew data.
+        # Check the repository's pinned contracts and state this lower evidence
+        # tier explicitly; never manufacture version.xml or a complete client.
+        from inspect_client import PINNED_ENTITY_DEFINITION_SHA256, PROBE_MEMBERS
+        with zipfile.ZipFile(client_root) as archive:
+            for name, expected in PINNED_ENTITY_DEFINITION_SHA256.items():
+                if hashlib.sha256(archive.read(name)).hexdigest() != expected:
+                    raise SystemExit('pinned scripts contract mismatch: ' + name)
+            for name in PROBE_MEMBERS:
+                if archive.read(name)[:4] != b'\x03\xf3\r\n':
+                    raise SystemExit('Python 2.7 bytecode contract mismatch: ' + name)
+        version, build = TARGET_VERSION, TARGET_BUILD
+        client_evidence = 'extracted_scripts_pinned_contracts_only'
+    else:
+        from inspect_client import inspect_client
+        inspect_client(client_root)
+        version, build = _client_identity(client_root)
+        client_evidence = 'inspect_client'
+
     cache = Path(args.cache).resolve()
     cache.mkdir(parents=True, exist_ok=True)
     output = (Path(args.output).resolve() if args.output else
@@ -1064,6 +927,8 @@ def main():
             body = fetch(cache, package, vehicle['archive_id'], requests)
             if body is None:
                 continue
+            if not _package_is_for(body, vehicle['code']):
+                continue
             bounds = pc_bounds(body)
             if 'hull' in bounds:
                 pc, pc_used = bounds, package
@@ -1075,6 +940,7 @@ def main():
                       + ALTERNATE_ARCHIVE_IDS.get(key, ()))
         for package in CONSOLE_PACKAGES:
             body = None
+            archive_id_used = None
             for candidate in candidates:
                 found = fetch(cache, package, candidate, requests)
                 if found is None:
@@ -1084,13 +950,15 @@ def main():
                         candidate,)
                     continue
                 body = found
-                if candidate != vehicle['archive_id']:
-                    entry['archive_id_used'] = candidate
+                archive_id_used = candidate
                 break
             if body is None:
                 continue
             try:
-                parts = console_parts(body, password)
+                decode_rejections = {}
+                parts = console_parts(body, password, package, decode_rejections)
+                if decode_rejections:
+                    entry.setdefault('decode_rejections', {})[package] = decode_rejections
             except UnsupportedPackfile as error:
                 attempts[package] = str(error)
                 continue
@@ -1101,6 +969,7 @@ def main():
                 key, vehicle, parts, pc, args.max_residual,
                 args.max_overshoot)
             if built is None:
+                entry.setdefault('registration_rejections', {})[package] = residuals
                 attempts[package] = reason
                 continue
             # A layout may carry holes -- a module or a crew station the
@@ -1110,10 +979,9 @@ def main():
             # era-closest package is taken whatever it is missing, and the
             # E 100 ships four of its six crew unhittable because console4.3
             # does not model them while a later package does.
-            holes = len(built[2]) + sum(1 for zone in built[1]
-                                        if zone is None)
+            holes = _coverage_holes(built, pc)
             if best is None or holes < best[0]:
-                best = (holes, package, parts, built, residuals)
+                best = (holes, package, parts, built, residuals, archive_id_used)
                 if holes == 0:
                     break
             attempts[package] = '%s (%d unmodelled)' % (
@@ -1132,17 +1000,28 @@ def main():
             entry['reason'] = rejected[key]
             audit[key] = entry
             continue
-        unused_holes, package, parts, built, residuals = best
+        unused_holes, package, parts, built, residuals, archive_id_used = best
         sources.add(package)
         entry.update({
             'package': package,
+            'archive_id_used': archive_id_used,
             'residuals': residuals,
             'surfaces': dict((parent, sorted(surfaces))
                              for parent, surfaces in parts.items()),
             'module_zones': len(built[0]),
-            'crew_zones': len(built[1]),
+            'crew_zones': sum(len(z or ()) for z in built[1]),
+            'crew_slots_missing': [i for i, z in enumerate(built[1]) if z is None],
+            'configuration_holes': _coverage_holes(built, pc),
+            'pc_components': sorted(pc),
             'entities_unmodelled': list(built[2]),
         })
+        entry['meshes'] = [dict({'entity': entity, 'parent': parent, 'zone_id': zone_id},
+            **dict((k, v) for k, v in geometry.items() if k != 'payload'))
+            for entity, parent, zone_id, geometry in built[0]]
+        entry['crew_meshes'] = [dict({'crew_index': i, 'parent': parent, 'zone_id': zone_id},
+            **dict((k, v) for k, v in geometry.items() if k != 'payload'))
+            for i, alternatives in enumerate(built[1])
+            for parent, zone_id, geometry in alternatives or ()]
         if attempts:
             entry['earlier_attempts'] = attempts
         audit[key] = entry
@@ -1243,7 +1122,7 @@ def main():
     report_path = (Path(args.report).resolve() if args.report else
                    cache / 'console_layout_report.json')
     report_path.write_text(json.dumps(
-        {'client': {'version': version, 'build': build},
+        {'client': {'version': version, 'build': build, 'evidence': client_evidence},
          'catalogue': len(vehicles), 'decoded': len(decoded),
          'rejected': rejected, 'requests': requests, 'vehicles': audit},
         indent=1, sort_keys=True), encoding='utf-8')
