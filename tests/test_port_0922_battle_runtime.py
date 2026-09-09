@@ -1074,6 +1074,8 @@ class _Avatar(object):
         return None
 
     def __init__(self):
+        self.makeVehicleMovementCommandByKeys = mock.Mock(return_value=0)
+        self.moveVehicle = mock.Mock()
         self._offlineLANInitComplete = True
         self._offlineLANPlayerReady = True
         self.spaceID = 7
@@ -14152,6 +14154,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._battle_live)
         battle._binding.arena_period.assert_not_called()
         battle._avatar.gunRotator.lock.assert_not_called()
+        battle._avatar.moveVehicle.assert_not_called()
 
     def test_a_battle_hud_panel_failure_does_not_end_the_round(self):
         runtime = _runtime()
@@ -19060,6 +19063,79 @@ class BattleRuntimeContractTests(unittest.TestCase):
         # raises retail's second gate to keep laying and firing frozen.
         self.assertTrue(battle._avatar.isGunLocked)
         self.assertEqual([True], battle._avatar.gun_locks)
+
+    def test_battle_transition_refreshes_current_stock_drive_after_reticle(self):
+        # PREBATTLE can retain a cruise preset without a delivered move. The
+        # early reticle gate then makes stock __setIsOnArena(True) a no-op.
+        for flags, forward, turn, brake in (
+                (33, 0.25, 0.0, False), (17, 0.5, 0.0, False),
+                (1, 1.0, 0.0, False), (18, -0.5, 0.0, False),
+                (2, -1.0, 0.0, False), (0, 0.0, 0.0, False),
+                (9, 1.0, 1.0, False), (64, 0.0, 0.0, True)):
+            with self.subTest(flags=flags):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle.state = 'running'
+                battle._battle_live = False
+                battle._avatar = runtime.bigworld.avatar
+                battle.client = types.SimpleNamespace(
+                    send_input=mock.Mock(return_value=True))
+                battle._config = {}
+                battle._sender = _LANInputSender(battle)
+                battle._sender.send_current = mock.Mock(return_value=True)
+                battle.local_pose = lambda: ((0.0, 0.0, 0.0), 0.0)
+                avatar = battle._avatar
+                avatar.makeVehicleMovementCommandByKeys.return_value = flags
+
+                def move(current_flags, is_key_down):
+                    self.assertFalse(is_key_down)
+                    battle._sender.send_avatar_input(
+                        10, 'move', {'flags': current_flags})
+
+                avatar.moveVehicle.side_effect = move
+
+                def period_changed(period, duration):
+                    self.assertEqual('battle', period)
+                    # Match #1513's equality guard, including its omitted
+                    # movement refresh when the reticle already raised it.
+                    if not avatar._PlayerAvatar__isOnArena:
+                        avatar._PlayerAvatar__isOnArena = True
+                        avatar.moveVehicle(
+                            avatar.makeVehicleMovementCommandByKeys(), False)
+
+                battle._binding = types.SimpleNamespace(
+                    arena_period=period_changed)
+                self.assertTrue(battle._show_prebattle_crosshair())
+                self.assertEqual(0.0, battle._sender.forward)
+                # A released/cancelled command must replace stale LAN input.
+                if flags == 0:
+                    battle._sender.forward = 1.0
+                avatar.moveVehicle.assert_not_called()
+                self.assertTrue(battle._begin_battle())
+                self.assertEqual(forward, battle._sender.forward)
+                self.assertEqual(turn, battle._sender.turn)
+                self.assertEqual(brake, battle._sender.handbrake)
+                avatar.moveVehicle.assert_called_once_with(flags, False)
+                self.assertFalse(battle._begin_battle())
+                avatar.moveVehicle.assert_called_once_with(flags, False)
+
+    def test_battle_transition_keeps_stock_refresh_without_early_reticle(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._avatar._PlayerAvatar__isOnArena = False
+        battle._battle_live = False
+        battle._config = {}
+        battle.client = types.SimpleNamespace()
+
+        def period_changed(period, duration):
+            battle._avatar._PlayerAvatar__isOnArena = True
+            battle._avatar.moveVehicle(
+                battle._avatar.makeVehicleMovementCommandByKeys(), False)
+
+        battle._binding = types.SimpleNamespace(arena_period=period_changed)
+        self.assertTrue(battle._begin_battle())
+        battle._avatar.moveVehicle.assert_called_once_with(0, False)
 
     def test_battle_transition_starts_one_native_gun_timer_from_zero(self):
         runtime = _runtime()
