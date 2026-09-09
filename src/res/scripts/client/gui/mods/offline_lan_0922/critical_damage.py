@@ -420,7 +420,7 @@ def _offh_internal_ray_hits(target_mock, td, start_pos, end_pos, covered=()):
 	'''Interior modules and crew the shell REALLY passed through.
 
 	Returns [(entry_distance, extraName)] sorted front to back, or None when no
-	layout is available. The profile boxes live in their parent component's own
+	layout is available. Interior geometry lives in its parent component's own
 	space, so the segment goes through exactly the two transforms
 	Vehicle.getComponents applies: world -> vehicle -> component, which also
 	accounts for the current turret yaw and gun pitch.
@@ -479,12 +479,8 @@ def _offh_internal_ray_hits(target_mock, td, start_pos, end_pos, covered=()):
 		# the stopping/exit-plate filters compare them.
 		hits.append((float(interval[0]) * _world_length, name))
 	hits.sort()
-	# ONE roll per device, not per box. The profiles model a module as several
-	# boxes - an ammo rack is typically three (hull floor left, hull floor right,
-	# turret ready rack) - and a shell through the fighting compartment crosses
-	# two of them. Scoring both would give that module twice the saving throw WG
-	# gives it. The log showed exactly that: 'ammoBayHealth@0.04,
-	# ammoBayHealth@0.04' from a single strike. Keep the nearest box per device.
+	# Keep the nearest contact per device: disconnected source pieces and
+	# retained reconstructed zones must not multiply the saving throw.
 	seen = set()
 	unique = []
 	for dist, name in hits:
@@ -987,20 +983,16 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 			if getattr(_hm0, 'vehicleDamageFactor', 1.0) != 0.0 and float(getattr(_hm0, 'armor', 0.0) or 0.0) > 0.0:
 				if _hd0 < _stop_d:
 					_stop_d = _hd0
-	# Interior devices have no collision geometry in this client: all 1975
-	# collision meshes carry armor_N, gun, both tracks, surveyingDevice and
-	# gunBreech and nothing else. Adopted per-tank profiles provide the only
-	# reliable interior boxes. Without one, fail closed instead of inventing a
-	# compartment hit; native external device geometry still runs below.
+	# PC component materials supply external contacts. Selected Console meshes
+	# (or explicitly retained authored profiles) supply interior contacts. A
+	# missing source must not fabricate a compartment hit.
 	_scored = all_hits
 	if (internal_hits is not None or penetrated is not False) and bool(
 			_MDCFG.get('internal_module_damage', True)):
 		try:
-			# Preferred path: the adopted per-tank profiles give every interior
-			# module and crewman a real box, so the shell either crosses one or
-			# it does not - no zone guess involved. Each crossed box gets its own
-			# saving throw, which is how a round through the engine bay can take
-			# the engine AND a fuel tank.
+			# Query the selected component-local geometry. Multiple reached
+			# pieces of one device produce one saving throw; distinct devices
+			# keep independent rolls.
 			_covered = set()
 			for _h2 in all_hits:
 				_m2 = _h2[2]

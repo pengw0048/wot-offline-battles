@@ -333,7 +333,13 @@ def _rotate_point_y(point, center, degrees):
         float(point[1]), float(center[2]) + dx * sine + dz * cosine)
 
 
+def _require_adjustable(target):
+    if any(item.get('shape') == 'mesh' for item in target.get('primitives', ())):
+        raise ValueError('decoded source meshes cannot be recalibrated as primitives')
+
+
 def set_target_rotation(target, yaw_degrees, calibration_status='runtime_rotated'):
+    _require_adjustable(target)
     yaw = _normalise_yaw(yaw_degrees)
     old_yaw = _normalise_yaw(target.get('rotation_yaw_degrees', 0.0))
     delta = _normalise_yaw(yaw - old_yaw)
@@ -376,6 +382,7 @@ def set_target_rotation(target, yaw_degrees, calibration_status='runtime_rotated
 
 def set_target_geometry(target, center, half_extents, bounds=None,
         calibration_status='runtime_adjusted'):
+    _require_adjustable(target)
     old_center = tuple(target.get('center', center))
     old_half = tuple(target.get('half_extents', half_extents))
     requested_half = tuple(float(value) for value in half_extents)
@@ -418,6 +425,8 @@ def set_target_geometry(target, center, half_extents, bounds=None,
 
 
 def _primitive_volume(primitive):
+    if primitive.get('shape') == 'mesh':
+        return primitive['volume_m3']
     shape = str(primitive.get('shape', 'aabb') or 'aabb').lower()
     if shape == 'sphere':
         radius = float(primitive.get('radius', 0.0))
@@ -438,6 +447,8 @@ def _primitive_volume(primitive):
 
 
 def apply_target_override(fingerprint, target, bounds=None):
+    if any(item.get('shape') == 'mesh' for item in target.get('primitives', ())):
+        return target
     record = get_override(fingerprint, target)
     if record is None:
         target.setdefault('calibration_status', 'profile_seed_unverified')
@@ -454,6 +465,7 @@ def apply_target_override(fingerprint, target, bounds=None):
 
 def save_target_override(fingerprint, vehicle_type, target,
         model_signatures=None):
+    _require_adjustable(target)
     document = copy.deepcopy(load_document())
     vehicles = document.setdefault('vehicles', {})
     fingerprint = _safe_text(fingerprint)
@@ -587,6 +599,7 @@ def append_custom_targets(fingerprint, targets, bounds_by_parent):
 
 def create_custom_zone(fingerprint, vehicle_type, source_target,
         model_signatures=None):
+    _require_adjustable(source_target)
     document = copy.deepcopy(load_document())
     vehicle_record = _vehicle_record(document, fingerprint, vehicle_type)
     if model_signatures:

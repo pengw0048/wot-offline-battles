@@ -13897,7 +13897,7 @@ class BattleRuntime(object):
 
         The historical limit starts at the first vehicle material, including
         tracks and spaced armour.  Keeping the original query origin lets the
-        native collision distances and reconstructed internal hit boxes share
+        native collision distances and internal mesh contacts share
         one physical distance axis.
         """
         collisions = tuple(collisions or ())

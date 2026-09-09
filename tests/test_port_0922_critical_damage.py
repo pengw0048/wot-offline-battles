@@ -138,7 +138,7 @@ def _layout_descriptor(name, crew_roles):
         defaults.update(values)
         return _Strict1513Component(**defaults)
 
-    return _Strict1513Component(
+    descriptor = _Strict1513Component(
         type=types.SimpleNamespace(name=name, crewRoles=crew_roles),
         chassis=component('chassis'),
         hull=component('hull'),
@@ -147,6 +147,27 @@ def _layout_descriptor(name, crew_roles):
         engine=component('engine', weight=120.0),
         fuelTank=component('fuelTank', weight=40.0),
         radio=component('radio', weight=15.0))
+
+    # Geometry consumers need the matching component model/frame. Arbitrary
+    # shared bboxes cannot stand in for an installed #1513 component now that
+    # decoded meshes are correctly kept in metres instead of fitted to it.
+    table = internal_hit_layouts._layout_console
+    record = getattr(table, 'CONSOLE_LAYOUTS_0922', {}).get(
+        internal_hit_layouts._profile_key(name))
+    if record is not None and getattr(table, 'MESH_SCHEMA', None) == 1:
+        geometries = ([z[3] for z in record[4]] +
+                      [z[2] for alternatives in record[5] for z in alternatives or ()])
+        selected = {}
+        for geometry in sorted(geometries, key=lambda g: g['part']):
+            parent = geometry['part'].split('_')[0]
+            if parent in selected:
+                continue
+            selected[parent] = geometry
+            value = getattr(descriptor, parent)
+            value.models = types.SimpleNamespace(undamaged=(
+                'vehicles/example/normal/lod0/' + geometry['part'] + '.model'))
+            value.hitTester.bbox = tuple(geometry['reference_bounds']) + (None,)
+    return descriptor
 
 
 class CriticalDamageTests(unittest.TestCase):
@@ -403,7 +424,9 @@ class CriticalDamageTests(unittest.TestCase):
                 zones = internal_hit_layouts._profile_record(
                     profile)['crew_zones']
                 self.assertEqual(
-                    tuple(row[:3] + (zones[row[2]][1],) for row in expected),
+                    tuple(row[:3] + ((zones[row[2]][0][1] if
+                        profile[0].startswith('decoded_collision_surfaces') else
+                        zones[row[2]][1]),) for row in expected if zones[row[2]] is not None),
                     actual)
 
     def test_layout_prewarm_waits_for_complete_native_bounds(self):

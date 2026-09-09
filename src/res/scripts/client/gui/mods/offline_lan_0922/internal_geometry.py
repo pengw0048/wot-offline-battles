@@ -1,5 +1,10 @@
 import math
 
+try:
+	from gui.mods.offline_lan_0922 import internal_mesh
+except ImportError:
+	import internal_mesh
+
 
 GEOMETRY_MODE = 'profile'
 
@@ -570,6 +575,8 @@ def _build_primitives(entity, kind, center, half, zone_id,
 	return (_box(center, half, zone_id + ':body'),)
 
 def _primitive_volume(primitive):
+	if primitive.get('shape') == 'mesh':
+		return primitive['volume_m3']
 	shape = str(primitive.get('shape', 'aabb') or 'aabb').lower()
 	if shape == 'sphere':
 		radius = float(primitive.get('radius', 0.0))
@@ -607,7 +614,8 @@ def _penetration_resistance(vehicle_descriptor, entity, kind, primitives):
 	return {
 		'weight_kg': float(weight),
 		'weight_source': weight_source,
-		'volume_m3': volume,
+		'volume_m3': (sum(_primitive_volume(item) for item in primitives)
+			if any(item.get('shape') == 'mesh' for item in primitives) else volume),
 		'effective_density_kg_m3': density,
 		'penetration_resistance_mm_per_meter': resistance_per_meter,
 		'resistance_source': ('component_mass_or_entity_density/'
@@ -617,6 +625,48 @@ def _penetration_resistance(vehicle_descriptor, entity, kind, primitives):
 
 def _explicit_anchor_fractions(fractions):
 	return tuple(_clamp(float(value), 0.02, 0.98) for value in fractions)
+
+def mesh_matches_component(vehicle_descriptor, parent, bounds, geometry):
+	'''Require the exact PC model variant and its unscaled component frame.'''
+	component = _value(vehicle_descriptor, parent)
+	# #1513 readModels constructs ModelStatesPaths. The undamaged member
+	# identifies the installed part; wreck models may be shared by variants.
+	path = _value(_value(component, 'models'), 'undamaged', '')
+	part = str(path or '').replace('\\', '/').rsplit('/', 1)[-1].split('.')[0].lower()
+	if geometry['part'] != part:
+		return False, 'installed_component_model_mismatch'
+	reference = geometry['reference_bounds']
+	if any(abs(float(bounds[side][axis]) - float(reference[side][axis])) > 0.002
+		for side in range(2) for axis in range(3)):
+		return False, 'installed_component_frame_mismatch'
+	return True, None
+
+
+def fit_mesh(vehicle_descriptor, parent, entity, kind, bounds, zone_id, geometry):
+	'''Keep decoded component metres verbatim; bounds never resize a mesh.'''
+	matched, reason = mesh_matches_component(vehicle_descriptor, parent, bounds, geometry)
+	if not matched:
+		raise ValueError(reason)
+	vertices, triangles = internal_mesh.decode(geometry['payload'])
+	primitives = internal_mesh.prepare(vertices, triangles, zone_id)
+	minimum = tuple(min(p['minimum'][a] for p in primitives) for a in range(3))
+	maximum = tuple(max(p['maximum'][a] for p in primitives) for a in range(3))
+	center = tuple((minimum[a] + maximum[a]) * 0.5 for a in range(3))
+	half = tuple((maximum[a] - minimum[a]) * 0.5 for a in range(3))
+	return {
+		'center': center, 'half_extents': half,
+		'minimum': minimum, 'maximum': maximum,
+		'shape': 'compound', 'primitives': primitives,
+		'fit_mode': 'decoded_component_mesh', 'fit_source': parent,
+		'model_signature': _component_identity(_value(vehicle_descriptor, parent), bounds),
+		'geometry_mode': 'decoded_mesh', 'size_policy': 'source_mesh_metres',
+		'final_half_extents_m': half, 'size_correction_applied': False,
+		'physical_cap_size_corrected': False, 'collision_fit_size_corrected': False,
+		'shape_hint': 'indexed_mesh', 'shape_source': 'console_indexed_mesh',
+		'primitive_policy': 'source_topology',
+		'resistance': _penetration_resistance(vehicle_descriptor, entity, kind, primitives),
+	}
+
 
 def fit_target(vehicle_descriptor, parent, entity, kind, bounds,
 		center_fractions, half_fractions, zone_id, role_data=None,
@@ -711,6 +761,8 @@ def fit_target(vehicle_descriptor, parent, entity, kind, bounds,
 
 
 def _sample_primitive_points(primitive):
+	if primitive.get('shape') == 'mesh':
+		return primitive['vertices']
 	shape = str(primitive.get('shape', 'aabb') or 'aabb').lower()
 	center = tuple(float(v) for v in primitive.get('center', (0.0, 0.0, 0.0)))
 	if shape == 'sphere':
@@ -995,6 +1047,9 @@ def _segment_capsule_interval(start, end, primitive):
 
 
 def primitive_interval(start, end, primitive):
+	if primitive.get('shape') == 'mesh':
+		hits = internal_mesh.intervals(start, end, primitive)
+		return hits[0] if hits else None
 	shape = str(primitive.get('shape', 'aabb') or 'aabb').lower()
 	if shape == 'sphere':
 		return _segment_sphere_interval(start, end, primitive['center'],
@@ -1011,15 +1066,18 @@ def primitive_interval(start, end, primitive):
 def target_intervals(start, end, target):
 	intervals = []
 	for primitive in target.get('primitives', ()):
-		interval = primitive_interval(start, end, primitive)
-		if interval is None:
-			continue
-		intervals.append((float(interval[0]), float(interval[1]), primitive))
+		if primitive.get('shape') == 'mesh':
+			intervals.extend((float(a), float(b), primitive)
+				for a, b in internal_mesh.intervals(start, end, primitive))
+		else:
+			interval = primitive_interval(start, end, primitive)
+			if interval is not None:
+				intervals.append((float(interval[0]), float(interval[1]), primitive))
 	intervals.sort(key=lambda item: (item[0], item[1],
 		item[2].get('primitive_id', '')))
 	merged = []
 	for entry, exit_value, primitive in intervals:
-		if not merged or entry > merged[-1][1] + 0.0001:
+		if not merged or entry > merged[-1][1] + 1.0e-9:
 			merged.append([entry, exit_value, primitive])
 		else:
 			merged[-1][1] = max(merged[-1][1], exit_value)

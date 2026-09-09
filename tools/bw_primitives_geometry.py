@@ -5,7 +5,7 @@ The Armor Inspector archive ships Console collision proxies as Havok
 packfiles up to ``console4.9`` and as this container from ``console4.10``
 onward, so the tanks Console added after 2019 are only readable here.
 ``tools/hkx_module_geometry.py`` handles the Havok side; this module presents
-the same result -- one exact axis-aligned bound per named surface -- so the
+the same result -- indexed triangles and bounds per named surface -- so the
 baker can use either interchangeably.
 
 The container is a plain section archive, and unlike the Havok files it needs
@@ -92,7 +92,7 @@ def _material_names(blob):
     names = re.findall(r'<id>([^<]*)</id>', text)
     if not names:
         raise UnsupportedPrimitives('bsp2_materials names nothing')
-    return names
+    return [name.strip() for name in names]
 
 
 def _vertices(blob):
@@ -157,7 +157,7 @@ def _plausible(low, high):
 
 
 def module_surfaces(blob):
-    """{surface name: {'minimum', 'maximum', 'vertices'}} for one component.
+    """{surface name: {'minimum', 'maximum', 'vertices', 'triangles'}} for one component.
 
     Same shape as ``hkx_module_geometry.module_surfaces``, so either decoder
     can feed the baker.  A surface whose group is empty or whose bound is
@@ -191,15 +191,27 @@ def module_surfaces(blob):
             raise UnsupportedPrimitives(
                 'group %r references vertex %d of %d'
                 % (name, max(referenced), len(vertices)))
-        block = [vertices[index] for index in referenced]
+        ordered = sorted(referenced)
+        remap = dict((index, i) for i, index in enumerate(ordered))
+        block = [vertices[index] for index in ordered]
+        faces = tuple(tuple(remap[index] for index in indices[i:i + 3])
+                      for i in range(start_index, stop, 3))
         low = tuple(min(vertex[axis] for vertex in block)
                     for axis in range(3))
         high = tuple(max(vertex[axis] for vertex in block)
                      for axis in range(3))
         if not _plausible(low, high):
             continue
+        previous = surfaces.get(name)
+        if previous is not None:
+            offset = len(previous['vertices'])
+            block = list(previous['vertices']) + block
+            faces = previous['triangles'] + tuple(
+                tuple(i + offset for i in face) for face in faces)
+            low = tuple(min(low[a], previous['minimum'][a]) for a in range(3))
+            high = tuple(max(high[a], previous['maximum'][a]) for a in range(3))
         surfaces[name] = {'minimum': low, 'maximum': high,
-                          'vertices': tuple(block)}
+                          'vertices': tuple(block), 'triangles': faces}
     if not surfaces:
         raise UnsupportedPrimitives('no usable surface in the container')
     return surfaces

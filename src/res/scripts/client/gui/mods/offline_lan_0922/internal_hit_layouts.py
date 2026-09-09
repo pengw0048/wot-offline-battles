@@ -71,7 +71,7 @@ except Exception:
 		return _decorate
 
 
-LAYOUT_KEY = 15
+LAYOUT_KEY = 16
 _LAYOUT_MODE = 'profile'
 
 
@@ -224,10 +224,9 @@ def _decoded_layout(key):
 
 	These zones are collision surfaces read out of the exact-era resources by
 	tools/bake_internal_layout_console_0922.py, not reconstructions, so they
-	take precedence over the retained archetypes.  Centres and half extents
-	are already fractions of the component's collision bounding box, which is
-	the same bound this client's hit tester reports, so they drop straight
-	into the profile record the rest of this module expects.'''
+	take precedence over the retained archetypes. Indexed triangles retain
+	component-local metres; source part and PC reference bounds fence them
+	to the installed component without fitting or relocation.'''
 	if _layout_console is None:
 		return None
 	record = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', {}).get(key)
@@ -286,16 +285,7 @@ def _compiled_profile(vehicle_name):
 	decoded = _decoded_layout(key)
 	authored_key, authored = _profile_for_key(key)
 	if decoded is not None:
-		# A decoded record whose resources model no station for some of the
-		# crew leaves those crewmen unhittable.  That is the right answer when
-		# the alternative is no interior at all, but not when a retained
-		# archetype already seats every one of them: an approximate crew the
-		# player can hit is closer to retail than an exact one he cannot, and
-		# on the E 100 the resources miss four of six stations.  A module hole
-		# costs a single crit target and does not trigger this.
-		if authored is None or not _decoded_crew_incomplete(key):
-			return key, decoded
-		return authored_key, authored
+		return key, decoded
 	return authored_key, authored
 
 
@@ -593,8 +583,11 @@ def _profile_shape_hint(profile_key, entity, kind, parent, zone_id,
 def _target(vehicle_descriptor, entity, kind, parent, bounds,
 		center_fractions, half_fractions, descriptor_source, hit_chance_info,
 		role_data=None, zone_id='', profile_id='', profile_confidence='',
-		shape_hint=None):
-	if _internal_geometry is None:
+		shape_hint=None, mesh=None):
+	if mesh is not None:
+		fit = _internal_geometry.fit_mesh(vehicle_descriptor, parent, entity,
+			kind, bounds, zone_id, mesh)
+	elif _internal_geometry is None:
 		center = _fraction_point(bounds, center_fractions)
 		half_extents = _fraction_half_extents(bounds, half_fractions)
 		center, half_extents = _clamp_volume(bounds, center, half_extents)
@@ -649,7 +642,8 @@ def _target(vehicle_descriptor, entity, kind, parent, bounds,
 		'seed_half_fractions': tuple(half_fractions),
 		'calibration_status': 'profile_seed_unverified',
 		'geometry_classification': 'profile',
-		'descriptor_source': descriptor_source,
+		'descriptor_source': ('Console indexed mesh + exact PC component frame'
+			if mesh is not None else descriptor_source),
 		'fit_mode': fit.get('fit_mode'),
 		'fit_source': fit.get('fit_source'),
 		'model_signature': fit.get('model_signature'),
@@ -695,6 +689,13 @@ def _target(vehicle_descriptor, entity, kind, parent, bounds,
 		'geometry_effective_density_kg_m3': resistance.get(
 			'effective_density_kg_m3', 0.0),
 	}
+	if mesh is not None:
+		result['geometry_classification'] = 'decoded_console_mesh'
+		result['calibration_status'] = 'source_geometry_immutable'
+		result['mesh_source'] = dict((key, value) for key, value in mesh.items()
+			if key != 'payload')
+		result.pop('seed_center_fractions', None)
+		result.pop('seed_half_fractions', None)
 	if role_data is not None:
 		result['roles'] = tuple(role_data.get('roles', ()))
 		result['crew_index'] = role_data.get('crew_index')
@@ -733,6 +734,53 @@ def _rotating_turret_architecture(vehicle_descriptor):
 		'limited_fighting_compartment') % math.degrees(yaw_span)
 
 
+def _decoded_candidates(vehicle_descriptor, profile, crew, bounds, official_geometry):
+	'''Resolve the source's component variants before any collision query.'''
+	candidates, rejections = [], []
+	def candidate(entity, kind, parent, zone_id, geometry, role_data):
+		if entity in official_geometry:
+			return None
+		part = geometry.get('part') if isinstance(geometry, dict) else None
+		if not part:
+			reason = 'invalid_mesh_metadata'
+		elif parent not in bounds or _internal_geometry is None:
+			reason = 'component_bounds_or_mesh_runtime_unavailable'
+		else:
+			try:
+				matched, reason = _internal_geometry.mesh_matches_component(
+					vehicle_descriptor, parent, bounds[parent], geometry)
+			except Exception:
+				matched, reason = False, 'invalid_mesh_metadata'
+			if matched:
+				return {'entity': entity, 'kind': kind, 'parent': parent,
+					'zone_id': zone_id, 'mesh': geometry, 'role_data': role_data,
+					'center_fractions': (0.0, 0.0, 0.0),
+					'half_fractions': (0.0, 0.0, 0.0), 'shape_hint': 'indexed_mesh'}
+		rejections.append({'entity': entity, 'parent': parent,
+			'part': part, 'reason': reason})
+		return None
+	for entity, parent, zone_id, geometry in profile['module_zones']:
+		item = candidate(entity, 'module', parent, zone_id, geometry, None)
+		if item is not None:
+			candidates.append(item)
+	for index, role_data in enumerate(crew):
+		alternatives = profile['crew_zones'][index] if index < len(profile['crew_zones']) else ()
+		matches = []
+		for parent, zone_id, geometry in alternatives or ():
+			item = candidate(role_data['entity'], 'crew', parent, zone_id, geometry, role_data)
+			if item is not None:
+				matches.append(item)
+		if len(matches) == 1:
+			candidates.extend(matches)
+		elif len(matches) > 1:
+			rejections.append({'entity': role_data['entity'], 'reason': 'ambiguous_crew_component'})
+	located = set(item['entity'] for item in candidates)
+	expected = set(MODULE_TARGETS) - set(('leftTrack', 'rightTrack', 'gun'))
+	expected.update(item['entity'] for item in crew)
+	unavailable = frozenset(expected - located - set(official_geometry))
+	return candidates, unavailable, rejections
+
+
 @TRACE_CALL('modules', 'build_internal_hit_layout')
 def build_layout(vehicle_descriptor, log_build=True):
 	vehicle_name = vehicle_type_name(vehicle_descriptor)
@@ -758,7 +806,7 @@ def build_layout(vehicle_descriptor, log_build=True):
 	profile_key, compiled_profile = _compiled_profile(vehicle_name)
 	profile = _profile_record(compiled_profile)
 	# Provenance and unavailable targets belong to the selected profile.
-	# A decoded table entry may have yielded to a complete crew archetype.
+	# Incomplete decoded interiors retain their explicit missing targets.
 	decoded_geometry = (profile is not None and
 		profile['source_id'].startswith('decoded_collision_surfaces'))
 	if _layout_console is not None:
@@ -790,7 +838,11 @@ def build_layout(vehicle_descriptor, log_build=True):
 	unmodelled_entities = (frozenset(decoded_unmodelled_entities(vehicle_name))
 		if decoded_geometry else frozenset())
 	candidate_specs = []
-	if profile is not None:
+	mesh_rejections = []
+	if decoded_geometry:
+		candidate_specs, unmodelled_entities, mesh_rejections = _decoded_candidates(
+			vehicle_descriptor, profile, crew, bounds, official_geometry)
+	if profile is not None and not decoded_geometry:
 		for module_zone in profile['module_zones']:
 			entity, parent, zone_id, center_fractions, half_fractions = (
 				module_zone)
@@ -806,19 +858,6 @@ def build_layout(vehicle_descriptor, log_build=True):
 				'role_data': None,
 				'shape_hint': _profile_shape_hint(profile_key, entity,
 					'module', parent, zone_id, half_fractions),
-			})
-		if 'gun' not in official_geometry and 'gun' in bounds:
-			candidate_specs.append({
-				'entity': 'gun',
-				'kind': 'module',
-				'parent': 'gun',
-				'zone_id': 'single_installed_gun_model',
-				'center_fractions': (0.5, 0.5, 0.5),
-				'half_fractions': (0.40, 0.40, 0.40),
-				'role_data': None,
-				'shape_hint': _profile_shape_hint(profile_key, 'gun',
-					'module', 'gun', 'single_installed_gun_model',
-					(0.40, 0.40, 0.40)),
 			})
 		for crew_index, role_data in enumerate(crew):
 			if crew_index >= len(profile['crew_zones']):
@@ -848,6 +887,21 @@ def build_layout(vehicle_descriptor, log_build=True):
 				'shape_hint': _profile_shape_hint(profile_key,
 					role_data['entity'], 'crew', parent, zone_id,
 					half_fractions),
+			})
+
+	if profile is not None:
+		if 'gun' not in official_geometry and 'gun' in bounds:
+			candidate_specs.append({
+				'entity': 'gun',
+				'kind': 'module',
+				'parent': 'gun',
+				'zone_id': 'single_installed_gun_model',
+				'center_fractions': (0.5, 0.5, 0.5),
+				'half_fractions': (0.40, 0.40, 0.40),
+				'role_data': None,
+				'shape_hint': _profile_shape_hint(profile_key, 'gun',
+					'module', 'gun', 'single_installed_gun_model',
+					(0.40, 0.40, 0.40)),
 			})
 
 	candidate_entities = set(item['entity'] for item in candidate_specs)
@@ -923,23 +977,33 @@ def build_layout(vehicle_descriptor, log_build=True):
 			errors.append('parent_transform_binding_failed:' + parent_name)
 
 	targets = []
+	failed_mesh_entities = set()
 	for candidate in candidate_specs:
 		parent = candidate['parent']
 		chance_info = hit_chances.get((
 			candidate['kind'], candidate['entity']))
 		if parent not in bounds or chance_info is None:
 			continue
-		target = _target(
-			vehicle_descriptor, candidate['entity'], candidate['kind'], parent, bounds[parent],
-			candidate['center_fractions'], candidate['half_fractions'],
-			('internal_layout_profiles.PROFILES+%s+'
-				'VehicleDescr.%s.hitTester.bbox') % (
-					profile_key, parent),
-			chance_info, candidate['role_data'], candidate['zone_id'],
-			(profile['source_id'] if profile is not None else ''),
-			(profile['confidence'] if profile is not None else ''),
-			candidate.get('shape_hint'))
-		if _layout_store is not None:
+		try:
+			target = _target(
+				vehicle_descriptor, candidate['entity'], candidate['kind'], parent, bounds[parent],
+				candidate['center_fractions'], candidate['half_fractions'],
+				('internal_layout_profiles.PROFILES+%s+'
+					'VehicleDescr.%s.hitTester.bbox') % (
+						profile_key, parent),
+				chance_info, candidate['role_data'], candidate['zone_id'],
+				(profile['source_id'] if profile is not None else ''),
+				(profile['confidence'] if profile is not None else ''),
+				candidate.get('shape_hint'), candidate.get('mesh'))
+		except Exception:
+			if candidate.get('mesh') is None:
+				raise
+			mesh_rejections.append({'entity': candidate['entity'],
+				'parent': parent, 'part': candidate['mesh']['part'],
+				'reason': 'invalid_mesh_payload'})
+			failed_mesh_entities.add(candidate['entity'])
+			continue
+		if _layout_store is not None and candidate.get('mesh') is None:
 			try:
 				_layout_store.apply_target_override(
 					fingerprint, target, bounds[parent])
@@ -947,7 +1011,10 @@ def build_layout(vehicle_descriptor, log_build=True):
 				errors.append('calibration_override_failed:%s' %
 					candidate['zone_id'])
 		targets.append(target)
-	if _layout_store is not None:
+	for entity in failed_mesh_entities - set(t['entity'] for t in targets):
+		logical_entity_sources[entity] = {'mode': 'RESOURCE_GEOMETRY_UNMODELLED'}
+		unmodelled_entities = unmodelled_entities | frozenset((entity,))
+	if _layout_store is not None and not decoded_geometry:
 		try:
 			targets.extend(_layout_store.append_custom_targets(
 				fingerprint, targets, bounds))
@@ -964,6 +1031,7 @@ def build_layout(vehicle_descriptor, log_build=True):
 		'vehicle_type': vehicle_name,
 		'configuration_fingerprint': fingerprint,
 		'layout_key': LAYOUT_KEY,
+		'mesh_rejections': tuple(mesh_rejections),
 		'layout_mode': _LAYOUT_MODE,
 		'profile_key': profile_key,
 		'profile_geometry_provenance': ('decoded_collision_surfaces'
@@ -1184,6 +1252,12 @@ def diagnose_segment(layout, parent_segments, excluded_entities=None):
 def _directional_validation_rays(parent_bounds, target):
 	parent_minimum, parent_maximum = parent_bounds
 	center = target['center']
+	for primitive in target.get('primitives', ()):
+		if primitive.get('shape') == 'mesh':
+			face = primitive['triangles'][0]
+			center = tuple(sum(primitive['vertices'][i][a] for i in face) / 3.0
+				for a in range(3))
+			break
 	rays = []
 	for axis in range(3):
 		span = parent_maximum[axis] - parent_minimum[axis]
@@ -1944,6 +2018,8 @@ def _capsule_point_distance(point, center, radius, half_length, axis,
 
 
 def _primitive_distance_record(point, target, primitive):
+	if primitive.get('shape') == 'mesh':
+		return _internal_geometry.internal_mesh.distance(point, primitive)
 	shape = str(primitive.get('shape', 'aabb') or 'aabb').lower()
 	center = tuple(float(value) for value in primitive.get(
 		'center', target.get('center', (0.0, 0.0, 0.0))))
@@ -2226,6 +2302,9 @@ def _gjk_intersects(support, initial_direction):
 
 def _primitive_intersects_cone(target, primitive, apex, axis, depth,
 		tangent):
+	if primitive.get('shape') == 'mesh':
+		return _internal_geometry.internal_mesh.intersects_cone(
+			primitive, apex, axis, depth, tangent)
 	center = _primitive_center(target, primitive)
 	cone_center = _vector_add(apex, _vector_scale(axis, depth * 0.5))
 	initial = _vector_subtract(center, cone_center)
@@ -2247,14 +2326,15 @@ def _primitive_cone_entry(target, primitive, apex, axis, depth, tangent):
 	if distance <= 0.0000001:
 		return 0.0
 	# Preserve an exact entry for points/volumes whose apex-nearest point is
-	# already inside the cone. The binary convex-intersection search below is
-	# needed only for the edge-straddling case that the old closest-point-only
-	# test missed.
+	# already inside the cone. The bounded intersection search below also
+	# handles mesh faces: an apex-nearest point need not have the first
+	# occupied axial depth, even when that point is inside the cone.
 	delta = _vector_subtract(closest, apex)
 	axial = _vector_dot(delta, axis)
 	radial = _vector_length(_vector_subtract(
 		delta, _vector_scale(axis, axial)))
-	if (axial >= -0.0000001 and axial <= float(depth) + 0.0000001 and
+	if (primitive.get('shape') != 'mesh' and
+			axial >= -0.0000001 and axial <= float(depth) + 0.0000001 and
 			radial <= max(0.0, axial) * float(tangent) + 0.0000001):
 		return max(0.0, axial)
 	low = 0.0
@@ -2431,6 +2511,9 @@ def geometry_signature(target, primitive_id=None):
             target.get('half_extents', ()))),
         'minimum': tuple(primitive.get('minimum', target.get('minimum', ()))),
         'maximum': tuple(primitive.get('maximum', target.get('maximum', ()))),
+        'vertices': tuple(primitive.get('vertices', ())),
+        'triangles': tuple(primitive.get('triangles', ())),
+        'volume_status': primitive.get('volume_status'),
         'model_signature': target.get('model_signature'),
         'layout_key': target.get('layout_key'),
         'calibration_status': target.get('calibration_status'),
@@ -2457,6 +2540,16 @@ def compare_geometry_signatures(expected, current, tolerance=0.0005):
         if any(abs(float(first[index]) - float(second[index])) > tolerance
                 for index in range(len(first))):
             differences.append('%s:delta' % key)
+    if expected.get('shape') == 'mesh' or current.get('shape') == 'mesh':
+        first = tuple(tuple(f) for f in expected.get('triangles', ()))
+        second = tuple(tuple(f) for f in current.get('triangles', ()))
+        if first != second:
+            differences.append('triangles:topology')
+        first, second = expected.get('vertices', ()), current.get('vertices', ())
+        if len(first) != len(second) or any(
+                len(a) != len(b) or any(abs(float(x) - float(y)) > tolerance
+                for x, y in zip(a, b)) for a, b in zip(first, second)):
+            differences.append('vertices:delta')
     return {
         'synchronized': not differences,
         'reason': ('MATCH' if not differences else ';'.join(differences)),
@@ -2480,7 +2573,8 @@ def validate_layout_geometry(layout):
         entities.add(entity)
         half = tuple(target.get('half_extents', (0.0, 0.0, 0.0)))
         center = tuple(target.get('center', (0.0, 0.0, 0.0)))
-        if len(half) != 3 or min([float(value) for value in half] or [0.0]) <= 0.0:
+        if (target.get('geometry_mode') != 'decoded_mesh' and
+                (len(half) != 3 or min([float(value) for value in half] or [0.0]) <= 0.0)):
             warnings.append({'severity': 'error', 'code': 'ZERO_VOLUME',
                 'entity': entity, 'zone_id': zone_id,
                 'message': 'zone has a zero/invalid half extent'})

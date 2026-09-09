@@ -89,6 +89,17 @@ class PrimitivesDecoderTests(unittest.TestCase):
         # decoder is not silently transposing axes.
         self.assertLess(engine['maximum'][2], driver['minimum'][2])
 
+    def test_duplicate_material_groups_keep_both_disconnected_triangles(self):
+        blob = _section_container((
+            ('vertices', _vertices_section(self.vertices)),
+            ('indices', _indices_section(self.indices, self.groups)),
+            ('bsp2_materials', _materials_section(['ammoBay', ' ammoBay '])),
+        ))
+        surface = bw.module_surfaces(blob)['ammoBay']
+        self.assertEqual(((0, 1, 2), (3, 4, 5)), surface['triangles'])
+        self.assertEqual(6, len(surface['vertices']))
+        self.assertLess(surface['vertices'][2][2], surface['vertices'][3][2])
+
     def _assert_box(self, surface, low, high):
         # The vertices round-trip through float32, so compare to that.
         for axis in range(3):
