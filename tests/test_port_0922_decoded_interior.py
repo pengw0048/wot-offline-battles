@@ -191,6 +191,27 @@ class DecodedInteriorResolutionTests(unittest.TestCase):
         self.assertTrue(yielded, 'expected a vehicle to yield')
         self.assertTrue(kept, 'expected decoded records to be kept')
 
+    def test_built_fallback_uses_only_the_selected_profile_provenance(self):
+        from test_port_0922_critical_damage import _layout_descriptor
+
+        checked = 0
+        for key, record in internal_layout_console.CONSOLE_LAYOUTS_0922.items():
+            vehicle = '%s:%s' % key
+            unused_key, selected = internal_hit_layouts._compiled_profile(vehicle)
+            if selected[0].startswith('decoded_collision_surfaces'):
+                continue
+            checked += 1
+            with self.subTest(vehicle=vehicle):
+                layout = internal_hit_layouts.build_layout(
+                    _layout_descriptor(vehicle, record[2]), log_build=False)
+                self.assertEqual('reconstructed_archetype',
+                                 layout['profile_geometry_provenance'])
+                self.assertEqual((), layout['profile_unmodelled_entities'])
+                self.assertFalse(any(
+                    source['mode'] == 'RESOURCE_GEOMETRY_UNMODELLED'
+                    for source in layout['logical_entity_sources'].values()))
+        self.assertGreater(checked, 0)
+
     def test_an_archetype_only_vehicle_is_labelled_as_reconstructed(self):
         # The fallback tier must still exist and must still say what it is.
         decoded = internal_layout_console.CONSOLE_LAYOUTS_0922

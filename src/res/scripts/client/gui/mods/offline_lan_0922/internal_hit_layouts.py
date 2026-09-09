@@ -757,7 +757,10 @@ def build_layout(vehicle_descriptor, log_build=True):
 		vehicle_descriptor)
 	profile_key, compiled_profile = _compiled_profile(vehicle_name)
 	profile = _profile_record(compiled_profile)
-	decoded_geometry = decoded_layout_available(vehicle_name)
+	# Provenance and unavailable targets belong to the selected profile.
+	# A decoded table entry may have yielded to a complete crew archetype.
+	decoded_geometry = (profile is not None and
+		profile['source_id'].startswith('decoded_collision_surfaces'))
 	if _layout_console is not None:
 		layouts = getattr(_layout_console, 'CONSOLE_LAYOUTS_0922', None)
 		if (not isinstance(layouts, dict) or
