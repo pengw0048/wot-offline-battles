@@ -370,7 +370,9 @@ def _native_name_groups_1513(
 		if not name:
 			continue
 		try:
-			descriptor = query(name)
+			canonical = (_destructible_catalog or {}).get(
+				'tree_resources', {}).get(_normalized_filename(name), name)
+			descriptor = query(canonical)
 		except Exception as error:
 			if positional:
 				item_failures.append(
@@ -460,11 +462,45 @@ def _align_native_item_names_1513(
 
 def _finish_native_item_name_alignment_1513(
 		entry, positional_names, chunk_id):
-	"""Consume exact positional failures without weakening compacted checks."""
+	"""Recover authored names and preserve independent native type groups."""
 	mapping, status, anomalous, item_failures = (
 		_align_native_item_names_1513(
 			entry['names_by_type'], entry['items_by_type'], positional_names,
 			entry['ignored_items']))
+	if positional_names is None and status in ('exact', 'partial'):
+		# A compacted list can omit only some SpeedTrees of one type.  WGDE
+		# and SpTr still name each exact slot; consuming those identities does
+		# not require guessing where a missing name belonged in the list.
+		catalog = _destructible_catalog or {}
+		anomalous = set(anomalous)
+		for native_type, items in entry['items_by_type'].items():
+			names = entry['names_by_type'].get(native_type) or ()
+			if len(names) == len(items):
+				continue
+			kind = entry.get('kinds_by_type', {}).get(native_type)
+			compiled = {}
+			for item_index in items:
+				wire = (int(chunk_id), int(item_index))
+				record = catalog.get(
+					'tree_instances' if kind == 'tree' else
+					'baked_instances', {}).get(wire)
+				if record is not None and record.get('kind') == kind:
+					compiled[item_index] = record['descriptor_filename']
+			# Non-empty native names must be an ordered subsequence of the
+			# authored resources.  Contradictory evidence is never discarded.
+			if names:
+				if len(compiled) != len(items):
+					continue
+				remaining = iter(_normalized_filename(compiled[index])
+					for index in items)
+				if not all(any(value == _normalized_filename(name)
+						for value in remaining) for name in names):
+					continue
+			mapping.update(compiled)
+			if len(compiled) == len(items):
+				anomalous.discard(native_type)
+		anomalous = tuple(sorted(anomalous))
+		status = 'partial' if anomalous else 'exact'
 	for item_index, failure_type, detail in item_failures:
 		entry['ignored_items'].add(item_index)
 		_isolate_destructible_1513(
@@ -548,11 +584,18 @@ def _invalidate_chunk_native_names_1513(chunk_id):
 	"""Forget cached native-name evidence after a real chunk unload."""
 	chunk_id = int(chunk_id)
 	for cache_name in ('g_offh_destr_item_names',
-			'g_offh_destr_native_name_lists'):
+			'g_offh_destr_native_name_lists',
+			'g_offh_destr_isolated_name_types'):
 		cache = globals().get(cache_name, {})
 		for key in list(cache):
 			if key[1] == chunk_id:
 				cache.pop(key, None)
+	cache = globals().get('g_offh_destr_catalog_tree_names', {})
+	for key in list(cache):
+		if key[1] == chunk_id:
+			cache.pop(key, None)
+	from gui.mods.offline_lan_0922 import destructibles_compat
+	destructibles_compat.invalidate_safe_descriptor_chunk(chunk_id)
 	# Placement proof belongs to this streaming lifetime too: a reload can
 	# reuse the same native slot count with a different item matrix.
 	unresolved = globals().get('g_offh_destr_unresolved_obstacles', {})
@@ -620,7 +663,7 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 	or malformed categories are terminal evidence failures: full-width position
 	proof contains them to one item, while a compacted list stays unsafe as a
 	whole.  Neither is converted into an unnamed item.  A completed compacted
-	count mismatch is likewise terminal.  A resolver exception is the exact
+	count mismatch is contained to the unresolved native type group.  A resolver exception is the exact
 	native loop's unnamed case, but that live slot is quarantined so no later
 	native matrix/effect/destroy query can touch it.
 	"""
@@ -674,6 +717,13 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 			entry = {
 				'fingerprint': fingerprint,
 				'names_by_type': names_by_type,
+				'kinds_by_type': dict((getattr(area_destructibles, name), kind)
+					for name, kind in (
+						('DESTR_TYPE_TREE', 'tree'),
+						('DESTR_TYPE_FALLING_ATOM', 'falling'),
+						('DESTR_TYPE_FRAGILE', 'fragile'),
+						('DESTR_TYPE_STRUCTURE', 'structure'))
+					if hasattr(area_destructibles, name)),
 				'items_by_type': {},
 				'ignored_items': ignored_items,
 				'next_item': 0,
@@ -703,6 +753,13 @@ def _chunk_item_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 	for item_index in range(entry['next_item'], end_item):
 		identity = (int(chunk_id), int(item_index))
 		if _destructible_isolated_1513(*identity):
+			known_type = globals().get(
+				'g_offh_destr_isolated_name_types', {}).get(
+				(int(space_id), int(chunk_id)), {}).get(item_index)
+			if known_type is not None:
+				entry['items_by_type'].setdefault(
+					known_type, []).append(item_index)
+				continue
 			if identity in globals().get(
 					'g_offh_destr_name_unresolved_slots', ()):
 				# The first null-safe resolver query already proved that the native
@@ -826,17 +883,35 @@ def _chunk_native_names_1513(bigworld, area_destructibles, space_id, chunk_id,
 		native_count, names):
 	"""Align one chunk's validated name list to its native item indices.
 
-	All calls and chunks share at most ``_ITEM_NAME_QUERY_BUDGET`` native category
-	queries per render tick.  ``pending_alignment`` is retryable.  A shorter
-	compacted list keeps every completed evidence failure chunk-wide because it
-	cannot identify which slot owns contradictory name evidence.  A full-width
-	list preserves slots, including legal empty strings, so descriptor, category,
-	or type failures are contained to their exact item.
+	Incremental scans share ``_ITEM_NAME_QUERY_BUDGET`` native category queries
+	per render tick. ``pending_alignment`` is retryable. Once every name and
+	item has a type, unresolved compacted groups are contained to that type's
+	items. A full-width list additionally preserves exact positions.
 	"""
 	mapping, status, anomalous = _chunk_item_names_1513(
 		bigworld, area_destructibles, space_id, chunk_id, native_count, names)
 	if status == 'pending_alignment':
 		return None, status
+	if mapping is not None and status == 'partial' and anomalous:
+		# Types are independent in a compacted list once every item and name
+		# has been typed.  An unresolved tree group cannot invalidate the
+		# exact fragile/structure identities in the same chunk.
+		entry = globals().get('g_offh_destr_item_names', {}).get(
+			(int(space_id), int(chunk_id)), {})
+		mapping = dict(mapping)
+		for native_type in anomalous:
+			for item_index in entry.get('items_by_type', {}).get(
+					native_type, ()):
+				mapping.pop(item_index, None)
+				# Preserve type proof across bounded mapping-cache eviction.
+				globals().setdefault('g_offh_destr_isolated_name_types',
+					{}).setdefault((int(space_id), int(chunk_id)),
+					{})[item_index] = native_type
+				_isolate_destructible_1513(
+					'name_alignment', chunk_id, item_index,
+					detail='unresolved type=%s names=%s count=%s' % (
+						native_type, len(names), native_count))
+		return mapping, 'exact'
 	if mapping is None or anomalous or status != 'exact':
 		_isolate_destructible_1513(
 			'name_alignment', chunk_id,
@@ -878,6 +953,12 @@ def resolve_native_item_name_1513(space_id, chunk_id, item_index):
 		return 'invalid', None
 	names, status = _chunk_native_name_list_1513(
 		BigWorld, space_id, chunk_id, native_count)
+	if (status in ('ready', 'pending') and
+			(chunk_id, item_index) in (_destructible_catalog or {}).get(
+				'tree_instances', {})):
+		return _resolve_catalog_tree_name_1513(
+			BigWorld, AreaDestructibles, space_id, chunk_id, item_index,
+			native_count, names)
 	if names is None:
 		return ('pending' if status == 'pending' else 'invalid'), None
 	mapping, unused_status = _chunk_native_names_1513(
@@ -888,6 +969,54 @@ def resolve_native_item_name_1513(space_id, chunk_id, item_index):
 			_destructible_isolated_1513(chunk_id, item_index)):
 		return 'invalid', None
 	return 'exact', mapping.get(item_index)
+
+
+def _resolve_catalog_tree_name_1513(bigworld, area, space_id, chunk_id,
+		item_index, native_count, names):
+	"""Resolve one tree before its stock synchronous fall-effect callbacks.
+
+	A tree callback cannot wait for a whole chunk's incremental name scan.
+	WGDE supplies its exact slot and SpTr supplies its authored resource and
+	transform.  Confirm the live type and initial matrix once, then retain the
+	name through animation until the chunk unloads.
+	"""
+	wire = (chunk_id, item_index)
+	record = _destructible_catalog['tree_instances'][wire]
+	cache = globals().setdefault('g_offh_destr_catalog_tree_names', {})
+	key = (int(space_id), chunk_id, item_index)
+	if cache.get(key) == native_count:
+		return 'exact', record['descriptor_filename']
+	if (names is not None and len(names) == native_count and names[item_index] and
+			_normalized_filename(names[item_index]) != record['filename']):
+		_isolate_destructible_1513(
+			'filename_identity_conflict', chunk_id, item_index,
+			detail='native=%s catalog=%s' % (
+				names[item_index], record['descriptor_filename']))
+		return 'invalid', None
+	try:
+		native_type = observed_call(
+			'native.destructible.category',
+			bigworld.wg_getDestructibleEffectCategory,
+			space_id, chunk_id, item_index, -1)
+		if (type(native_type) not in _INTEGER_TYPES or
+				native_type != area.DESTR_TYPE_TREE):
+			raise ValueError('authored tree has native type %r' % native_type)
+		import Math
+		chunk = observed_call('native.destructible.chunk_matrix',
+			bigworld.wg_getChunkMatrix, space_id, chunk_id)
+		matrix = Math.Matrix(observed_call(
+			'native.destructible.item_matrix',
+			bigworld.wg_getDestructibleMatrix, space_id, chunk_id, item_index))
+		signature, unused_located = _catalog_instance_for_matrix_1513(
+			matrix, chunk.translation, Math)
+		if signature != record['signature']:
+			raise ValueError('tree matrix disagrees with authored slot')
+	except Exception as error:
+		_isolate_destructible_1513(
+			'tree_identity', chunk_id, item_index, detail=error)
+		return 'invalid', None
+	cache[key] = native_count
+	return 'exact', record['descriptor_filename']
 
 
 
@@ -1115,6 +1244,8 @@ def _clear_runtime_registry(preserve_spatial_batch=False):
 			'g_offh_destr_unresolved_logs',
 			'g_offh_destr_broken_cache',
 			'g_offh_destr_item_names',
+			'g_offh_destr_catalog_tree_names',
+			'g_offh_destr_isolated_name_types',
 			'g_offh_destr_native_name_lists',
 			'g_offh_destr_item_name_budget',
 			'g_offh_destr_item_name_cache_serial',
@@ -1401,6 +1532,29 @@ def set_catalog(catalog):
 				raise ValueError(
 					'ambiguous destructible candidate is invalid')
 		ambiguous_signatures.add(signature)
+	tree_instances = {}
+	tree_resources = {}
+	raw_trees = catalog.get('tree_instances', [])
+	if (not isinstance(raw_trees, list) or
+			(catalog_version >= 8 and 'tree_instances' not in catalog)):
+		raise ValueError('tree instance index is invalid')
+	for row in raw_trees:
+		if (not isinstance(row, (list, tuple)) or len(row) != 15 or
+				any(type(value) not in _INTEGER_TYPES for value in row[:12]) or
+				any(type(value) not in _INTEGER_TYPES or value < 0
+					for value in row[13:])):
+			raise ValueError('tree instance row is invalid')
+		filename = _normalized_filename(row[12])
+		wire = (int(row[13]), int(row[14]))
+		if (not filename or not filename.endswith('.spt') or
+				wire[0] > 0xFFFFFFFF or wire in tree_instances or
+				wire in seen_wires):
+			raise ValueError('tree instance identity is invalid')
+		tree_instances[wire] = {
+			'filename': filename, 'descriptor_filename': row[12],
+			'kind': 'tree', 'signature': tuple(row[:12]),
+		}
+		tree_resources[filename] = row[12]
 	_destructible_catalog = {
 		'map': catalog.get('map'),
 		'resources': prepared, 'quantization': quantization,
@@ -1409,6 +1563,8 @@ def set_catalog(catalog):
 		'has_instance_index': catalog_version >= 4,
 		'baked_instances': baked_instances,
 		'baked_shot_bins': baked_shot_bins,
+		'tree_instances': tree_instances,
+		'tree_resources': tree_resources,
 	}
 	_clear_runtime_registry()
 
@@ -5281,7 +5437,24 @@ def _fell_trees_near(
 									detail=error)
 								_slot_diag['result'] = 'isolated'
 								continue
-						if (_destructible_catalog is not None and
+						_tree_slot = ((_destructible_catalog or {}).get(
+							'tree_instances', {}).get((int(cid), int(_ti))))
+						if _tree_slot is not None:
+							_tree_name_cache = globals().setdefault(
+								'g_offh_destr_catalog_tree_names', {})
+							_tree_key = (int(spaceID), int(cid), int(_ti))
+							if (_raw_normalized != _tree_slot['filename'] or
+									(_tree_name_cache.get(_tree_key) != _native_count and
+									_signature != _tree_slot['signature'])):
+								_isolate_destructible_1513(
+									'tree_identity', cid, _ti,
+									detail='native name/matrix disagrees with SpTr wire')
+								continue
+							_tree_name_cache[_tree_key] = _native_count
+							_raw_filename = _tree_slot['descriptor_filename']
+							# Coincident model geometry cannot claim a WGDE tree slot.
+							_located = None
+						if (_tree_slot is None and _destructible_catalog is not None and
 								_destructible_catalog.get('has_instance_index')):
 							if _signature in _destructible_catalog[
 									'ambiguous_instances']:

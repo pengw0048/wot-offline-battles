@@ -302,7 +302,7 @@ living ally and cleanup revokes the exposure. Windows #1513 remains required
 to accept the native switch controls, camera continuity and repeated-round
 teardown.
 
-The 0.3.68 destructible boundary is pinned to a shipped schema-v7 destructible
+The destructible boundary is pinned to a schema-v8 destructible
 catalog and schema-v4 foliage catalog baked from all 41 exact #1513 map
 packages; the exact-instance runtime shape starts at schema version 4. A
 checksum-pinned whole-map directory maps
@@ -548,12 +548,15 @@ then both filtered sequences are paired in item order. This is sound only
 under the pinned-client bridge that a descriptor's `type` is the same native
 category returned for that item, and only after every resolvable native item
 has been enumerated. A whole category with zero non-empty names is known to be
-unnamed. A nonzero unequal name/item count is only a partial alignment,
-however, so the complete chunk is isolated; no otherwise aligned category is
-admitted from it. Because a compacted name position has no item identity, an
-unknown or malformed non-empty name descriptor, per-name lookup exception,
-malformed category result, or descriptor/category disagreement also isolates
-the complete chunk. A category-query exception is the native resolver's
+unnamed. A nonzero unequal name/item count is only a partial alignment.
+The schema-v8 catalog also supplies exact WGDE/SpTr tree wires, resource
+names, and quantized initial transforms for every supported map. A compacted
+category can use those authored identities when its surviving names form an
+ordered subsequence; each consumer still verifies the live slot and matrix.
+An unresolved category is isolated only at its own item indices, preserving
+independently aligned types in the same chunk. An unknown or malformed
+non-empty descriptor or malformed category payload that prevents typing the
+compacted sequences still invalidates their shared alignment contract. A category-query exception is the native resolver's
 skipped-item case:
 that exact slot is isolated before any matrix, effect or destruction call,
 while other resolvable slots may finish alignment. Native category `-1` is a
@@ -563,6 +566,18 @@ not reinterpret `-1` as a category mismatch. A registered native effect
 category must match the exact admitted descriptor; `-1` leaves only that
 effect channel unverified, so admission still requires the exact live matrix
 and wire plus the exact native filename when one is present.
+
+Stock `__launchTreeFallEffect` and `_DestructiblesAnimator.showFallTree`
+return immediately when `getDestructibleDesc` yields `None`; they do not wait
+for an incremental chunk-name scan. The safe descriptor adapter therefore
+resolves a catalog tree synchronously from its exact wire, live native tree
+category, and initial matrix. It keeps this identity through native animation
+and invalidates both name and descriptor caches on chunk unload. The XML
+spelling is retained for the case-sensitive Python descriptor dictionary,
+including compiled resource names that differ only by case. The original
+scalar filename wrapper remains unused. All-map resource joins and local
+lifecycle tests establish coverage and guards, not Windows animation or
+contact acceptance; those still require exact-client playtesting.
 
 `wg_getDestructibleFilename` (`0x006b2580`) is deliberately not used as a
 per-item probe. It resolves the same item and returns `Py_None` for an
@@ -790,7 +805,7 @@ list by the item index silently returned a neighbour's resource. The
 exact-instance runtime shape introduced at schema v4 closes that identity gap
 with the whole-map matrix signature, and the per-item name is now recovered
 from the full-width or reconstructed compacted alignment. The coherent shipped
-batches are destructible format v7 and foliage format v4.
+batches are destructible format v8 and foliage format v4.
 
 The stock `BigWorld.entity`/`entities` facade is an AOI surface, not the LAN
 authority registry. Unspotted or dead synthetic vehicles remain private there;

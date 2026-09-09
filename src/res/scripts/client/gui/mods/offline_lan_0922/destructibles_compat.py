@@ -34,6 +34,13 @@ def reset_safe_descriptor_cache(space_id=None):
     _SAFE_DESC_BY_WIRE.clear()
 
 
+def invalidate_safe_descriptor_chunk(chunk_id):
+    """A reloaded chunk must prove the descriptor's native identity again."""
+    for wire in list(_SAFE_DESC_BY_WIRE):
+        if wire[0] == int(chunk_id):
+            _SAFE_DESC_BY_WIRE.pop(wire, None)
+
+
 def inspect_destructible_desc(cache, space_id, chunk_id, item_index):
     """Inspect one streamed descriptor without the nullable scalar wrapper.
 
@@ -107,6 +114,23 @@ def _safe_missing_descriptor_log(area_module, space_id, chunk_id, item_index):
             (space_id, chunk_id, item_index))
 
 
+def _chunk_identity_boundary(area_module, original):
+    """Invalidate before onChunkLoad can synchronously replay queued damage."""
+    def handle(manager, chunk_id, *args):
+        if manager is getattr(area_module, 'g_destructiblesManager', None):
+            from gui.mods.offline_lan_0922 import destructibles_sensor
+            state = getattr(destructibles_sensor, 'g_offh_tree_state', None)
+            if (isinstance(state, dict) and
+                    state.get('spaceID') == manager.getSpaceID()):
+                destructibles_sensor._drop_streamed_chunk_registry_1513(
+                    state, chunk_id)
+            else:
+                destructibles_sensor._invalidate_chunk_native_names_1513(
+                    chunk_id)
+        return original(manager, chunk_id, *args)
+    return handle
+
+
 def install(area_module=None, cache_module=None):
     global _INSTALLED
     if _INSTALLED:
@@ -162,6 +186,14 @@ def install(area_module=None, cache_module=None):
                 lambda space_id, chunk_id, item_index:
                 _safe_missing_descriptor_log(
                     AreaDestructibles, space_id, chunk_id, item_index))
+
+    manager_type = getattr(AreaDestructibles, 'DestructiblesManager', None)
+    if manager_type is not None:
+        for name in ('onChunkLoad', 'onChunkLoose'):
+            original = getattr(manager_type, name, None)
+            if callable(original):
+                setattr(manager_type, name,
+                        _chunk_identity_boundary(AreaDestructibles, original))
 
     reset_safe_descriptor_cache()
     _INSTALLED = True

@@ -40,7 +40,7 @@ import navigation_graph_schema
 
 
 FORMAT_NAME = 'offline-lan-0922-destructible-catalog'
-FORMAT_VERSION = 7
+FORMAT_VERSION = 8
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 GAME_VERSION = '0.9.22.0.1-cn-1513'
 DECODER_VERSION = '0.9.22.0.1'
@@ -101,11 +101,12 @@ def model_filename_from_primitive(value):
 
 
 def parse_descriptors(data):
-    """Return exact falling/fragile/structure descriptors by filename."""
+    """Return exact tree/falling/fragile/structure descriptors by filename."""
     root = read_packed_xml(data)
     result = {}
     casefold = {}
-    for section_name, kind in (('fallingAtoms', 'falling'),
+    for section_name, kind in (('trees', 'tree'),
+                               ('fallingAtoms', 'falling'),
                                ('fragiles', 'fragile'),
                                ('structures', 'structure')):
         section = _element(root, section_name)
@@ -113,7 +114,15 @@ def parse_descriptors(data):
             if child_name != b'entry' or value.value_type != TYPE_ELEMENT:
                 raise ValueError('invalid %s descriptor entry' % section_name)
             entry = value.value
-            filename = normalize_model_filename(_string(entry, 'filename'))
+            raw_filename = _string(entry, 'filename')
+            if kind == 'tree':
+                filename = raw_filename.replace('\\', '/').strip()
+                if (not filename.lower().endswith('.spt') or
+                        filename.startswith('/') or
+                        '..' in filename.split('/')):
+                    raise ValueError('invalid tree filename: %r' % filename)
+            else:
+                filename = normalize_model_filename(raw_filename)
             folded = filename.lower()
             if filename in result or (folded in casefold and
                                       casefold[folded] != filename):
@@ -395,7 +404,28 @@ def bake_compiled_map(map_name, map_package_data, space_data,
     model_ids = list(bsmi.model_ids())
     if len(model_ids) != len(bsmi._data['transforms']):
         raise ValueError('BSMI model ids do not match transforms')
-    row_wires, wire_rows = _native_wires(compiled, len(model_ids))
+    row_wires, wire_rows, speedtree_wires = native_wires(
+        compiled, len(model_ids))
+    tree_instances = []
+    tree_wires = set()
+    tree_descriptors = dict((filename.lower(), (filename, descriptor))
+                            for filename, descriptor in descriptors.items()
+                            if descriptor['kind'] == 'tree')
+    for source_index, wire in sorted(speedtree_wires.items()):
+        row = compiled.sections['SpTr']._data['speedtree_list'][source_index]
+        filename = strings.get(row['spt_fnv'])
+        # Preserve the XML spelling for the case-sensitive Python descriptor
+        # dictionary (e.g. Tundra's compiled Thicket_Bush vs Thicket_bush).
+        matched = tree_descriptors.get(filename.lower() if filename else '')
+        if matched is None:
+            raise ValueError('WGDE SpeedTree has no tree descriptor: %r' %
+                             filename)
+        filename, descriptor = matched
+        if wire in tree_wires or wire in wire_rows:
+            raise ValueError('WGDE SpeedTree wire is shared: %r' % (wire,))
+        tree_wires.add(wire)
+        tree_instances.append(list(_locator_signature(row['transform'])) +
+                              [filename, wire[0], wire[1]])
     instance_counts = {}
     instances_by_model = {}
     for model_id, transform in zip(model_ids, bsmi._data['transforms']):
@@ -653,8 +683,10 @@ def bake_compiled_map(map_name, map_package_data, space_data,
         },
         'resources': resources,
         'instances': instances,
+        'tree_instances': tree_instances,
         'ambiguous_instances': ambiguous_instances,
         'census': {
+            'tree_instances': len(tree_instances),
             'source_type1_models': type1_models,
             'source_type2_models': type2_models,
             'ignored_entry_types': ignored_entry_types,
@@ -741,7 +773,7 @@ def write_json(path, data):
 
 
 def _aggregate_census(data_by_map):
-    keys = ('resources', 'falling_resources', 'fragile_resources',
+    keys = ('tree_instances', 'resources', 'falling_resources', 'fragile_resources',
             'structure_resources', 'boxes', 'falling_boxes',
             'fragile_boxes', 'structure_boxes', 'instances',
             'falling_instances', 'fragile_instances', 'structure_instances',

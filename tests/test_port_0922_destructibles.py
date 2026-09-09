@@ -737,6 +737,150 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         destructibles_sensor.xrange = range
         return area, bigworld, math_module, descriptor
 
+    def _authored_tree_identity_fixture(self):
+        area, bigworld, math_module, vehicle = self._scanner_tree_fixture()
+        tree = 'speedtree/test/scanner-oak.spt'
+        fence = 'content/test/fence.model'
+        matrices = (_ItemMatrix(_Vector(50, 0, 50)),
+                    _ItemMatrix(_Vector(55, 0, 50)),
+                    _ItemMatrix(_Vector(60, 0, 50)))
+        signatures = [list(destructibles_sensor._locator_signature(
+            matrix, _Vector(), math_module, 1000)) for matrix in matrices]
+        catalog = _catalog({fence: {
+            'kind': 'fragile', 'boxes': [[-1, -1, -1, 1, 2, 1, None]],
+        }}, [signatures[2] + [fence, 0, 22, 2, 1.0]])
+        catalog['tree_instances'] = [
+            signatures[index] + [tree, 22, index] for index in (0, 1)]
+        destructibles_sensor.set_catalog(catalog)
+        area.g_destructiblesManager.set_chunk_count(22, 3)
+        descriptors = {tree: {'type': 1, 'health': 10, 'mass': 20},
+                       fence: {'type': 3, 'health': 15}}
+        area.g_cache.getDescByFilename = descriptors.get
+        # One tree is omitted; the fence's independent identity stays usable.
+        bigworld.wg_getChunkDestrFilenames.return_value = (tree,)
+        bigworld.wg_getDestructibleEffectCategory.side_effect = (
+            lambda space, chunk, item, module: 1 if item < 2 else 3)
+        bigworld.wg_getDestructibleMatrix.side_effect = (
+            lambda space, chunk, item: matrices[item])
+        bigworld.wg_getDestructibleFilename = mock.Mock(
+            side_effect=AssertionError('unsafe scalar filename query'))
+        return area, bigworld, math_module, vehicle, tree, matrices
+
+    def test_authored_tree_names_recover_compaction_without_blocking_fence(self):
+        area, bigworld, math_module, vehicle, tree, unused = (
+            self._authored_tree_identity_fixture())
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}):
+            result = destructibles_sensor.prewarm_tree_registry(
+                1, _Vector(), 0.0, vehicle, 1.0)
+            fence = destructibles_sensor._stream_baked_shot_instance_1513(
+                1, (22, 2))
+            second_tree = destructibles_compat.inspect_destructible_desc(
+                area.g_cache, 1, 22, 1)
+        self.assertEqual('ready', result['status'])
+        self.assertEqual('fragile', fence['kind'])
+        self.assertEqual('resolved', second_tree[0])
+        self.assertFalse(getattr(
+            destructibles_sensor, 'g_offh_destr_isolated_chunks', ()))
+        self.assertFalse(getattr(
+            destructibles_sensor, 'g_offh_destr_isolated_slots', ()))
+        bigworld.wg_getDestructibleFilename.assert_not_called()
+
+    def test_tree_callback_does_not_wait_for_whole_chunk_name_budget(self):
+        area, bigworld, math_module, unused, tree, matrices = (
+            self._authored_tree_identity_fixture())
+        # Stock effect/animator calls are synchronous even when another chunk
+        # owns the complete incremental name-query allowance.
+        destructibles_sensor.g_offh_destr_item_name_budget = {
+            'focus': (1, 99), 'remaining': 0, 'tick_serial': 1,
+            'focus_last_seen': 1,
+        }
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}):
+            first = destructibles_compat.inspect_destructible_desc(
+                area.g_cache, 1, 22, 1)
+            self.assertEqual('resolved', first[0])
+            self.assertEqual(1, bigworld.wg_getDestructibleMatrix.call_count)
+            matrices[1].translation = _Vector(57, -1, 50)
+            self.assertEqual(first,
+                             destructibles_compat.inspect_destructible_desc(
+                                 area.g_cache, 1, 22, 1))
+            self.assertEqual(1, bigworld.wg_getDestructibleMatrix.call_count)
+            destructibles_sensor._invalidate_chunk_native_names_1513(22)
+            with mock.patch.object(sys, 'stdout', mock.Mock()):
+                self.assertEqual(
+                    ('invalid', None),
+                    destructibles_compat.inspect_destructible_desc(
+                        area.g_cache, 1, 22, 1))
+        self.assertEqual(2, bigworld.wg_getDestructibleMatrix.call_count)
+        bigworld.wg_getDestructibleFilename.assert_not_called()
+
+    def test_authored_tree_rejects_live_type_name_or_transform_conflict(self):
+        for conflict in ('type', 'name', 'matrix'):
+            with self.subTest(conflict=conflict):
+                area, bigworld, math_module, unused, tree, matrices = (
+                    self._authored_tree_identity_fixture())
+                if conflict == 'type':
+                    bigworld.wg_getDestructibleEffectCategory.side_effect = None
+                    bigworld.wg_getDestructibleEffectCategory.return_value = 3
+                elif conflict == 'name':
+                    bigworld.wg_getChunkDestrFilenames.return_value = (
+                        tree, 'speedtree/test/different.spt', '')
+                else:
+                    matrices[1].translation = _Vector(100, 0, 50)
+                with mock.patch.dict(sys.modules, {
+                        'AreaDestructibles': area, 'BigWorld': bigworld,
+                        'Math': math_module}), mock.patch.object(
+                            sys, 'stdout', mock.Mock()):
+                    self.assertEqual(
+                        ('invalid', None),
+                        destructibles_sensor.resolve_native_item_name_1513(
+                            1, 22, 1))
+                self.assertEqual(
+                    {(22, 1)}, destructibles_sensor.g_offh_destr_isolated_slots)
+                self.assertFalse(getattr(
+                    destructibles_sensor, 'g_offh_destr_isolated_chunks', ()))
+                bigworld.wg_getDestructibleFilename.assert_not_called()
+
+    def test_tree_callback_resolves_while_chunk_name_list_is_pending(self):
+        area, bigworld, math_module, unused, tree, matrices = (
+            self._authored_tree_identity_fixture())
+        bigworld.wg_getChunkDestrFilenames.return_value = None
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}):
+            self.assertEqual(
+                ('exact', tree),
+                destructibles_sensor.resolve_native_item_name_1513(1, 22, 1))
+        bigworld.wg_getDestructibleEffectCategory.assert_called_once_with(
+            1, 22, 1, -1)
+
+    def test_chunk_reload_invalidates_before_synchronous_stock_damage(self):
+        area, bigworld, math_module, unused, tree, matrices = (
+            self._authored_tree_identity_fixture())
+        manager = area.g_destructiblesManager
+        observed = []
+
+        def stock_load(owner, chunk_id, count):
+            observed.append((owner, chunk_id, count))
+            self.assertNotIn((22, 1), destructibles_compat._SAFE_DESC_BY_WIRE)
+            return destructibles_compat.inspect_destructible_desc(
+                area.g_cache, 1, chunk_id, 1)
+
+        callback = destructibles_compat._chunk_identity_boundary(area, stock_load)
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}), mock.patch.object(
+                    sys, 'stdout', mock.Mock()):
+            self.assertEqual('resolved',
+                             destructibles_compat.inspect_destructible_desc(
+                                 area.g_cache, 1, 22, 1)[0])
+            matrices[1].translation = _Vector(100, 0, 50)
+            self.assertEqual(('invalid', None), callback(manager, 22, 3))
+        self.assertEqual([(manager, 22, 3)], observed)
+
     def _tree_motion_fixture(self, positions, bbox=None, streamed=True):
         names = tuple(
             'speedtree/test/motion-%d.spt' % index
@@ -5860,8 +6004,8 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual('falling', instances[(22, 2)]['kind'])
         self.assertEqual(1, len(diagnostic_lines))
         self.assertIn(
-            'chunk=22 slots=3 names=1 named_items=1 names_status=exact '
-            'named=1 blank=2',
+            'chunk=22 slots=3 names=1 named_items=3 names_status=exact '
+            'named=3 blank=0',
                       diagnostic_lines[0])
         self.assertIn('v4_unique=2', diagnostic_lines[0])
         self.assertIn('registered=falling:1,fragile:1,tree:1',
@@ -6505,10 +6649,9 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
             {'filename_identity_conflict'},
             destructibles_sensor.g_offh_destr_isolation_logs)
 
-    def test_partial_alignment_isolates_without_lending_a_descriptor(self):
-        # A chunk whose compaction cannot be reconstructed yields no per-item
-        # names at all.  Even an otherwise aligned type is not admitted from a
-        # partial chunk, because ownership of the remaining name is unknown.
+    def test_partial_alignment_isolates_only_the_unresolved_type(self):
+        # A compacted fragile group is ambiguous, but its missing name cannot
+        # belong to the independently typed and exactly aligned tree group.
         tree = 'speedtree/05_prohorovka/poplar.spt'
         fence = ('content/GatesAndFences/gaf001_WoodFence/normal/lod0/'
                  'gaf001_WoodFence.model')
@@ -6543,15 +6686,23 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                               'BigWorld': bigworld}), \
                 mock.patch.object(sys, 'stdout', mock.Mock()):
             self.assertEqual(
-                ('invalid', None),
+                ('exact', tree),
                 destructibles_sensor.resolve_native_item_name_1513(1, 22, 2))
             self.assertEqual(
                 ('invalid', None),
                 destructibles_sensor.resolve_native_item_name_1513(1, 22, 0))
 
+            destructibles_sensor.g_offh_destr_item_names.clear()
+            self.assertEqual(
+                ('exact', tree),
+                destructibles_sensor.resolve_native_item_name_1513(1, 22, 2))
+
         scalar.assert_not_called()
         self.assertEqual(
-            {22}, destructibles_sensor.g_offh_destr_isolated_chunks)
+            {(22, 0), (22, 1)},
+            destructibles_sensor.g_offh_destr_isolated_slots)
+        self.assertFalse(getattr(
+            destructibles_sensor, 'g_offh_destr_isolated_chunks', ()))
         self.assertEqual(
             {'name_alignment'},
             destructibles_sensor.g_offh_destr_isolation_logs)

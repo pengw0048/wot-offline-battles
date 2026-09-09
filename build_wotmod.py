@@ -13,6 +13,11 @@ import time
 import uuid
 import zipfile
 
+try:
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _STRING_TYPES = (str,)
+
 
 _SCHEMA_ROOT = os.path.join(
     os.path.dirname(__file__), 'src', 'res', 'scripts', 'client', 'gui',
@@ -39,7 +44,7 @@ FOLIAGE_FORMAT = 'offline-lan-0922-foliage'
 FOLIAGE_VERSION = 4
 FOLIAGE_MANIFEST_FORMAT = FOLIAGE_FORMAT + '-manifest'
 DESTRUCTIBLE_FORMAT = 'offline-lan-0922-destructible-catalog'
-DESTRUCTIBLE_VERSION = 7
+DESTRUCTIBLE_VERSION = 8
 DESTRUCTIBLE_MANIFEST_FORMAT = DESTRUCTIBLE_FORMAT + '-manifest'
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 LEGAL_FILES = (
@@ -550,6 +555,21 @@ def _validate_destructibles(destructible_root):
                 seen_instance_signatures.add(signature)
                 previous_signature = signature
                 instance_kind_counts[resource['kind']] += 1
+            trees = data.get('tree_instances')
+            if not isinstance(trees, list):
+                raise ValueError('tree instance index is unavailable')
+            for row in trees:
+                if (not isinstance(row, list) or len(row) != 15 or
+                        any(type(value) is not int for value in row[:12]) or
+                        not isinstance(row[12], _STRING_TYPES) or
+                        not row[12].lower().endswith('.spt') or
+                        any(type(value) is not int or value < 0
+                            for value in row[13:]) or row[13] > 0xFFFFFFFF):
+                    raise ValueError('invalid tree instance row')
+                wire = tuple(row[13:])
+                if wire in seen_instance_wires:
+                    raise ValueError('duplicated tree instance wire')
+                seen_instance_wires.add(wire)
             previous_signature = None
             ambiguous_candidate_count = 0
             for row in ambiguous_instances:
