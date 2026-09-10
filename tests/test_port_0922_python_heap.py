@@ -169,7 +169,7 @@ class ForcedCollectTest(unittest.TestCase):
 
     def test_the_lines_report_the_accounting_and_the_cost(self):
         lines = python_heap.format_collect_lines('round_end', 6)
-        self.assertEqual(2, len(lines))
+        self.assertEqual(3, len(lines))
         self.assertIn('PYGC phase=round_end round=6', lines[0])
         for field in ('before=', 'unreachable=', 'after=', 'net_freed=',
                       'second_pass=', 'elapsed_ms=', 'gc_enabled_after='):
@@ -177,6 +177,56 @@ class ForcedCollectTest(unittest.TestCase):
         self.assertIn('PYSIG phase=round_end round=6', lines[1])
         self.assertIn('sampled=', lines[1])
         self.assertIn('shapes=', lines[1])
+        self.assertIn('PYREF phase=round_end round=6', lines[2])
+        self.assertIn('window=', lines[2])
+        self.assertIn('holds=', lines[2])
+
+    def test_the_edge_census_names_the_cycle_not_its_contents(self):
+        # "dict leaked" is not a diagnosis. "dict{...} -> list(len=1)" is.
+        gc.collect()
+        self._leak_cycles(2000)
+        state = python_heap.collect_once()
+        holds = dict(state['edges'])
+        forward = [name for name in holds
+                   if name.startswith('dict{') and '-> list(' in name]
+        self.assertTrue(forward, 'no dict->list edge found: %r' % (holds,))
+        back = [name for name in holds
+                if name.startswith('list(') and '-> dict{' in name]
+        self.assertTrue(back, 'no list->dict edge closing the cycle: %r'
+                        % (holds,))
+
+    def test_only_edges_inside_the_unreachable_set_are_reported(self):
+        # An edge to a live object says nothing about what leaked.
+        outsider = {'reachable_marker': True}
+        member = {'name': 'member'}
+        holder = [member]
+        member['self'] = holder
+        member['outside'] = outsider
+        window, edges, ranked = python_heap.edge_census([member, holder])
+        self.assertEqual(2, window)
+        self.assertEqual(2, edges)
+        # Only the member<->holder pair; the edge to `outsider` is dropped
+        # because `outsider` is not in the unreachable set.
+        self.assertFalse(
+            any('reachable_marker' in name for name, unused in ranked),
+            repr(ranked))
+
+    def test_the_edge_sample_is_bounded(self):
+        window, unused_edges, ranked = python_heap.edge_census(
+            [{} for unused in range(python_heap.EDGE_SAMPLE + 500)])
+        self.assertEqual(python_heap.EDGE_SAMPLE, window)
+        self.assertLessEqual(len(ranked), python_heap.TOP_EDGES)
+
+    def test_the_diagnostic_can_be_switched_off_to_measure_the_fix(self):
+        self.addCleanup(setattr, python_heap, 'DIAGNOSTIC_COLLECT',
+                        python_heap.DIAGNOSTIC_COLLECT)
+        python_heap.DIAGNOSTIC_COLLECT = False
+        collected = []
+        original = python_heap.gc.collect
+        python_heap.gc.collect = lambda *args: collected.append(1) or 0
+        self.addCleanup(setattr, python_heap.gc, 'collect', original)
+        python_heap.log_collect('round_end', 1)
+        self.assertEqual([], collected)
 
     def test_a_function_signature_carries_its_source_location(self):
         def _closure_target():

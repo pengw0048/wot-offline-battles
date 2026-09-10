@@ -40,6 +40,13 @@ MAX_CENSUS_OBJECTS = 2000000
 # ~117k lists and ~112k tuples per round in the worker while every named
 # class stayed flat, so the type histogram alone cannot say what they are.
 SIGNATURE_SAMPLE = 4000
+# Edges reported between two objects that are BOTH unreachable.  The shape
+# census says what is in the leaked graph; only an edge inside that graph says
+# what holds it together, which is the difference between "dicts leaked" and
+# "this structure is the cycle".  Stock #1513's own
+# GarbageCollectionDebug.get_refs builds the same source/target edges.
+EDGE_SAMPLE = 2000
+TOP_EDGES = 8
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
 # List and tuple lengths are reported as exact small values and then in
@@ -198,6 +205,41 @@ def signature_census(items, limit=SIGNATURE_SAMPLE):
     return scanned, ranked[:TOP_SIGNATURES]
 
 
+def edge_census(items, sample=EDGE_SAMPLE):
+    """Return the most common reference edges *within* an unreachable set.
+
+    An object whose referents include another member of the same unreachable
+    set is part of what keeps that set alive.  Reporting those pairs by
+    signature names the cycle - `dict{...} -> list(len=1)` is a diagnosis,
+    where `dict` on its own is not.
+    """
+    try:
+        window = items[:sample]
+    except TypeError:
+        window = list(items)[:sample]
+    known = {}
+    for item in window:
+        known[id(item)] = item
+    tally = {}
+    edges = 0
+    for item in window:
+        try:
+            referents = gc.get_referents(item)
+        except Exception:
+            continue
+        source = None
+        for target in referents:
+            if id(target) not in known or target is item:
+                continue
+            if source is None:
+                source = _signature(item)
+            key = '%s -> %s' % (source, _signature(target))
+            tally[key] = tally.get(key, 0) + 1
+            edges += 1
+    ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
+    return len(window), edges, ranked[:TOP_EDGES]
+
+
 def collect_once():
     """Force one collection and report what it found. Never raises.
 
@@ -238,6 +280,7 @@ def collect_once():
             unreachable = gc.collect()
             scanned, signatures = signature_census(gc.garbage)
             garbage_types = _by_type(gc.garbage[:SIGNATURE_SAMPLE])
+            edge_window, edge_count, edges = edge_census(gc.garbage)
         finally:
             del gc.garbage[:]
             gc.set_debug(previous_debug)
@@ -256,6 +299,9 @@ def collect_once():
             'scanned': scanned,
             'signatures': signatures,
             'types': garbage_types,
+            'edge_window': edge_window,
+            'edge_count': edge_count,
+            'edges': edges,
         }
     except Exception:
         return None
@@ -280,11 +326,26 @@ def format_collect_lines(phase, round_id, state=None):
                   phase, round_id, state.get('scanned', 0),
                   ','.join('%s:%d' % pair for pair in types) or '-',
                   ' | '.join('%s x%d' % pair for pair in signatures) or '-'))
-    return (head, detail)
+    edges = state.get('edges') or ()
+    held = ('[Offline LAN 0.9.22] PYREF phase=%s round=%s window=%d edges=%d '
+            'holds=%s' % (
+                phase, round_id, state.get('edge_window', 0),
+                state.get('edge_count', 0),
+                ' | '.join('%s x%d' % pair for pair in edges) or '-'))
+    return (head, detail, held)
+
+
+# The diagnostic collect costs two full collections and two full
+# `gc.get_objects()` passes on top of the one collection the fix needs, so its
+# reported `elapsed_ms` is NOT the cost of `gc_sweep`.  Set this to False to
+# leave only the fix in place and measure that cost on its own.
+DIAGNOSTIC_COLLECT = True
 
 
 def log_collect(phase, round_id):
-    """Write the PYGC/PYSIG pair. Never raises into a caller."""
+    """Write the PYGC/PYSIG/PYREF group. Never raises into a caller."""
+    if not DIAGNOSTIC_COLLECT:
+        return
     try:
         for line in format_collect_lines(phase, round_id):
             sys.stdout.write(line + '\n')

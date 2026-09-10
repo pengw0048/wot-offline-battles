@@ -56,8 +56,8 @@ from gui.mods.offline_lan_0922 import (
     destructibles_compat, device_damage, effective_params,
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
-    graphics_probe, loadout as loadout_law, memory_probe, python_heap,
-    world_census, prebaked_destructibles,
+    gc_sweep, graphics_probe, loadout as loadout_law, memory_probe,
+    python_heap, world_census, prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
@@ -24399,6 +24399,13 @@ class BattleRuntime(object):
         # the round actually left behind, and the collect is what says whether
         # any of it was reclaimable.
         python_heap.log_collect('round_end', round_identity)
+        # The fix.  BigWorld disables the cyclic collector, so every reference
+        # cycle this round created would otherwise be permanent - 348581 of
+        # them in one worker round of report 20260910-045317.  While the
+        # diagnostic above is wired it has already swept, so PYSWEEP reports a
+        # small count; with python_heap.DIAGNOSTIC_COLLECT off this is the
+        # only collection and its elapsed_ms is the real cost.
+        gc_sweep.sweep('round_end', round_identity)
         graphics_probe.log('round_end', round_identity)
 
         def restore_after_native_boundary():
