@@ -56,7 +56,8 @@ from gui.mods.offline_lan_0922 import (
     destructibles_compat, device_damage, effective_params,
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
-    loadout as loadout_law, memory_probe, prebaked_destructibles,
+    graphics_probe, loadout as loadout_law, memory_probe, python_heap,
+    world_census, prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
@@ -2255,9 +2256,20 @@ class BattleRuntime(object):
                 self._has_sixth_sense = bool(skills['sixth_sense'])
                 self._has_expert = bool(skills['expert'])
                 self._has_deadeye = bool(skills['deadeye'])
-            memory_probe.log(
-                'round_start', (self._start_message or {}).get(
-                    'round_id', '-'))
+            round_identity = (self._start_message or {}).get('round_id', '-')
+            memory_probe.log('round_start', round_identity)
+            # Track GC-visible object counts across equivalent boundaries;
+            # neither these counts nor allocation sizes measure all Python
+            # memory or identify the owner of a suspected leak.
+            python_heap.log('round_start', round_identity)
+            # Registry trends can guide lifecycle investigation, but do not
+            # prove a leak or cover resources outside those registries.
+            world_census.log('round_start', round_identity)
+            # MemoryCriticalController can lower TERRAIN_QUALITY mid-session,
+            # and this port's ground probes and BSP collision read the terrain
+            # it lowers.  Record the preset at both boundaries so a round that
+            # ran on different ground than the one before it is visible.
+            graphics_probe.log('round_start', round_identity)
             self._install_battle_gui_guard()
             self._enter_battle_loading()
             self._retire_lobby_entities(lobby_boundary)
@@ -9174,7 +9186,7 @@ class BattleRuntime(object):
         return True
 
     def _collection_counts(self):
-        """Return the per-round collection sizes a leak would grow.
+        """Return per-round collection sizes for retention trend analysis.
 
         The client runs against a 32-bit address-space ceiling, so every
         structure that lives for the whole round is reported once per window.
@@ -9286,7 +9298,7 @@ class BattleRuntime(object):
     )
 
     def _measured_module_structures(self):
-        """Module caches that outlive a round, so a leak shows across rounds."""
+        """Report module caches for comparing retention across rounds."""
         rows = []
         for module_name, attribute, label in (
                 ('internal_hit_layouts', '_LAYOUT_CACHE', 'hit_layout_cache'),
@@ -24389,8 +24401,11 @@ class BattleRuntime(object):
         sys.stdout.write(
             '[Offline LAN 0.9.22] battle teardown complete; deferring '
             'lobby Account restore\n')
-        memory_probe.log(
-            'round_end', (self._start_message or {}).get('round_id', '-'))
+        round_identity = (self._start_message or {}).get('round_id', '-')
+        memory_probe.log('round_end', round_identity)
+        python_heap.log('round_end', round_identity)
+        world_census.log('round_end', round_identity)
+        graphics_probe.log('round_end', round_identity)
 
         def restore_after_native_boundary():
             if self._lobby_restore_token is not token:
