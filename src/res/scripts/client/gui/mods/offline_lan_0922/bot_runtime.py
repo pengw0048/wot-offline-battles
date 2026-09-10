@@ -7882,6 +7882,8 @@ class BotRuntime(object):
                 'damage_to_bot': event['damage_to_self'],
                 'damage_to_target': event['damage_to_other'],
             }
+            if target_kind == 'bot':
+                report['contact_positions'] = list(event['contact_positions'])
             if (target_kind == 'human' and
                     isinstance(human_ram_receipt, dict)):
                 report['ram_contact_player_id'] = int(
@@ -10400,7 +10402,11 @@ class BotRuntime(object):
               launch_receipt=None, ammo_state=None, launch_preview=None,
               launch_time_us=None):
         if (state.get('_drowning', False) or
-                state.get('_overturned', False)):
+                state.get('_overturned', False) or
+                state.get('_wire_projection_failure') is not None):
+            # A later trigger would replace the unavailable checkpoint's
+            # burst identity before the server can admit its frozen launches.
+            # An already accepted burst still advances through its own path.
             return False
         if ammo_state is None:
             ammo_state = self._ammo_states.get(int(state.get('id', 0)))

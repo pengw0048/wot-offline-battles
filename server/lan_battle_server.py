@@ -2128,6 +2128,7 @@ class BattleState:
         self.bot_manifest = []
         self.bot_manifest_revision = 0
         self.bot_states = {}
+        self.bot_unavailable_checkpoints = set()
         self.bot_terminal_criticals = {}
         self.bot_state_revision = 0
         self.bot_planner = BotPlanner()
@@ -3301,6 +3302,7 @@ class BattleState:
         self.bot_manifest = []
         self.bot_manifest_revision = 0
         self.bot_states = {}
+        self.bot_unavailable_checkpoints = set()
         self.bot_terminal_criticals = {}
         self.bot_state_revision = 0
         self.bot_state_time_us = 0
@@ -5890,7 +5892,8 @@ class BattleState:
         return result
 
     @staticmethod
-    def _validate_bot_ammo_transition(previous, current):
+    def _validate_bot_ammo_transition(previous, current,
+                                      unavailable_checkpoint=False):
         """Require conserved inventory and exact magazine boundaries."""
         if previous is None:
             return True
@@ -5925,8 +5928,6 @@ class BattleState:
             raise ValueError("bot clip checkpoint is invalid")
         expected = list(before)
         if fire_delta:
-            if not pending:
-                raise ValueError("bot shot did not enter reload state")
             previous_active = bool((previous or {}).get(
                 "burst_active", False))
             if previous_active:
@@ -5948,6 +5949,25 @@ class BattleState:
                     previous_pending and previous_clip == 0):
                 raise ValueError("bot fired from an empty clip")
             burst_shell = int(current.get("burst_shell_index", loaded))
+            if not pending:
+                if (not unavailable_checkpoint or reload_time != 0.0 or
+                        current.get("burst_active", False) or
+                        not 0 <= burst_shell < len(after)):
+                    raise ValueError("bot shot did not enter reload state")
+                # The missing checkpoint may span the shot and its completed
+                # reload. Validate those two ordinary transactions in order;
+                # neither ammunition conservation nor shell/clip identity is
+                # waived by the unavailable marker.
+                exhausted = after[burst_shell] == 0 and sum(after) > 0
+                post_shot_clip = 0 if exhausted else expected_clip
+                full_reload = post_shot_clip == 0 or clip_size == 1
+                shot = dict(
+                    current, shell_index=burst_shell,
+                    next_shell_index=loaded if full_reload else next_shell,
+                    clip=post_shot_clip, ammo_reload_pending=True,
+                    reload_time=float(current.get("reload_duration", 0.0)))
+                BattleState._validate_bot_ammo_transition(previous, shot)
+                return BattleState._validate_bot_ammo_transition(shot, current)
             if loaded != burst_shell or loaded != expected_loaded:
                 raise ValueError("bot loaded shell changed while firing")
             if (expected_clip < 0 or loaded >= len(expected) or
@@ -6372,6 +6392,7 @@ class BattleState:
                             incoming, (list, tuple)) else None,
                         len(identities)))
             next_states = {}
+            next_unavailable_checkpoints = set()
             human_ram_armors = self._validated_human_ram_armors(
                 message.get("human_ram_armors"))
             if human_ram_armors is None:
@@ -6404,6 +6425,7 @@ class BattleState:
                     # Retain all admitted ledgers without advancing its ACK;
                     # the next valid row can reconcile the pending changes.
                     next_states[bot_id] = previous
+                    next_unavailable_checkpoints.add(bot_id)
                     continue
                 try:
                     raw = bot_state_codec.decode_row(row, identity)
@@ -6485,7 +6507,9 @@ class BattleState:
                     try:
                         burst_edges = self._bot_burst_transition(
                             previous, current)
-                        self._validate_bot_ammo_transition(previous, current)
+                        self._validate_bot_ammo_transition(
+                            previous, current,
+                            bot_id in self.bot_unavailable_checkpoints)
                     except ValueError as error:
                         # The published magazine and burst clock do not follow
                         # from the last ones the server admitted, which a
@@ -6577,6 +6601,7 @@ class BattleState:
                     "missing=%s" % sorted(set(identities) - set(next_states)))
             self._commit_human_ram_armors(human_ram_armors)
             self.bot_states = next_states
+            self.bot_unavailable_checkpoints = next_unavailable_checkpoints
             for bot_id in stun_clears:
                 self.pending_events.append({
                     "kind": "stun", "active": False,
@@ -9111,9 +9136,23 @@ class BattleState:
             key = (("contact", contact_player_id, contact_seq)
                    if has_contact_player else
                    ("authority", self.authority_epoch, player_id, ram_seq))
+            contact_positions = None
+            if "contact_positions" in message:
+                positions = message["contact_positions"]
+                if (target_kind != "bot" or
+                        not isinstance(positions, (list, tuple)) or
+                        len(positions) != 4):
+                    return False
+                try:
+                    contact_positions = tuple(
+                        _bounded_float(value, -5000.0, 5000.0)
+                        for value in positions)
+                except (TypeError, ValueError, OverflowError):
+                    return False
             fingerprint = (
                 bot_id, target_kind, target_id, damage_to_bot,
-                damage_to_target, contact_player_id, contact_seq)
+                damage_to_target, contact_player_id, contact_seq,
+                contact_positions)
             previous_fingerprint = (
                 self.bot_reported_ram_fingerprints.get(key))
             if previous_fingerprint is not None:
@@ -9154,8 +9193,14 @@ class BattleState:
                             else target.x)
                 target_z = (target.get("z") if target_kind == "bot"
                             else target.z)
-                if math.hypot(float(bot["x"]) - float(target_x),
-                              float(bot["z"]) - float(target_z)) > 12.5:
+                # A projection failure can defer this immutable contact past
+                # later movement. Validate its frozen geometry, not the pose
+                # of the recovery checkpoint that happened to carry it.
+                positions = contact_positions or (
+                    float(bot["x"]), float(bot["z"]),
+                    float(target_x), float(target_z))
+                if math.hypot(positions[0] - positions[2],
+                              positions[1] - positions[3]) > 12.5:
                     return False
             if ram_contact is not None and (
                     not bot.get("alive") or not target.alive):

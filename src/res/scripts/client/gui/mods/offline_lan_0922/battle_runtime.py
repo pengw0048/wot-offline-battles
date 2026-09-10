@@ -21343,13 +21343,17 @@ class BattleRuntime(object):
             return self.client.send_bot_observation(
                 message.get('contacts'), message.get('affordances'))
         if kind == 'bot_ram':
+            contact_kwargs = {}
+            if 'contact_positions' in message:
+                contact_kwargs['contact_positions'] = message[
+                    'contact_positions']
             return self.client.send_bot_ram(
                 message.get('bot_id'), message.get('target_kind'),
                 message.get('target_id'), message.get('ram_seq'),
                 message.get('damage_to_bot'),
                 message.get('damage_to_target'),
                 message.get('ram_contact_player_id'),
-                message.get('ram_contact_seq'))
+                message.get('ram_contact_seq'), **contact_kwargs)
         if kind == 'rules_state':
             rules = message.get('rules') or {}
             return self.client.send_rules_state(rules.get('bases'))
