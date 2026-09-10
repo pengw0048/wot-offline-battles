@@ -5,23 +5,22 @@ unreachable cycles and the objects they retain. This bounds that source of
 retention; it does not identify the cycle's creator or account for all process
 memory. The returned count is unreachable objects, not cycles or freed bytes.
 
-The sweep takes no heap census and never enables automatic GC. An existing
-DEBUG_SAVEALL session owns its retained garbage, so the sweep leaves it alone.
-Native traversal safety and pause time still require exact Windows evidence.
+The manual collection still traverses all GC generations. The sweep omits the
+additional heap census and never enables automatic GC. An existing DEBUG_SAVEALL
+session owns its retained garbage, so the sweep leaves it alone. Native traversal
+safety and pause time still require exact Windows evidence.
 
-One creator is now known and fixed. Report 20260910-072722 closed the loop as
-``cell -> function@encoder.py:288 -> tuple -> cell``, which is
-``json.encoder._make_iterencode``: CPython 2.7's pure-Python encoder, whose
-``_iterencode``/``_iterencode_dict``/``_iterencode_list`` are mutually
-recursive closures, selected whenever ``indent`` is set or ``sort_keys`` is
-true. Hot-path log lines passed ``sort_keys=True``; see
-``tests/test_port_0922_json_encoder_cycles.py``.
+One demonstrated creator is CPython 2.7's pure-Python JSON encoder. An exact
+#1513 experiment found 34 garbage objects requiring cyclic collection after
+one forced pure-Python encoding. Its mutually recursive closures become
+unreachable, but successful encoding does not retain the whole input record.
+Removing the forcing options from hot-path log calls addresses that producer;
+it does not establish the cause of all observed process-memory growth. See
+``tests/test_port_0922_json_encoder_cycles.py`` for the encoder checks.
 
-The sweep stays regardless. That was one creator, and the remaining ones are
-not all ours: every sampled round also carried ``OrderedDict``, ``_Link`` and
-``weakproxy`` in fixed counts, and py2.7's ``OrderedDict`` keeps a
-self-referencing linked root. With the automatic collector disabled, any
-ordinary cycle - ours or stock - is permanent.
+The sweep remains for other unreachable cycles, including those created by
+ordinary cyclic structures in mod or stock code. With automatic collection
+disabled, such cycles remain until a manual collection can reclaim them.
 """
 
 import gc
@@ -46,11 +45,12 @@ def sweep(phase, round_id):
         started = time.time()
         unreachable = gc.collect()
         elapsed_ms = int((time.time() - started) * 1000.0)
-        # `unreachable` is the regression signal the retired census used to
-        # provide, and a cheaper one: it counts what this round left in cycles
-        # rather than walking the whole heap. A step change means new cyclic
-        # retention. `uncollectable` should stay zero - anything parked in
-        # gc.garbage is a cycle the collector gave up on.
+        # The collection still scans all generations; using its result avoids
+        # an additional heap census. This is the number of objects found
+        # unreachable now, not cycles created this round or bytes released.
+        # A change can guide investigation but does not identify its creator.
+        # gc.garbage may also contain entries retained before this sweep, so
+        # its length is not a per-round delta.
         try:
             uncollectable = len(gc.garbage)
         except Exception:

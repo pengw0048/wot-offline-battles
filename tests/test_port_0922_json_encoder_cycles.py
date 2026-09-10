@@ -1,13 +1,13 @@
 """No hot-path `json.dumps` may force CPython 2.7's pure-Python encoder.
 
-Report `20260910-072722` named the leak with a closed cycle path:
+Report `20260910-072722` recorded this closed encoder cycle path:
 
     PYCYCLE found=1  cell -> function@encoder.py:288 -> tuple(len=<=32) -> cell
 
 `encoder.py:288` is `json.encoder._make_iterencode`, whose `_iterencode`,
 `_iterencode_dict` and `_iterencode_list` are mutually recursive closures - a
-reference cycle on every call. #1513 disables the cyclic collector, so each
-call leaks, and the closure's cells retain the whole record being encoded.
+reference cycle on every call. #1513 disables the automatic cyclic collector,
+so that unreachable encoder state remains until a manual collection.
 
 CPython 2.7 selects that encoder whenever `indent is not None` **or**
 `sort_keys` is true:
@@ -15,17 +15,23 @@ CPython 2.7 selects that encoder whenever `indent is not None` **or**
     if (_one_shot and c_make_encoder is not None
             and self.indent is None and not self.sort_keys):
 
-Measured on a representative `[BOT MOTION]` record: `sort_keys=True` costs
-824 us per call and leaks 34 gc-only objects; without it, 112 us and zero,
-for byte-identical output.
+Controlled Python 2.7 probes, including the exact #1513 encoder, collected 34
+unreachable helper objects after a successful `sort_keys=True` call and zero
+without it. Weak-reference probes showed that successful encoding releases the
+input record before collection; these helpers do not retain that whole graph.
+Removing sorting preserves decoded JSON values, not key order or identical
+serialized bytes. These probes do not establish the cause of all process
+memory growth.
 
 File writers are exempt: their content is read by people and diffed, they run
-once per save rather than per event, and one cycle per save is not a leak.
+once per save rather than per event, and stable formatting is useful there.
+They can still leave encoder cycles for the next manual collection.
 """
 
 import ast
 import io
 from pathlib import Path
+import tempfile
 import unittest
 
 PORT = (Path(__file__).resolve().parents[1] / 'src' / 'res' / 'scripts' /
@@ -56,15 +62,25 @@ def _forcing_calls(path):
         for keyword in node.keywords:
             if keyword.arg not in FORCING_KEYWORDS:
                 continue
-            # A literal false/None does not force the Python encoder.
+            # CPython tests indent by identity and sort_keys by truthiness.
+            # In particular, indent=0 and indent=False still force Python.
             value = keyword.value
-            if (isinstance(value, ast.Constant) and
-                    value.value in (False, None)):
-                continue
+            if isinstance(value, ast.Constant):
+                if keyword.arg == 'indent' and value.value is None:
+                    continue
+                if keyword.arg == 'sort_keys' and not value.value:
+                    continue
             yield node.lineno, keyword.arg
 
 
 class JsonEncoderCycleTest(unittest.TestCase):
+    def _calls_for_source(self, source):
+        # Keep audit fixtures outside the package that a concurrent build reads.
+        with tempfile.TemporaryDirectory(prefix='wot-json-audit-') as directory:
+            scratch = Path(directory) / 'probe.py'
+            scratch.write_text(source, encoding='utf-8')
+            return list(_forcing_calls(scratch))
+
     def test_no_hot_path_module_forces_the_pure_python_encoder(self):
         offenders = []
         for path in sorted(PORT.glob('*.py')):
@@ -84,20 +100,22 @@ class JsonEncoderCycleTest(unittest.TestCase):
         source = ('import json\n'
                   'def emit(record):\n'
                   '    return json.dumps(record, sort_keys=True)\n')
-        scratch = PORT / '_json_audit_probe.py'
-        scratch.write_text(source, encoding='utf-8')
-        self.addCleanup(scratch.unlink)
-        found = list(_forcing_calls(scratch))
+        found = self._calls_for_source(source)
         self.assertEqual([(3, 'sort_keys')], found)
+
+    def test_false_and_zero_indent_still_force_the_python_encoder(self):
+        for value in ('False', '0'):
+            with self.subTest(indent=value):
+                source = ('import json\n'
+                          'json.dumps({"z": 1, "a": 2}, indent=%s)\n' % value)
+                self.assertEqual([(2, 'indent')],
+                                 self._calls_for_source(source))
 
     def test_an_explicitly_disabled_keyword_is_not_an_offender(self):
         source = ('import json\n'
                   'def emit(record):\n'
                   '    return json.dumps(record, sort_keys=False, indent=None)\n')
-        scratch = PORT / '_json_audit_allowed.py'
-        scratch.write_text(source, encoding='utf-8')
-        self.addCleanup(scratch.unlink)
-        self.assertEqual([], list(_forcing_calls(scratch)))
+        self.assertEqual([], self._calls_for_source(source))
 
     def test_the_file_writers_are_a_deliberate_short_list(self):
         # If this grows, someone exempted a hot path instead of fixing it.
