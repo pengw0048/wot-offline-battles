@@ -9,6 +9,7 @@ into a flat 1133959 -> 1033952 -> 1044656.
 """
 
 import gc
+import os
 import sys
 from pathlib import Path
 import unittest
@@ -81,34 +82,61 @@ class BotUpdateCreatesNoCyclesTest(unittest.TestCase):
     zero cycles, so the Bot update path is not the source of the 348581
     unreachable objects a real worker round produces.  If this ever starts
     failing, someone has just written the cycle.
+
+    It runs in a subprocess on purpose.  Driving a real runtime populates
+    process-global state - `bot_runtime._LOGGED_CREW_LEVEL_REJECTIONS` is
+    documented as "once per level per process" - and the loadout tests assert
+    exactly that once-per-process behaviour.  An in-process version of this
+    test passed on its own and broke four unrelated tests under
+    `unittest discover`.
     """
 
+    DRIVER = r"""
+import contextlib, gc, io, sys
+import test_port_0922_bot_runtime as driver
+import effective_params_fixture as fixture
+
+case = driver.BotRuntimeTests('run')
+case.setUp()
+runtime = case._roster_runtime()
+player = fixture.wire_player(5)
+player.setdefault('team', 1)
+player.setdefault('position', [0.0, 0.0, 0.0])
+player.setdefault('yaw', 0.0)
+
+gc.collect()
+gc.disable()
+sink = io.StringIO()
+with contextlib.redirect_stdout(sink):
+    for tick in range(200):
+        runtime.update(0.05, 1.0 + tick * 0.05, [player])
+cycles = gc.collect()
+sys.stderr.write('CYCLES=%d\n' % cycles)
+"""
+
     def test_two_hundred_updates_create_no_reference_cycles(self):
-        import test_port_0922_bot_runtime as driver
-        import effective_params_fixture as fixture
-        import contextlib
-        import io as text_io
+        import subprocess
 
-        case = driver.BotRuntimeTests('run')
-        case.setUp()
-        runtime = case._roster_runtime()
-        player = fixture.wire_player(5)
-        player.setdefault('team', 1)
-        player.setdefault('position', [0.0, 0.0, 0.0])
-        player.setdefault('yaw', 0.0)
-
-        gc.collect()
-        was_enabled = gc.isenabled()
-        gc.disable()                      # match the game
-        try:
-            sink = text_io.StringIO()
-            with contextlib.redirect_stdout(sink):
-                for tick in range(200):
-                    runtime.update(0.05, 1.0 + tick * 0.05, [player])
-            cycles = gc.collect()
-        finally:
-            if was_enabled:
-                gc.enable()
+        root = Path(__file__).resolve().parents[1]
+        environment = dict(os.environ)
+        environment['PYTHONDONTWRITEBYTECODE'] = '1'
+        environment['PYTHONPATH'] = os.pathsep.join((
+            str(root / 'src' / 'res' / 'scripts' / 'client'),
+            str(root / 'tests'),
+        ))
+        finished = subprocess.run(
+            [sys.executable, '-c', self.DRIVER],
+            cwd=str(root), env=environment, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=300)
+        report = finished.stderr.decode('utf-8', 'replace')
+        self.assertEqual(
+            0, finished.returncode,
+            'the Bot update driver failed:\n%s' % report[-2000:])
+        marker = [line for line in report.splitlines()
+                  if line.startswith('CYCLES=')]
+        self.assertTrue(marker, 'driver reported no cycle count:\n%s'
+                        % report[-2000:])
+        cycles = int(marker[-1].split('=', 1)[1])
         self.assertEqual(
             0, cycles,
             'the Bot update path created %d cyclic objects; it used to create '
