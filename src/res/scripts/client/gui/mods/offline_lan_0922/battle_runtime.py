@@ -57,7 +57,7 @@ from gui.mods.offline_lan_0922 import (
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
     graphics_probe, loadout as loadout_law, memory_probe, python_heap,
-    prebaked_destructibles,
+    world_census, prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
@@ -2262,6 +2262,10 @@ class BattleRuntime(object):
             # The dumps only proved Python was not what exhausted the address
             # space; a rate needs one census per round, not one at death.
             python_heap.log('round_start', round_identity)
+            # The other half of that question: an entity or space the engine
+            # still holds from last round is our bug even though the memory
+            # is C++, and nothing in Python can see it.
+            world_census.log('round_start', round_identity)
             # MemoryCriticalController can lower TERRAIN_QUALITY mid-session,
             # and this port's ground probes and BSP collision read the terrain
             # it lowers.  Record the preset at both boundaries so a round that
@@ -24390,6 +24394,7 @@ class BattleRuntime(object):
         round_identity = (self._start_message or {}).get('round_id', '-')
         memory_probe.log('round_end', round_identity)
         python_heap.log('round_end', round_identity)
+        world_census.log('round_end', round_identity)
         graphics_probe.log('round_end', round_identity)
 
         def restore_after_native_boundary():
