@@ -3021,6 +3021,30 @@ class LauncherWindow(object):
         self.root.after(0, self._update_action_controls)
 
     def _start_worker(self, game_root, host, port, room_owned=False):
+        """Start the worker isolated from other mods, and never stay down.
+
+        The isolated resource list is the fix for third-party mods running
+        inside the hidden worker, but it is also the one thing here that has
+        never run on a player's client.  If the worker does not come up with
+        it, fall back to the client's own mod paths once rather than leave the
+        player with no worker at all.
+        """
+        if self._start_worker_attempt(
+                game_root, host, port, room_owned=room_owned,
+                isolated_mods=True):
+            return True
+        if self._stop_requested or not core.worker_resource_path_list(
+                game_root):
+            return False
+        self._log(
+            "The hidden worker did not start with its own resource list; "
+            "retrying with the client's own mod paths.")
+        return self._start_worker_attempt(
+            game_root, host, port, room_owned=room_owned,
+            isolated_mods=False)
+
+    def _start_worker_attempt(self, game_root, host, port, room_owned=False,
+                              isolated_mods=True):
         self._worker_exited_unexpectedly = False
         starter = core.worker_starter_executable(game_root)
         if not os.path.isfile(starter):
@@ -3037,9 +3061,15 @@ class LauncherWindow(object):
                 self._log(
                     "The worker starter log boundary could not be recorded: "
                     "%s" % error)
-        environment = core.worker_environment(game_root, host, port)
+        environment = core.worker_environment(
+            game_root, host, port, isolated_mods=isolated_mods)
         environment = self._crash_capture_environment(
             environment, error_reports.ROLE_HIDDEN_WORKER)
+        self._log(
+            "Hidden worker resources: %s." %
+            ("this port only" if environment.get(
+                core.WORKER_RES_PATH_ENV_0922) else
+             "the client's own mod paths"))
         # Stop intent belongs to the previous worker, not its replacement.
         self._stop_requested_roles.discard(error_reports.ROLE_HIDDEN_WORKER)
         worker = subprocess.Popen(
