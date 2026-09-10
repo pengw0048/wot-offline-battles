@@ -24395,6 +24395,10 @@ class BattleRuntime(object):
         memory_probe.log('round_end', round_identity)
         python_heap.log('round_end', round_identity)
         world_census.log('round_end', round_identity)
+        # Census first, then force a collection: the census must see the heap
+        # the round actually left behind, and the collect is what says whether
+        # any of it was reclaimable.
+        python_heap.log_collect('round_end', round_identity)
         graphics_probe.log('round_end', round_identity)
 
         def restore_after_native_boundary():
