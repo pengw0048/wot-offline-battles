@@ -33,13 +33,13 @@ MEM_IMAGE = 0x1000000
 # 6754 and 7293 regions, so the cap only guards against a pathological process
 # stalling a frame; it is not meant to bound a healthy walk.
 MAX_REGIONS = 32768
-POOL_BLOCK_BYTES = 1024 * 1024
-# CPython 2.7's obmalloc arena.  Counting private allocations of exactly this
-# size is how Python's own footprint is separated from BigWorld's C++ heap
-# without asking Python anything: 84/99/78 of them in the three 2026-09-09/10
-# dumps, 21.0/24.8/19.5 MiB.  Whether that number *grows* per round is the
-# open question, and one dump could never answer it.
-ARENA_BYTES = 256 * 1024
+# Allocation size classes, with no allocator or ownership attribution.
+# CPython 2.7 arenas can be 256 KiB, but VirtualQuery does not identify their
+# owner, and Python can allocate larger objects outside its small-object
+# arenas. These totals include reserved and committed private regions sharing
+# an AllocationBase; they are not a measurement of Python's total footprint.
+ALLOC_1MIB_BYTES = 1024 * 1024
+ALLOC_256KIB_BYTES = 256 * 1024
 
 # Top of the 32-bit user address space on a large-address-aware image, less the
 # final no-access guard page.  A process that only gets 2 GB simply fails the
@@ -103,8 +103,8 @@ def _walk(kernel32):
     reserved = 0
     free_total = 0
     free_largest = 0
-    pool_blocks = 0
-    arenas = 0
+    alloc_1mib = 0
+    alloc_256kib = 0
     allocation_sizes = {}
     while address < limit:
         if query(ctypes.c_void_p(address), ctypes.byref(info), size) != size:
@@ -134,10 +134,10 @@ def _walk(kernel32):
         address += region
     histogram = {}
     for total in allocation_sizes.values():
-        if total == POOL_BLOCK_BYTES:
-            pool_blocks += 1
-        elif total == ARENA_BYTES:
-            arenas += 1
+        if total == ALLOC_1MIB_BYTES:
+            alloc_1mib += 1
+        elif total == ALLOC_256KIB_BYTES:
+            alloc_256kib += 1
         histogram[total] = histogram.get(total, 0) + 1
     result = {
         'private': committed[MEM_PRIVATE],
@@ -147,8 +147,8 @@ def _walk(kernel32):
         'free': free_total,
         'largest_free': free_largest,
         'regions': regions,
-        'pool_blocks': pool_blocks,
-        'arenas': arenas,
+        'alloc_1mib': alloc_1mib,
+        'alloc_256kib': alloc_256kib,
         'classes': _top_classes(histogram),
         'truncated': truncated,
         'system_load': -1,
@@ -195,16 +195,16 @@ def format_line(phase, round_id, state=None):
         return None
     return ('[Offline LAN 0.9.22] MEMORY phase=%s round=%s private_mb=%s '
             'image_mb=%s mapped_mb=%s reserved_mb=%s free_mb=%s '
-            'largest_free_mb=%s regions=%d pool_1mib=%d arenas=%d '
-            'arena_mb=%s classes=%s system_load=%d '
+            'largest_free_mb=%s regions=%d alloc_1mib=%d alloc_256kib=%d '
+            'alloc_256kib_mb=%s classes=%s system_load=%d '
             'total_virtual_mb=%s total_phys_mb=%s truncated=%d' % (
                 phase, round_id,
                 _megabytes(state['private']), _megabytes(state['image']),
                 _megabytes(state['mapped']), _megabytes(state['reserved']),
                 _megabytes(state['free']), _megabytes(state['largest_free']),
-                state['regions'], state['pool_blocks'],
-                state.get('arenas', 0),
-                _megabytes(state.get('arenas', 0) * ARENA_BYTES),
+                state['regions'], state['alloc_1mib'],
+                state.get('alloc_256kib', 0),
+                _megabytes(state.get('alloc_256kib', 0) * ALLOC_256KIB_BYTES),
                 _format_classes(state.get('classes')),
                 state['system_load'],
                 _megabytes(state.get('total_virtual', 0)),

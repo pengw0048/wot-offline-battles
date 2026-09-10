@@ -2258,13 +2258,12 @@ class BattleRuntime(object):
                 self._has_deadeye = bool(skills['deadeye'])
             round_identity = (self._start_message or {}).get('round_id', '-')
             memory_probe.log('round_start', round_identity)
-            # Peng's standing question is whether this port leaks Python.
-            # The dumps only proved Python was not what exhausted the address
-            # space; a rate needs one census per round, not one at death.
+            # Track GC-visible object counts across equivalent boundaries;
+            # neither these counts nor allocation sizes measure all Python
+            # memory or identify the owner of a suspected leak.
             python_heap.log('round_start', round_identity)
-            # The other half of that question: an entity or space the engine
-            # still holds from last round is our bug even though the memory
-            # is C++, and nothing in Python can see it.
+            # Registry trends can guide lifecycle investigation, but do not
+            # prove a leak or cover resources outside those registries.
             world_census.log('round_start', round_identity)
             # MemoryCriticalController can lower TERRAIN_QUALITY mid-session,
             # and this port's ground probes and BSP collision read the terrain
@@ -9187,7 +9186,7 @@ class BattleRuntime(object):
         return True
 
     def _collection_counts(self):
-        """Return the per-round collection sizes a leak would grow.
+        """Return per-round collection sizes for retention trend analysis.
 
         The client runs against a 32-bit address-space ceiling, so every
         structure that lives for the whole round is reported once per window.
@@ -9299,7 +9298,7 @@ class BattleRuntime(object):
     )
 
     def _measured_module_structures(self):
-        """Module caches that outlive a round, so a leak shows across rounds."""
+        """Report module caches for comparing retention across rounds."""
         rows = []
         for module_name, attribute, label in (
                 ('internal_hit_layouts', '_LAYOUT_CACHE', 'hit_layout_cache'),
