@@ -549,6 +549,7 @@ EXPECTED_ABI = {
             'self', 'period', '*args'),
         'AvatarInputHandler.getAutorotation': ('self',),
         'AvatarInputHandler.setAutorotation': ('self', 'bValue'),
+        'AvatarInputHandler.switchAutorotation': ('self',),
         '_Targeting.__init__': ('self',),
         '_Targeting.getTargetEntity': ('self',),
         '_Targeting.enable': ('self', 'flag'),
@@ -568,6 +569,10 @@ EXPECTED_ABI = {
         '_ShellingControl.setTargetModelMatrix': (
             'self', 'worldMatrix'),
         '_ShellingControl.__createTargetModel': ('self', 'bDelete'),
+        'IControlMode.getPreferredAutorotationMode': ('self',),
+        'IControlMode.enableSwitchAutorotationMode': ('self',),
+        'SniperControlMode.getPreferredAutorotationMode': ('self',),
+        'SniperControlMode.enableSwitchAutorotationMode': ('self',),
         'ArcadeControlMode.handleKeyEvent': (
             'self', 'isDown', 'key', 'mods', 'event'),
         'SniperControlMode.handleKeyEvent': (
@@ -1239,7 +1244,9 @@ EXPECTED_CODE_NAMES = {
             'CommandMapping', 'CRUISE_CONTROL25', 'CRUISE_CONTROL50',
             'CMD_BLOCK_TRACKS'),
         'PlayerAvatar.moveVehicle': (
-            'filter', 'notifyInputKeysDown', 'base', 'vehicle_moveWith'),
+            'filter', 'notifyInputKeysDown', 'base', 'vehicle_moveWith',
+            '_MOVEMENT_FLAGS', 'BLOCK_TRACKS', 'inputHandler',
+            'setAutorotation'),
         'PlayerAvatar.getOwnVehicleSpeeds': (
             'BigWorld', 'entity', 'playerVehicleID', 'speedInfo', 'value'),
         'PlayerAvatar.__onSetOwnVehicleAuxPhysicsData': (
@@ -1350,6 +1357,12 @@ EXPECTED_CODE_NAMES = {
         'SniperControlMode.__siegeModeStateChanged': (
             'VEHICLE_SIEGE_STATE', 'ENABLED', 'DISABLED', '_cam',
             'aimingSystem', 'forceFullStabilization'),
+        'SniperControlMode.getPreferredAutorotationMode': (
+            'BigWorld', 'entities', 'get', 'player', 'playerVehicleID',
+            'typeDescriptor', 'chassis', 'rotationIsAroundCenter', 'gun',
+            'turretYawLimits', 'isYawHullAimingAvailable'),
+        'SniperControlMode.enableSwitchAutorotationMode': (
+            'getPreferredAutorotationMode',),
         'PostMortemControlMode.enable': (
             '_PostMortemControlMode__cam', 'consistentMatrices',
             'attachedVehicleMatrix', 'vehicleMProv', 'PostmortemDelay',
@@ -1389,6 +1402,14 @@ EXPECTED_CODE_NAMES = {
             '_AvatarInputHandler__curCtrl',
             'enableSwitchAutorotationMode',
             '_AvatarInputHandler__isAutorotation',
+            'enableOwnVehicleAutorotation'),
+        'AvatarInputHandler.switchAutorotation': (
+            'setAutorotation', '_AvatarInputHandler__isAutorotation'),
+        'AvatarInputHandler.onControlModeChanged': (
+            '_AvatarInputHandler__curCtrl',
+            'getPreferredAutorotationMode',
+            '_AvatarInputHandler__isAutorotation',
+            '_AvatarInputHandler__prevModeAutorotation',
             'enableOwnVehicleAutorotation'),
         'AvatarInputHandler.activatePostmortem': (
             '_CTRL_MODE', 'POSTMORTEM', 'onControlModeChanged'),
@@ -2508,6 +2529,91 @@ EXPECTED_ORDERED_INSTRUCTION_PATTERNS = {
                 ('BINARY_SUBTRACT', None, None),
                 ('LOAD_ATTR', 'value', 'length'),
                 ('STORE_FAST', 'value', 'vehSpeedSum'),
+            )),
+        'PlayerAvatar.moveVehicle': (
+            'a movement command without Space re-enables autorotation', 0, (
+                ('LOAD_ATTR', 'value', 'BLOCK_TRACKS'),
+                ('BINARY_AND', None, None),
+                ('UNARY_NOT', None, None),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'self'),
+                ('LOAD_ATTR', 'value', 'inputHandler'),
+                ('LOAD_ATTR', 'value', 'setAutorotation'),
+                ('LOAD_GLOBAL', 'value', 'True'),
+                ('CALL_FUNCTION', 'argument', 1),
+            )),
+    },
+    'scripts/client/AvatarInputHandler/__init__.pyc': {
+        'AvatarInputHandler.setAutorotation': (
+            'the control mode gates every autorotation request', 0, (
+                ('LOAD_FAST', 'value', 'self'),
+                ('LOAD_ATTR', 'value', '_AvatarInputHandler__curCtrl'),
+                ('LOAD_ATTR', 'value', 'enableSwitchAutorotationMode'),
+                ('CALL_FUNCTION', 'argument', 0),
+                ('POP_JUMP_IF_TRUE', None, None),
+                ('LOAD_CONST', 'value', None),
+                ('RETURN_VALUE', None, None),
+                ('LOAD_GLOBAL', 'value', 'BigWorld'),
+                ('LOAD_ATTR', 'value', 'player'),
+                ('CALL_FUNCTION', 'argument', 0),
+                ('LOAD_ATTR', 'value', 'isOnArena'),
+                ('POP_JUMP_IF_TRUE', None, None),
+            )),
+        'AvatarInputHandler.onControlModeChanged': (
+            'a preferring control mode saves and forces autorotation', 0, (
+                ('LOAD_ATTR', 'value', 'getPreferredAutorotationMode'),
+                ('CALL_FUNCTION', 'argument', 0),
+                ('STORE_FAST', 'value', 'newAutoRotationMode'),
+                ('LOAD_FAST', 'value', 'newAutoRotationMode'),
+                ('LOAD_CONST', 'value', None),
+                ('COMPARE_OP', 'argument', 9),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'prevCtrl'),
+                ('LOAD_ATTR', 'value', 'getPreferredAutorotationMode'),
+                ('CALL_FUNCTION', 'argument', 0),
+                ('LOAD_CONST', 'value', None),
+                ('COMPARE_OP', 'argument', 8),
+                ('POP_JUMP_IF_FALSE', None, None),
+                ('LOAD_FAST', 'value', 'self'),
+                ('LOAD_ATTR', 'value',
+                 '_AvatarInputHandler__isAutorotation'),
+                ('LOAD_FAST', 'value', 'self'),
+                ('STORE_ATTR', 'value',
+                 '_AvatarInputHandler__prevModeAutorotation'),
+            )),
+    },
+    'scripts/client/AvatarInputHandler/control_modes.pyc': {
+        'SniperControlMode.getPreferredAutorotationMode': (
+            'sniper locks a limited-traverse hull', 0, (
+                ('LOAD_FAST', 'value', 'desc'),
+                ('LOAD_ATTR', 'value', 'chassis'),
+                ('LOAD_ATTR', 'value', 'rotationIsAroundCenter'),
+                ('STORE_FAST', 'value', 'isRotationAroundCenter'),
+                ('LOAD_FAST', 'value', 'desc'),
+                ('LOAD_ATTR', 'value', 'gun'),
+                ('LOAD_ATTR', 'value', 'turretYawLimits'),
+                ('LOAD_CONST', 'value', None),
+                ('COMPARE_OP', 'argument', 9),
+                ('STORE_FAST', 'value', 'turretHasYawLimits'),
+                ('LOAD_FAST', 'value', 'desc'),
+                ('LOAD_ATTR', 'value', 'isYawHullAimingAvailable'),
+                ('STORE_FAST', 'value', 'yawHullAimingAvailable'),
+                ('LOAD_FAST', 'value', 'yawHullAimingAvailable'),
+                ('JUMP_IF_TRUE_OR_POP', None, None),
+                ('LOAD_FAST', 'value', 'isRotationAroundCenter'),
+                ('JUMP_IF_FALSE_OR_POP', None, None),
+                ('LOAD_FAST', 'value', 'turretHasYawLimits'),
+                ('UNARY_NOT', None, None),
+                ('RETURN_VALUE', None, None),
+            )),
+        'SniperControlMode.enableSwitchAutorotationMode': (
+            'sniper refuses the X key only for a preferred lock', 0, (
+                ('LOAD_FAST', 'value', 'self'),
+                ('LOAD_ATTR', 'value', 'getPreferredAutorotationMode'),
+                ('CALL_FUNCTION', 'argument', 0),
+                ('LOAD_GLOBAL', 'value', 'False'),
+                ('COMPARE_OP', 'argument', 9),
+                ('RETURN_VALUE', None, None),
             )),
     },
     'scripts/client/ProjectileMover.pyc': {

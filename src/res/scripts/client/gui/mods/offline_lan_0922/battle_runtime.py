@@ -20085,8 +20085,7 @@ class BattleRuntime(object):
                 position[1] + self._local_vertical_speed * dt,
                 next_z)
 
-    def _local_autorotation_turn(self, entity, turn, drive_intent=0.0,
-                                 tracks_blocked=False):
+    def _local_autorotation_turn(self, entity, turn, tracks_blocked=False):
         """Apply #1513's limited-traverse autorotation to copied physics.
 
         The stock input handler owns whether autorotation is enabled in the
@@ -20096,16 +20095,19 @@ class BattleRuntime(object):
         local cell must feed that same binary direction into its sole pose
         integrator.  The descriptor, native gun rotator and copied traverse
         physics continue to own the arc, gun speed and resulting dispersion.
+
+        The direction is independent of the throttle.  The pinned executable
+        computes it in ``WGGunRotatorImpl`` from the elapsed time, the desired
+        yaw, the current turret yaw, the installed yaw limits and the turret
+        and vehicle rotation speeds; no drive input reaches that routine, and
+        the movement flags it publishes carry ``_MOVEMENT_FLAGS.FORWARD``
+        beside the rotation bit.  Autorotation therefore composes with a live
+        throttle exactly like the player holding W and D together.
         """
         turn = float(turn)
         if turn != 0.0:
-            return turn
-        # Retail autorotation is an idle arcade-mode convenience.  Any live
-        # drive command owns the hull even when the vehicle is physically
-        # blocked and its measured speed is zero.  ``forward`` also carries
-        # the native R/F cruise presets, so this covers both keyboard drive
-        # and cruise without inferring motion from speed.
-        if float(drive_intent) != 0.0:
+            # A live A/D command owns the hull.  Only the rotation half of the
+            # retail command is in question here; the throttle keeps driving.
             return turn
         # CMD_BLOCK_TRACKS is independent from the persistent autorotation
         # setting.  Holding Space does not clear that setting, but the retail
@@ -20247,7 +20249,7 @@ class BattleRuntime(object):
                     self._sender.forward)
         turn = (0.0 if siege_drive_locked or overturned else
                 self._local_autorotation_turn(
-                    entity, self._sender.turn, throttle,
+                    entity, self._sender.turn,
                     tracks_blocked=self._sender.handbrake))
         is_tracked = bool(getattr(entity, 'is_tracked', False))
         is_engine_dead = bool(getattr(entity, 'is_engine_dead', False))
