@@ -1644,6 +1644,7 @@ class _EndpointSendMixin:
         self._outbox_reliable_bytes = 0
         self._outbox_snapshot = None
         self._outbox_thread = None
+        self._outbox_failure_reported = False
 
     def __post_init__(self):
         self._initialize_outbox()
@@ -1681,11 +1682,64 @@ class _EndpointSendMixin:
             self.connected = False
             condition.notify_all()
 
+    def _record_outbound_failure(self, reason, message, payload=None,
+                                 error=None, sent_bytes=None):
+        """Record the first failed send without retaining or logging content."""
+        try:
+            with self._ensure_outbox():
+                if self._outbox_failure_reported or not self.connected:
+                    return
+                self._outbox_failure_reported = True
+                metadata = message if isinstance(message, dict) else {}
+                message_type = metadata.get("type")
+                worker = isinstance(self, SimulationWorker)
+                snapshot = self._outbox_snapshot
+                failure = {
+                    "endpoint_role": "worker" if worker else "player",
+                    "endpoint_id": (self.worker_id if worker else
+                                    self.player_id),
+                    "reason": reason,
+                    "message_type": (
+                        message_type[:64]
+                        if isinstance(message_type, str) else None),
+                    "round_id": metadata.get("round_id"),
+                    "server_tick": metadata.get("server_tick"),
+                    "payload_bytes": (
+                        len(payload) if payload is not None else None),
+                    "sent_bytes": sent_bytes,
+                    "reliable_messages": len(self._outbox_reliable),
+                    "reliable_bytes": self._outbox_reliable_bytes,
+                    "snapshot_bytes": (len(snapshot["payload"])
+                                       if snapshot is not None else 0),
+                    "error_type": (
+                        type(error).__name__[:64]
+                        if error is not None else None),
+                    "errno": getattr(error, "errno", None),
+                }
+                # Malformed framing metadata must not leak arbitrary values
+                # or prevent a diagnostic for the original encoding failure.
+                for key in ("endpoint_id", "round_id", "server_tick", "errno"):
+                    if (type(failure[key]) is not int or
+                            not -(1 << 63) <= failure[key] < (1 << 63)):
+                        failure[key] = None
+            _server_log("OUTBOUND FAILURE " + json.dumps(
+                failure, sort_keys=True, separators=(",", ":")))
+        except Exception:
+            # A broken log destination must not change send/close semantics.
+            pass
+
     def _serialize_message(self, message):
         outgoing = _monotonic_endpoint_server_time(self, message)
-        payload = (json.dumps(
-            outgoing, separators=(",", ":")) + "\n").encode("utf-8")
+        try:
+            payload = (json.dumps(
+                outgoing, separators=(",", ":")) + "\n").encode("utf-8")
+        except Exception as error:
+            self._record_outbound_failure(
+                "encode_error", message, error=error, sent_bytes=0)
+            raise
         if len(payload) > MAX_LINE_BYTES:
+            self._record_outbound_failure(
+                "message_too_large", message, payload, sent_bytes=0)
             return None
         return payload
 
@@ -1706,42 +1760,54 @@ class _EndpointSendMixin:
     def _send_direct(self, message):
         if not self.connected:
             return False
+        # A restored endpoint may lack its outbox. Initialize before taking
+        # send_lock so a failure diagnostic cannot re-enter that plain lock.
+        self._ensure_outbox()
         try:
             with self.send_lock:
                 payload = self._serialize_message(message)
                 if payload is None:
                     return False
-                self._write_payload(payload)
+                self._write_payload(payload, message)
             self._mark_message_sent(message)
             return True
         except (BrokenPipeError, ConnectionError, OSError):
             self.connected = False
             return False
 
-    def _write_payload(self, payload):
+    def _write_payload(self, payload, message=None):
         """Finish one frame across short socket stalls without duplication."""
         sender = getattr(self.conn, "send", None)
-        if not callable(sender):
-            self.conn.sendall(payload)
-            return
-        offset = 0
+        # sendall does not expose partial progress if it raises.
+        offset = 0 if callable(sender) else None
         stalled_since = None
-        while offset < len(payload):
-            try:
-                count = sender(payload[offset:])
-                if count is None or int(count) <= 0:
-                    raise ConnectionError("peer closed during send")
-                offset += int(count)
-                stalled_since = None
-            except socket.timeout:
-                now = time.monotonic()
-                if stalled_since is None:
-                    stalled_since = now
-                elif (now - stalled_since >=
-                      OUTBOUND_STALL_TIMEOUT_SECONDS):
-                    raise socket.timeout(
-                        "peer did not accept LAN state for %.0f seconds" %
-                        OUTBOUND_STALL_TIMEOUT_SECONDS)
+        reason = "socket_error"
+        try:
+            if not callable(sender):
+                self.conn.sendall(payload)
+                return
+            while offset < len(payload):
+                try:
+                    count = sender(payload[offset:])
+                    if count is None or int(count) <= 0:
+                        reason = "peer_closed"
+                        raise ConnectionError("peer closed during send")
+                    offset += int(count)
+                    stalled_since = None
+                except socket.timeout:
+                    now = time.monotonic()
+                    if stalled_since is None:
+                        stalled_since = now
+                    elif (now - stalled_since >=
+                          OUTBOUND_STALL_TIMEOUT_SECONDS):
+                        reason = "send_stall"
+                        raise socket.timeout(
+                            "peer did not accept LAN state for %.0f seconds" %
+                            OUTBOUND_STALL_TIMEOUT_SECONDS)
+        except (BrokenPipeError, ConnectionError, OSError) as error:
+            self._record_outbound_failure(
+                reason, message, payload, error, offset)
+            raise
 
     def _start_outbox_locked(self):
         thread = self._outbox_thread
@@ -1776,6 +1842,12 @@ class _EndpointSendMixin:
                     MAX_RELIABLE_OUTBOUND_MESSAGES or
                     self._outbox_reliable_bytes + len(payload) >
                     MAX_RELIABLE_OUTBOUND_BYTES):
+                reason = ("reliable_message_limit"
+                          if len(self._outbox_reliable) >=
+                          MAX_RELIABLE_OUTBOUND_MESSAGES else
+                          "reliable_byte_limit")
+                self._record_outbound_failure(
+                    reason, message, payload, sent_bytes=0)
                 self._fail_outbox()
                 self._shutdown_transport()
                 return False
@@ -1791,6 +1863,7 @@ class _EndpointSendMixin:
         if done is None:
             return True
         if not done.wait(OUTBOUND_SYNC_TIMEOUT_SECONDS):
+            self._record_outbound_failure("sync_timeout", message, payload)
             self._fail_outbox()
             self._shutdown_transport()
             return False
@@ -1901,7 +1974,7 @@ class _EndpointSendMixin:
                     self._outbox_snapshot = None
             try:
                 with self.send_lock:
-                    self._write_payload(item["payload"])
+                    self._write_payload(item["payload"], item["message"])
             except (BrokenPipeError, ConnectionError, OSError):
                 self._fail_outbox(item)
                 self._shutdown_transport()
@@ -3020,6 +3093,8 @@ class BattleState:
             if round_failed:
                 self.worker_failure_reason = str(
                     failure_reason or "worker_disconnected")
+                failed_round_id = self.round_id
+                recorded_failure_reason = self.worker_failure_reason
                 self.pending_live_message = None
                 # A loading client has already entered the native offline
                 # arena. Publish the same explicit terminal result used in a
@@ -3040,7 +3115,7 @@ class BattleState:
             if round_failed:
                 _server_log(
                     "WORKER FAILURE round=%d reason=%s; round terminated" % (
-                        self.round_id, self.worker_failure_reason))
+                        failed_round_id, recorded_failure_reason))
         worker._shutdown_transport()
         return worker, round_failed
 
@@ -11516,8 +11591,24 @@ class BattleState:
                     player, intent_seq, False, "equipment_ineligible")
             payload = None
             if effect.get("action") != "set_rpm_limiter":
-                payload = player_critical_mechanics.apply_equipment(
-                    player, effect, now)
+                try:
+                    payload = player_critical_mechanics.apply_equipment(
+                        player, effect, now)
+                    if payload is not None:
+                        payload = _critical_payload(payload)
+                except Exception as error:
+                    # Resolution uses a detached target, before consuming the
+                    # kit or committing critical state. Finish this intent so
+                    # the client can retry with a new trigger after failure.
+                    detail = str(error).replace(
+                        "\r", " ").replace("\n", " ")[:160]
+                    _server_log(
+                        "EQUIPMENT INTENT failed sender=%d seq=%d item=%d "
+                        "error=%s detail=%s" % (
+                            player_id, intent_seq, equipment_id,
+                            type(error).__name__, detail))
+                    return self._finish_equipment_intent(
+                        player, intent_seq, False, "equipment_failed")
                 if payload is None and not effect.get("clearStun", False):
                     return self._finish_equipment_intent(
                         player, intent_seq, False, "equipment_no_effect")
@@ -11529,7 +11620,7 @@ class BattleState:
                     "canonical player equipment commit diverged")
             if payload is not None:
                 self._commit_player_critical_progress(
-                    player, _critical_payload(payload))
+                    player, payload)
             if effect.get("clearStun", False):
                 if not self._clear_vehicle_stun(("player", player_id)):
                     raise RuntimeError("canonical medkit stun clear diverged")
