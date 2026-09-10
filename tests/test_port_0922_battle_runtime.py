@@ -2064,7 +2064,7 @@ def _effective_params_snapshot(mass=25000.0, reload_factor=1.0,
         add_skill('radioman', 'radioman', 'radioman_lasteffort')
     instances = [member['instance'] for member in members]
     return {
-        'version': 1,
+        'version': 2,
         'loadout': {
             'crew_level': 100.0, 'commander_level': 100.0,
             'effective_crew_level': 100.0, 'crew_multiplier': 1.0,
@@ -2110,6 +2110,7 @@ def _effective_params_snapshot(mass=25000.0, reload_factor=1.0,
         'camouflage': {
             'camouflage_id': None, 'base_moving': 0.171,
             'base_still': 0.228, 'shot_factor': 0.1,
+            'paint_bonus': 0.0,
         },
         'skills': {
             'sixth_sense': bool(sixth_sense),
@@ -24826,9 +24827,75 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         # Each client proves only its local human's direct sight. Bot and
         # remote-human sightings arrive through the server-merged team relay,
-        # so three phased enemies cost two static rays apiece instead of the
-        # old 3 enemies x 15 duplicated observers x 2 rays.
-        self.assertEqual([6] * 10, per_update)
+        # and the client now casts the hidden worker's single authority ray
+        # rather than its own two-height variant, so three phased enemies cost
+        # one static ray apiece.
+        self.assertEqual([3] * 10, per_update)
+
+    def test_the_client_casts_the_hidden_worker_authority_ray(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        rays = []
+
+        def collide(unused_space, start, end, mask, *filters):
+            rays.append(((start.x, start.y, start.z),
+                         (end.x, end.y, end.z), mask, len(filters)))
+            return None
+
+        runtime.bigworld.wg_collideSegment = collide
+        observer = _Descriptor()
+        target = _Descriptor()
+        target.computeBaseInvisibility = lambda *unused: (0.0, 0.0)
+        observer_position = (0.0, 1.0, 0.0)
+        target_position = (250.0, 3.0, 0.0)
+
+        battle._bot_visibility(
+            {'x': observer_position[0], 'y': observer_position[1],
+             'z': observer_position[2]},
+            {'position': target_position})
+        battle._spot_line_of_sight(
+            (observer_position, observer, None), target_position,
+            target, False, False)
+
+        # One ray each, same endpoints: a client ray that reached further than
+        # the worker's would draw an enemy the authority never spotted.
+        self.assertEqual(2, len(rays))
+        self.assertEqual(rays[0], rays[1])
+        self.assertEqual(((0.0, 3.0, 0.0), (250.0, 4.5, 0.0), 128, 0),
+                         rays[0])
+
+    def test_a_spotting_ray_carries_one_prepared_broken_skin_filter(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        filters = []
+
+        def collide(unused_space, unused_start, unused_end, unused_mask,
+                    *callbacks):
+            filters.append(callbacks)
+            return None
+
+        runtime.bigworld.wg_collideSegment = collide
+        reject = lambda *unused: False
+        prepare = mock.Mock(return_value=reject)
+        battle._destructibles = types.SimpleNamespace(
+            sight_collision_filter=prepare)
+        clock = [100.0]
+        battle._clock = lambda: clock[0]
+        source = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        target = {'position': (200.0, 0.0, 0.0)}
+
+        battle._bot_visibility(source, target)
+        battle._bot_visibility(source, target)
+        clock[0] += battle_runtime_module.SIGHT_COLLISION_FILTER_SECONDS
+        battle._bot_visibility(source, target)
+
+        # A destroyed fence keeps its native skin all round, so every ray
+        # carries the filter; preparing one per ray would cost more than the
+        # ray, so it is prepared once per interval.
+        self.assertEqual([(reject,)] * 3, filters)
+        self.assertEqual(2, prepare.call_count)
 
     def test_spotting_uses_descriptor_camouflage_and_shot_factor(self):
         runtime = _runtime()

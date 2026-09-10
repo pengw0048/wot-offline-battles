@@ -121,6 +121,20 @@ def destroyed_keys(chunkID):
 	return c['keys'] if c is not None else ()
 
 
+def destroyed_identities():
+	"""Return every accepted ``(chunkID, itemIndex)`` in this space.
+
+	A ray of unbounded length cannot afford a spatial candidate set, and only
+	an already accepted identity is ever hidden from one, so the whole ledger
+	is both exact and small enough to enumerate. Read only.
+	"""
+	result = set()
+	for chunk_id, chunk in (_state.get('chunks', {}) or {}).items():
+		for item_index, unused_mat_kind in chunk.get('keys', ()):
+			result.add((int(chunk_id), int(item_index)))
+	return result
+
+
 def contact_collision_ready(chunkID, itemIndex, matKind=None):
 	c = _state.get('chunks', {}).get(chunkID)
 	return bool(c is not None and

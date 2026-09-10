@@ -421,39 +421,6 @@ def entity_visible_to_minimap(entity):
 	return bool(getattr(entity, '_spot_visible', True))
 
 
-def trimmed_sight_segment(observer, target, observer_height=2.5,
-		target_height=1.5, start_clearance=4.0, end_clearance=4.0):
-	"""Return a world ray that excludes the two vehicle hull volumes.
-
-	The legacy battle creates a ``PyModelObstacle`` for every mock vehicle.  A
-	world ray from centre to centre can therefore hit its shooter immediately or
-	the intended target at the far end and report a blocked lane.  Static-world
-	LOS only needs the part *between* the vehicles.  Very close vehicles have no
-	meaningful middle segment and are considered mutually exposed by returning
-	``None``.
-	"""
-	try:
-		ox = float(observer[0]); oy = float(observer[1]); oz = float(observer[2])
-		tx = float(target[0]); ty = float(target[1]); tz = float(target[2])
-		dx = tx - ox
-		dz = tz - oz
-		distance = math.sqrt(dx * dx + dz * dz)
-		start_clearance = max(0.0, float(start_clearance))
-		end_clearance = max(0.0, float(end_clearance))
-		if distance <= start_clearance + end_clearance + 0.5:
-			return None
-		unit_x = dx / distance
-		unit_z = dz / distance
-		return (
-			(ox + unit_x * start_clearance, oy + float(observer_height),
-			 oz + unit_z * start_clearance),
-			(tx - unit_x * end_clearance, ty + float(target_height),
-			 tz - unit_z * end_clearance),
-		)
-	except Exception:
-		return ()
-
-
 def route_toward_enemy(route, team, bases):
 	"""Orient a multi-point route from the own flag to the enemy flag."""
 	result = dict(route or {})
