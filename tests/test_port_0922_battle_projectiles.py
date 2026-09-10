@@ -5516,6 +5516,7 @@ class BattleProjectileTests(unittest.TestCase):
                 mock.patch.object(
                     battle, '_projectile_he_blast_contact', return_value={
                         'damage': 200, 'collisions': (collision,),
+                        'point': (10.0, 1.0, 0.0),
                         'direction': (1.0, 0.0, 0.0)}), \
                 mock.patch.object(
                     combat_rules, 'damage', return_value=200), \
@@ -5670,6 +5671,7 @@ class BattleProjectileTests(unittest.TestCase):
         with mock.patch.object(
                 battle, '_projectile_he_blast_contact', return_value={
                     'damage': 90, 'collisions': (),
+                    'point': (5.0, 1.0, 0.0),
                     'direction': (1.0, 0.0, 0.0)}), \
                 mock.patch.object(
                     critical_damage, 'propose_explosion',

@@ -342,13 +342,16 @@ class _TurretEntity(object):
 
 class _BigWorld(object):
 
-    def __init__(self, fail_create=False, model=True):
+    def __init__(self, fail_create=False, model=True, defer_enter=False):
         self.entities = {}
+        self.pending = {}
         self.created = []
         self.destroyed = []
+        self.destroy_attempts = []
         self._next_id = 900
         self._fail_create = fail_create
         self._model = model
+        self._defer_enter = defer_enter
 
     def createEntity(self, class_name, space_id, vehicle_id, position,
                      direction, state):
@@ -359,13 +362,24 @@ class _BigWorld(object):
         self._next_id += 1
         entity = _TurretEntity(self._next_id, state, position, direction,
                                self._model)
-        self.entities[self._next_id] = entity
+        if self._defer_enter:
+            self.pending[self._next_id] = entity
+        else:
+            self.entities[self._next_id] = entity
         return self._next_id
+
+    def enter_world(self, entity_id):
+        entity = self.pending.pop(entity_id)
+        self.entities[entity_id] = entity
+        return entity
 
     def entity(self, entity_id):
         return self.entities.get(entity_id)
 
     def destroyEntity(self, entity_id):
+        self.destroy_attempts.append(entity_id)
+        if entity_id in self.pending:
+            raise RuntimeError('pending entity cannot be destroyed before entry')
         self.destroyed.append(entity_id)
         self.entities.pop(entity_id, None)
 
@@ -498,14 +512,60 @@ class DetachedTurretPresentationTest(unittest.TestCase):
         self.assertEqual(presentation.advance(0.5), 0)
         self.assertEqual(presentation.active(), 1)
 
+    def test_async_entry_waits_then_binds_flies_and_lands_once(self):
+        """#1513 returns an ID before prerequisites make entity(id) visible."""
+        bigworld = _BigWorld(defer_enter=True)
+        presentation = self._presentation(bigworld)
+        plan = presentation.prepare(_Vehicle())
+        self.assertTrue(presentation.launch(plan, 77, 10.0))
+        self.assertIsNone(bigworld.entity(901))
+
+        for now in (10.01, 10.1, 10.2):
+            self.assertEqual(presentation.advance(now), 0)
+            self.assertEqual(presentation.active(), 1)
+        entity = bigworld.enter_world(901)
+        self.assertEqual(presentation.advance(10.3), 1)
+        matrix = entity.model.matrix
+        self.assertIsInstance(matrix, _Matrix)
+        initial_position = matrix.translation
+        self.assertEqual(entity.impacts, [])
+        self.assertEqual(presentation.advance(10.6), 1)
+        self.assertIs(entity.model.matrix, matrix)
+        self.assertNotEqual(matrix.translation, initial_position)
+        self.assertEqual(presentation.advance(60.0), 1)
+        self.assertEqual(len(entity.impacts), 1)
+        self.assertEqual(presentation.advance(90.0), 0)
+        self.assertEqual(len(entity.impacts), 1)
+        self.assertEqual(bigworld.destroy_attempts, [])
+        self.assertEqual(self.failures, [])
+
     def test_a_destroyed_entity_is_dropped_without_an_error(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
         plan = presentation.prepare(_Vehicle())
         presentation.launch(plan, 5, 0.0)
+        self.assertEqual(presentation.advance(0.0), 1)
+        entity = bigworld.entity(901)
+        rotations = list(entity.model.matrix.rotations)
         bigworld.entities.clear()
         self.assertEqual(presentation.advance(1.0), 0)
         self.assertEqual(presentation.active(), 0)
+        self.assertEqual(entity.model.matrix.rotations, rotations)
+        self.assertEqual(self.failures, [])
+
+    def test_a_seen_entity_lost_before_model_readiness_is_retired(self):
+        bigworld = _BigWorld(model=False, defer_enter=True)
+        presentation = self._presentation(bigworld)
+        plan = presentation.prepare(_Vehicle())
+        presentation.launch(plan, 5, 0.0)
+        bigworld.enter_world(901)
+        self.assertEqual(presentation.advance(0.1), 0)
+        self.assertEqual(presentation.active(), 1)
+        bigworld.entities.clear()
+
+        self.assertEqual(presentation.advance(0.2), 0)
+        self.assertEqual(presentation.active(), 0)
+        self.assertEqual(bigworld.destroy_attempts, [])
         self.assertEqual(self.failures, [])
 
     def test_one_vehicle_throws_one_turret(self):
@@ -521,12 +581,88 @@ class DetachedTurretPresentationTest(unittest.TestCase):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
         self.assertEqual(presentation.destroy_all(), 0)
+        self.assertEqual(presentation.destroy_all(), 0)
+        presentation = self._presentation(bigworld)
         plan = presentation.prepare(_Vehicle())
         presentation.launch(plan, 5, 0.0)
         self.assertEqual(presentation.destroy_all(), 1)
         self.assertEqual(bigworld.destroyed, [901])
         self.assertEqual(presentation.destroy_all(), 0)
         self.assertEqual(bigworld.destroyed, [901])
+
+    def test_pending_cleanup_waits_for_entry_and_never_starts_the_visual(self):
+        for retry in ('advance', 'destroy_all'):
+            with self.subTest(retry=retry):
+                bigworld = _BigWorld(defer_enter=True)
+                presentation = self._presentation(bigworld)
+                plan = presentation.prepare(_Vehicle())
+                presentation.launch(plan, 5, 0.0)
+
+                self.assertEqual(presentation.destroy_all(), 0)
+                self.assertEqual(presentation.destroy_all(), 0)
+                self.assertEqual(bigworld.destroy_attempts, [])
+                self.assertIsNone(presentation.prepare(_Vehicle(entity_id=18)))
+                self.assertFalse(presentation.launch(plan, 5, 0.1))
+                self.assertEqual(len(bigworld.created), 1)
+
+                entity = bigworld.enter_world(901)
+                if retry == 'advance':
+                    self.assertEqual(presentation.advance(0.2), 0)
+                else:
+                    self.assertEqual(presentation.destroy_all(), 1)
+                self.assertEqual(bigworld.destroyed, [901])
+                self.assertIsNone(entity.model.matrix)
+                self.assertEqual(entity.impacts, [])
+                self.assertEqual(presentation.active(), 0)
+                self.assertEqual(presentation.advance(0.3), 0)
+                self.assertEqual(presentation.destroy_all(), 0)
+                self.assertEqual(bigworld.destroy_attempts, [901])
+                self.assertEqual(self.failures, [])
+
+    def test_cleanup_retires_resident_and_pending_entities_when_each_is_safe(self):
+        bigworld = _BigWorld(defer_enter=True)
+        presentation = self._presentation(bigworld)
+        for vehicle_id in (17, 18):
+            plan = presentation.prepare(_Vehicle(entity_id=vehicle_id))
+            presentation.launch(plan, vehicle_id, 0.0)
+        resident = bigworld.enter_world(901)
+
+        self.assertEqual(presentation.destroy_all(), 1)
+        self.assertEqual(bigworld.destroy_attempts, [901])
+        self.assertIsNone(resident.model.matrix)
+        self.assertIn(902, bigworld.pending)
+        pending = bigworld.enter_world(902)
+        self.assertEqual(presentation.destroy_all(), 1)
+        self.assertEqual(bigworld.destroy_attempts, [901, 902])
+        self.assertIsNone(pending.model.matrix)
+        self.assertEqual(presentation.destroy_all(), 0)
+        self.assertEqual(self.failures, [])
+
+    def test_a_reused_id_never_writes_or_destroys_the_replacement_entity(self):
+        for retire in ('advance', 'destroy_all'):
+            with self.subTest(retire=retire):
+                bigworld = _BigWorld()
+                presentation = self._presentation(bigworld)
+                plan = presentation.prepare(_Vehicle())
+                presentation.launch(plan, 5, 0.0)
+                self.assertEqual(presentation.advance(0.0), 1)
+                old_entity = bigworld.entity(901)
+                rotations = list(old_entity.model.matrix.rotations)
+                replacement = _TurretEntity(
+                    901, {}, _Vector(0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+                bigworld.entities[901] = replacement
+
+                if retire == 'advance':
+                    self.assertEqual(presentation.advance(0.1), 0)
+                else:
+                    self.assertEqual(presentation.destroy_all(), 0)
+                self.assertEqual(presentation.active(), 0)
+                self.assertEqual(presentation.destroy_all(), 0)
+                self.assertIs(bigworld.entity(901), replacement)
+                self.assertIsNone(replacement.model.matrix)
+                self.assertEqual(old_entity.model.matrix.rotations, rotations)
+                self.assertEqual(bigworld.destroy_attempts, [])
+                self.assertEqual(self.failures, [])
 
 
 class HandshakeOrderTest(unittest.TestCase):

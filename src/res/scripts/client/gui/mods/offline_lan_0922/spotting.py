@@ -25,6 +25,32 @@ LAST_EFFORT_SECONDS = 2.0
 MOVING_SPEED_EPSILON = 0.5
 SHOT_CAMOUFLAGE_SECONDS = 0.75
 
+# The client package does not carry the cell-app detection implementation.
+# Preserve the existing cap instead of treating a published maximum as an
+# exact #1513 calibration for this port's single-ray coverage approximation.
+CAMOUFLAGE_LIMIT = 0.95
+# Preserve the existing tuning until exact per-asset density and coverage are
+# available. Published vegetation values vary by density; a single ray through
+# an enclosing volume cannot justify assigning every asset the maximum value.
+# These retained values are not claimed as #1513 server constants.
+FOLIAGE_CAMOUFLAGE_PER_VOLUME = 0.15
+FOLIAGE_CAMOUFLAGE_LIMIT = 0.60
+# Soft cover this close to a vehicle is transparent to that vehicle, so its own
+# bush conceals it without blinding it. Retain the existing full removal of
+# nearby foliage after firing; the exact residual coefficient is unverified.
+FOLIAGE_TRANSPARENCY_DISTANCE = 15.0
+
+# One owner for the spotting ray's geometry.  The hidden worker decides
+# spotting and the visible client samples the same pair for its own
+# presentation, so a client ray that is even slightly more permissive draws an
+# enemy the authority never spotted: no spotting credit, no Bot reaction, and
+# no warning for the target.  The vegetation query uses the same two heights.
+OBSERVER_EYE_HEIGHT = 2.0
+TARGET_CHECK_HEIGHT = 1.5
+# Retain the authority ray's existing allowance for a hit near the target
+# endpoint. This tolerance does not identify the native surface that was hit.
+SIGHT_END_TOLERANCE = 1.5
+
 
 def clamp(value, minimum, maximum):
 	return max(float(minimum), min(float(maximum), float(value)))
@@ -64,11 +90,14 @@ def base_camouflage(moving_base, still_base, crew_factor=0.57,
 def effective_camouflage(base_pair, moving=False, additive=0.0,
 		multiplier=1.0, shot_factor=1.0, fired_recently=False,
 		foliage_bonus=0.0):
-	"""#1513 ``utils.getInvisibility`` plus the shot and foliage terms.
+	"""#1513 ``utils.getInvisibility`` plus the shot and vegetation terms.
 
 	``additive`` and ``multiplier`` are the aspect the caller resolved from
 	``factors['invisibility']``: the camouflage net lives in the stationary
-	aspect only.
+	aspect only. The exact ``VehicleParams.__getInvisibilityValues`` consumer
+	multiplies the complete ``getClientInvisibility`` moving/still values by
+	``invisibilityFactorAtShot``. Those values already include paint and the
+	resolved device aspect, so all of them retain that shot factor here.
 	"""
 	if not isinstance(base_pair, (list, tuple)) or len(base_pair) < 2:
 		base_pair = (0.0, 0.0)
@@ -77,14 +106,14 @@ def effective_camouflage(base_pair, moving=False, additive=0.0,
 		0.0, float(multiplier or 0.0))
 	if fired_recently:
 		result *= clamp(shot_factor, 0.0, 1.0)
-	result += clamp(foliage_bonus, 0.0, 0.60)
-	return clamp(result, 0.0, 0.95)
+	result += clamp(foliage_bonus, 0.0, FOLIAGE_CAMOUFLAGE_LIMIT)
+	return clamp(result, 0.0, CAMOUFLAGE_LIMIT)
 
 
 def detection_distance(view_range, camouflage):
 	"""Apply #1513's 50 metre floor and 445 metre spotting ceiling."""
 	view_range = max(PROXIMITY_SPOT_DISTANCE, float(view_range or 0.0))
-	camouflage = clamp(camouflage, 0.0, 0.95)
+	camouflage = clamp(camouflage, 0.0, CAMOUFLAGE_LIMIT)
 	distance = view_range - (
 		view_range - PROXIMITY_SPOT_DISTANCE) * camouflage
 	return clamp(distance, PROXIMITY_SPOT_DISTANCE, MAX_SPOT_DISTANCE)

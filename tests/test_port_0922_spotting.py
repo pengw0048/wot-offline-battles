@@ -34,6 +34,29 @@ class SpottingTests(unittest.TestCase):
 
         self.assertAlmostEqual((0.30 + 0.10) * 0.25 + 0.15, result)
 
+    def test_firing_scales_paint_and_net_as_the_exact_gui_consumer_does(self):
+        # VehicleParams.__getInvisibilityValues consumes the complete
+        # getClientInvisibility pair, then applies invisibilityFactorAtShot.
+        # 3% paint plus 10% net becomes 3.25% at a 0.25 shot factor.
+        result = spotting.effective_camouflage(
+            (0.03, 0.03), moving=False, additive=0.10,
+            shot_factor=0.25, fired_recently=True)
+        self.assertAlmostEqual(0.0325, result)
+
+    def test_geometry_changes_preserve_the_existing_concealment_tuning(self):
+        self.assertEqual(0.15, spotting.FOLIAGE_CAMOUFLAGE_PER_VOLUME)
+        self.assertEqual(0.60, spotting.FOLIAGE_CAMOUFLAGE_LIMIT)
+        self.assertEqual(0.95, spotting.CAMOUFLAGE_LIMIT)
+        self.assertAlmostEqual(0.60, spotting.effective_camouflage(
+            (0.0, 0.0), foliage_bonus=0.95))
+        self.assertAlmostEqual(0.95, spotting.effective_camouflage(
+            (0.0, 0.40), additive=0.10, foliage_bonus=0.80))
+
+    def test_one_owner_publishes_the_spotting_ray_geometry(self):
+        from gui.mods.offline_lan_0922 import foliage
+        self.assertEqual(spotting.OBSERVER_EYE_HEIGHT, foliage.OBSERVER_EYE_HEIGHT)
+        self.assertEqual(spotting.TARGET_CHECK_HEIGHT, foliage.TARGET_CHECK_HEIGHT)
+
     def test_detection_distance_keeps_floor_and_ceiling(self):
         self.assertEqual(67.5, spotting.detection_distance(400.0, 0.95))
         self.assertEqual(225.0, spotting.detection_distance(400.0, 0.5))

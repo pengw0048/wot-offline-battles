@@ -1964,13 +1964,52 @@ render loop to 20 Hz and 45/50/75 FPS to 22.5/25/25 Hz. At most one current
 pose is sent per rendered frame, so recovery from a slow frame never bursts
 stale samples.
 
-The player-visible spotting path derives its 50-metre proximity, two-height
-static LOS and allied observer relay from the retired predecessor. Its
+The player-visible spotting path derives its 50-metre proximity, static LOS
+and allied observer relay from the retired predecessor. Its
 deterministic no-skill memory uses the historical 5--10 second rule's
 guaranteed ten-second
 disappearance bound. Enemy
 compound models and their stock marker/minimap visuals cross one visibility
 boundary, so an unspotted vehicle cannot remain visible in only one UI layer.
+
+The exact #1513 `gui/shared/items_parameters/params.pyc` consumer
+`VehicleParams.__getInvisibilityValues` (source lines 599--610) calls
+`items.utils.getClientInvisibility` and then multiplies both returned values
+by `gun.invisibilityFactorAtShot`. `getClientInvisibility` already includes
+`computeBaseInvisibility`'s paint bonus and the resolved camouflage-net aspect.
+The port keeps that complete-value shot factor and effective-parameters schema
+v1. A published formula that exempts paint or the net is not substituted for
+this directly observed client consumer. This proves the client parameter
+composition, not the unavailable cell-app detection implementation.
+
+The worker and visible client use the same existing worker LOS endpoints and
+end tolerance. Both carry the exact-identity broken-skin filter, so an accepted
+broken fence skin can yield while an unrelated wall or surviving replacement
+surface still blocks. The prepared filter is reused for at most 0.25 seconds;
+round teardown clears it. Target stationary clocks are sampled each visibility
+frame even when an observer-target pair is deferred by the native-ray budget.
+
+Cover within 15 metres of the observer is transparent to that observer,
+following [WG's spotting guidance](https://wargaming.net/support/en/products/wot/article/10222/?redirect_lang=en).
+The guidance is current and does not establish an exact #1513 server contract.
+For static foliage, the distance and its early-rejection radius use the actual
+baked horizontal parallelogram: projected axes can be non-orthogonal, and the
+source box radius need not enclose that footprint. Fallen-tree proximity still
+uses a conservative horizontal-radius approximation. Vegetation coefficients
+remain the existing 0.15 per volume, 0.60 combined limit, 0.95 total concealment
+limit and complete removal of nearby foliage after firing. These are retained
+port settings, not claimed retail constants. [The official 7.5 update notes](https://worldoftanks.com/en/news/general-news/75-update-note/)
+confirm that bush density matters; they do not justify assigning every volume
+the same maximum coefficient. [WG's later Berlin map-development article](https://worldoftanks.eu/en/news/general-news/berlin-map-development/)
+distinguishes dense vegetation at 50 percent from sparse vegetation at 25
+percent; it is not evidence that every #1513 asset should receive 50 percent.
+The exact tree cache also reads a per-resource `density` with values from 0
+to 0.50, separately from falling-tree mass and other physics parameters.
+Its use as the final spotting addend has not been established by the reviewed
+Python consumers, so it is not substituted for that addend here.
+Foliage catalogs remain schema v4. Single-ray
+coverage, per-asset camouflage, native filtering and actual Windows spotting
+behavior remain outside the local contract evidence.
 
 That single boundary was not sufficient. Windows playtesting reported a green
 penetration indicator, ground dust and a visible silhouette for an unspotted
@@ -2279,6 +2318,17 @@ archetype. A small per-piece BVH is built lazily with the cached layout.
 
 `BattleRuntime._vehicle_trace` still limits solid-shell travel to ten calibres
 from the first vehicle material. HE uses its separate finite interior cone.
+For non-penetrating HE and nearby explosions, that cone starts at the proved
+structural contact selected by the blast search, not at the outside explosion
+position; visuals and other victims still use the original world burst. If no
+structural surface is reachable, only native device contacts up to the shell's
+stopping point survive. The historical official
+[HE explanation](https://worldoftanks.com/en/news/general-news/high-explosive-damage-explanation/)
+describes internal damage for penetrations and near misses, so both retain the
+explosion path. It does not establish the precise module-damage attenuation
+formula or whether its stated 45-degree cone uses a full or half angle. The
+existing angle, depth, and device roll remain reconstruction boundaries; hull
+HP loss is not evidence for a new proportional module-damage multiplier.
 The critical loop scores each reached device once using `damage[1]`; this
 change does not alter saving throws, ammunition bookkeeping or damage rolls.
 The current device roll is uniform within +/-25%; available client contracts
@@ -2433,6 +2483,23 @@ model state, and it keeps that native call from happening at all. An unseen
 target detaches nothing: retail has no `DetachedTurret` in AOI for a vehicle
 never spotted. A missing exploded model, a full turret budget or a failed
 `createEntity` leaves exactly the -5 burn-off wreck the port produced before.
+
+The synchronous constructor handshake is separate from asynchronous world
+entry. Exact `DetachedTurret.prerequisites` returns a `CompoundAssembler` and
+the vehicle descriptor's resources; `onEnterWorld(prereqs)` installs the
+assembled model. As with client-created Vehicles, a returned id can therefore
+precede `BigWorld.entity(id)`. Presentation retains this pending id until it
+appears, then binds the model at the elapsed point on the frozen arc. Only an
+already observed entity disappearing retires its animation; a reused id never
+authorizes writes to or destruction of a different entity. Closing presentation
+retains pending retirement records, retries them during the existing teardown
+poll, and leaves remaining prerequisite loads to battle-space retirement. It
+never calls `destroyEntity` for an id the engine does not yet own. One `TURRET`
+creation line and one binding line record the vehicle, entity and load delay.
+Regressions reproduce the old first-frame loss with an id that becomes visible
+only after loading. The reported FV4005 match's installed bytecode matched the
+reviewed source, but its logs lacked these lifecycle transitions; this confirms
+a reproducible adapter defect, not native Windows flight acceptance.
 
 A late ammo-bay cause can arrive after the ordinary death edge. It now admits
 one detachment from the existing wreck's turret pose, even though the health
@@ -2904,8 +2971,10 @@ The source audit deliberately keeps the following differences visible:
   `Avatar.updateVehicleOptionalDeviceStatus`, and this client ships no cell
   script, so the port uses its own speed threshold with the client's 3.0 second
   delay; the camouflage paint bonus
-  (`invisibilityDeltas['camouflageBonus']`) and `invisibilityDeltas`
-  `firePenalty` are still not applied;
+  (`invisibilityDeltas['camouflageBonus']`) is included in the client's own
+  `computeBaseInvisibility` pair and keeps the exact GUI consumer's shot
+  factor, while `invisibilityDeltas` `firePenalty` and radio-range gating of
+  the team's shared intelligence are still not applied;
 - the server publishes terminal winner/reason/base team plus live frags and the
   human team-killer flag, but not the retired predecessor's complete
   `personal`/`players`/`vehicles` battle-result record;

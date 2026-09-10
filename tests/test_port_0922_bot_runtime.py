@@ -7908,6 +7908,62 @@ class BotRuntimeTests(unittest.TestCase):
                 self.assertEqual(remembered['position'],
                                  lookup[25]['position'])
 
+    def test_deferred_target_motion_restarts_bot_and_human_camouflage_nets(self):
+        probes = []
+        runtime = self.module.BotRuntime(
+            1, visibility_probe=lambda source, target, fired=False: (
+                probes.append((target['kind'], target['id'])) or True))
+        source = {
+            'id': 11, 'team': 1, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 0.0, 'speed': 0.0,
+            'view_range': 445.0,
+        }
+        bot = {
+            'id': 25, 'kind': 'bot', 'team': 2, 'alive': True,
+            'x': 0.0, 'y': 0.0, 'z': 400.0, 'speed': 0.0,
+        }
+        # Use the same numeric id so both authority namespaces must reset.
+        human = dict(bot, kind='human')
+        runtime.states = {11: source, 25: bot}
+        profile = _effective_params_snapshot()['spotting']
+        profile.update(
+            has_camouflage_net=True, camouflage_net_delay=3.0,
+            invisibility_moving=(0.0, 1.0),
+            invisibility_still=(0.2, 1.0))
+        profile_calls = []
+
+        def spotting_profile(*unused):
+            profile_calls.append(True)
+            return (0.05, 0.05), 0.1, profile
+
+        runtime._spotting_profile = spotting_profile
+
+        def sample(now, speed, budget):
+            bot['speed'] = human['speed'] = speed
+            runtime._begin_visibility_frame()
+            runtime._visibility_frame['budget'] = budget
+            runtime._prepare_visibility_frame([human], now, False)
+            values = [runtime._visible(source, target, now, {})
+                      for target in (bot, human)]
+            runtime._finish_visibility_frame()
+            return values
+
+        budget = self.module.MAX_VISIBILITY_PROBES_PER_FRAME
+        self.assertEqual([True, True], sample(1.0, 0.0, budget))
+        self.assertEqual([False, False], sample(4.1, 0.0, budget))
+        profiles_before_deferral = len(profile_calls)
+        probes_before_deferral = len(probes)
+
+        # Both pairs are denied before camouflage projection while the live
+        # targets move and stop. The frame sampler must still reset the clock.
+        self.assertEqual([False, False], sample(5.0, 10.0, 0))
+        self.assertEqual([False, False], sample(6.0, 0.0, 0))
+        self.assertEqual(profiles_before_deferral,
+                         len(profile_calls))
+        self.assertEqual(probes_before_deferral, len(probes))
+        self.assertEqual([True, True], sample(6.1, 0.0, budget))
+        self.assertEqual([False, False], sample(9.1, 0.0, budget))
+
     def test_worker_visibility_diagnostics_measure_queue_debt_and_reset(self):
         command = self._stationary_command()
         roster = [
@@ -15090,6 +15146,37 @@ class BotRuntimeTests(unittest.TestCase):
         # impossible middle ray and leaves the remaining order unchanged.
         self.assertEqual([2, 4], probes)
         self.assertEqual(2, runtime.probe_totals()[0])
+
+    def test_visibility_upper_bound_keeps_native_aspect_pairs(self):
+        for additive, multiplier, distance, visible in (
+                (0.1, 0.25, 380.0, True),
+                (0.1, 1.0, 280.0, False)):
+            with self.subTest(additive=additive, multiplier=multiplier):
+                probes = []
+                runtime = self.module.BotRuntime(
+                    1, descriptor_resolver=lambda unused: _combat_descriptor(),
+                    visibility_probe=lambda source, target, fired=False: (
+                        probes.append(target['network_id']) or True))
+                source = {
+                    'id': 11, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+                    'view_range': 445.0,
+                }
+                target = _admit_player({
+                    'id': self.module.HUMAN_TARGET_ID_BASE + 2,
+                    'kind': 'human', 'network_id': 2,
+                    'vehicle': 'ussr:R11_MS-1',
+                    'position': (0.0, 0.0, distance),
+                    'speed': 0.0, 'fire_seq': 0,
+                }, base_moving=0.4, base_still=0.4)
+                dynamic = target['effective_params']['crew']['dynamic_spotting']
+                for row in dynamic['states'].values():
+                    row['invisibility_moving'] = [additive, multiplier]
+                    row['invisibility_still'] = [additive, multiplier]
+
+                # The 0.25 multiplier permits the first ray. The additive
+                # term makes the second pair impossible even with clear LOS.
+                self.assertEqual(visible, runtime._visible(source, target, 1.0))
+                self.assertEqual([2] if visible else [], probes)
 
     def test_visibility_upper_bound_retains_24_fps_cache_and_shot_refresh(self):
         descriptor = _combat_descriptor()

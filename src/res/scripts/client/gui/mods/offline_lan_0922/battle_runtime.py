@@ -104,6 +104,11 @@ SPOTTING_PROBE_SECONDS = 0.50
 SPOTTING_PHASE_BUCKETS = 5
 FALLEN_TREE_FOLIAGE_REFRESH_SECONDS = 0.10
 FALLEN_TREE_FOLIAGE_STABLE_READS = 3
+# How long one prepared broken-skin filter serves every spotting ray.
+# Rebuilding it per ray would cost more than the ray; the callback
+# resolves each hit against the live ledger, so the only staleness is a
+# just-broken item that keeps blocking for at most this long.
+SIGHT_COLLISION_FILTER_SECONDS = 0.25
 # Stock client code can republish the server half of a space visibility mask
 # after the local map has entered the battle.  Read it infrequently and only
 # write when it no longer selects this arena's gameplay.
@@ -1842,6 +1847,8 @@ class BattleRuntime(object):
         self._next_outline_report = 0.0
         self._next_spotting_time = 0.0
         self._foliage = None
+        self._sight_filter = None
+        self._sight_filter_built_at = None
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}
@@ -2137,6 +2144,8 @@ class BattleRuntime(object):
         self._overturn_started = None
         self._next_spotting_time = 0.0
         self._foliage = None
+        self._sight_filter = None
+        self._sight_filter_built_at = None
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}
@@ -3092,9 +3101,11 @@ class BattleRuntime(object):
             # this one startup callback; bot presentation staggering is a
             # separate later phase and never throttles this prewarm.
             lineup_ready = self._prepare_bot_vehicle_assignments(descriptor)
-            if self._start_message.get('bot_lineup') and not lineup_ready:
+            if (self._start_message.get('bot_lineup') or
+                    self._start_message.get('bot_excluded_vehicles')) and \
+                    not lineup_ready:
                 raise RuntimeError(
-                    'the exact Bot lineup is not available in this client')
+                    'the configured Bot roster is not available in this client')
             prewarm_enabled = getattr(
                 self._remote_factory, 'prewarm_wrecks_enabled', None)
             if callable(prewarm_enabled) and prewarm_enabled():
@@ -4633,6 +4644,8 @@ class BattleRuntime(object):
             tier = int(player_profile['level'])
             tier_mode = bot_planner.normalize_bot_tier_mode(
                 self._start_message.get('bot_tier_mode'))
+            excluded_names = set(
+                self._start_message.get('bot_excluded_vehicles') or ())
             all_candidates = []
             for nation in self._runtime.nations.AVAILABLE_NAMES:
                 nation_id = self._runtime.nations.INDICES[nation]
@@ -4649,6 +4662,14 @@ class BattleRuntime(object):
             ]
             if not candidates:
                 return False
+            automatic_candidates = [candidate for candidate in candidates
+                                    if candidate['name'] not in excluded_names]
+            if automatic_candidates:
+                candidates = automatic_candidates
+            # If every candidate was excluded, retain the template shape only
+            # until explicit slot overrides below can fill a fully pinned team.
+            # The final automatic pool and completeness check still forbid a
+            # fallback to an excluded player tank.
             candidates.sort(key=lambda value: (
                 int(value.get('level', 0)),
                 self._vehicle_class_order(value),
@@ -4733,18 +4754,26 @@ class BattleRuntime(object):
             template = bot_planner.build_match_template(
                 candidates, team_size, player_profile, match_tiers,
                 lineup_random, requirements)
+            automatic_candidates = [
+                candidate for candidate in candidates
+                if candidate['name'] not in excluded_names]
 
             assignments = {}
             for team in (1, 2):
                 team_bots = bots_by_team[team]
                 picked = bot_planner.remaining_match_template(
                     template, humans_by_team[team])
+                # Human tier/class reservations may mirror their exact tank.
+                # Apply profile exclusions after removing human slots so that
+                # those reservations cannot put an edited tank back in a Bot.
+                picked = [entry for entry in picked
+                          if entry['name'] not in excluded_names]
                 # Apply the bot-only quota after removing human slots. A human
                 # SPG must not force mirrored artillery onto the opposing bots.
                 # Explicit lineup overrides below retain the host's choices.
                 picked = bot_planner.select_bot_lineup(
-                    picked or candidates, len(team_bots), spg_limit=0,
-                    fallback_candidates=candidates)
+                    picked or automatic_candidates, len(team_bots),
+                    spg_limit=0, fallback_candidates=automatic_candidates)
                 picked = list(picked[:len(team_bots)])
                 lineup_random.shuffle(picked)
                 picked.sort(key=self._vehicle_class_order)
@@ -4753,6 +4782,8 @@ class BattleRuntime(object):
                         entry['name']
             allowed_names = set(
                 candidate['name'] for candidate in all_candidates)
+            bot_slots = set((team, int(raw.get('slot', 0)))
+                            for team in (1, 2) for raw in bots_by_team[team])
             for raw in self._start_message.get('bot_lineup') or ():
                 if not isinstance(raw, dict):
                     self._bot_vehicle_assignments = {}
@@ -4774,8 +4805,11 @@ class BattleRuntime(object):
                 if vehicle not in allowed_names:
                     self._bot_vehicle_assignments = {}
                     return False
-                if (team, slot) in assignments:
+                if (team, slot) in bot_slots:
                     assignments[(team, slot)] = vehicle
+            if excluded_names and set(assignments) != bot_slots:
+                self._bot_vehicle_assignments = {}
+                return False
             self._bot_vehicle_assignments = assignments
             return True
         except Exception:
@@ -14449,7 +14483,19 @@ class BattleRuntime(object):
         if blast_contact is not None:
             layers = combat_rules.collision_layers(
                 blast_contact['collisions'])
+            # The internal cone starts where the blast reached the hull.
+            # Its ten-calibre depth must not be spent crossing the outside
+            # gap from a screen or the original, thicker impact plate.
+            critical_impact = self._vector(blast_contact['point'])
             explosion_direction = self._vector(blast_contact['direction'])
+        elif is_he and int(result) != 2:
+            # No blast ray established a reachable structural surface.
+            # Keep only native devices reached by the stopped shell; its
+            # remaining query chord is not evidence of internal blast damage.
+            stop_distance = (contact['distance'] if contact is not None else
+                             min(layer[0] for layer in layers))
+            layers = tuple(layer for layer in layers
+                           if layer[0] <= stop_distance + 0.000001)
         critical = None
         critical_delta = {}
         if int(result) == 0:
@@ -14572,7 +14618,6 @@ class BattleRuntime(object):
             return []
         if combat_rules.he_radius(shot) <= 0.0:
             return []
-        burst = self._vector(impact)
         legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
         effects = []
         for key, record in tuple(self._records.items()):
@@ -14630,7 +14675,8 @@ class BattleRuntime(object):
                     critical_damage.propose_explosion(
                         critical_target,
                         combat_rules.collision_layers(contact['collisions']),
-                        burst, self._vector(contact['direction']), hull_damage,
+                        self._vector(contact['point']),
+                        self._vector(contact['direction']), hull_damage,
                         legacy_shell,
                         int(getattr(source, 'id', meta.get('shooter_id', 0))),
                         deadeye=bool(_field(shot, 'deadeye', False)),
@@ -20851,18 +20897,70 @@ class BattleRuntime(object):
                 self._remote_factory.track_animation_error))
         return True
 
+    def _sight_collision_filter(self):
+        """Return the broken-skin filter every spotting ray shares.
+
+        A destroyed fence keeps its native skin in the world for the rest of
+        the round, so an unfiltered mask-128 ray goes on treating it as cover.
+        The filter is rebuilt on a short interval rather than per ray:
+        spotting is the highest-volume ray consumer in the worker, and the
+        callback resolves each hit against the live ledger anyway, so the only
+        staleness is a fence that keeps blocking for at most one interval
+        after it breaks.
+        """
+        if self._destructibles is None:
+            return None
+        now = self._clock()
+        if (self._sight_filter_built_at is not None and
+                now - self._sight_filter_built_at <
+                SIGHT_COLLISION_FILTER_SECONDS and
+                now >= self._sight_filter_built_at):
+            return self._sight_filter
+        probe = getattr(self._destructibles, 'sight_collision_filter', None)
+        if not callable(probe):
+            self._sight_filter = None
+            self._sight_filter_built_at = now
+            return None
+        try:
+            prepared = probe()
+        except Exception:
+            prepared = None
+        self._sight_filter = prepared if callable(prepared) else None
+        self._sight_filter_built_at = now
+        return self._sight_filter
+
+    def _spot_segment_clear(self, observer_position, target_position):
+        """Static-world line of sight for one spotting pair.
+
+        The hidden worker owns spotting and the visible client samples the
+        same pair for its own presentation, so both cast this one ray. A more
+        permissive client ray would draw an enemy the authority never spotted.
+        """
+        start = self._vector((
+            observer_position[0],
+            observer_position[1] + spotting.OBSERVER_EYE_HEIGHT,
+            observer_position[2]))
+        end = self._vector((
+            target_position[0],
+            target_position[1] + spotting.TARGET_CHECK_HEIGHT,
+            target_position[2]))
+        broken_filter = self._sight_collision_filter()
+        if broken_filter is None:
+            hit = self._runtime.bigworld.wg_collideSegment(
+                self._avatar.spaceID, start, end, 128)
+        else:
+            hit = self._runtime.bigworld.wg_collideSegment(
+                self._avatar.spaceID, start, end, 128, broken_filter)
+        return bool(
+            hit is None or
+            (hit[0] - start).length + spotting.SIGHT_END_TOLERANCE >=
+            (end - start).length)
+
     def _bot_visibility(self, source, target, fired_recently=False):
         source_position = _xyz(source)
         target_position = target.get('position') or _xyz(target)
-        start = self._vector((source_position[0], source_position[1] + 2.0,
-                              source_position[2]))
-        end = self._vector((target_position[0], target_position[1] + 1.5,
-                            target_position[2]))
-        hit = self._runtime.bigworld.wg_collideSegment(
-            self._avatar.spaceID, start, end, 128)
-        line_of_sight = bool(
-            hit is None or
-            (hit[0] - start).length + 1.5 >= (end - start).length)
+        line_of_sight = self._spot_segment_clear(
+            source_position, target_position)
         foliage_bonus = 0.0
         if line_of_sight and self._foliage is not None:
             foliage_bonus = self._foliage_camouflage_bonus(
@@ -23226,24 +23324,7 @@ class BattleRuntime(object):
             return True
         if distance > spotting.MAX_SPOT_DISTANCE:
             return False
-        for target_height in (1.5, 2.2):
-            segment = bot_planner.trimmed_sight_segment(
-                observer_position, target, 2.5, target_height)
-            if segment is None:
-                has_line_of_sight = True
-                break
-            if not segment:
-                continue
-            start, end = segment
-            hit = self._runtime.bigworld.wg_collideSegment(
-                self._avatar.spaceID,
-                self._vector(start), self._vector(end), 128)
-            if hit is None:
-                has_line_of_sight = True
-                break
-        else:
-            has_line_of_sight = False
-        if not has_line_of_sight:
+        if not self._spot_segment_clear(observer_position, target):
             return False
         foliage_bonus = self._foliage_camouflage_bonus(
             observer_position, target, fired_recently)
@@ -24470,9 +24551,9 @@ class BattleRuntime(object):
                     '[Offline LAN 0.9.22] deferred lobby Account restored\n')
             self._retired_native_owners = []
             # Cross the native teardown boundary and release its retained
-            # Python owners before collecting, so nothing traverses a native
-            # object this round still owned. The token above also excludes
-            # cancelled or repeated callbacks.
+            # Python owners before collecting. The token above also excludes
+            # cancelled or repeated callbacks; this ordering alone does not
+            # establish native GC traversal safety.
             gc_sweep.sweep('round_end', round_identity)
             if callable(on_complete):
                 try:
@@ -24550,8 +24631,9 @@ class BattleRuntime(object):
             # Detached turrets are separate client-created entities holding a
             # compound each.  Retire them at the synchronous leaveArena
             # boundary, before the Hangar app can replace the battle space.
-            # ``destroy_all`` is harmless after a partial start and safe to
-            # call twice.
+            # Pending prerequisite loads are not engine-owned yet.  Keep
+            # their tombstones for the second quiesce in _cleanup; the battle
+            # space retirement there cancels any loads still pending.
             try:
                 self._detached_turrets.destroy_all()
             except Exception as error:
@@ -24934,6 +25016,8 @@ class BattleRuntime(object):
         self._prebattle_deadline = None
         self._next_spotting_time = 0.0
         self._foliage = None
+        self._sight_filter = None
+        self._sight_filter_built_at = None
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}

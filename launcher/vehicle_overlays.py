@@ -2705,6 +2705,10 @@ def _validate_profile_store(value):
         if not isinstance(profile.get("members"), list):
             raise VehicleOverlayError(
                 "A vehicle profile member list is invalid.")
+        if not isinstance(profile.get("excludeEditedVehiclesFromBots", False),
+                          bool):
+            raise VehicleOverlayError(
+                "The vehicle profile Bot exclusion option must be a boolean.")
         _profile_manifest(profile)
     return value
 
@@ -2867,6 +2871,136 @@ def _profile_index(store, profile_name):
     return matches[0]
 
 
+def _profile_changed_fields(profile, source_root):
+    """Return actual numeric changes, including normalized string scalars."""
+    changed = set()
+    for entry in profile["members"]:
+        member = entry["sourceMember"]
+        root = source_root(member)
+        for edit in entry["edits"]:
+            field_path = edit["fieldPath"]
+            rule = _field_rule(member, field_path)
+            original = _find_value(root, field_path)
+            _validate_original(original, rule)
+            original_value = _manifest_scalar(original)
+            if (edit["originalPackedType"] !=
+                    _TYPE_NAMES.get(original.value_type) or
+                    not _same_recorded_value(
+                        edit["originalValue"], original_value,
+                        original.value_type)):
+                raise VehicleOverlayError(
+                    "The original package contract changed for this saved edit.")
+            unused_original, normalized_original = _parse_replacement(
+                original_value, original, rule)
+            unused_replacement, normalized_replacement = _parse_replacement(
+                edit["replacementValue"], original, rule)
+            if normalized_original != normalized_replacement:
+                changed.add((member, field_path))
+    return changed
+
+
+def _profile_component_uses(root, shared_components, guns_root):
+    """Index component occurrences and their local overrides once per mode."""
+    uses = _vehicle_shared_component_occurrences(root, shared_components)
+    uses["guns"] = _vehicle_local_gun_overrides(root)
+    references = _vehicle_component_references(root, shared_components)
+    uses["turrets"] = dict((name, (set(),))
+                          for name in references["turrets"])
+    if guns_root is not None:
+        shells = _gun_shell_references(guns_root, references["guns"])
+        # The exact client also has vehicle-local shots on Observer.
+        for occurrences in uses["guns"].values():
+            for paths in occurrences:
+                shells.update(path.split("/")[1] for path in paths
+                              if path.startswith("shots/"))
+        uses["shells"] = dict((name, (set(),)) for name in shells)
+    return uses
+
+
+def profile_bot_excluded_vehicles(game_root, profile_name):
+    """List canonical Bot names affected by an opted-in profile's edits."""
+    if profile_name is None or profile_name == "":
+        return []
+    status, package_path = _require_target(game_root)
+    store, unused_exists = _load_profile_store(status["path"])
+    profile = store["profiles"][_profile_index(store, profile_name)]
+    if (not profile.get("excludeEditedVehiclesFromBots", False) or
+            not profile["members"]):
+        return []
+
+    try:
+        with zipfile.ZipFile(package_path, "r") as archive:
+            counts = {}
+            for info in archive.infolist():
+                counts[info.filename] = counts.get(info.filename, 0) + 1
+            roots = {}
+
+            def source_root(member):
+                if member not in roots:
+                    if counts.get(member) != 1:
+                        raise VehicleOverlayError(
+                            "A vehicle topology member is missing or repeated: "
+                            "%s" % member)
+                    roots[member] = packed_xml.read_packed_xml(
+                        archive.read(member))
+                return roots[member]
+
+            changed = _profile_changed_fields(profile, source_root)
+            if not changed:
+                return []
+            nations = set(member.split("/")[3] for member, unused in changed)
+            affected = set()
+            for nation in sorted(nations):
+                roster = _vehicle_roster_from_archive(
+                    archive, counts, nation=nation)
+                component_roots = {}
+                component_edits = []
+                for member, field_path in sorted(changed):
+                    match = _COMPONENT_MEMBER.fullmatch(member)
+                    if match is not None and match.group(1) == nation:
+                        category = match.group(2)
+                        component_roots[category] = source_root(member)
+                        component_edits.append((
+                            category, _component_name(category, field_path),
+                            "/".join(_field_parts(field_path)[
+                                1 if category == "shells" else 2:])))
+                guns_member = (
+                    "scripts/item_defs/vehicles/%s/components/guns.xml" %
+                    nation)
+                guns_root = (source_root(guns_member)
+                             if any(edit[0] == "shells"
+                                    for edit in component_edits) else None)
+                shared_components = dict(
+                    (category, _shared_component_names(root))
+                    for category, root in component_roots.items())
+                direct_members = set(member for member, unused in changed
+                                     if _VEHICLE_MEMBER.fullmatch(member))
+                for record in roster:
+                    members = [record["member"]]
+                    peer = _siege_peer_member(record["member"])
+                    if counts.get(peer, 0):
+                        members.append(peer)
+                    for member in members:
+                        uses = (_profile_component_uses(
+                            source_root(member), shared_components, guns_root)
+                            if component_edits else {})
+                        if (member in direct_members or any(
+                                any(suffix not in overrides for overrides in
+                                    uses.get(category, {}).get(component, ()))
+                                for category, component, suffix
+                                in component_edits)):
+                            affected.add(bot_lineup_profiles.vehicle_type_name(
+                                record))
+                            break
+            return sorted(affected)
+    except VehicleOverlayError:
+        raise
+    except (IOError, OSError, KeyError, TypeError, ValueError,
+            zipfile.BadZipFile) as error:
+        raise VehicleOverlayError(
+            "The original vehicle topology is unreadable: %s" % error)
+
+
 def list_vehicle_profiles(game_root):
     """List saved profiles without materializing anything into res_mods."""
     status, unused_package = _require_target(game_root)
@@ -2874,6 +3008,28 @@ def list_vehicle_profiles(game_root):
     return sorted(
         (profile["name"] for profile in store["profiles"]),
         key=lambda name: name.casefold())
+
+
+def get_vehicle_profile_options(game_root, profile_name):
+    status, unused_package = _require_target(game_root)
+    store, unused_exists = _load_profile_store(status["path"])
+    profile = store["profiles"][_profile_index(store, profile_name)]
+    return {"excludeEditedVehiclesFromBots": profile.get(
+        "excludeEditedVehiclesFromBots", False)}
+
+
+def set_vehicle_profile_options(game_root, profile_name,
+                                exclude_edited_vehicles_from_bots):
+    if not isinstance(exclude_edited_vehicles_from_bots, bool):
+        raise VehicleOverlayError(
+            "The vehicle profile Bot exclusion option must be a boolean.")
+    status, unused_package = _require_target(game_root)
+    store, unused_exists = _load_profile_store(status["path"])
+    profile = store["profiles"][_profile_index(store, profile_name)]
+    profile["excludeEditedVehiclesFromBots"] = exclude_edited_vehicles_from_bots
+    profile["updatedAt"] = _now()
+    _save_profile_store(status["path"], store)
+    return {"excludeEditedVehiclesFromBots": exclude_edited_vehicles_from_bots}
 
 
 def create_vehicle_profile(game_root, profile_name):
@@ -2890,6 +3046,7 @@ def create_vehicle_profile(game_root, profile_name):
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "members": [],
+        "excludeEditedVehiclesFromBots": False,
     })
     store["profiles"].sort(key=lambda profile: profile["name"].casefold())
     _save_profile_store(status["path"], store)
@@ -3072,13 +3229,17 @@ def prepare_vehicle_profile(game_root, profile_name=None, is_running=None):
             "profile": None,
             "installedMembers": 0,
             "removedMembers": removed,
+            "botExcludedVehicles": [],
         }
+    bot_excluded_vehicles = profile_bot_excluded_vehicles(
+        game_root, profile_name)
     installed = activate_vehicle_profile(
         game_root, profile_name, is_running=is_running)
     return {
         "profile": _normalize_profile_name(profile_name),
         "installedMembers": installed,
         "removedMembers": 0,
+        "botExcludedVehicles": bot_excluded_vehicles,
     }
 
 

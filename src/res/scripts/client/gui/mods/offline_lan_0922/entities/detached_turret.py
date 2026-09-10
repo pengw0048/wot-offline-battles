@@ -31,6 +31,8 @@ projectiles and knows nothing about this object:
   drag/pull effect this version does not produce.
 """
 
+import sys
+
 from gui.mods.offline_lan_0922 import turret_detachment
 
 
@@ -62,6 +64,8 @@ class DetachedTurretPresentation(object):
         self._log = log
         self._max_active = int(max_active)
         self._turrets = []
+        self._retiring = []
+        self._closed = False
 
     def active(self):
         return len(self._turrets)
@@ -75,7 +79,7 @@ class DetachedTurretPresentation(object):
         this before writing the special health value, because
         ``onHealthChanged`` replaces the compound this pose is read from.
         """
-        if len(self._turrets) >= self._max_active:
+        if self._closed or len(self._turrets) >= self._max_active:
             return None
         descriptor = getattr(entity, 'typeDescriptor', None)
         appearance = getattr(entity, 'appearance', None)
@@ -132,6 +136,8 @@ class DetachedTurretPresentation(object):
         re-confirming and without seeding the turret filter from the
         vehicle's own unfed one.
         """
+        if self._closed:
+            return False
         vehicle_id = int(plan['entity_id'])
         for existing in self._turrets:
             if existing['vehicle_id'] == vehicle_id:
@@ -164,29 +170,43 @@ class DetachedTurretPresentation(object):
                 'spin': impulse['spin'],
                 'started': float(now),
                 'matrix': None,
+                'entity': None,
                 'impacted': False,
                 'settled': False,
             }
             self._turrets.append(turret)
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] TURRET vehicle=%d entity=%d '
+                'state=created\n' % (vehicle_id, int(entity_id)))
         except Exception as error:
-            # Retire any allocated entity before the caller restores the
-            # burn-off health and requests the wreck assembler.
+            # An allocated id may still be loading prerequisites.  Retain it
+            # for safe retirement instead of destroying a not-yet-owned id.
             if entity_id is not None:
-                self._destroy_entity(int(entity_id))
+                self._retiring.append({'id': int(entity_id), 'entity': None})
+                self._retire_entities()
             self._note('detached turret creation failed', error)
             return False
         return True
 
     def advance(self, now):
         """Write this frame's pose for every live turret."""
+        self._retire_entities()
         if not self._turrets:
             return 0
         written = 0
         for turret in tuple(self._turrets):
             entity = self._entity(turret['id'])
             if entity is None:
+                # #1513 createEntity returns an id before prerequisites and
+                # onEnterWorld publish the entity.  Only a previously seen
+                # entity disappearing means retirement, not pending loading.
+                if turret['entity'] is not None:
+                    self._turrets.remove(turret)
+                continue
+            if turret['entity'] is not None and turret['entity'] is not entity:
                 self._turrets.remove(turret)
                 continue
+            turret['entity'] = entity
             model = getattr(entity, 'model', None)
             if model is None:
                 # #1513 enters a client-created entity only after its
@@ -200,8 +220,15 @@ class DetachedTurretPresentation(object):
                 continue
             if turret['matrix'] is None:
                 if not self._bind(entity, turret):
+                    self._retiring.append(turret)
+                    self._retire_entities()
                     self._turrets.remove(turret)
                     continue
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] TURRET vehicle=%d entity=%d '
+                    'state=bound elapsed_ms=%d\n' % (
+                        turret['vehicle_id'], turret['id'],
+                        max(0, int((float(now) - turret['started']) * 1000))))
             elapsed = max(0.0, float(now) - turret['started'])
             position, attitude = turret_detachment.pose_at(
                 turret['flight'], turret['attitude'], turret['spin'],
@@ -231,7 +258,6 @@ class DetachedTurretPresentation(object):
             turret['matrix'] = matrix
         except Exception as error:
             self._note('detached turret binding failed', error)
-            self._destroy_entity(turret['id'])
             return False
         try:
             # Reuse the reviewed LAN draw gate so stock dynamic collision,
@@ -267,12 +293,32 @@ class DetachedTurretPresentation(object):
         return True
 
     def destroy_all(self):
-        """Retire every turret entity.  Safe after a partial start, and twice."""
-        turrets = self._turrets
+        """Close presentation and retire only engine-owned turret entities.
+
+        A pending creation stays as a tombstone for the next teardown poll.
+        BattleRuntime polls again before retiring the battle space, whose
+        native teardown cancels any remaining prerequisite loads.  No timer
+        or animation from this closed owner can enter the next round.
+        """
+        self._closed = True
+        self._retiring.extend(self._turrets)
         self._turrets = []
-        for turret in turrets:
-            self._destroy_entity(turret['id'])
-        return len(turrets)
+        return self._retire_entities()
+
+    def _retire_entities(self):
+        retired = 0
+        for turret in tuple(self._retiring):
+            entity = self._entity(turret['id'])
+            previous = turret['entity']
+            if entity is None and previous is None:
+                continue
+            if entity is not None and (previous is None or previous is entity):
+                turret['entity'] = entity
+                if not self._destroy_entity(turret['id']):
+                    continue
+                retired += 1
+            self._retiring.remove(turret)
+        return retired
 
     def _destroy_entity(self, entity_id):
         destroy = getattr(self._bigworld, 'destroyEntity', None)

@@ -11109,5 +11109,66 @@ class NativeItemNameContractTests(unittest.TestCase):
         self.assertEqual(((tree,), 'ready'), after_drop)
         self.assertEqual(2, query.call_count)
 
+
+class SightCollisionFilterTests(unittest.TestCase):
+    """A spotting ray must stop treating a broken skin as cover."""
+
+    def setUp(self):
+        destructibles_authority.reset(1)
+        self.addCleanup(destructibles_authority.reset)
+        # The callback reads the speculative ledger when it runs, not when it
+        # is built, so these globals have to outlive the build.
+        globals_dict = destructibles_sensor.__dict__
+        previous = dict(
+            (name, globals_dict.get(name)) for name in
+            ('g_offh_destr_speculative', 'g_offh_destr_broken_cache'))
+
+        def restore():
+            for name, value in previous.items():
+                if value is None:
+                    globals_dict.pop(name, None)
+                else:
+                    globals_dict[name] = value
+
+        self.addCleanup(restore)
+        globals_dict['g_offh_destr_speculative'] = set()
+        globals_dict['g_offh_destr_broken_cache'] = {}
+
+    def _filter(self, speculative=()):
+        destructibles_sensor.__dict__[
+            'g_offh_destr_speculative'] = set(speculative)
+        with mock.patch.object(
+                destructibles_sensor, '_destructible_catalog', {}), \
+                mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=destructibles_authority), \
+                mock.patch.object(
+                    destructibles_sensor,
+                    '_accepted_tree_collision_keys_1513',
+                    return_value=frozenset()):
+            return destructibles_sensor.sight_collision_filter()
+
+    def test_no_accepted_item_needs_no_filter(self):
+        self.assertIsNone(self._filter())
+
+    def test_an_accepted_item_stops_blocking_but_its_neighbour_does_not(self):
+        destructibles_authority._chunk(7)['keys'].add((3, None))
+
+        reject = self._filter()
+
+        self.assertTrue(callable(reject))
+        # wg_collideSegment reports (matKind, ?, itemIndex, chunkID).
+        self.assertFalse(reject(2, None, 3, 7))
+        self.assertTrue(reject(2, None, 4, 7))
+        self.assertTrue(reject(2, None, 3, 8))
+
+    def test_a_locally_predicted_break_yields_before_the_canonical_event(self):
+        reject = self._filter(speculative=[(7, 3, 2)])
+
+        self.assertTrue(callable(reject))
+        self.assertFalse(reject(2, None, 3, 7))
+        self.assertTrue(reject(2, None, 4, 7))
+
+
 if __name__ == '__main__':
     unittest.main()

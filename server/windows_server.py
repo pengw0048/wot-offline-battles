@@ -20,6 +20,7 @@ SERVER_TEAM_SIZE_ENV = "WOT_0922_TEAM_SIZE"
 SERVER_TEAM1_SIZE_ENV = "WOT_0922_TEAM1_SIZE"
 SERVER_TEAM2_SIZE_ENV = "WOT_0922_TEAM2_SIZE"
 SERVER_BOT_LINEUP_ENV = "WOT_0922_BOT_LINEUP"
+SERVER_BOT_EXCLUDED_VEHICLES_ENV = "WOT_0922_BOT_EXCLUDED_VEHICLES"
 SERVER_LOOPBACK_ONLY_ENV = "WOT_0922_LOOPBACK_ONLY"
 SERVER_VEHICLE_OVERLAY_ROOT_ENV = "WOT_0922_VEHICLE_OVERLAY_ROOT"
 BUILD_SEMANTIC_VERSION_ENV = "WOT_OFFLINE_SEMANTIC_VERSION"
@@ -229,6 +230,20 @@ def _vehicle_overlay_root_from_environment(environment=None):
     return str(root).strip()
 
 
+def _bot_excluded_vehicles_from_environment(environment=None):
+    environment = os.environ if environment is None else environment
+    raw_value = environment.get(SERVER_BOT_EXCLUDED_VEHICLES_ENV)
+    if raw_value is None:
+        return []
+    try:
+        value = json.loads(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid Bot vehicle exclusions JSON: %s" % error)
+    if not isinstance(value, list):
+        raise ValueError("Bot vehicle exclusions must be a JSON list")
+    return value
+
+
 def _session_identity(environment=None):
     """Return launcher-supplied diagnostic labels without validating peers."""
     environment = os.environ if environment is None else environment
@@ -258,6 +273,7 @@ def main():
         default_map, run_server = _load_server()
         team1_size, team2_size = _team_sizes_from_environment()
         bot_lineup = _bot_lineup_from_environment()
+        bot_excluded_vehicles = _bot_excluded_vehicles_from_environment()
         vehicle_overlay_root = _vehicle_overlay_root_from_environment()
         if not loopback_only:
             _ensure_windows_firewall_rule(SERVER_PORT)
@@ -267,6 +283,7 @@ def main():
             team1_size=team1_size,
             team2_size=team2_size,
             bot_lineup=bot_lineup,
+            bot_excluded_vehicles=bot_excluded_vehicles,
             vehicle_overlay_root=vehicle_overlay_root,
         )
     except Exception:
