@@ -1295,6 +1295,34 @@ def _log_session_identity(requested_mode):
             identity['semanticVersion'], identity['buildIdentity'], role,
             identity['launcherSemanticVersion'],
             identity['launcherBuildIdentity']))
+    _log_mod_isolation()
+
+
+def _log_mod_isolation():
+    """Record which resource list this process started against.
+
+    The hidden worker is meant to load this port and nothing else.  Whether
+    that actually happened is only observable here: ``BW_RES_PATH`` says the
+    launcher published an isolated list, and the count of sibling GUI mods
+    says whether the client mounted anyone else's anyway.
+    """
+    try:
+        isolated = bool((os.environ.get('BW_RES_PATH') or '').strip())
+    except Exception:
+        isolated = False
+    others = -1
+    try:
+        import gui.mods as _gui_mods
+        loaded = getattr(_gui_mods, '_mods', None)
+        if isinstance(loaded, dict):
+            others = len([name for name in loaded
+                          if 'offline_lan_0922' not in str(name)])
+    except Exception:
+        pass
+    sys.stdout.write(
+        '[Offline LAN 0.9.22] resource list=%s other gui mods=%s\n' % (
+            'BW_RES_PATH (this port only)' if isolated else 'client paths.xml',
+            'unknown' if others < 0 else others))
 
 
 def init():

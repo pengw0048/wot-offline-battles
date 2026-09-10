@@ -7849,6 +7849,101 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [original(state) for state in internal], publication['rows'])
 
+    def test_one_unencodable_bot_row_does_not_end_the_round(self):
+        """A row the wire layout rejects is that Bot's problem, not the round's.
+
+        A field report (`wot-error-report-20260909-223753`) lost a live round
+        three minutes in because one `BotStateCodecError` became a
+        `RuntimeError` out of `_update_once`: the server ended the round as a
+        `worker_disconnected` draw and the player went back to the garage,
+        while the worker itself was healthy enough to rejoin six seconds
+        later.  The server requires a full-roster batch, so the contained
+        publication carries an identity-only row that retains the last
+        accepted server checkpoint without acknowledging new combat state.
+        """
+        runtime = self._roster_runtime()
+        codec = self.module.bot_state_codec
+        original = codec.encode_row
+        rejected = 12
+        runtime.update(.04, 1.0)
+
+        def reject_one(state):
+            if int(state['id']) == rejected:
+                raise codec.BotStateCodecError(
+                    'bot state column is not finite')
+            return original(state)
+
+        stream = io.StringIO()
+        saved = self.module.sys.stdout
+        codec.encode_row = reject_one
+        self.module.sys.stdout = stream
+        try:
+            publication = runtime.update(.04, 1.04)[0]
+            # A second frame proves the drop is reported once, not per frame.
+            runtime.update(.04, 1.08)
+        finally:
+            codec.encode_row = original
+            self.module.sys.stdout = saved
+
+        self.assertEqual('bot_state', publication['type'])
+        rows = dict((row[0], row) for row in publication['rows'])
+        self.assertEqual(
+            sorted(state['id'] for state in runtime._ordered_states()),
+            sorted(rows))
+        self.assertEqual([rejected], rows[rejected])
+        report = stream.getvalue()
+        self.assertEqual(1, report.count('[BOT STATE] projection unavailable'))
+        self.assertIn('bot=%d' % rejected, report)
+        self.assertIn('bot state column is not finite', report)
+
+    def test_a_bot_that_never_encoded_keeps_other_rows_publishing(self):
+        """A short batch is rejected whole, which would freeze every Bot."""
+        runtime = self._roster_runtime()
+        codec = self.module.bot_state_codec
+        original = codec.encode_row
+
+        def reject_one(state):
+            if int(state['id']) == 12:
+                raise codec.BotStateCodecError('unknown critical device')
+            return original(state)
+
+        stream = io.StringIO()
+        saved = self.module.sys.stdout
+        codec.encode_row = reject_one
+        self.module.sys.stdout = stream
+        try:
+            outgoing = runtime.update(.04, 1.0)
+        finally:
+            codec.encode_row = original
+            self.module.sys.stdout = saved
+
+        publication = next(message for message in outgoing
+                           if message.get('type') == 'bot_state')
+        rows = dict((row[0], row) for row in publication['rows'])
+        self.assertEqual([12], rows[12])
+        self.assertEqual(4, len(rows))
+        self.assertTrue(all(len(row) > 1 for bot_id, row in rows.items()
+                            if bot_id != 12))
+        self.assertIn('projection unavailable', stream.getvalue())
+
+    def _roster_runtime(self):
+        roster = [
+            {'id': 11 + index, 'team': 1 if index < 2 else 2,
+             'slot': index if index < 2 else index - 2,
+             'name': 'Projection-%02d' % index}
+            for index in range(4)
+        ]
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(
+                self._stationary_command()),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.battle_start(dict(self.start, bots=roster))
+        return runtime
+
     def test_contact_resolution_uses_the_banked_global_simulation_step(self):
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),
