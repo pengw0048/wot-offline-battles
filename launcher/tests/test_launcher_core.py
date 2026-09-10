@@ -2598,6 +2598,46 @@ class WorkerResourceIsolationTest(unittest.TestCase):
                             for action in actions), actions)
         self.assertIsNone(core.worker_resource_path_list(self.root))
 
+    def test_a_missing_source_cannot_reuse_an_older_worker_root(self):
+        package, config = self._install_payload()
+        core.prepare_worker_resource_root(self.root)
+        for source in (package, config):
+            with open(source, "rb") as stream:
+                payload = stream.read()
+            os.unlink(source)
+            core.prepare_worker_resource_root(self.root)
+            self.assertIsNone(core.worker_resource_path_list(self.root))
+            with open(source, "wb") as stream:
+                stream.write(payload)
+            core.prepare_worker_resource_root(self.root)
+            self.assertIsNotNone(core.worker_resource_path_list(self.root))
+
+    def test_a_failed_upgrade_cannot_mount_the_previous_worker_payload(self):
+        package, unused_config = self._install_payload()
+        core.prepare_worker_resource_root(self.root)
+        with open(package, "wb") as stream:
+            stream.write(b"unreadable replacement")
+        actions = core.prepare_worker_resource_root(self.root)
+        self.assertTrue(any("could not be built" in action
+                            for action in actions), actions)
+        self.assertIsNone(core.worker_resource_path_list(self.root))
+        environment = core.worker_environment(self.root, environment={})
+        self.assertNotIn(core.WORKER_RES_PATH_ENV_0922, environment)
+
+    def test_a_corrupt_member_falls_back_after_the_archive_opens(self):
+        package, unused_config = self._install_payload()
+        core.prepare_worker_resource_root(self.root)
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("res/scripts/replacement.py", b"payload-bytes")
+        with open(package, "rb") as stream:
+            payload = stream.read()
+        with open(package, "wb") as stream:
+            stream.write(payload.replace(b"payload-bytes", b"PAYLOAD-bytes", 1))
+        actions = core.prepare_worker_resource_root(self.root)
+        self.assertTrue(any("could not be built" in action
+                            for action in actions), actions)
+        self.assertIsNone(core.worker_resource_path_list(self.root))
+
     def test_only_an_isolated_worker_receives_the_resource_variable(self):
         self._install_payload()
         core.prepare_worker_resource_root(self.root)

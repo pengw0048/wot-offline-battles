@@ -1322,6 +1322,7 @@ def prepare_worker_resource_root(game_root):
     """
     import shutil
     import tempfile
+    import zipfile
 
     sources = _worker_resource_sources(game_root)
     if sources is None:
@@ -1355,7 +1356,8 @@ def prepare_worker_resource_root(game_root):
         os.replace(staging, root)
         staging = None
         _write_json(stamp_path, stamp)
-    except (IOError, OSError, LauncherError, ValueError) as error:
+    except (IOError, OSError, LauncherError, ValueError,
+            zipfile.BadZipFile) as error:
         return ["The hidden worker keeps the client's own mod paths; its "
                 "isolated resource root could not be built: %s" % error]
     finally:
@@ -1402,6 +1404,21 @@ def worker_resource_path_list(game_root):
     root = worker_resource_root(game_root)
     if not os.path.isfile(
             os.path.join(root, WORKER_ENGINE_CONFIG_0922)):
+        return None
+    # A failed rebuild may leave the previous root intact. Only mount it when
+    # its recorded inputs still match the installed package and engine config;
+    # otherwise the logged fallback must really use the client's own paths.
+    sources = _worker_resource_sources(game_root)
+    if sources is None:
+        return None
+    package, config = sources
+    try:
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config)}
+        with open(_worker_resource_stamp_path(game_root), "r",
+                  encoding="utf-8") as stream:
+            if json.load(stream) != stamp:
+                return None
+    except (IOError, OSError, ValueError):
         return None
     entries = client_resource_paths(game_root)
     if not entries:
