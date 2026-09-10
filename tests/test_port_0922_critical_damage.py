@@ -674,7 +674,7 @@ class CriticalDamageTests(unittest.TestCase):
         self.assertIsNone(explosion)
         interval.assert_not_called()
 
-    def test_he_internal_cone_uses_22_5_degrees_and_caliber_depth(self):
+    def test_he_internal_cone_uses_45_degrees_and_caliber_depth(self):
         descriptor = _descriptor()
         target = types.SimpleNamespace(
             matrix=object(), getComponents=lambda: (
@@ -689,10 +689,8 @@ class CriticalDamageTests(unittest.TestCase):
             }
 
         layout = {'valid': True, 'targets': (
-            # "45 degrees wide" is the full aperture, so the boundary at
-            # depth 0.5 sits at radius 0.5 * tan(22.5) = 0.2071.
-            sphere('engine', (0.205, 0.0, 0.5)),  # 22.29 degrees
-            sphere('fuelTank', (0.21, 0.0, 0.5)), # 22.78 degrees
+            sphere('engine', (0.49, 0.0, 0.5)),   # 44.4 degrees
+            sphere('fuelTank', (0.51, 0.0, 0.5)), # 45.6 degrees
             sphere('radio', (0.0, 0.0, 1.0)),     # exact depth
             sphere('ammoBay', (0.0, 0.0, 1.01)),  # beyond depth
         )}
@@ -761,12 +759,11 @@ class CriticalDamageTests(unittest.TestCase):
             }
 
         layout = {'valid': True, 'targets': (
-            # The cone radius is z * tan(22.5) = 0.4142 * z. The nearest point
-            # (0.18, 0, 0.40) needs 0.1657 and is outside, but the upper-left
-            # edge at z 0.60 is allowed 0.2485 and reaches in.
-            box('engine', (0.18, -0.05, 0.40), (0.30, 0.05, 0.60)),
-            # This box remains wholly outside: min radial 0.26 > 0.2485.
-            box('radio', (0.26, -0.05, 0.40), (0.40, 0.05, 0.60)),
+            # Nearest point to the apex is (0.45, 0, 0.40), outside 45
+            # degrees, but the upper-left edge reaches (0.45, 0, 0.60).
+            box('engine', (0.45, -0.05, 0.40), (0.65, 0.05, 0.60)),
+            # This box remains wholly outside: min radial 0.61 > max z 0.60.
+            box('radio', (0.61, -0.05, 0.40), (0.75, 0.05, 0.60)),
         )}
         math_module = types.ModuleType('Math')
         math_module.Vector3 = _Point
@@ -955,86 +952,6 @@ class CriticalDamageTests(unittest.TestCase):
         self.assertEqual('critical', inside_payload['devices'][0]['state'])
         self.assertEqual({}, outside.devices_hp)
         self.assertIsNone(outside_payload)
-
-    def test_a_shell_without_a_calibre_gets_no_invented_reach(self):
-        self.assertEqual(
-            0.0, critical_damage.shell_interior_reach({'damage': (1.0, 1.0)}))
-        self.assertEqual(0.5, critical_damage.shell_interior_reach(
-            {'caliber': 37.0}))
-        self.assertEqual(0.5, critical_damage.shell_interior_reach(
-            {'caliber': 50.0}))
-        self.assertEqual(1.52, critical_damage.shell_interior_reach(
-            {'caliber': 152.0}))
-
-    def test_he_cone_depth_shares_the_solid_reach_floor(self):
-        self.assertEqual(
-            0.5, critical_damage._offh_he_internal_depth({'caliber': 37.0}))
-        self.assertEqual(
-            1.52, critical_damage._offh_he_internal_depth({'caliber': 152.0}))
-        self.assertEqual(
-            0.0, critical_damage._offh_he_internal_depth({}))
-
-    def _interior_strike(self, factor, distance=0.5):
-        """One non-penetrating HE strike whose interior contact is scaled."""
-        armor = types.SimpleNamespace(
-            extra=None, armor=20.0, vehicleDamageFactor=1.0)
-        collisions = ((0.0, 1.0, armor, None),)
-        vehicle = types.SimpleNamespace(
-            id=1, health=500, typeDescriptor=_descriptor())
-        with mock.patch.dict(
-                sys.modules,
-                {'BigWorld': self.bigworld, 'Math': self.math}), \
-                mock.patch.object(
-                    critical_damage, '_offh_internal_cone_hits',
-                    return_value=[(distance, 'engineHealth')]), \
-                mock.patch('random.uniform', return_value=60.0), \
-                mock.patch('random.random', return_value=0.0):
-            unused_damage, payload = critical_damage.apply_explosion(
-                vehicle, collisions, object(), object(), 0,
-                {'damage': (100.0, 60.0), 'caliber': 100.0}, attacker_id=2,
-                interior_damage_factor=factor)
-        return vehicle, payload
-
-    def test_interior_blast_damage_scales_with_what_the_plate_let_through(self):
-        """Reached through armour, so scaled by the hull channel's fraction."""
-        full, unused_full = self._interior_strike(1.0)
-        half, unused_half = self._interior_strike(0.5)
-
-        self.assertEqual(40.0, full.devices_hp['engineHealth'])
-        self.assertEqual(70.0, half.devices_hp['engineHealth'])
-
-    def test_a_fully_absorbed_blast_reaches_no_interior_module(self):
-        stopped, payload = self._interior_strike(0.0)
-
-        self.assertEqual({}, stopped.devices_hp)
-        self.assertIsNone(payload)
-
-    def test_absorbed_blast_still_breaks_an_externally_reached_track(self):
-        """The scale applies to contacts behind armour, never to exposed gear.
-
-        A blast the plate absorbed still touches the running gear directly,
-        which is why an HE round that deals no hull damage can still track a
-        vehicle.
-        """
-        vehicle = types.SimpleNamespace(
-            id=1, health=500, typeDescriptor=_descriptor())
-        track = (0.5, 1.0, _Material('leftTrackHealth'), None)
-        with mock.patch.dict(
-                sys.modules,
-                {'BigWorld': self.bigworld, 'Math': self.math}), \
-                mock.patch.object(
-                    critical_damage, '_offh_internal_cone_hits',
-                    return_value=[]), \
-                mock.patch('random.uniform', return_value=60.0), \
-                mock.patch('random.random', return_value=0.0):
-            critical_damage.apply_explosion(
-                vehicle, (track,), object(), object(), 0,
-                {'damage': (100.0, 60.0), 'caliber': 100.0}, attacker_id=2,
-                interior_damage_factor=0.0)
-
-        maximum = device_damage.device_max_hp(
-            _descriptor(), 'leftTrackHealth')
-        self.assertEqual(maximum - 60.0, vehicle.devices_hp['leftTrackHealth'])
 
     def test_engine_fire_roll_starts_at_minimum_device_damage(self):
         descriptor = _descriptor()

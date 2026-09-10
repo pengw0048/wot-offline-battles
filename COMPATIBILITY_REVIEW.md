@@ -2277,20 +2277,19 @@ Invalid payloads and unmatched component variants are reported per target;
 an incomplete crew does not replace the remaining decoded interior with an
 archetype. A small per-piece BVH is built lazily with the cached layout.
 
-`BattleRuntime._vehicle_trace` limits solid-shell travel to ten calibres from
-the first vehicle material, and never less than the published half-metre
-floor; `critical_damage.shell_interior_reach` owns that distance. A
-PENETRATING HE round takes that same solid ray, because the published law
-gives it ordinary damage; only a hit that did not get through draws the blast
-cone, whose depth is the same distance and whose aperture is 45 degrees wide,
-i.e. a 22.5-degree half angle. Both keep the explosion column of the saving
-throws. Interior contacts of a non-penetrating blast are scaled by the
-fraction of the roll the hull channel kept, since the published law reduces
-them "by armor, and distance from initial impact" without publishing that
-arithmetic; contacts the blast reaches directly, tracks above all, keep the
-unscaled roll, so an absorbed HE hit still breaks a track. A vehicle that was
-only caught by the splash has no impact point of its own and is given no
-interior contact.
+`BattleRuntime._vehicle_trace` still limits solid-shell travel to ten calibres
+from the first vehicle material. HE uses its separate finite interior cone.
+For non-penetrating HE and nearby explosions, that cone starts at the proved
+structural contact selected by the blast search, not at the outside explosion
+position; visuals and other victims still use the original world burst. If no
+structural surface is reachable, only native device contacts up to the shell's
+stopping point survive. The historical official
+[HE explanation](https://worldoftanks.com/en/news/general-news/high-explosive-damage-explanation/)
+describes internal damage for penetrations and near misses, so both retain the
+explosion path. It does not establish the precise module-damage attenuation
+formula or whether its stated 45-degree cone uses a full or half angle. The
+existing angle, depth, and device roll remain reconstruction boundaries; hull
+HP loss is not evidence for a new proportional module-damage multiplier.
 The critical loop scores each reached device once using `damage[1]`; this
 change does not alter saving throws, ammunition bookkeeping or damage rolls.
 The current device roll is uniform within +/-25%; available client contracts

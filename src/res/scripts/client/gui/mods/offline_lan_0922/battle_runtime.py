@@ -14009,10 +14009,7 @@ class BattleRuntime(object):
         The historical limit starts at the first vehicle material, including
         tracks and spaced armour.  Keeping the original query origin lets the
         native collision distances and internal mesh contacts share
-        one physical distance axis.  The distance itself is ten calibres but
-        not less than half a metre, and it is owned by
-        ``critical_damage.shell_interior_reach`` so the HE blast cone cannot
-        drift away from the solid ray.
+        one physical distance axis.
         """
         collisions = tuple(collisions or ())
         delta = query_end - query_start
@@ -14025,8 +14022,8 @@ class BattleRuntime(object):
             raise TypeError('#1513 collision contains an invalid distance')
         first = max(0.0, min(length, first))
         legacy = combat_rules.legacy_shot(shot)
-        trace_distance = first + critical_damage.shell_interior_reach(
-            legacy.get('shell') or {})
+        caliber = _number((legacy.get('shell') or {}).get('caliber'), 0.0)
+        trace_distance = first + max(0.0, caliber) / 100.0
         limited = tuple(
             collision for collision in collisions
             if float(collision.dist) <= trace_distance + 0.000001)
@@ -14457,7 +14454,19 @@ class BattleRuntime(object):
         if blast_contact is not None:
             layers = combat_rules.collision_layers(
                 blast_contact['collisions'])
+            # The internal cone starts where the blast reached the hull.
+            # Its ten-calibre depth must not be spent crossing the outside
+            # gap from a screen or the original, thicker impact plate.
+            critical_impact = self._vector(blast_contact['point'])
             explosion_direction = self._vector(blast_contact['direction'])
+        elif is_he and int(result) != 2:
+            # No blast ray established a reachable structural surface.
+            # Keep only native devices reached by the stopped shell; its
+            # remaining query chord is not evidence of internal blast damage.
+            stop_distance = (contact['distance'] if contact is not None else
+                             min(layer[0] for layer in layers))
+            layers = tuple(layer for layer in layers
+                           if layer[0] <= stop_distance + 0.000001)
         critical = None
         critical_delta = {}
         if int(result) == 0:
@@ -14466,35 +14475,15 @@ class BattleRuntime(object):
         timed_call(diagnostic, 'projectile.critical_equipment',
                    self._install_critical_equipment_effects,
                    record, critical_target)
-        if int(result) == 2 and is_he:
-            # A penetrating HE round is not a blast cone: the published law
-            # gives it ordinary damage, so it takes the solid ray every other
-            # penetrating shell takes. It stays an explosion for the saving
-            # throws, which is the only place the two chance columns differ.
-            damage, critical, critical_delta = timed_call(
-                diagnostic, 'projectile.critical_direct',
-                critical_damage.propose_direct,
-                critical_target, layers, trace_start, trace_end, damage,
-                legacy_shell, attacker_id, penetrated=True,
-                by_explosion=True, deadeye=deadeye, with_delta=True,
-                collision_contacts=self._collision_contacts(
-                    collision_evidence))
-        elif int(result) != 0 and is_he:
-            # Non-penetrating HE. Interior modules are reached only through
-            # the plate that stopped the round, so they are scaled by the
-            # fraction of the roll the hull channel kept.
-            interior_factor = 0.0
-            if blast_contact is not None and damage_roll > 0:
-                interior_factor = max(0.0, min(
-                    1.0, float(damage) / float(damage_roll)))
+        if int(result) != 0 and is_he:
             damage, critical, critical_delta = (
                 timed_call(diagnostic, 'projectile.critical_explosion',
                     critical_damage.propose_explosion,
                     critical_target, layers, critical_impact,
                     explosion_direction, damage, legacy_shell,
                     attacker_id, deadeye=deadeye, with_delta=True,
-                    allow_interior=blast_contact is not None,
-                    interior_damage_factor=interior_factor))
+                    allow_interior=(int(result) == 2 or
+                                    blast_contact is not None)))
         elif int(result) != 0:
             damage, critical, critical_delta = timed_call(
                 diagnostic, 'projectile.critical_direct',
@@ -14600,7 +14589,6 @@ class BattleRuntime(object):
             return []
         if combat_rules.he_radius(shot) <= 0.0:
             return []
-        burst = self._vector(impact)
         legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
         effects = []
         for key, record in tuple(self._records.items()):
@@ -14658,17 +14646,12 @@ class BattleRuntime(object):
                     critical_damage.propose_explosion(
                         critical_target,
                         combat_rules.collision_layers(contact['collisions']),
-                        burst, self._vector(contact['direction']), hull_damage,
+                        self._vector(contact['point']),
+                        self._vector(contact['direction']), hull_damage,
                         legacy_shell,
                         int(getattr(source, 'id', meta.get('shooter_id', 0))),
                         deadeye=bool(_field(shot, 'deadeye', False)),
-                        with_delta=True,
-                        # The published cone originates at "the point of impact
-                        # of the shell". A vehicle that was only caught by the
-                        # blast has no such point, so it keeps the exposed
-                        # modules the blast really touches - tracks above all -
-                        # and gets no interior contact invented for it.
-                        allow_interior=False))
+                        with_delta=True))
                 critical = self._critical_with_crew_roster(
                     critical_target, critical)
                 position = _xyz(getattr(
