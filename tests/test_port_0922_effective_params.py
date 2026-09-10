@@ -88,6 +88,100 @@ def _snapshot_with_members(members):
 
 
 class EffectiveParamsContractTests(unittest.TestCase):
+    def test_small_medkit_intent_restores_only_selected_crew_and_spends_once(self):
+        from gui.mods.offline_lan_0922 import equipment_mechanics
+        member = effective_params()['crew']['members'][0]
+        params = _snapshot_with_members([
+            dict(member, instance='commander', roles=['commander']),
+            dict(member, instance='driver', roles=['driver'])])
+        params['critical']['activation_targets'] = [
+            {'index': 1, 'name': 'commander'}, {'index': 2, 'name': 'driver'}]
+        params['equipment'] = [equipment_mechanics.project_equipment(
+            types.SimpleNamespace(
+                name='medkit', id=(15, 2), compactDescr=763,
+                cooldownSeconds=90.0, reuseCount=1, repairAll=False))]
+        state = BattleState()
+        player, error = state.add_player(
+            _Connection(), ('127.0.0.1', 2000), _hello(params))
+        self.assertIsNone(error)
+        self.assertTrue(state._install_player_equipments(player))
+        state.phase = 'battle'
+        state.tick = 10000
+        player.participating = True
+        player.critical['crew_ko'] = ['commander', 'driver']
+        equipment = player.equipment_states[0]
+        before_uses = equipment.uses_left
+        before_revision = player.equipment_revision
+        intent = {
+            'type': 'equipment_intent', 'round_id': state.round_id,
+            'intent_seq': 1, 'equipment_id': 2,
+            'activation_code': (1 << 16) | 2,
+            'selected': 'commander', 'requested_active': None,
+        }
+
+        with mock.patch.dict(sys.modules, {'BigWorld': None}):
+            self.assertTrue(state.submit_equipment_intent(player.player_id, intent))
+            self.assertTrue(state.submit_equipment_intent(player.player_id, intent))
+
+        self.assertEqual({'intent_seq': 1, 'accepted': True, 'reason': ''},
+                         player.equipment_intent_result)
+        self.assertEqual(['driver'], player.critical['crew_ko'])
+        self.assertEqual(before_uses - 1, equipment.uses_left)
+        self.assertEqual(before_revision + 1, player.equipment_revision)
+        self.assertEqual({'763': 1}, state._statistics_row(
+            'player', player.player_id)['equipment_used'])
+
+    def test_equipment_resolution_failure_finishes_without_spending_the_kit(self):
+        import lan_battle_server as server
+        from gui.mods.offline_lan_0922 import equipment_mechanics
+        equipment = equipment_mechanics.project_equipment(types.SimpleNamespace(
+            name='handExtinguishers', id=(15, 0), compactDescr=251,
+            cooldownSeconds=90.0, reuseCount=1))
+        params = effective_params()
+        params['equipment'] = [equipment]
+        state = BattleState()
+        player, error = state.add_player(
+            _Connection(), ('127.0.0.1', 2000), _hello(params))
+        self.assertIsNone(error)
+        self.assertTrue(state._install_player_equipments(player))
+        state.phase = 'battle'
+        state.tick = 10000
+        player.participating = True
+        player.critical['fire'] = True
+        intent = {
+            'type': 'equipment_intent', 'round_id': state.round_id,
+            'intent_seq': 1, 'equipment_id': 0, 'activation_code': 0,
+            'selected': None, 'requested_active': None,
+        }
+        before_critical = copy.deepcopy(player.critical)
+        before_equipment = copy.deepcopy(player.equipment_states[0].snapshot(0.0))
+        before_revision = player.equipment_revision
+        with mock.patch.object(server.player_critical_mechanics,
+                               'apply_equipment',
+                               side_effect=ImportError('No module named BigWorld')) \
+                as resolve, mock.patch.object(server, '_server_log') as log:
+            self.assertTrue(state.submit_equipment_intent(player.player_id, intent))
+            self.assertEqual({
+                'intent_seq': 1, 'accepted': False,
+                'reason': 'equipment_failed'}, player.equipment_intent_result)
+            self.assertEqual(before_critical, player.critical)
+            self.assertEqual(before_equipment, player.equipment_states[0].snapshot(0.0))
+            self.assertEqual(before_revision, player.equipment_revision)
+            self.assertEqual({}, state._statistics_row(
+                'player', player.player_id)['equipment_used'])
+            self.assertTrue(state.submit_equipment_intent(player.player_id, intent))
+            resolve.assert_called_once()
+            self.assertIn('BigWorld', log.call_args[0][0])
+
+        # A failed operation is terminal; a new valid trigger can still use
+        # the unspent kit once the resolver is available again.
+        self.assertTrue(state.submit_equipment_intent(
+            player.player_id, dict(intent, intent_seq=2)))
+        self.assertTrue(player.equipment_intent_result['accepted'])
+        self.assertEqual(2, player.equipment_intent_result['intent_seq'])
+        self.assertFalse(player.critical['fire'])
+        self.assertEqual(before_revision + 1, player.equipment_revision)
+
     def test_zero_id_manual_extinguisher_joins_and_extinguishes_once(self):
         from gui.mods.offline_lan_0922 import equipment_mechanics
         # Exact #1513 handExtinguishers: local ID 0, packed equipment ID 251.

@@ -11516,8 +11516,24 @@ class BattleState:
                     player, intent_seq, False, "equipment_ineligible")
             payload = None
             if effect.get("action") != "set_rpm_limiter":
-                payload = player_critical_mechanics.apply_equipment(
-                    player, effect, now)
+                try:
+                    payload = player_critical_mechanics.apply_equipment(
+                        player, effect, now)
+                    if payload is not None:
+                        payload = _critical_payload(payload)
+                except Exception as error:
+                    # Resolution uses a detached target, before consuming the
+                    # kit or committing critical state. Finish this intent so
+                    # the client can retry with a new trigger after failure.
+                    detail = str(error).replace(
+                        "\r", " ").replace("\n", " ")[:160]
+                    _server_log(
+                        "EQUIPMENT INTENT failed sender=%d seq=%d item=%d "
+                        "error=%s detail=%s" % (
+                            player_id, intent_seq, equipment_id,
+                            type(error).__name__, detail))
+                    return self._finish_equipment_intent(
+                        player, intent_seq, False, "equipment_failed")
                 if payload is None and not effect.get("clearStun", False):
                     return self._finish_equipment_intent(
                         player, intent_seq, False, "equipment_no_effect")
@@ -11529,7 +11545,7 @@ class BattleState:
                     "canonical player equipment commit diverged")
             if payload is not None:
                 self._commit_player_critical_progress(
-                    player, _critical_payload(payload))
+                    player, payload)
             if effect.get("clearStun", False):
                 if not self._clear_vehicle_stun(("player", player_id)):
                     raise RuntimeError("canonical medkit stun clear diverged")
