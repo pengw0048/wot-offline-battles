@@ -14488,7 +14488,19 @@ class BattleRuntime(object):
         if blast_contact is not None:
             layers = combat_rules.collision_layers(
                 blast_contact['collisions'])
+            # The internal cone starts where the blast reached the hull.
+            # Its ten-calibre depth must not be spent crossing the outside
+            # gap from a screen or the original, thicker impact plate.
+            critical_impact = self._vector(blast_contact['point'])
             explosion_direction = self._vector(blast_contact['direction'])
+        elif is_he and int(result) != 2:
+            # No blast ray established a reachable structural surface.
+            # Keep only native devices reached by the stopped shell; its
+            # remaining query chord is not evidence of internal blast damage.
+            stop_distance = (contact['distance'] if contact is not None else
+                             min(layer[0] for layer in layers))
+            layers = tuple(layer for layer in layers
+                           if layer[0] <= stop_distance + 0.000001)
         critical = None
         critical_delta = {}
         if int(result) == 0:
@@ -14611,7 +14623,6 @@ class BattleRuntime(object):
             return []
         if combat_rules.he_radius(shot) <= 0.0:
             return []
-        burst = self._vector(impact)
         legacy_shell = combat_rules.legacy_shot(shot).get('shell') or {}
         effects = []
         for key, record in tuple(self._records.items()):
@@ -14669,7 +14680,8 @@ class BattleRuntime(object):
                     critical_damage.propose_explosion(
                         critical_target,
                         combat_rules.collision_layers(contact['collisions']),
-                        burst, self._vector(contact['direction']), hull_damage,
+                        self._vector(contact['point']),
+                        self._vector(contact['direction']), hull_damage,
                         legacy_shell,
                         int(getattr(source, 'id', meta.get('shooter_id', 0))),
                         deadeye=bool(_field(shot, 'deadeye', False)),

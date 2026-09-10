@@ -2318,6 +2318,17 @@ archetype. A small per-piece BVH is built lazily with the cached layout.
 
 `BattleRuntime._vehicle_trace` still limits solid-shell travel to ten calibres
 from the first vehicle material. HE uses its separate finite interior cone.
+For non-penetrating HE and nearby explosions, that cone starts at the proved
+structural contact selected by the blast search, not at the outside explosion
+position; visuals and other victims still use the original world burst. If no
+structural surface is reachable, only native device contacts up to the shell's
+stopping point survive. The historical official
+[HE explanation](https://worldoftanks.com/en/news/general-news/high-explosive-damage-explanation/)
+describes internal damage for penetrations and near misses, so both retain the
+explosion path. It does not establish the precise module-damage attenuation
+formula or whether its stated 45-degree cone uses a full or half angle. The
+existing angle, depth, and device roll remain reconstruction boundaries; hull
+HP loss is not evidence for a new proportional module-damage multiplier.
 The critical loop scores each reached device once using `damage[1]`; this
 change does not alter saving throws, ammunition bookkeeping or damage rolls.
 The current device roll is uniform within +/-25%; available client contracts
