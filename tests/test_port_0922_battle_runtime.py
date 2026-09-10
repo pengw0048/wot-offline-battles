@@ -28234,6 +28234,43 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(['destroy', 'restore'], calls)
         self.assertEqual([], battle._retired_native_owners)
 
+    def test_round_collection_waits_for_released_native_owners(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        battle._start_message = {'round_id': 42}
+        native_owner = object()
+        battle._local_model = native_owner
+        observed = []
+
+        def collect(phase, round_id):
+            observed.append((phase, round_id,
+                             list(battle._retired_native_owners)))
+
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect', side_effect=collect):
+            battle.stop(show_login=False)
+            self.assertEqual([], observed)
+            self.assertIn(native_owner, battle._retired_native_owners)
+            callback = runtime.bigworld.callbacks.pop()
+            callback()
+            self.assertEqual([('round_end', 42, [])], observed)
+            callback()
+            battle.stop(show_login=False)
+            self.assertEqual([('round_end', 42, [])], observed)
+
+    def test_cancelled_lobby_restore_does_not_collect(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect') as collect:
+            battle.stop(show_login=False)
+            callback = runtime.bigworld.callbacks.pop()
+            battle.stop(restore_account=False)
+            callback()
+            collect.assert_not_called()
+
     def test_cleanup_leaves_vehicle_teardown_to_native_avatar_then_map(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
