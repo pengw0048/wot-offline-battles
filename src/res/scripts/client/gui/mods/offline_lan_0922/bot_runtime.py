@@ -2122,8 +2122,6 @@ class BotRuntime(object):
         self._equipment_wire_cache = {}
         self._equipment_wire_exposed_in_update = set()
         self._equipment_now = 0.0
-        self._unpublishable_bots = set()
-        self._last_wire_rows = {}
         self._pending_launches = []
         self._pending_launch_keys = {}
         self._pending_launch_by_bot = {}
@@ -3205,8 +3203,6 @@ class BotRuntime(object):
             self._equipment_wire_cache = {}
             self._equipment_wire_exposed_in_update = set()
             self._equipment_now = 0.0
-            self._unpublishable_bots = set()
-            self._last_wire_rows = {}
             self._pending_launches = []
             self._pending_launch_keys = {}
             self._pending_launch_by_bot = {}
@@ -4471,22 +4467,6 @@ class BotRuntime(object):
     def _ordered_states(self):
         return sorted(self.states.values(), key=lambda state: (
             int(state.get('slot', 0)), int(state.get('team', 1))))
-
-    def _report_unpublishable_bot(self, state, error, republished):
-        """Log one Bot the wire layout rejected, at most once per Bot."""
-        try:
-            bot_id = int(state.get('id', -1))
-        except (TypeError, ValueError):
-            bot_id = -1
-        if bot_id in self._unpublishable_bots:
-            return
-        self._unpublishable_bots.add(bot_id)
-        sys.stdout.write(
-            '[Offline LAN 0.9.22] BOT PUBLICATION DROPPED id=%s vehicle=%s '
-            'outcome=%s reason=%s\n' % (
-                bot_id, state.get('vehicle', 'unknown'),
-                'last accepted row republished' if republished else
-                'checkpoint skipped', error))
 
     def _spawn(self, team, slot):
         if callable(self.spawn_resolver):
@@ -7902,6 +7882,8 @@ class BotRuntime(object):
                 'damage_to_bot': event['damage_to_self'],
                 'damage_to_target': event['damage_to_other'],
             }
+            if target_kind == 'bot':
+                report['contact_positions'] = list(event['contact_positions'])
             if (target_kind == 'human' and
                     isinstance(human_ram_receipt, dict)):
                 report['ram_contact_player_id'] = int(
@@ -10420,7 +10402,11 @@ class BotRuntime(object):
               launch_receipt=None, ammo_state=None, launch_preview=None,
               launch_time_us=None):
         if (state.get('_drowning', False) or
-                state.get('_overturned', False)):
+                state.get('_overturned', False) or
+                state.get('_wire_projection_failure') is not None):
+            # A later trigger would replace the unavailable checkpoint's
+            # burst identity before the server can admit its frozen launches.
+            # An already accepted burst still advances through its own path.
             return False
         if ammo_state is None:
             ammo_state = self._ammo_states.get(int(state.get('id', 0)))
@@ -12163,8 +12149,8 @@ class BotRuntime(object):
             self._sample_time_us = step_end_time_us
             return []
         wire_rows = []
-        complete = True
-        launches = [dict(launch) for launch in self._pending_launches]
+        failed_ids = set()
+        published_states = []
         for state in self._ordered_states():
             if diagnostic is not None:
                 diagnostic.actor(state['id'])
@@ -12172,56 +12158,64 @@ class BotRuntime(object):
             if burst_state is not None:
                 burst_state.publish(state)
             self._publish_equipment_state(state)
-            bot_id = int(state['id'])
             try:
                 row = observed_call(
                     'bot.wire_projection', bot_state_codec.encode_row, state)
-            except bot_state_codec.BotStateCodecError as error:
-                # One row the layout cannot carry is that Bot's problem, not
-                # the round's.  Raising here ended a live round as a
-                # system-error draw and threw the player back to the garage,
-                # with the codec's own message discarded so the log could not
-                # even say which column failed.  A publication carries the
-                # whole roster, so republish that Bot's last accepted row -
-                # the server's own contract for an un-ingestible Bot - and let
-                # every other Bot advance.
-                row = self._last_wire_rows.get(bot_id)
-                self._report_unpublishable_bot(state, error, row is not None)
-                if row is None:
-                    # Nothing was ever accepted for this Bot, so no row of the
-                    # required shape exists.  Skip this checkpoint rather than
-                    # send a short batch the server would reject whole.
-                    complete = False
-                    continue
-            else:
-                self._last_wire_rows[bot_id] = row
-                if 'equipment_states' in state:
-                    self._equipment_wire_exposed_in_update.add(bot_id)
+            except (bot_state_codec.BotStateCodecError, ValueError,
+                    TypeError, OverflowError) as error:
+                # An identity-only row explicitly retains the server's last
+                # checkpoint. Do not acknowledge combat or fabricate a pose.
+                bot_id = int(state['id'])
+                failed_ids.add(bot_id)
+                row = [bot_id]
+                previous = state.get('_wire_projection_failure')
+                reason = str(error)
+                if (previous is None or previous[0] != reason or
+                        now - previous[1] >= 5.0):
+                    print('[BOT STATE] projection unavailable round=%s '
+                          'bot=%s reason=%s' % (
+                              self.round_id, bot_id, reason))
+                    state['_wire_projection_failure'] = (reason, now)
+                wire_rows.append(row)
+                continue
+            state.pop('_wire_projection_failure', None)
+            published_states.append(state)
+            if 'equipment_states' in state:
+                self._equipment_wire_exposed_in_update.add(int(state['id']))
             wire_rows.append(row)
         if diagnostic is not None:
             diagnostic.actor(None)
         self._sample_time_us = step_end_time_us
+        # Keep frozen launches and contact barriers pending until their
+        # participants can publish again; unrelated actors continue normally.
+        launches = [dict(launch) for launch in self._pending_launches
+                    if not failed_ids or int(launch['id']) not in failed_ids]
+        ram_reports = []
+        deferred_ram = []
+        for report in self._pending_ram_reports:
+            blocked = bool(failed_ids) and (
+                int(report['bot_id']) in failed_ids or
+                (report.get('target_kind') == 'bot' and
+                 int(report['target_id']) in failed_ids))
+            (deferred_ram if blocked else ram_reports).append(report)
         edge_sample_time_us, edge_revision = self._mark_publication_edge(
-            ordered_states, launches, self._pending_ram_reports,
+            published_states, launches, ram_reports,
             self._sample_time_us)
-        outgoing = []
-        if complete:
-            publication = {
-                'type': 'bot_state', 'rows': wire_rows,
-                'sample_time_us': self._sample_time_us,
-                'edge_sample_time_us': edge_sample_time_us,
-                'edge_revision': edge_revision,
-            }
-            if launches:
-                # Never put these local-only SPG proof receipts on the LAN
-                # wire.  BattleRuntime retries an unaccepted launch from this
-                # compact list, so skipping a checkpoint cannot lose one.
-                publication['launches'] = launches
-            outgoing.append(publication)
+        publication = {
+            'type': 'bot_state', 'rows': wire_rows,
+            'sample_time_us': self._sample_time_us,
+            'edge_sample_time_us': edge_sample_time_us,
+            'edge_revision': edge_revision,
+        }
+        if launches:
+            # Never put these local-only SPG proof receipts on the LAN wire.
+            # BattleRuntime retries an unaccepted launch from this compact list.
+            publication['launches'] = launches
+        outgoing = [publication]
         # The server validates ram proximity against its latest authority pose.
         # Publish state first, then the cooldown-gated damage reports.
-        outgoing.extend(self._pending_ram_reports)
-        self._pending_ram_reports = []
+        outgoing.extend(ram_reports)
+        self._pending_ram_reports = deferred_ram
         if collect_observation:
             self._next_observation = now + OBSERVATION_SECONDS
             outgoing.append({

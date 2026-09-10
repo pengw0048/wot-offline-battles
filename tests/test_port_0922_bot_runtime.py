@@ -7858,16 +7858,14 @@ class BotRuntimeTests(unittest.TestCase):
         `worker_disconnected` draw and the player went back to the garage,
         while the worker itself was healthy enough to rejoin six seconds
         later.  The server requires a full-roster batch, so the contained
-        publication has to carry that Bot's last accepted row rather than one
-        row fewer.
+        publication carries an identity-only row that retains the last
+        accepted server checkpoint without acknowledging new combat state.
         """
         runtime = self._roster_runtime()
         codec = self.module.bot_state_codec
         original = codec.encode_row
         rejected = 12
-        accepted = runtime.update(.04, 1.0)[0]
-        good_row = dict(
-            (row[0], row) for row in accepted['rows'])[rejected]
+        runtime.update(.04, 1.0)
 
         def reject_one(state):
             if int(state['id']) == rejected:
@@ -7892,14 +7890,13 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(
             sorted(state['id'] for state in runtime._ordered_states()),
             sorted(rows))
-        self.assertEqual(good_row, rows[rejected])
+        self.assertEqual([rejected], rows[rejected])
         report = stream.getvalue()
-        self.assertEqual(1, report.count('BOT PUBLICATION DROPPED'))
-        self.assertIn('id=%d' % rejected, report)
-        self.assertIn('last accepted row republished', report)
+        self.assertEqual(1, report.count('[BOT STATE] projection unavailable'))
+        self.assertIn('bot=%d' % rejected, report)
         self.assertIn('bot state column is not finite', report)
 
-    def test_a_bot_that_never_encoded_skips_the_checkpoint(self):
+    def test_a_bot_that_never_encoded_keeps_other_rows_publishing(self):
         """A short batch is rejected whole, which would freeze every Bot."""
         runtime = self._roster_runtime()
         codec = self.module.bot_state_codec
@@ -7920,9 +7917,14 @@ class BotRuntimeTests(unittest.TestCase):
             codec.encode_row = original
             self.module.sys.stdout = saved
 
-        self.assertFalse([message for message in outgoing
-                          if message.get('type') == 'bot_state'])
-        self.assertIn('checkpoint skipped', stream.getvalue())
+        publication = next(message for message in outgoing
+                           if message.get('type') == 'bot_state')
+        rows = dict((row[0], row) for row in publication['rows'])
+        self.assertEqual([12], rows[12])
+        self.assertEqual(4, len(rows))
+        self.assertTrue(all(len(row) > 1 for bot_id, row in rows.items()
+                            if bot_id != 12))
+        self.assertIn('projection unavailable', stream.getvalue())
 
     def _roster_runtime(self):
         roster = [

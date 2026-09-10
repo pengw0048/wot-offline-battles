@@ -511,7 +511,7 @@ class _Descriptor(object):
             shell=shell, piercingPower=(1000.0, 800.0),
             speed=800.0, gravity=9.81, maxDistance=500.0)
         self.gun = types.SimpleNamespace(
-            itemTypeName='vehicleGun',
+            itemTypeName='vehicleGun', turretYawLimits=None,
             pitchLimits={'absolute': (-0.2, 0.4)}, shots=[shot],
             maxAmmo=40, clip=(1,), reloadTime=1.5, rotationSpeed=1.0,
             aimingTime=1.0, burst=(1, 0.1),
@@ -538,6 +538,7 @@ class _Descriptor(object):
                 _Vector(1.5, 0.8, 3.5), loaded),
             hullPosition=_Vector(0.0, 0.6, 0.0),
             rotationSpeed=0.75,
+            rotationIsAroundCenter=False,
             shotDispersionFactors=(0.14, 0.14))
         self.hull = _Strict1513Component(
             itemTypeName='vehicleHull',
@@ -546,6 +547,7 @@ class _Descriptor(object):
                 _Vector(1.7, 1.4, 3.5), loaded),
             turretPositions=(_Vector(),))
         self.maxHealth = 500
+        self.isYawHullAimingAvailable = False
         self.activeGunShotIndex = 0
         self.activeTurretPosition = 0
 
@@ -1039,6 +1041,81 @@ class _InputHandler(object):
 
     def showGunMarker2(self, flag):
         self.server_markers.append(bool(flag))
+
+
+class _StockAutorotationHandler(object):
+    """Mirror #1513's AvatarInputHandler autorotation state machine.
+
+    ``AvatarInputHandler.start`` seeds the flag from the arcade control mode
+    (``__init__.pyc`` lines 607-614), ``onControlModeChanged`` saves, forces
+    and restores it around a control mode that prefers one (lines 767-792),
+    ``setAutorotation`` is gated by ``enableSwitchAutorotationMode`` and
+    ``isOnArena`` (lines 489-503), and ``switchAutorotation`` is the CMD_CM_
+    VEHICLE_SWITCH_AUTOROTATION key.  ``SniperControlMode`` prefers
+    ``isYawHullAimingAvailable or (rotationIsAroundCenter and not
+    turretHasYawLimits)`` and only allows switching while that is not False
+    (``control_modes.pyc`` lines 1427-1442).
+
+    This mirror reproduces the evaluated truth table of those exact code
+    objects, which cannot run here because the suite is Python 3.  The audit
+    pins their signatures, code names and control flow against the package.
+    """
+
+    def __init__(self, descriptor, on_arena=True):
+        self._descriptor = descriptor
+        self.isOnArena = on_arena
+        self.mode = 'arcade'
+        self.published = []
+        self._isAutorotation = True
+        self._prevModeAutorotation = None
+
+    def _preferred(self, mode):
+        if mode != 'sniper':
+            return None
+        descriptor = self._descriptor
+        return (descriptor.isYawHullAimingAvailable or
+                (descriptor.chassis.rotationIsAroundCenter and
+                 descriptor.gun.turretYawLimits is None))
+
+    def _enable_switch(self, mode):
+        return self._preferred(mode) is not False
+
+    def _publish(self, enable):
+        self.published.append(bool(enable))
+
+    def getAutorotation(self):
+        return self._isAutorotation
+
+    def setAutorotation(self, value):
+        if not self._enable_switch(self.mode):
+            return
+        if not self.isOnArena:
+            return
+        if self._isAutorotation != value:
+            self._isAutorotation = value
+            self._publish(self._isAutorotation)
+        self._prevModeAutorotation = None
+
+    def switchAutorotation(self):
+        self.setAutorotation(not self._isAutorotation)
+
+    def onControlModeChanged(self, mode):
+        previous_mode = self.mode
+        self.mode = mode
+        preferred = self._preferred(mode)
+        if preferred is not None:
+            if self._preferred(previous_mode) is None:
+                self._prevModeAutorotation = self._isAutorotation
+            if self._isAutorotation != preferred:
+                self._isAutorotation = preferred
+                self._publish(self._isAutorotation)
+        elif self._preferred(previous_mode) is not None:
+            if self._prevModeAutorotation is None:
+                self._prevModeAutorotation = True
+            if self._isAutorotation != self._prevModeAutorotation:
+                self._isAutorotation = self._prevModeAutorotation
+                self._publish(self._isAutorotation)
+            self._prevModeAutorotation = None
 
 
 class _ArcadeCamera(object):
@@ -15776,7 +15853,65 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             0.0, battle._local_autorotation_turn(entity, 0.0))
 
-    def test_limited_traverse_autorotation_requires_no_drive_or_cruise(self):
+    def test_limited_traverse_autorotation_follows_the_stock_control_mode(self):
+        """Mirror #1513's arcade/sniper autorotation state machine."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        descriptor = _Descriptor()
+        descriptor.gun.turretYawLimits = (-0.10, 0.10)
+        entity = _Vehicle(
+            10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+        battle._sender = types.SimpleNamespace(aim_yaw=0.75)
+        battle._local_yaw = 0.0
+        handler = _StockAutorotationHandler(descriptor)
+        battle._avatar.inputHandler = handler
+
+        # Arcade starts autorotating, so the aim beyond the arc turns the hull.
+        self.assertTrue(handler.getAutorotation())
+        self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
+
+        # Entering sniper locks the hull of a limited-traverse vehicle, and X
+        # cannot release it while that control mode is preferred.
+        handler.onControlModeChanged('sniper')
+        self.assertFalse(handler.getAutorotation())
+        self.assertEqual(0.0, battle._local_autorotation_turn(entity, 0.0))
+        handler.switchAutorotation()
+        self.assertFalse(handler.getAutorotation())
+        self.assertEqual(0.0, battle._local_autorotation_turn(entity, 0.0))
+
+        # Neither does a movement key, because the same gate rejects it.
+        handler.setAutorotation(True)
+        self.assertFalse(handler.getAutorotation())
+
+        # Leaving sniper restores the arcade setting saved on the way in.
+        handler.onControlModeChanged('arcade')
+        self.assertTrue(handler.getAutorotation())
+        self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
+
+        # X does toggle it outside sniper, and moving turns it back on.
+        handler.switchAutorotation()
+        self.assertFalse(handler.getAutorotation())
+        self.assertEqual(0.0, battle._local_autorotation_turn(entity, 0.0))
+        handler.setAutorotation(True)
+        self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
+
+    def test_sniper_keeps_autorotating_a_fully_rotating_turret(self):
+        """#1513 prefers autorotation on when the gun has no yaw limits."""
+        descriptor = _Descriptor()
+        descriptor.gun.turretYawLimits = None
+        descriptor.chassis.rotationIsAroundCenter = True
+        handler = _StockAutorotationHandler(descriptor)
+
+        handler.switchAutorotation()
+        self.assertFalse(handler.getAutorotation())
+        handler.onControlModeChanged('sniper')
+        self.assertTrue(handler.getAutorotation())
+        # ``enableSwitchAutorotationMode`` only rejects a preferred False.
+        handler.switchAutorotation()
+        self.assertFalse(handler.getAutorotation())
+
+    def test_limited_traverse_autorotation_composes_with_a_live_throttle(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
@@ -15788,14 +15923,14 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._local_yaw = 0.0
         battle._avatar.inputHandler.getAutorotation = lambda: True
 
-        self.assertEqual(0.0, battle._local_autorotation_turn(
-            entity, 0.0, drive_intent=1.0))
-        self.assertEqual(0.0, battle._local_autorotation_turn(
-            entity, 0.0, drive_intent=-1.0))
-        self.assertEqual(0.0, battle._local_autorotation_turn(
-            entity, 0.0, drive_intent=0.25))
-        self.assertEqual(1.0, battle._local_autorotation_turn(
-            entity, 0.0, drive_intent=0.0))
+        # #1513's WGGunRotatorImpl publishes the rotation direction without
+        # reading any drive input, so driving does not suppress the hull turn.
+        self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
+        # Explicit A/D still owns steering, including its reverse convention.
+        for throttle in (-1.0, 1.0):
+            for turn in (-1.0, 1.0):
+                self.assertEqual(turn, battle._local_autorotation_turn(
+                    entity, turn, drive_intent=throttle))
 
     def test_limited_traverse_autorotation_respects_block_tracks(self):
         runtime = _runtime()
@@ -15828,7 +15963,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime.bigworld.entities[10] = entity
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = types.SimpleNamespace(
-            forward=0.0, turn=0.0, aim_yaw=0.75, handbrake=False,
+            forward=1.0, turn=0.0, aim_yaw=0.75, handbrake=False,
             send_current=lambda: client.send_input('current'))
         battle._local_descriptor = descriptor
         battle._attach_local_presentation()
@@ -15841,8 +15976,41 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(1.0, step.call_args.args[2])
         self.assertAlmostEqual(0.05, battle._local_yaw)
         self.assertEqual(0.5, battle._local_turn_speed)
-        self.assertEqual((2, 8), entity.engineMode)
+        # The hull turns while the throttle keeps driving, exactly like the
+        # ``FORWARD | ROTATE_RIGHT`` command #1513's rotator publishes.
+        self.assertEqual((2, 9), entity.engineMode)
         self.assertEqual(0.5, runtime.bigworld.avatar.positions[-1][3])
+
+    def test_autorotation_tracks_target_while_driving_in_either_direction(self):
+        for throttle in (-1.0, -0.25, 0.0, 0.25, 1.0):
+            for aim_yaw in (-0.75, 0.75):
+                with self.subTest(throttle=throttle, aim_yaw=aim_yaw):
+                    runtime = _runtime()
+                    battle = BattleRuntime(runtime)
+                    battle.client = _Client()
+                    battle._avatar = runtime.bigworld.avatar
+                    battle._avatar.inputHandler.getAutorotation = lambda: True
+                    descriptor = _Descriptor()
+                    descriptor.gun.turretYawLimits = (-0.10, 0.10)
+                    entity = _Vehicle(
+                        10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+                    runtime.bigworld.entities[10] = entity
+                    battle._server = types.SimpleNamespace(vehicle_id=10)
+                    battle._sender = types.SimpleNamespace(
+                        forward=throttle, turn=0.0, aim_yaw=aim_yaw,
+                        handbrake=False, send_current=lambda: None)
+                    battle._local_descriptor = descriptor
+                    battle._attach_local_presentation()
+
+                    # Exercise the real integrator: reverse steering changes
+                    # the input sign, but aiming must still close the yaw error.
+                    battle._drive_local(0.1)
+
+                    self.assertGreater(battle._local_yaw * aim_yaw, 0.0)
+                    self.assertLess(abs(aim_yaw - battle._local_yaw),
+                                    abs(aim_yaw))
+                    if throttle:
+                        self.assertGreater(battle._local_speed * throttle, 0.0)
 
     def test_drowning_countdown_keeps_movement_until_the_vehicle_drowns(self):
         runtime = _runtime()
@@ -28234,6 +28402,43 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(['destroy', 'restore'], calls)
         self.assertEqual([], battle._retired_native_owners)
 
+    def test_round_collection_waits_for_released_native_owners(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        battle._start_message = {'round_id': 42}
+        native_owner = object()
+        battle._local_model = native_owner
+        observed = []
+
+        def collect(phase, round_id):
+            observed.append((phase, round_id,
+                             list(battle._retired_native_owners)))
+
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect', side_effect=collect):
+            battle.stop(show_login=False)
+            self.assertEqual([], observed)
+            self.assertIn(native_owner, battle._retired_native_owners)
+            callback = runtime.bigworld.callbacks.pop()
+            callback()
+            self.assertEqual([('round_end', 42, [])], observed)
+            callback()
+            battle.stop(show_login=False)
+            self.assertEqual([('round_end', 42, [])], observed)
+
+    def test_cancelled_lobby_restore_does_not_collect(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect') as collect:
+            battle.stop(show_login=False)
+            callback = runtime.bigworld.callbacks.pop()
+            battle.stop(restore_account=False)
+            callback()
+            collect.assert_not_called()
+
     def test_cleanup_leaves_vehicle_teardown_to_native_avatar_then_map(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -28864,6 +29069,16 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client.send_bot_ram.assert_called_once_with(
             11, 'human', 2, 5, 21, 41, 2, 9)
         battle._bots.ack_human_ram_receipt.assert_not_called()
+
+        battle.client.send_bot_ram.reset_mock()
+        self.assertTrue(battle._send_bot_message({
+            'type': 'bot_ram', 'bot_id': 11, 'target_kind': 'bot',
+            'target_id': 12, 'ram_seq': 6, 'damage_to_bot': 21,
+            'damage_to_target': 41,
+            'contact_positions': [0.0, 0.0, 0.8, 0.0]}))
+        battle.client.send_bot_ram.assert_called_once_with(
+            11, 'bot', 12, 6, 21, 41, None, None,
+            contact_positions=[0.0, 0.0, 0.8, 0.0])
 
     def test_bot_state_uses_the_already_projected_client_boundary(self):
         battle = BattleRuntime(_runtime())

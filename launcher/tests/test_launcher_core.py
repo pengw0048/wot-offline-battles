@@ -2102,6 +2102,30 @@ class GameProcessTest(unittest.TestCase):
             is_running=lambda: True, timeout=1.0, poll=0.1,
             clock=lambda: next(ticks), sleep=lambda unused: None))
 
+    def test_worker_loader_failure_explains_unsigned_and_signed_status(self):
+        for code in (0xc0000135, -1073741515):
+            hint = core.worker_startup_exit_hint(code)
+            self.assertIn("0xC0000135", hint)
+            self.assertIn("x86", hint)
+            self.assertIn("does not identify", hint)
+        for code in (None, 0, 3, 1):
+            self.assertEqual("", core.worker_startup_exit_hint(code))
+
+    def test_launcher_ready_deadline_allows_starter_to_record_timeout(self):
+        native = os.path.join(os.path.dirname(__file__), "..", "..",
+                              "native", "offline_worker_starter.c")
+        with open(native) as stream:
+            definitions = dict(
+                (parts[1], int(parts[2]))
+                for line in stream
+                for parts in [line.split()]
+                if len(parts) == 3 and parts[0] == "#define"
+                and parts[2].isdigit())
+        starter_seconds = (definitions["WORKER_READY_TIMEOUT_MS"] +
+                           definitions["PROCDUMP_ATTACH_TIMEOUT_MS"]) / 1000.0
+        self.assertGreater(core.WORKER_READY_TIMEOUT_SECONDS_0922,
+                           starter_seconds + 5.0)
+
     def test_worker_ready_requires_a_live_process_and_marker(self):
         game_root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, game_root, True)
@@ -2571,6 +2595,46 @@ class WorkerResourceIsolationTest(unittest.TestCase):
     def test_a_missing_package_leaves_the_worker_on_the_client_paths(self):
         actions = core.prepare_worker_resource_root(self.root)
         self.assertTrue(any("keeps the client's own mod paths" in action
+                            for action in actions), actions)
+        self.assertIsNone(core.worker_resource_path_list(self.root))
+
+    def test_a_missing_source_cannot_reuse_an_older_worker_root(self):
+        package, config = self._install_payload()
+        core.prepare_worker_resource_root(self.root)
+        for source in (package, config):
+            with open(source, "rb") as stream:
+                payload = stream.read()
+            os.unlink(source)
+            core.prepare_worker_resource_root(self.root)
+            self.assertIsNone(core.worker_resource_path_list(self.root))
+            with open(source, "wb") as stream:
+                stream.write(payload)
+            core.prepare_worker_resource_root(self.root)
+            self.assertIsNotNone(core.worker_resource_path_list(self.root))
+
+    def test_a_failed_upgrade_cannot_mount_the_previous_worker_payload(self):
+        package, unused_config = self._install_payload()
+        core.prepare_worker_resource_root(self.root)
+        with open(package, "wb") as stream:
+            stream.write(b"unreadable replacement")
+        actions = core.prepare_worker_resource_root(self.root)
+        self.assertTrue(any("could not be built" in action
+                            for action in actions), actions)
+        self.assertIsNone(core.worker_resource_path_list(self.root))
+        environment = core.worker_environment(self.root, environment={})
+        self.assertNotIn(core.WORKER_RES_PATH_ENV_0922, environment)
+
+    def test_a_corrupt_member_falls_back_after_the_archive_opens(self):
+        package, unused_config = self._install_payload()
+        core.prepare_worker_resource_root(self.root)
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("res/scripts/replacement.py", b"payload-bytes")
+        with open(package, "rb") as stream:
+            payload = stream.read()
+        with open(package, "wb") as stream:
+            stream.write(payload.replace(b"payload-bytes", b"PAYLOAD-bytes", 1))
+        actions = core.prepare_worker_resource_root(self.root)
+        self.assertTrue(any("could not be built" in action
                             for action in actions), actions)
         self.assertIsNone(core.worker_resource_path_list(self.root))
 

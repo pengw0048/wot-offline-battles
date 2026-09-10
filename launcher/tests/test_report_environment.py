@@ -263,3 +263,14 @@ class OwnPayloadIsNotListedTest(unittest.TestCase):
         text = report_environment.installed_mods_report(self.game)
         self.assertIn("configs/", text)
         self.assertIn("500 files, installed by this launcher", text)
+
+    def test_other_mod_configs_remain_visible_beside_our_own_tree(self):
+        directory = os.path.join(self.game, "mods", "configs", "third_party")
+        os.makedirs(directory)
+        with open(os.path.join(directory, "settings.json"), "wb") as stream:
+            stream.write(b"{}")
+        text = report_environment.installed_mods_report(self.game)
+        self.assertIn("configs/third_party/settings.json", text)
+        self.assertIn("configs/offline_lan_0922/", text)
+        self.assertIn("500 files, installed by this launcher", text)
+        self.assertNotIn("truncated", text.lower())
