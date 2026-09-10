@@ -56,8 +56,8 @@ from gui.mods.offline_lan_0922 import (
     destructibles_compat, device_damage, effective_params,
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
-    gc_sweep, graphics_probe, loadout as loadout_law, memory_probe,
-    python_heap, world_census, prebaked_destructibles,
+    gc_sweep, graphics_probe, loadout as loadout_law,
+    world_census, prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
@@ -432,7 +432,7 @@ _PROJECTILE_METRIC_NAMES = (
 
 def _combat_log_lines(prefix, kind, record):
     """Keep each native log line below #1513's observed 8 KiB limit."""
-    payload = json.dumps(record, sort_keys=True, separators=(',', ':'))
+    payload = json.dumps(record, separators=(',', ':'))
     line = prefix + kind + ' ' + payload + '\n'
     if len(line) <= 7168:
         return line
@@ -443,7 +443,7 @@ def _combat_log_lines(prefix, kind, record):
     return ''.join(prefix + kind + '_part ' + json.dumps({
         'schema': 2, 'part': index + 1, 'parts': len(chunks),
         'data': chunk,
-    }, sort_keys=True, separators=(',', ':')) + '\n'
+    }, separators=(',', ':')) + '\n'
         for index, chunk in enumerate(chunks))
 
 
@@ -2257,11 +2257,6 @@ class BattleRuntime(object):
                 self._has_expert = bool(skills['expert'])
                 self._has_deadeye = bool(skills['deadeye'])
             round_identity = (self._start_message or {}).get('round_id', '-')
-            memory_probe.log('round_start', round_identity)
-            # Track GC-visible object counts across equivalent boundaries;
-            # neither these counts nor allocation sizes measure all Python
-            # memory or identify the owner of a suspected leak.
-            python_heap.log('round_start', round_identity)
             # Registry trends can guide lifecycle investigation, but do not
             # prove a leak or cover resources outside those registries.
             world_census.log('round_start', round_identity)
@@ -16747,11 +16742,11 @@ class BattleRuntime(object):
                 'travel=%.4f dt=%.4f plane=%s\n' % (
                     before, drive, self._local_speed, pitch,
                     math.sqrt(dx * dx + dz * dz), dt,
-                    json.dumps(self._local_ground_plane, sort_keys=True)))
+                    json.dumps(self._local_ground_plane)))
         trace = contact or getattr(self, '_local_world_collision_trace', None)
         if trace and trace.get('reason'):
             sys.stdout.write('[Offline LAN 0.9.22] LOCAL HARD CONTACT %s\n' %
-                             json.dumps(trace, sort_keys=True))
+                             json.dumps(trace))
         return True
 
     def _report_local_contact_tick(self, path, before, pitch, rise):
@@ -24440,8 +24435,6 @@ class BattleRuntime(object):
             '[Offline LAN 0.9.22] battle teardown complete; deferring '
             'lobby Account restore\n')
         round_identity = (self._start_message or {}).get('round_id', '-')
-        memory_probe.log('round_end', round_identity)
-        python_heap.log('round_end', round_identity)
         world_census.log('round_end', round_identity)
         graphics_probe.log('round_end', round_identity)
 
@@ -24477,12 +24470,10 @@ class BattleRuntime(object):
                     '[Offline LAN 0.9.22] deferred lobby Account restored\n')
             self._retired_native_owners = []
             # Cross the native teardown boundary and release its retained
-            # Python owners before checking which cycles are reclaimable.
-            # The token above also excludes cancelled or repeated callbacks.
-            # The diagnostic includes its own release pass. Fall back to a
-            # plain collection only if it could not produce a result.
-            if not python_heap.log_collect('round_end', round_identity):
-                gc_sweep.sweep('round_end', round_identity)
+            # Python owners before collecting, so nothing traverses a native
+            # object this round still owned. The token above also excludes
+            # cancelled or repeated callbacks.
+            gc_sweep.sweep('round_end', round_identity)
             if callable(on_complete):
                 try:
                     on_complete(lobby_restored)
