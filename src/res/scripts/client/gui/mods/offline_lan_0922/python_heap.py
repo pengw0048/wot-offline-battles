@@ -1,27 +1,24 @@
-"""Per-round census of the Python heap, to settle leak-versus-cache.
+"""Measure GC-tracked objects and explicitly probe collectable cycles.
 
-The two 2026-09-09/10 worker crashes died with 3396 MiB and 3057 MiB of
-private commit, of which CPython 2.7's obmalloc arenas were 21.0 MiB and
-24.8 MiB - about 0.6%.  That proves Python was not what exhausted the address
-space.  It does **not** prove Python was not leaking: a heap that grew 5 MiB
-to 25 MiB across seven rounds has quintupled, which is a real leak, and one
-dump taken at the moment of death cannot show a rate at all.
-
-So this counts the heap itself, once per round boundary, and names the types
-holding the most objects.  A type whose count climbs linearly with the round
-number is a leak with an owner; a heap that returns to its previous level
-after each round is a cache doing its job.  Either answer is worth having, and
-neither needs a dump.
-
-Everything here is read-only.  In particular it never calls ``gc.collect()``:
-the question is what the process is actually holding during play, and
-collecting first would measure something the game never experiences.
+The regular census is read-only and does not call ``gc.collect()``.
+``collect_once`` is a separate, explicit collection experiment at a lifecycle
+boundary. Neither measurement covers all Python memory: untracked objects,
+extension buffers, and native resources can grow without changing the census.
+Growth or reclamation identifies paths to investigate, not a retaining owner
+or proof of a leak. Reachable acyclic objects can accumulate too.
 
 It is diagnostics: every failure is swallowed and the caller continues.
 """
 
 import gc
 import sys
+import types
+
+try:
+    _TEXT_TYPES = (str, unicode)
+except NameError:
+    _TEXT_TYPES = (str,)
+_TYPE_NAME = type.__dict__['__name__']
 
 # How many type names to report.  Enough to cover the port's own containers
 # plus the stock client's entity and GUI objects, short enough for one line.
@@ -34,14 +31,13 @@ TOP_TYPES = 12
 # question the histogram cannot.
 MAX_CENSUS_OBJECTS = 2000000
 
-# How many objects of one type to fingerprint, and how many fingerprints to
-# report.  A dict's key set identifies the structure that leaked far more
-# precisely than the word "dict": report 20260910-034953 grew ~121k dicts,
-# ~117k lists and ~112k tuples per round in the worker while every named
-# class stayed flat, so the type histogram alone cannot say what they are.
+# Maximum objects to fingerprint across all types, and signatures to report.
+# Small dict key sets can distinguish candidate structures more precisely
+# than a type name, without identifying which owner retained them.
 SIGNATURE_SAMPLE = 4000
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
+MAX_SIGNATURE_TEXT = 64
 # List and tuple lengths are reported as exact small values and then in
 # powers-of-two buckets, so one dominant shape is still visible.
 SMALL_LENGTH = 8
@@ -93,12 +89,13 @@ def _by_type(tracked):
     tally = {}
     for item in tracked:
         try:
-            name = type(item).__name__
+            # Read the built-in type slot, bypassing metaclass descriptors.
+            name = _TYPE_NAME.__get__(type(item))
         except Exception:
             name = '?'
         tally[name] = tally.get(name, 0) + 1
     ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
-    return ranked[:TOP_TYPES]
+    return [(_label(name), count) for name, count in ranked[:TOP_TYPES]]
 
 
 def format_line(phase, round_id, state=None):
@@ -129,36 +126,37 @@ def log(phase, round_id):
 
 
 def _signature(item):
-    """Fingerprint one object by what it structurally is.
-
-    "dict" is not an answer.  A dict's key set names the record that leaked;
-    a list's or tuple's length separates a 3-vector from a per-frame row; a
-    function or code object gives a file and a line outright.
-    """
-    kind = type(item).__name__
+    """Describe a bounded shape without invoking arbitrary object code."""
+    item_type = type(item)
+    kind = _type_name(item)
     try:
-        if isinstance(item, dict):
-            keys = sorted(str(key) for key in item.keys()
-                          if isinstance(key, str))
+        # Exact types only: subclasses may override keys, length, or attribute
+        # lookup and run application/native code while garbage is retained.
+        if item_type is dict:
+            if len(item) > MAX_SIGNATURE_KEYS:
+                return 'dict(len=%s)' % _bucket(len(item))
+            keys = sorted(_label(key) for key in item if _is_text(key))
             if not keys:
                 return 'dict(len=%d)' % len(item)
-            shown = keys[:MAX_SIGNATURE_KEYS]
-            more = '+%d' % (len(keys) - len(shown)) if len(keys) > len(
-                shown) else ''
-            return 'dict{%s%s}' % (','.join(shown), more)
-        if isinstance(item, (list, tuple, set, frozenset)):
+            return 'dict{%s}' % ','.join(keys)
+        if any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
             return '%s(len=%s)' % (kind, _bucket(len(item)))
-        code = getattr(item, 'func_code', None) or getattr(
-            item, '__code__', None)
-        if code is None and kind == 'code':
+        code = None
+        if item_type is types.FunctionType:
+            code = getattr(item, 'func_code', None) or item.__code__
+        elif item_type is types.CodeType:
             code = item
         if code is not None:
             return '%s@%s:%d' % (kind,
                                  _leaf(code.co_filename),
                                  code.co_firstlineno)
-        if kind == 'instancemethod':
-            return 'instancemethod:%s' % getattr(item, '__name__', '?')
-        if kind == 'frame':
+        if item_type is types.MethodType:
+            function = (item.im_func if sys.version_info[0] == 2 else
+                        item.__func__)
+            if type(function) is types.FunctionType:
+                return '%s:%s' % (kind, _label(function.__name__))
+            return kind
+        if item_type is types.FrameType:
             return 'frame@%s:%d' % (_leaf(item.f_code.co_filename),
                                     item.f_lineno)
         return kind
@@ -166,9 +164,32 @@ def _signature(item):
         return kind
 
 
+def _type_name(item):
+    try:
+        return _label(_TYPE_NAME.__get__(type(item)))
+    except Exception:
+        return '?'
+
+
+def _label(value):
+    """Bound log text and keep one structural sample on one line."""
+    if not _is_text(value):
+        return '?'
+    text = ''.join(str(char) if 32 <= ord(char) < 127 and
+                   char not in ',{}|' else '_'
+                   for char in value[:MAX_SIGNATURE_TEXT])
+    return text + ('...' if len(value) > MAX_SIGNATURE_TEXT else '')
+
+
+def _is_text(value):
+    return any(type(value) is builtin for builtin in _TEXT_TYPES)
+
+
 def _leaf(path):
     try:
-        text = str(path).replace('\\', '/')
+        if not _is_text(path):
+            return '?'
+        text = _label(path[-MAX_SIGNATURE_TEXT:]).replace('\\', '/')
         return text.rsplit('/', 1)[-1]
     except Exception:
         return '?'
@@ -198,52 +219,55 @@ def signature_census(items, limit=SIGNATURE_SAMPLE):
     return scanned, ranked[:TOP_SIGNATURES]
 
 
+def _collect_saved_sample(garbage, first):
+    """Keep temporary object references and exception frames out of pass two."""
+    try:
+        unreachable = gc.collect()
+        sample = garbage[first:first + SIGNATURE_SAMPLE]
+        scanned, signatures = signature_census(sample)
+        return unreachable, scanned, signatures, _by_type(sample)
+    except Exception:
+        return None
+
+
 def collect_once():
-    """Force one collection and report what it found. Never raises.
+    """Sample unreachable objects and perform a second pass to release cycles.
 
-    This is the experiment that separates the two explanations for the
-    worker's growth in report 20260910-034953 - 1.14M tracked objects on
-    round 1 to 2.87M on round 6, while the visible client on the same machine
-    stayed flat around 1.19M:
+    DEBUG_SAVEALL retains the first pass's objects long enough to fingerprint
+    a bounded sample. Only this call's additions to gc.garbage are removed;
+    an existing SAVEALL session is left untouched and this probe is skipped.
+    Both normal and failed sampling restore the caller's debug flags and run
+    the release pass. The automatic collector's enabled state is not changed.
 
-    * unreachable cycles that nobody collects, because the engine disables
-      the cyclic collector at startup (`gc` is imported and `disable` called
-      from native code at ``0x0068F4FA``/``0x0068F54A``, and both roles report
-      ``gc_enabled=0``).  Reference counting frees everything acyclic, so only
-      cycles can accumulate - and a periodic collect would then be a real fix.
-    * objects something still references, in which case a collect frees
-      nothing and the holder has to be found.
-
-    ``DEBUG_SAVEALL`` makes the collector put what it found in ``gc.garbage``
-    instead of freeing it, which is how stock #1513's own
-    ``GarbageCollectionDebug.gcDump`` inspects a leak.  We fingerprint a
-    bounded sample, drop the list, and collect again to actually free it -
-    members of a cycle keep each other alive, so clearing the list is not
-    enough on its own.
-
-    **This deliberately does something the engine chose not to do.** BigWorld
-    disables the cyclic collector, and a traversal of native objects is
-    exactly what that decision avoids, so a collect here could be slow or
-    could fault in a native ``tp_traverse``.  It runs at a round boundary,
-    once, and reports its own elapsed time so the cost is visible.  It never
-    re-enables the collector.
+    Reclaimed cycles are evidence of collectable retention, not proof of its
+    cause or of native lifecycle safety. Live references can also accumulate.
+    Exact Windows acceptance is still needed for native traversal and timing.
     """
     try:
         import time
+        previous_debug = gc.get_debug()
+        if previous_debug & gc.DEBUG_SAVEALL:
+            return None
+        garbage = gc.garbage
+        if type(garbage) is not list:
+            return None
+        first = len(garbage)
         before = len(gc.get_objects())
         started = time.time()
-        previous_debug = gc.get_debug()
-        gc.set_debug(gc.DEBUG_SAVEALL)
         try:
-            unreachable = gc.collect()
-            scanned, signatures = signature_census(gc.garbage)
-            garbage_types = _by_type(gc.garbage[:SIGNATURE_SAMPLE])
+            gc.set_debug(previous_debug | gc.DEBUG_SAVEALL)
+            sample = _collect_saved_sample(garbage, first)
         finally:
-            del gc.garbage[:]
-            gc.set_debug(previous_debug)
-        # The cycle members still point at each other, so refcounting cannot
-        # free them; this second pass is what actually reclaims the memory.
-        freed_second = gc.collect()
+            try:
+                del garbage[first:]
+            finally:
+                gc.set_debug(previous_debug)
+            # The sampling helper has returned, dropping references even if
+            # it failed. Clearing SAVEALL's list alone cannot release cycles.
+            freed_second = gc.collect()
+        if sample is None:
+            return None
+        unreachable, scanned, signatures, garbage_types = sample
         elapsed_ms = int((time.time() - started) * 1000.0)
         after = len(gc.get_objects())
         return {
