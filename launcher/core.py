@@ -86,7 +86,9 @@ PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
 STOP_STARTER_ARGUMENT_0922 = "--stop-starter"
-WORKER_READY_TIMEOUT_SECONDS_0922 = 60.0
+# The starter can spend 10 seconds attaching ProcDump before its own
+# 60-second ready wait. Let it record failure before launcher cancellation.
+WORKER_READY_TIMEOUT_SECONDS_0922 = 90.0
 WORKER_FAILURE_DRAIN_SECONDS_0922 = 0.5
 STARTER_CONTROL_TIMEOUT_SECONDS_0922 = 5.0
 STARTER_SHUTDOWN_TIMEOUT_SECONDS_0922 = 45.0
@@ -1985,6 +1987,16 @@ def wait_for_server(port_version, host, port, timeout=20.0, interval=0.25,
         if clock() >= deadline:
             return False
         sleep(interval)
+
+
+def worker_startup_exit_hint(exit_code):
+    """Explain loader failures that happen before the client can write a log."""
+    if exit_code is not None and (int(exit_code) & 0xffffffff) == 0xc0000135:
+        return ("0xC0000135: a required DLL could not be loaded. "
+                "Verify the game files and install the DirectX 9 June 2010 "
+                "runtime and Visual C++ x86 runtime. The exit code alone "
+                "does not identify the missing DLL.")
+    return ""
 
 
 def wait_for_worker_ready(process, game_root,
