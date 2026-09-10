@@ -1402,7 +1402,7 @@ class ServerBotObservationRelayTests(unittest.TestCase):
         lease_only['contacts'][0]['fresh'] = False
         server.update_bot_observation(
             SIMULATION_WORKER_AUTHORITY_ID, lease_only)
-        self.assertEqual({('bot', 11)}, server.team_lit_targets[1])
+        self.assertEqual({('bot', 11)}, set(server.team_lit_targets[1]))
         self.assertEqual(frozenset(), server.player_spotted[1])
 
         self.assertIsInstance(server.update_bot_observation(
@@ -1421,7 +1421,7 @@ class ServerBotObservationRelayTests(unittest.TestCase):
         self.assertTrue(server.update_bot_observation(
             SIMULATION_WORKER_AUTHORITY_ID,
             self._human_message(server.round_id, (), visible=False)))
-        self.assertEqual(set(), server.team_lit_targets[1])
+        self.assertEqual({}, server.team_lit_targets[1])
 
         self.assertIsInstance(server.update_bot_observation(
             SIMULATION_WORKER_AUTHORITY_ID,
@@ -1429,6 +1429,119 @@ class ServerBotObservationRelayTests(unittest.TestCase):
 
         self.assertEqual(1, server._statistics_row('player', 1)['spotted'])
         self.assertEqual(1, server._statistics_row('player', 2)['spotted'])
+
+    def test_a_lease_expiring_between_batches_credits_the_next_observer(self):
+        from unittest.mock import patch
+
+        for observer_kind in ('player', 'bot'):
+            with self.subTest(observer_kind=observer_kind):
+                server, _, _ = self._server()
+                if observer_kind == 'player':
+                    initial = self._human_message(server.round_id, (1,))
+                    renewed = self._human_message(server.round_id, (2,))
+                    observer_id, target = 1, ('bot', 11)
+                else:
+                    server.bot_manifest.append(dict(
+                        server.bot_manifest[0], id=12))
+                    server.bot_states[12] = dict(
+                        server.bot_states[11], id=12)
+                    initial = self._message(server.round_id)
+                    renewed = copy.deepcopy(initial)
+                    renewed['contacts'][0]['visible_by_bot_ids'] = [12]
+                    observer_id, target = 11, ('player', 2)
+                with patch('lan_battle_server.time.monotonic',
+                           return_value=100.0):
+                    self.assertIsInstance(server.update_bot_observation(
+                        SIMULATION_WORKER_AUTHORITY_ID, initial), dict)
+                remembered = copy.deepcopy(initial)
+                remembered['contacts'][0].update({
+                    'fresh': False, 'time_left': 0.1,
+                    'visible_by_bot_ids': [],
+                    'visible_by_player_ids': []})
+                with patch('lan_battle_server.time.monotonic',
+                           return_value=109.9):
+                    self.assertIsInstance(server.update_bot_observation(
+                        SIMULATION_WORKER_AUTHORITY_ID, remembered), dict)
+                # No explicit hidden sample arrives before another observer
+                # renews this target after its previous lease has expired.
+                with patch('lan_battle_server.time.monotonic',
+                           return_value=110.2):
+                    self.assertIsInstance(server.update_bot_observation(
+                        SIMULATION_WORKER_AUTHORITY_ID, renewed), dict)
+                next_id = 2 if observer_kind == 'player' else 12
+                self.assertEqual(1, server._statistics_row(
+                    observer_kind, observer_id)['spotted'])
+                self.assertEqual(1, server._statistics_row(
+                    observer_kind, next_id)['spotted'])
+                self.assertEqual({target}, server.ever_spotted_targets)
+
+    def test_a_dead_last_observer_does_not_cancel_the_team_lease(self):
+        for observer_kind in ('player', 'bot'):
+            with self.subTest(observer_kind=observer_kind):
+                server, _, _ = self._server()
+                if observer_kind == 'player':
+                    initial = self._human_message(server.round_id, (1,))
+                    renewed = self._human_message(server.round_id, (2,))
+                    observer_id, team, target = 1, 1, ('bot', 11)
+                else:
+                    server.bot_manifest.append(dict(
+                        server.bot_manifest[0], id=12))
+                    server.bot_states[12] = dict(
+                        server.bot_states[11], id=12)
+                    initial = self._message(server.round_id)
+                    initial['contacts'][0]['shootable_by_bot_ids'] = [12]
+                    initial['contacts'][0]['threatened_bot_ids'] = [12]
+                    renewed = copy.deepcopy(initial)
+                    renewed['contacts'][0]['visible_by_bot_ids'] = [12]
+                    observer_id, team, target = 11, 2, ('player', 2)
+                self.assertIsInstance(server.update_bot_observation(
+                    SIMULATION_WORKER_AUTHORITY_ID, initial), dict)
+                if observer_kind == 'player':
+                    server.players[observer_id].alive = False
+                else:
+                    server.bot_states[observer_id]['alive'] = False
+                relay = server.update_bot_observation(
+                    SIMULATION_WORKER_AUTHORITY_ID, initial)
+                self.assertIsInstance(relay, dict)
+                contact = relay['contacts'][0]
+                self.assertTrue(contact['visible'])
+                self.assertFalse(contact['fresh'])
+                self.assertEqual(10.0, contact['time_left'])
+                self.assertEqual([], contact['visible_by_bot_ids'])
+                self.assertEqual([], contact['visible_by_player_ids'])
+                self.assertEqual([], contact['shootable_by_bot_ids'])
+                self.assertEqual([], contact.get('threatened_bot_ids', []))
+                self.assertEqual({target}, set(server.team_lit_targets[team]))
+                self.assertIsInstance(server.update_bot_observation(
+                    SIMULATION_WORKER_AUTHORITY_ID, renewed), dict)
+                next_id = 2 if observer_kind == 'player' else 12
+                self.assertEqual(1, server._statistics_row(
+                    observer_kind, observer_id)['spotted'])
+                self.assertEqual(0, server._statistics_row(
+                    observer_kind, next_id)['spotted'])
+
+    def test_a_malformed_retired_observer_batch_preserves_spot_state(self):
+        server, _, _ = self._server()
+        initial = self._human_message(server.round_id, (1,))
+        self.assertIsInstance(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID, initial), dict)
+        server.players[1].alive = False
+        before = copy.deepcopy((server.player_spotted, server.bot_spotted,
+                                server.team_lit_targets,
+                                server.team_visible_targets,
+                                server.bot_planner._contacts))
+        malformed = self._human_message(server.round_id, (2,))
+        invalid = copy.deepcopy(initial['contacts'][0])
+        invalid['fresh'] = False
+        malformed['contacts'].append(invalid)
+
+        self.assertFalse(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID, malformed))
+
+        self.assertEqual(before, (
+            server.player_spotted, server.bot_spotted,
+            server.team_lit_targets, server.team_visible_targets,
+            server.bot_planner._contacts))
 
     def test_worker_human_spot_rejects_forged_observers(self):
         server, unused_authority_socket, unused_guest_socket = self._server()

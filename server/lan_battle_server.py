@@ -4745,7 +4745,7 @@ class BattleState:
                 (bot_id, set()) for bot_id in known_bots)
             direct_player_spots = dict(
                 (reporter_id, set()) for reporter_id in known_players)
-            team_lit = {1: set(), 2: set()}
+            team_lit = {1: {}, 2: {}}
             stale_observation = False
             contacts = []
             for raw in message.get("contacts"):
@@ -4797,8 +4797,16 @@ class BattleState:
                         int(target.get("team", 0)) == observing_team or
                         target_team != int(target.get("team", 0))):
                     return False
+                reported_fresh = bool(
+                    contact["visible_by_bot_ids"] or
+                    contact["visible_by_player_ids"])
+                if (contact["fresh"] != reported_fresh or
+                        contact["visible"] != (time_left > 0.0) or
+                        (reported_fresh and not contact["visible"]) or
+                        (not reported_fresh and
+                         contact["shootable_by_bot_ids"])):
+                    return False
                 bot_observer_ids = []
-                stale_contact = False
                 for raw_bot_id in contact.get("visible_by_bot_ids"):
                     try:
                         bot_id = _exact_int(
@@ -4806,15 +4814,15 @@ class BattleState:
                     except ValueError:
                         return False
                     bot = known_bots.get(bot_id)
-                    if bot is not None and not bot.get("alive"):
-                        stale_observation = True
-                        stale_contact = True
-                        continue
                     if (bot is None or
                             int(bot.get("team", 0)) != observing_team or
                             bot_id in bot_observer_ids):
                         return False
                     bot_observer_ids.append(bot_id)
+                    if not bot.get("alive"):
+                        stale_observation = True
+                bot_observer_ids = [bot_id for bot_id in bot_observer_ids
+                                    if known_bots[bot_id].get("alive")]
                 contact["visible_by_bot_ids"] = sorted(bot_observer_ids)
 
                 observer_ids = []
@@ -4826,17 +4834,15 @@ class BattleState:
                     except ValueError:
                         return False
                     observer = known_players.get(observer_id)
-                    if observer is not None and not observer.alive:
-                        stale_observation = True
-                        stale_contact = True
-                        continue
                     if (observer is None or
                             int(observer.team) != observing_team or
                             observer_id in observer_ids):
                         return False
                     observer_ids.append(observer_id)
-                if observer_ids and not contact["visible"]:
-                    return False
+                    if not observer.alive:
+                        stale_observation = True
+                observer_ids = [observer_id for observer_id in observer_ids
+                                if known_players[observer_id].alive]
                 contact["visible_by_player_ids"] = sorted(observer_ids)
                 shooter_ids = []
                 for raw_bot_id in contact.get("shootable_by_bot_ids"):
@@ -4846,15 +4852,15 @@ class BattleState:
                     except ValueError:
                         return False
                     bot = known_bots.get(bot_id)
-                    if bot is not None and not bot.get("alive"):
-                        stale_observation = True
-                        stale_contact = True
-                        continue
                     if (bot is None or
                             int(bot.get("team", 0)) != observing_team or
                             bot_id in shooter_ids):
                         return False
                     shooter_ids.append(bot_id)
+                    if not bot.get("alive"):
+                        stale_observation = True
+                shooter_ids = [bot_id for bot_id in shooter_ids
+                               if known_bots[bot_id].get("alive")]
                 contact["shootable_by_bot_ids"] = sorted(shooter_ids)
                 # A threat is advisory native geometry: a malformed row must
                 # not make an otherwise valid observation batch fail or give
@@ -4880,18 +4886,20 @@ class BattleState:
                     contact["threatened_bot_ids"] = sorted(
                         threatened_ids if contact["visible"] else ())
                 fresh = bool(bot_observer_ids or observer_ids)
-                if stale_contact and not fresh:
-                    continue
-                if (contact["fresh"] != fresh or
-                        contact["visible"] != (time_left > 0.0) or
-                        (fresh and not contact["visible"]) or
-                        (not fresh and shooter_ids)):
-                    return False
+                # An observer may die before its in-flight report arrives.
+                # Retire its direct sight and firing evidence, but keep the
+                # valid lease that still lights this target for the team.
+                contact["fresh"] = fresh
+                if not fresh:
+                    contact["shootable_by_bot_ids"] = []
+                    if "threatened_bot_ids" in contact:
+                        contact["threatened_bot_ids"] = []
                 contact["time_left"] = time_left
                 result_kind = ("player" if target_kind == "human"
                                else target_kind)
                 if contact["visible"]:
-                    team_lit[observing_team].add((result_kind, target_id))
+                    team_lit[observing_team][
+                        (result_kind, target_id)] = time_left
                 for bot_id in bot_observer_ids:
                     direct_bot_spots[bot_id].add(
                         (result_kind, target_id))
@@ -4900,6 +4908,10 @@ class BattleState:
                         (result_kind, target_id))
                 contacts.append(contact)
             now = time.monotonic()
+            team_lit = {
+                team: {target: now + time_left
+                       for target, time_left in targets.items()}
+                for team, targets in team_lit.items()}
             accepted_visibility = []
             accepted_contacts = self.bot_planner.report_contacts(
                 contacts, known_targets, now,
@@ -4911,7 +4923,7 @@ class BattleState:
                 message.get("affordances"), known_bots, known_targets, now)
             self._replace_bot_spotted(direct_bot_spots)
             self._replace_player_spotted(direct_player_spots)
-            self._replace_team_lit(team_lit)
+            self._replace_team_lit(team_lit, now=now)
             self._commit_detections()
             if accepted_visibility:
                 return {
@@ -4949,10 +4961,18 @@ class BattleState:
             self.player_spotted[int(player_id)] = spotted
         return True
 
-    def _replace_team_lit(self, lit_targets):
-        """Commit one complete validated team spot-lease batch."""
+    def _replace_team_lit(self, lit_targets, now=None):
+        """Expire old leases before committing a complete deadline batch."""
+        now = time.monotonic() if now is None else now
         for team in (1, 2):
-            self.team_lit_targets[team] = set(lit_targets.get(team, ()))
+            # A lease can expire between reports without an explicit hidden
+            # sample. Compare the previous lease before a fresh observer's
+            # renewal replaces it, so that observer gets the new detection.
+            still_lit = {
+                target for target, deadline in
+                self.team_lit_targets[team].items() if deadline > now}
+            self.team_visible_targets[team].intersection_update(still_lit)
+            self.team_lit_targets[team] = dict(lit_targets.get(team, {}))
         return True
 
     @staticmethod
@@ -11799,11 +11819,11 @@ class BattleState:
         # team -> the enemies that team can currently see, so a vehicle that
         # goes dark and reappears is a new detection for whoever finds it.
         self.team_visible_targets = {1: set(), 2: set()}
-        # team -> the enemies the worker's spot leases still light for that
-        # team.  A target stays detected for as long as its lease holds, so
+        # team -> enemy -> server monotonic deadline for the worker's spot
+        # lease. A target stays detected for as long as its lease holds, so
         # neither a blocked line of sight nor a budgeted-out visibility probe
         # can turn one continuous contact into a second detection.
-        self.team_lit_targets = {1: set(), 2: set()}
+        self.team_lit_targets = {1: {}, 2: {}}
         # every vehicle any enemy ever directly detected.
         self.ever_spotted_targets = set()
         # actor -> damage it dealt to its own team.
@@ -11861,7 +11881,7 @@ class BattleState:
         observer already revealed adds nothing, while an enemy whose lease
         expired and is found again credits whoever finds it that time.  This
         is the ``spotted`` column the results screen shows and the count
-        Patrol Duty (``scout``) reads.
+        Scout (``scout``) reads.
         """
         observers = [(("bot", int(bot_id)), spotted)
                      for bot_id, spotted in self.bot_spotted.items()]
@@ -12134,12 +12154,17 @@ class BattleState:
                 int(value.get("target_id", 0))))]
 
     def _spots_target(self, actor, target):
-        """Return whether one actor currently holds this target in sight."""
+        """Return whether one live observer currently sees this target."""
         actor = (str(actor[0]), int(actor[1]))
         target = (str(target[0]), int(target[1]))
         if actor[0] == "player":
-            return target in self.player_spotted.get(actor[1], ())
-        return target in self.bot_spotted.get(actor[1], ())
+            player = self.players.get(actor[1])
+            return bool(player is not None and player.connected and
+                        player.alive and
+                        target in self.player_spotted.get(actor[1], ()))
+        bot = self.bot_states.get(actor[1])
+        return bool(bot is not None and bot.get("alive") and
+                    target in self.bot_spotted.get(actor[1], ()))
 
     def _radio_assisters(self, attacker, target, target_team):
         """Return the live observers one spotting assist is divided between.

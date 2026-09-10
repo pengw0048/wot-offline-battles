@@ -1200,14 +1200,14 @@ class DetectionTests(unittest.TestCase):
         state, unused_player = self._battle()
         state.bot_states[2]['team'] = 1
         state.player_spotted = {1: frozenset({('bot', 1)})}
-        state._replace_team_lit({1: {('bot', 1)}})
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
         # The spot lease runs out, so the enemy is dark for the whole team.
         state.player_spotted = {1: frozenset()}
         state._replace_team_lit({})
         state._commit_detections()
         state.bot_spotted = {2: frozenset({('bot', 1)})}
-        state._replace_team_lit({1: {('bot', 1)}})
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
         self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
         self.assertEqual(1, state._statistics_row('bot', 2)['spotted'])
@@ -1216,15 +1216,15 @@ class DetectionTests(unittest.TestCase):
         state, unused_player = self._battle()
         state.bot_states[2]['team'] = 1
         state.player_spotted = {1: frozenset({('bot', 1)})}
-        state._replace_team_lit({1: {('bot', 1)}})
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
         # A blocked line of sight, or a visibility probe the worker budgeted
         # out, leaves the team lit by the lease alone.
         state.player_spotted = {1: frozenset()}
-        state._replace_team_lit({1: {('bot', 1)}})
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
         state.bot_spotted = {2: frozenset({('bot', 1)})}
-        state._replace_team_lit({1: {('bot', 1)}})
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
         self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
         self.assertEqual(0, state._statistics_row('bot', 2)['spotted'])
@@ -1272,6 +1272,43 @@ class SpottingAssistTests(unittest.TestCase):
             0, state._statistics_row('player', 1)['damage_assisted_radio'])
         self.assertEqual([], [event for event in state.pending_events
                               if event['kind'] == 'assist'])
+
+    def test_a_dead_shooters_in_flight_hit_credits_the_live_spotter(self):
+        for attacker in (('player', 1), ('bot', 3)):
+            with self.subTest(attacker=attacker):
+                state, player = self._battle()
+                target = ('bot', 1)
+                state.bot_spotted = {2: frozenset({target})}
+                # Death arrives before the next observation batch clears
+                # the shooter's old direct-vision set.
+                if attacker[0] == 'player':
+                    player.alive = False
+                    state.player_spotted = {1: frozenset({target})}
+                else:
+                    state.bot_states[3]['alive'] = False
+                    state.bot_spotted[3] = frozenset({target})
+
+                state._record_damage(attacker, target, 240, {})
+
+                self.assertEqual(240, state._statistics_row(
+                    'bot', 2)['damage_assisted_radio'])
+                self.assertEqual(240, state._statistics_interaction(
+                    ('bot', 2), target)['assist_radio'])
+                self.assertEqual([240], [
+                    event['damage'] for event in state.pending_events
+                    if event['kind'] == 'assist'])
+
+    def test_a_disconnected_shooters_old_sight_does_not_block_an_assist(self):
+        state, player = self._battle()
+        target = ('bot', 1)
+        state.player_spotted = {1: frozenset({target})}
+        state.bot_spotted = {2: frozenset({target})}
+        player.connected = False
+
+        state._record_damage(('player', 1), target, 240, {})
+
+        self.assertEqual(240, state._statistics_row(
+            'bot', 2)['damage_assisted_radio'])
 
     def test_a_blind_shooter_splits_the_assist_between_the_spotters(self):
         state, unused_player = self._battle()
