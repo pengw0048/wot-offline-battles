@@ -99,8 +99,13 @@ WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
 STOP_STARTER_ARGUMENT_0922 = "--stop-starter"
 # The starter waits up to 60 seconds for readiness, then can spend another
-# 10 seconds attaching ProcDump. Leave room for its own failure diagnostics.
-WORKER_READY_TIMEOUT_SECONDS_0922 = 90.0
+# 10 seconds attaching ProcDump. Keep the launcher's 90-second budget so the
+# starter can record its own failure before launcher cancellation.
+WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 = 60.0
+WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922 = 30.0
+WORKER_READY_TIMEOUT_SECONDS_0922 = (
+    WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 +
+    WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922)
 WORKER_FAILURE_DRAIN_SECONDS_0922 = 0.5
 STARTER_CONTROL_TIMEOUT_SECONDS_0922 = 5.0
 STARTER_SHUTDOWN_TIMEOUT_SECONDS_0922 = 45.0

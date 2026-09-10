@@ -24,6 +24,11 @@ try:
 except ImportError:
     import core
 
+try:
+    from . import report_environment
+except ImportError:
+    import report_environment
+
 
 SESSION_SCHEMA = 1
 SESSION_STATE_FILENAME = "latest-error-report-session.json"
@@ -78,6 +83,13 @@ _DUMP_FILENAMES = {
 _TRAIL_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "visible-client.exceptions.txt",
     ROLE_HIDDEN_WORKER: "hidden-worker.exceptions.txt",
+}
+# BigWorld writes its own crash banner onto the faulting thread's stack. It is
+# read out of each dump as that dump is copied, so the sentence survives even
+# when the player does not upload a multi-hundred-MB dump.
+_CRASH_TEXT_FILENAMES = {
+    ROLE_VISIBLE_CLIENT: "visible-client.crash-text.txt",
+    ROLE_HIDDEN_WORKER: "hidden-worker.crash-text.txt",
 }
 TRAIL_MAX_BYTES = 1024 * 1024
 _SESSION_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
@@ -892,7 +904,7 @@ def _open_valid_dump(session, role):
     return _open_recorded_dump(session, role)
 
 
-def _write_slice(archive, archive_name, stream, length):
+def _write_slice(archive, archive_name, stream, length, observer=None):
     remaining = int(length)
     # Streamed members have no size in their initial header. Archive-level
     # allowZip64 alone cannot expand that header after a large dump is copied.
@@ -902,7 +914,45 @@ def _write_slice(archive, archive_name, stream, length):
             if not payload:
                 raise IOError("A diagnostic log changed while it was copied.")
             target.write(payload)
+            if observer is not None:
+                observer.feed(payload)
             remaining -= len(payload)
+
+
+def _write_text(archive, archive_name, text):
+    """Add one generated text member. Diagnostics never fail a report."""
+    try:
+        payload = text.encode("utf-8", "replace")
+    except Exception:
+        return None
+    with archive.open(archive_name, "w") as target:
+        target.write(payload)
+    return archive_name
+
+
+def _describe_environment(session, game_root):
+    """Return the generated members, each already reduced to text.
+
+    Every section is best effort and reports its own failure inline: a report
+    that cannot be written is worse than a report missing one section.
+    """
+    sections = (
+        ("environment.txt", report_environment.environment_report),
+        ("installed-mods.txt", report_environment.installed_mods_report),
+        ("missing-dependencies.txt",
+         report_environment.missing_dependencies_report),
+    )
+    generated = []
+    for archive_name, builder in sections:
+        try:
+            if builder is report_environment.environment_report:
+                text = builder(game_root, session)
+            else:
+                text = builder(game_root)
+        except Exception as error:
+            text = "%s could not be collected: %s\n" % (archive_name, error)
+        generated.append((archive_name, text))
+    return generated
 
 
 def _prepare_reports_directory():
@@ -985,6 +1035,7 @@ def create_report(now=None):
     temporary = report_path + ".tmp-" + uuid.uuid4().hex
     included_roles = []
     included_files = []
+    collected = []
     try:
         with zipfile.ZipFile(
                 temporary, "w", compression=zipfile.ZIP_DEFLATED,
@@ -1020,13 +1071,34 @@ def create_report(now=None):
                 if opened is None:
                     continue
                 stream, length = opened
+                scanner = report_environment.CrashTextScanner()
                 try:
                     archive_name = _DUMP_FILENAMES[role]
-                    _write_slice(archive, archive_name, stream, length)
+                    _write_slice(archive, archive_name, stream, length,
+                                 observer=scanner)
                 finally:
                     stream.close()
                 included_files.append(archive_name)
-        if not included_files:
+                banner = scanner.result()
+                if banner:
+                    written = _write_text(
+                        archive, _CRASH_TEXT_FILENAMES[role],
+                        banner + "\n")
+                    if written:
+                        included_files.append(written)
+            # A report is worth sending only when the session actually
+            # produced something; generated sections describe the machine and
+            # must not, on their own, make an empty session look collectable.
+            collected = list(included_files)
+            # Generated last so that a failure inside them cannot cost the
+            # logs and dumps that are already in the archive.
+            if collected:
+                for archive_name, text in _describe_environment(
+                        session, session.get("gameRoot")):
+                    written = _write_text(archive, archive_name, text)
+                    if written:
+                        included_files.append(written)
+        if not collected:
             raise core.LauncherError(
                 "The latest game session has not produced any diagnostic "
                 "logs yet. No earlier session was included.")

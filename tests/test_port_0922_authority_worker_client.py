@@ -2000,3 +2000,51 @@ class AuthorityWorkerClientTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TransportFailureTextTest(unittest.TestCase):
+    """Report 20260909-223753 lost a round to a message with no message.
+
+    The visible client logged only `simulation worker failed: worker transport
+    lost` 32 ms before the worker faulted.  That string is the fallback for an
+    `error`/`connection_lost`/`disconnected` event whose `message` field was
+    empty, so the socket error that actually ended the round was never
+    recorded anywhere in the report.
+    """
+
+    def _text(self, kind, message):
+        return authority_worker_module._transport_failure_text(kind, message)
+
+    def test_a_real_socket_error_is_carried_through(self):
+        self.assertEqual(
+            '[Errno 10054] connection reset by peer (connection_lost)',
+            self._text('connection_lost',
+                       {'message': '[Errno 10054] connection reset by peer'}))
+
+    def test_a_code_is_reported_alongside_the_message(self):
+        self.assertEqual(
+            'server closed the room (error, code room_closed)',
+            self._text('error', {'message': 'server closed the room',
+                                 'code': 'room_closed'}))
+
+    def test_a_code_alone_still_beats_the_generic_text(self):
+        self.assertIn('code room_closed',
+                      self._text('error', {'code': 'room_closed'}))
+
+    def test_an_empty_payload_names_the_event_and_what_it_carried(self):
+        text = self._text('disconnected', {'round_id': 7, 'at': 1.5})
+        self.assertIn('disconnected', text)
+        self.assertIn('at,round_id', text)
+
+    def test_a_payload_that_is_not_a_dict_is_still_described(self):
+        for message in (None, 'boom', 42, []):
+            text = self._text('error', message)
+            self.assertIn('error', text)
+            self.assertTrue(text)
+
+    def test_the_key_list_is_bounded(self):
+        message = dict(('field%02d' % index, index) for index in range(40))
+        text = self._text('connection_lost', message)
+        self.assertEqual(12, text.count('field'))
+        self.assertIn('field00', text)
+        self.assertNotIn('field12', text)
