@@ -256,18 +256,6 @@ def _selected_vehicle_effective_params():
     if (not isinstance(base_invisibility, (list, tuple)) or
             len(base_invisibility) < 2):
         raise ValueError('the exact client camouflage values are invalid')
-    # #1513 adds type.invisibilityDeltas['camouflageBonus'] to both entries
-    # without scaling it by the crew factor, so a paintless call differenced
-    # against the mounted one recovers the exact paint term. The published law
-    # adds the paint after the shot factor, so the battle needs it apart.
-    paint_bonus = 0.0
-    if camouflage_id is not None:
-        paintless = calculator(spotting_values['camouflage_factor'], None)
-        if not isinstance(paintless, (list, tuple)) or len(paintless) < 2:
-            raise ValueError(
-                'the exact paintless camouflage values are invalid')
-        paint_bonus = max(
-            0.0, float(base_invisibility[0]) - float(paintless[0]))
     gun = _field(descriptor, 'gun', {})
     shot_factor = float(_field(gun, 'invisibilityFactorAtShot', 1.0))
     deadeye = bool(loadout.finished_skill_count(crew, 'gunner_sniper'))
@@ -388,7 +376,6 @@ def _selected_vehicle_effective_params():
             'base_moving': float(base_invisibility[0]),
             'base_still': float(base_invisibility[1]),
             'shot_factor': shot_factor,
-            'paint_bonus': paint_bonus,
         },
         'skills': healthy_skills,
         'crew': crew_projection,

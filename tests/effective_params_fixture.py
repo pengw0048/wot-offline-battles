@@ -1,7 +1,7 @@
 def effective_params():
-    """One complete canonical effective_params_v2 test fixture."""
+    """One complete canonical effective_params_v1 test fixture."""
     return {
-        'version': 2,
+        'version': 1,
         'loadout': {
             'crew_level': 100.0,
             'commander_level': 100.0,
@@ -71,7 +71,6 @@ def effective_params():
             'base_moving': 0.12,
             'base_still': 0.16,
             'shot_factor': 0.25,
-            'paint_bonus': 0.0,
         },
         'skills': {
             'sixth_sense': False,

@@ -360,14 +360,10 @@ class EffectiveParamsContractTests(unittest.TestCase):
         self.assertFalse(dynamic_calls[0].kwargs['is_fire'])
         self.assertTrue(dynamic_calls[-1].kwargs['is_fire'])
         derive_params.assert_called_once_with(descriptor, factors)
-        # One extra paintless call isolates the paint term the published law
-        # adds after the shot factor.
-        self.assertEqual(34, descriptor.computeBaseInvisibility.call_count)
+        self.assertEqual(33, descriptor.computeBaseInvisibility.call_count)
         descriptor.computeBaseInvisibility.assert_any_call(0.57, 7)
-        descriptor.computeBaseInvisibility.assert_any_call(0.57, None)
         self.assertEqual([[1, 20], [2, 10]], result['ammo'])
         self.assertEqual(0.2, result['camouflage']['base_moving'])
-        self.assertEqual(0.0, result['camouflage']['paint_bonus'])
         self.assertEqual(0.4, result['camouflage']['shot_factor'])
         self.assertTrue(result['skills']['deadeye'])
         self.assertEqual(1, result['skills']['intuition_chances'])
@@ -725,24 +721,6 @@ class EffectiveParamsContractTests(unittest.TestCase):
         }))
         self.assertEqual(0.81,
                          player.effective_params['loadout']['reload_factor'])
-
-    def test_the_paint_term_cannot_exceed_or_outlive_its_own_pair(self):
-        valid = effective_params()
-        valid['camouflage'].update(camouflage_id=7, paint_bonus=0.04)
-        self.assertIsNotNone(contract.canonical(valid))
-
-        too_large = effective_params()
-        too_large['camouflage'].update(camouflage_id=7, paint_bonus=0.2)
-        self.assertIsNone(contract.canonical(too_large))
-
-        no_paint_mounted = effective_params()
-        no_paint_mounted['camouflage'].update(paint_bonus=0.04)
-        self.assertIsNone(
-            contract.canonical(no_paint_mounted))
-
-        missing = effective_params()
-        del missing['camouflage']['paint_bonus']
-        self.assertIsNone(contract.canonical(missing))
 
     def test_server_rejects_invalid_snapshot_without_storing_player(self):
         state = BattleState()

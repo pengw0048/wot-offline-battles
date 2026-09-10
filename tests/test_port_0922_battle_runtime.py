@@ -2064,7 +2064,7 @@ def _effective_params_snapshot(mass=25000.0, reload_factor=1.0,
         add_skill('radioman', 'radioman', 'radioman_lasteffort')
     instances = [member['instance'] for member in members]
     return {
-        'version': 2,
+        'version': 1,
         'loadout': {
             'crew_level': 100.0, 'commander_level': 100.0,
             'effective_crew_level': 100.0, 'crew_multiplier': 1.0,
@@ -2110,7 +2110,6 @@ def _effective_params_snapshot(mass=25000.0, reload_factor=1.0,
         'camouflage': {
             'camouflage_id': None, 'base_moving': 0.171,
             'base_still': 0.228, 'shot_factor': 0.1,
-            'paint_bonus': 0.0,
         },
         'skills': {
             'sixth_sense': bool(sixth_sense),

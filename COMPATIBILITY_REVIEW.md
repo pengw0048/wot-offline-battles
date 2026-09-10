@@ -322,7 +322,7 @@ to accept the native switch controls, camera continuity and repeated-round
 teardown.
 
 The destructible boundary is pinned to a schema-v8 destructible
-catalog and schema-v5 foliage catalog baked from all 41 exact #1513 map
+catalog and schema-v4 foliage catalog baked from all 41 exact #1513 map
 packages; the exact-instance runtime shape starts at schema version 4. A
 checksum-pinned whole-map directory maps
 61,625 unique world-matrix signatures to fragile, falling and structure-module
@@ -834,7 +834,7 @@ list by the item index silently returned a neighbour's resource. The
 exact-instance runtime shape introduced at schema v4 closes that identity gap
 with the whole-map matrix signature, and the per-item name is now recovered
 from the full-width or reconstructed compacted alignment. The coherent shipped
-batches are destructible format v8 and foliage format v5.
+batches are destructible format v8 and foliage format v4.
 
 The stock `BigWorld.entity`/`entities` facade is an AOI surface, not the LAN
 authority registry. Unspotted or dead synthetic vehicles remain private there;
@@ -1972,28 +1972,37 @@ disappearance bound. Enemy
 compound models and their stock marker/minimap visuals cross one visibility
 boundary, so an unspotted vehicle cannot remain visible in only one UI layer.
 
-The detection law itself is cell-app code and is not in the client package.
-The port implements the pre-1.0 published model this build shipped under,
-`camoFactor = baseCamo * crew * camoAtShot + camoPattern + camoNet +
-environmentCamo` capped at 1, and `spottingRange = viewRange -
-(viewRange - 50) * camoFactor` clamped to the exact
-`constants.VISIBILITY` 50/445 bounds. Only the vehicle-and-crew term carries
-`gun.invisibilityFactorAtShot`; the paint, the camouflage net and the
-vegetation are summed after it. `spotting.py` owns those numbers and the ray
-geometry, so the hidden-worker authority, the visible client's own
-presentation sample and the vegetation query cannot drift apart: a more
-permissive client ray drew enemies the worker had never spotted, which earned
-no spotting credit and warned nobody. Vegetation contributes the published
-50 per cent per volume additively to a 80 per cent cap, cover within 15 metres
-of an observer is transparent to that observer, and cover within 15 metres of
-a target that has just fired keeps 30 per cent of one volume's bonus. The
-exact per-asset numbers are published rule rather than bytecode, and the
-coverage test is still a single ray rather than the six or seven visibility
-checkpoints retail casts, so Windows play is what calibrates how bushes feel.
-Both spotting rays now carry the broken-skin filter that the motion and shell
-rays carry, because a destroyed fence keeps its native skin in the world for
-the rest of the round and an unfiltered mask-128 ray went on treating it as
-cover.
+The exact #1513 `gui/shared/items_parameters/params.pyc` consumer
+`VehicleParams.__getInvisibilityValues` (source lines 599--610) calls
+`items.utils.getClientInvisibility` and then multiplies both returned values
+by `gun.invisibilityFactorAtShot`. `getClientInvisibility` already includes
+`computeBaseInvisibility`'s paint bonus and the resolved camouflage-net aspect.
+The port keeps that complete-value shot factor and effective-parameters schema
+v1. A published formula that exempts paint or the net is not substituted for
+this directly observed client consumer. This proves the client parameter
+composition, not the unavailable cell-app detection implementation.
+
+The worker and visible client use the same existing worker LOS endpoints and
+end tolerance. Both carry the exact-identity broken-skin filter, so an accepted
+broken fence skin can yield while an unrelated wall or surviving replacement
+surface still blocks. The prepared filter is reused for at most 0.25 seconds;
+round teardown clears it. Target stationary clocks are sampled each visibility
+frame even when an observer-target pair is deferred by the native-ray budget.
+
+Cover within 15 metres of the observer is transparent to that observer,
+following [WG's spotting guidance](https://wargaming.net/support/en/products/wot/article/10222/?redirect_lang=en).
+The guidance is current and does not establish an exact #1513 server contract.
+For static foliage, the distance and its early-rejection radius use the actual
+baked horizontal parallelogram: projected axes can be non-orthogonal, and the
+source box radius need not enclose that footprint. Fallen-tree proximity still
+uses a conservative horizontal-radius approximation. Vegetation coefficients
+remain the existing 0.15 per volume, 0.60 combined limit, 0.95 total concealment
+limit and complete removal of nearby foliage after firing. These are retained
+port settings, not claimed retail constants. [The official 7.5 update notes](https://worldoftanks.com/en/news/general-news/75-update-note/)
+confirm that bush density matters; they do not justify assigning every volume
+the same maximum coefficient. Foliage catalogs remain schema v4. Single-ray
+coverage, per-asset camouflage, native filtering and actual Windows spotting
+behavior remain outside the local contract evidence.
 
 That single boundary was not sufficient. Windows playtesting reported a green
 penetration indicator, ground dust and a visible silhouette for an unspotted
@@ -2927,10 +2936,10 @@ The source audit deliberately keeps the following differences visible:
   `Avatar.updateVehicleOptionalDeviceStatus`, and this client ships no cell
   script, so the port uses its own speed threshold with the client's 3.0 second
   delay; the camouflage paint bonus
-  (`invisibilityDeltas['camouflageBonus']`) is applied through the client's own
-  `computeBaseInvisibility` and travels as its own wire term so the shot factor
-  cannot discount it, while `invisibilityDeltas` `firePenalty` and radio-range
-  gating of the team's shared intelligence are still not applied;
+  (`invisibilityDeltas['camouflageBonus']`) is included in the client's own
+  `computeBaseInvisibility` pair and keeps the exact GUI consumer's shot
+  factor, while `invisibilityDeltas` `firePenalty` and radio-range gating of
+  the team's shared intelligence are still not applied;
 - the server publishes terminal winner/reason/base team plus live frags and the
   human team-killer flag, but not the retired predecessor's complete
   `personal`/`players`/`vehicles` battle-result record;

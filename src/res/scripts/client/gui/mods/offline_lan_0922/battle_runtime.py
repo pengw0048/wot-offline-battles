@@ -23068,38 +23068,16 @@ class BattleRuntime(object):
                 loadout_law.still_device_active(
                     still_seconds, profile['binocular_delay'])))
 
-    @classmethod
-    def _base_invisibility(cls, descriptor, profile, camouflage_id=None):
-        """#1513 ``computeBaseInvisibility``, returned as ``(moving, still)``."""
-        return cls._base_invisibility_with_paint(
-            descriptor, profile, camouflage_id)[0]
-
     @staticmethod
-    def _base_invisibility_with_paint(descriptor, profile,
-                                      camouflage_id=None):
-        """Return the base pair and the paint term it already contains.
-
-        #1513 adds ``type.invisibilityDeltas['camouflageBonus']`` to both
-        entries without scaling it by the crew factor, so a paintless call
-        differenced against the mounted one recovers the exact paint bonus
-        from the client's own calculator.  The published law adds the paint
-        after the shot factor, so the two terms have to travel apart.
-        """
+    def _base_invisibility(descriptor, profile, camouflage_id=None):
+        """#1513 ``computeBaseInvisibility``, returned as ``(moving, still)``."""
         crew_factor = profile['camouflage_factor']
         calculator = getattr(descriptor, 'computeBaseInvisibility', None)
         if callable(calculator):
             try:
                 values = calculator(crew_factor, camouflage_id)
                 if isinstance(values, (list, tuple)) and len(values) >= 2:
-                    pair = (_number(values[0]), _number(values[1]))
-                    if camouflage_id is None:
-                        return pair, 0.0
-                    paintless = calculator(crew_factor, None)
-                    if (isinstance(paintless, (list, tuple)) and
-                            len(paintless) >= 2):
-                        return pair, max(
-                            0.0, pair[0] - _number(paintless[0]))
-                    return pair, 0.0
+                    return (_number(values[0]), _number(values[1]))
             except Exception:
                 pass
         vehicle_type = _field(descriptor, 'type', {})
@@ -23109,7 +23087,7 @@ class BattleRuntime(object):
         misc = _field(descriptor, 'miscAttrs', {})
         return spotting.base_camouflage(
             values[0], values[1], crew_factor=crew_factor,
-            invisibility_factor=_field(misc, 'invisibilityFactor', 1.0)), 0.0
+            invisibility_factor=_field(misc, 'invisibilityFactor', 1.0))
 
     @staticmethod
     def _invisibility_aspect(profile, moving, still_device_ready):
@@ -23318,12 +23296,10 @@ class BattleRuntime(object):
             return False
         foliage_bonus = self._foliage_camouflage_bonus(
             observer_position, target, fired_recently)
-        paint_bonus = 0.0
         if target_effective is None:
             target_profile = self._spotting_profile(target_descriptor)
-            base_invisibility, paint_bonus = \
-                self._base_invisibility_with_paint(
-                    target_descriptor, target_profile)
+            base_invisibility = self._base_invisibility(
+                target_descriptor, target_profile)
             shot_factor = self._shot_invisibility_factor(target_descriptor)
         else:
             target_effective = effective_params.canonical(target_effective)
@@ -23335,7 +23311,6 @@ class BattleRuntime(object):
             base_invisibility = (
                 camouflage['base_moving'], camouflage['base_still'])
             shot_factor = camouflage['shot_factor']
-            paint_bonus = camouflage['paint_bonus']
         additive, multiplier = self._invisibility_aspect(
             target_profile, target_moving,
             loadout_law.still_device_active(
@@ -23346,8 +23321,7 @@ class BattleRuntime(object):
             moving=target_moving, additive=additive, multiplier=multiplier,
             shot_factor=shot_factor,
             fired_recently=fired_recently,
-            foliage_bonus=foliage_bonus,
-            paint_bonus=paint_bonus)
+            foliage_bonus=foliage_bonus)
         return spotting.is_detected(
             distance, self._vision_radius(
                 observer_descriptor, observer_entity,

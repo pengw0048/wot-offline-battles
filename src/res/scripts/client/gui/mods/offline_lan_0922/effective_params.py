@@ -17,8 +17,8 @@ import math
 from gui.mods.offline_lan_0922 import equipment_mechanics
 
 
-SCHEMA_VERSION = 2
-CAPABILITY = 'effective_params_v2'
+SCHEMA_VERSION = 1
+CAPABILITY = 'effective_params_v1'
 # Vehicle XML stores these values in 32-bit-era numeric fields.  Keep one
 # generous finite wire bound so trusted editor values are preserved without
 # admitting infinities or arithmetic-scale payloads.
@@ -63,8 +63,7 @@ _SPOTTING_KEYS = frozenset(
 
 _RAMMING_KEYS = frozenset(('spall_coefficient', 'ramming_bonus'))
 _CAMOUFLAGE_KEYS = frozenset(
-    ('camouflage_id', 'base_moving', 'base_still', 'shot_factor',
-     'paint_bonus'))
+    ('camouflage_id', 'base_moving', 'base_still', 'shot_factor'))
 _SKILL_KEYS = frozenset((
     'sixth_sense', 'expert', 'deadeye', 'intuition_chances',
     'controlled_impact', 'designated_target', 'last_effort'))
@@ -318,18 +317,11 @@ def _canonical_camouflage(value):
     shot = _number(value.get('shot_factor'), 0.0, 1.0)
     if moving is None or still is None or shot is None:
         return None
-    # ``computeBaseInvisibility`` folds the paint bonus into both entries, so
-    # it can never exceed either of them. The published law adds it after the
-    # shot factor, which is why it travels as its own term.
-    paint = _number(value.get('paint_bonus'), 0.0, min(moving, still))
-    if paint is None or (camouflage_id is None and paint):
-        return None
     return {
         'camouflage_id': camouflage_id,
         'base_moving': moving,
         'base_still': still,
         'shot_factor': shot,
-        'paint_bonus': paint,
     }
 
 
@@ -729,8 +721,7 @@ def canonical(value):
                 _TOP_LEVEL_KEYS, _TOP_LEVEL_KEYS_WITH_EQUIPMENT,
                 _TOP_LEVEL_KEYS_WITH_CRITICAL)):
         return None
-    if (_exact_int(value.get('version'), SCHEMA_VERSION,
-                   SCHEMA_VERSION) != SCHEMA_VERSION):
+    if _exact_int(value.get('version'), 1, 1) != SCHEMA_VERSION:
         return None
     loadout = _canonical_loadout(value.get('loadout'))
     physics = _canonical_physics(value.get('physics'))

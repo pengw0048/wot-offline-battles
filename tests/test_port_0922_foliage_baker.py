@@ -36,8 +36,7 @@ class FoliageBaker0922Tests(unittest.TestCase):
     def test_contract_is_pinned_to_client_1513(self):
         self.assertEqual('offline-lan-0922-foliage',
                          self.baker.FORMAT_NAME)
-        self.assertEqual(5, self.baker.FORMAT_VERSION)
-        self.assertEqual(0.50, self.baker.CAMOUFLAGE_PER_VOLUME)
+        self.assertEqual(4, self.baker.FORMAT_VERSION)
         self.assertEqual('offline-lan-0922-foliage-manifest',
                          self.baker.MANIFEST_FORMAT)
         self.assertEqual('0.9.22.0.1-cn-1513', self.baker.GAME_VERSION)
