@@ -3,9 +3,15 @@
 Two field reports ended with the hidden worker faulting inside Scaleform's SWF
 tag loader at ``WorldOfTanks.exe+0x0075DAE2``: an allocation returned NULL, the
 stock null branch joined a path that dereferences the object anyway, and the
-process died.  Both dumps showed the same cause - roughly 1.6 GB of a 2 GB user
-address space already committed on the seventh round of the session.  Neither
-log could have shown that; only the dumps did.
+process died.  Both dumps showed the same cause - 3396 MiB and 3057 MiB of
+private commit, with 119 MiB and 260 MiB free, on the seventh round of the
+session.  Neither log could have shown that; only the dumps did.
+
+``WorldOfTanks.exe`` sets ``IMAGE_FILE_LARGE_ADDRESS_AWARE`` (COFF
+characteristics 0x0123), so on 64-bit Windows the user address space is 4 GB,
+not 2 GB.  The walk below must cover all of it: in the 223333 dump 2077 MB of
+committed memory lives above ``0x80000000``, and a walk that stopped at the
+2 GB line would have reported a healthy process minutes before it died.
 
 This module answers the same question from inside the process, once per round
 boundary, so the next report says how the address space grew without needing a
@@ -23,10 +29,16 @@ MEM_PRIVATE = 0x20000
 MEM_MAPPED = 0x40000
 MEM_IMAGE = 0x1000000
 
-# The walk costs one VirtualQuery per region.  A healthy client has a few
-# thousand; the cap keeps a pathological process from stalling a frame.
-MAX_REGIONS = 12000
+# The walk costs one VirtualQuery per region.  The two crashed workers held
+# 6754 and 7293 regions, so the cap only guards against a pathological process
+# stalling a frame; it is not meant to bound a healthy walk.
+MAX_REGIONS = 32768
 POOL_BLOCK_BYTES = 1024 * 1024
+
+# Top of the 32-bit user address space on a large-address-aware image, less the
+# final no-access guard page.  A process that only gets 2 GB simply fails the
+# VirtualQuery past its own limit and the walk stops there on its own.
+ADDRESS_SPACE_LIMIT = 0xFFFF0000
 
 
 class _MemoryBasicInformation(ctypes.Structure):
@@ -78,7 +90,7 @@ def _walk(kernel32):
     size = ctypes.sizeof(info)
     query = kernel32.VirtualQuery
     address = 0
-    limit = 0x80000000
+    limit = ADDRESS_SPACE_LIMIT
     regions = 0
     truncated = 0
     committed = {MEM_PRIVATE: 0, MEM_MAPPED: 0, MEM_IMAGE: 0}
@@ -127,12 +139,19 @@ def _walk(kernel32):
         'pool_blocks': pool_blocks,
         'truncated': truncated,
         'system_load': -1,
+        'total_virtual': 0,
+        'total_phys': 0,
     }
     status = _MemoryStatusEx()
     status.dwLength = ctypes.sizeof(status)
     try:
         if kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             result['system_load'] = int(status.dwMemoryLoad)
+            # These two decide whether the machine can host two clients at all,
+            # and total_virtual says outright whether this process got 2 GB or
+            # the large-address-aware 4 GB.
+            result['total_virtual'] = int(status.ullTotalVirtual)
+            result['total_phys'] = int(status.ullTotalPhys)
     except Exception:
         pass
     return result
@@ -150,13 +169,16 @@ def format_line(phase, round_id, state=None):
     return ('[Offline LAN 0.9.22] MEMORY phase=%s round=%s private_mb=%s '
             'image_mb=%s mapped_mb=%s reserved_mb=%s free_mb=%s '
             'largest_free_mb=%s regions=%d pool_1mib=%d system_load=%d '
-            'truncated=%d' % (
+            'total_virtual_mb=%s total_phys_mb=%s truncated=%d' % (
                 phase, round_id,
                 _megabytes(state['private']), _megabytes(state['image']),
                 _megabytes(state['mapped']), _megabytes(state['reserved']),
                 _megabytes(state['free']), _megabytes(state['largest_free']),
                 state['regions'], state['pool_blocks'],
-                state['system_load'], state['truncated']))
+                state['system_load'],
+                _megabytes(state.get('total_virtual', 0)),
+                _megabytes(state.get('total_phys', 0)),
+                state['truncated']))
 
 
 def log(phase, round_id):
