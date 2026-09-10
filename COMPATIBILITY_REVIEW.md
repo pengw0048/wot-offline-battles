@@ -2484,6 +2484,23 @@ target detaches nothing: retail has no `DetachedTurret` in AOI for a vehicle
 never spotted. A missing exploded model, a full turret budget or a failed
 `createEntity` leaves exactly the -5 burn-off wreck the port produced before.
 
+The synchronous constructor handshake is separate from asynchronous world
+entry. Exact `DetachedTurret.prerequisites` returns a `CompoundAssembler` and
+the vehicle descriptor's resources; `onEnterWorld(prereqs)` installs the
+assembled model. As with client-created Vehicles, a returned id can therefore
+precede `BigWorld.entity(id)`. Presentation retains this pending id until it
+appears, then binds the model at the elapsed point on the frozen arc. Only an
+already observed entity disappearing retires its animation; a reused id never
+authorizes writes to or destruction of a different entity. Closing presentation
+retains pending retirement records, retries them during the existing teardown
+poll, and leaves remaining prerequisite loads to battle-space retirement. It
+never calls `destroyEntity` for an id the engine does not yet own. One `TURRET`
+creation line and one binding line record the vehicle, entity and load delay.
+Regressions reproduce the old first-frame loss with an id that becomes visible
+only after loading. The reported FV4005 match's installed bytecode matched the
+reviewed source, but its logs lacked these lifecycle transitions; this confirms
+a reproducible adapter defect, not native Windows flight acceptance.
+
 A late ammo-bay cause can arrive after the ordinary death edge. It now admits
 one detachment from the existing wreck's turret pose, even though the health
 signature is already terminal. A per-record launch attempt fence and the
