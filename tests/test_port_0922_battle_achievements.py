@@ -1200,13 +1200,34 @@ class DetectionTests(unittest.TestCase):
         state, unused_player = self._battle()
         state.bot_states[2]['team'] = 1
         state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
+        # The spot lease runs out, so the enemy is dark for the whole team.
         state.player_spotted = {1: frozenset()}
+        state._replace_team_lit({})
         state._commit_detections()
         state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
         state._commit_detections()
         self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
         self.assertEqual(1, state._statistics_row('bot', 2)['spotted'])
+
+    def test_a_live_lease_is_not_a_second_detection(self):
+        state, unused_player = self._battle()
+        state.bot_states[2]['team'] = 1
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+        # A blocked line of sight, or a visibility probe the worker budgeted
+        # out, leaves the team lit by the lease alone.
+        state.player_spotted = {1: frozenset()}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+        self.assertEqual(1, state._statistics_row('player', 1)['spotted'])
+        self.assertEqual(0, state._statistics_row('bot', 2)['spotted'])
 
     def test_a_teammate_is_never_a_detection(self):
         state, unused_player = self._battle()
@@ -1214,6 +1235,120 @@ class DetectionTests(unittest.TestCase):
         state.player_spotted = {1: frozenset({('bot', 1)})}
         state._commit_detections()
         self.assertEqual(0, state._statistics_row('player', 1)['spotted'])
+
+
+class SpottingAssistTests(unittest.TestCase):
+    """A spotting assist needs a blind shooter, and is shared by spotters."""
+
+    @staticmethod
+    def _battle():
+        state, player = DetectionTests._battle()
+        # Bots 2 and 3 fight alongside the human player.
+        for bot_id in (2, 3):
+            state.bot_states[bot_id]['team'] = 1
+        return state, player
+
+    def test_a_shooter_that_sees_its_own_target_earns_nobody_an_assist(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+
+        state._record_damage(('player', 1), ('bot', 1), 240, {})
+
+        self.assertEqual(
+            0, state._statistics_row('bot', 2)['damage_assisted_radio'])
+        self.assertEqual([], [event for event in state.pending_events
+                              if event['kind'] == 'assist'])
+
+    def test_a_bot_shooter_that_sees_its_own_target_earns_nobody_an_assist(
+            self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+
+        state._record_damage(('bot', 2), ('bot', 1), 240, {})
+
+        self.assertEqual(
+            0, state._statistics_row('player', 1)['damage_assisted_radio'])
+        self.assertEqual([], [event for event in state.pending_events
+                              if event['kind'] == 'assist'])
+
+    def test_a_dead_shooters_in_flight_hit_credits_the_live_spotter(self):
+        for attacker in (('player', 1), ('bot', 3)):
+            with self.subTest(attacker=attacker):
+                state, player = self._battle()
+                target = ('bot', 1)
+                state.bot_spotted = {2: frozenset({target})}
+                # Death arrives before the next observation batch clears
+                # the shooter's old direct-vision set.
+                if attacker[0] == 'player':
+                    player.alive = False
+                    state.player_spotted = {1: frozenset({target})}
+                else:
+                    state.bot_states[3]['alive'] = False
+                    state.bot_spotted[3] = frozenset({target})
+
+                state._record_damage(attacker, target, 240, {})
+
+                self.assertEqual(240, state._statistics_row(
+                    'bot', 2)['damage_assisted_radio'])
+                self.assertEqual(240, state._statistics_interaction(
+                    ('bot', 2), target)['assist_radio'])
+                self.assertEqual([240], [
+                    event['damage'] for event in state.pending_events
+                    if event['kind'] == 'assist'])
+
+    def test_a_disconnected_shooters_old_sight_does_not_block_an_assist(self):
+        state, player = self._battle()
+        target = ('bot', 1)
+        state.player_spotted = {1: frozenset({target})}
+        state.bot_spotted = {2: frozenset({target})}
+        player.connected = False
+
+        state._record_damage(('player', 1), target, 240, {})
+
+        self.assertEqual(240, state._statistics_row(
+            'bot', 2)['damage_assisted_radio'])
+
+    def test_a_blind_shooter_splits_the_assist_between_the_spotters(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+
+        state._record_damage(('bot', 3), ('bot', 1), 241, {})
+
+        self.assertEqual(
+            121, state._statistics_row('player', 1)['damage_assisted_radio'])
+        self.assertEqual(
+            120, state._statistics_row('bot', 2)['damage_assisted_radio'])
+        self.assertEqual(
+            [(('player', 1), 121), (('bot', 2), 120)],
+            [((event['assister_kind'], event['assister_id']),
+              event['damage'])
+             for event in state.pending_events
+             if event['kind'] == 'assist'])
+
+    def test_one_spotter_still_earns_the_whole_damage(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+
+        state._record_damage(('bot', 3), ('bot', 1), 241, {})
+
+        self.assertEqual(
+            241, state._statistics_row('player', 1)['damage_assisted_radio'])
+
+    def test_a_track_assist_is_never_divided(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state.track_immobilisers[('bot', 1)] = ('player', 1)
+
+        state._record_damage(('bot', 3), ('bot', 1), 241, {
+            'destroyed': ['leftTrackHealth']})
+
+        row = state._statistics_row('player', 1)
+        self.assertEqual(241, row['damage_assisted_track'])
+        self.assertEqual(121, row['damage_assisted_radio'])
 
 
 class LuckyDevilTests(unittest.TestCase):
