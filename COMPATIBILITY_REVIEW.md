@@ -1889,6 +1889,67 @@ and copied bot integrator without feeding a second physics owner.
 `BigWorld.Entity.teleport` remains forbidden; #1513 rejects it for an in-world
 client Vehicle as `Operation is not allowed`.
 
+### Hull autorotation and the sniper hull lock
+
+Every part of retail's hull lock except the cell itself is stock #1513 code the
+port already runs. `AvatarInputHandler.start` seeds `__isAutorotation` from the
+arcade control mode, which prefers nothing, so a round starts autorotating.
+`onControlModeChanged` then asks the new control mode for
+`getPreferredAutorotationMode()`; a mode that returns a boolean saves the
+previous setting, forces its own, and publishes it through
+`PlayerAvatar.enableOwnVehicleAutorotation`, which both invalidates
+`VEHICLE_VIEW_STATE.AUTO_ROTATION` for the lower-left damage-panel indicator
+and sends `VEHICLE_SETTING.AUTOROTATION_ENABLED` down the vehicle mailbox that
+this port answers. Leaving that mode restores the saved setting.
+
+`SniperControlMode.getPreferredAutorotationMode` returns
+`isYawHullAimingAvailable or (chassis.rotationIsAroundCenter and gun
+.turretYawLimits is None)`. Running that exact code object against a stub
+`BigWorld` gives `False` for a limited-traverse gun on either chassis, `True`
+once the vehicle has yaw hull aiming, `True` for a fully rotating turret on a
+centre-pivot chassis, `False` for one on a track-pivot chassis, and `None`
+when the player vehicle is not yet in `BigWorld.entities`. Entering sniper on
+a limited-traverse vehicle therefore forces autorotation off, and
+`enableSwitchAutorotationMode` — `preferred is not False` — makes both the
+`CMD_CM_VEHICLE_SWITCH_AUTOROTATION` key and `PlayerAvatar.moveVehicle`'s
+re-enable no-ops for every vehicle the mode prefers `False` for, which is both
+the limited-traverse case and a fully rotating turret on a track-pivot
+chassis. Only the first of those has an arc to notice it. Outside sniper the
+key toggles the lock and any key-down movement command without
+`_MOVEMENT_FLAGS.BLOCK_TRACKS` turns it back on.
+`SiegeModeControl.handleKeyEvent` consumes that same key first on a siege
+vehicle. The whole package writes `__isAutorotation` in five places, all in
+`AvatarInputHandler`, so nothing else can release the lock while sniper is
+active. The ABI audit pins the signatures, the code names and the control flow
+of all five methods.
+
+Modern retail behaves differently, and the difference is a version boundary,
+not a defect here. Wargaming added both the in-battle `X` toggle for sniper
+hull lock and the game setting for its default state in Update 1.12.1 of April
+2021, describing the behaviour it replaced as "when you enter Sniper mode, the
+hull is automatically locked and you cannot aim outside of the aiming angles",
+which is exactly what this January 2018 build does. Reproducing the 1.12.1
+convenience would be a deliberate product deviation from #1513, not a parity
+fix.
+
+Only the cell behaviour is ours. The copied local physics reads the stock
+`getAutorotation()` and, when the unclamped mouse target leaves the installed
+`gun.turretYawLimits`, feeds one binary rotation direction into the single pose
+integrator; the descriptor, native gun rotator and copied traverse physics keep
+owning the arc, gun speed and dispersion. A live A/D command and
+`CMD_BLOCK_TRACKS` both suppress it, but the throttle does not: the pinned
+executable computes the direction in `WGGunRotatorImpl` from elapsed time, the
+desired yaw, the current turret yaw, the yaw limits and the turret and vehicle
+rotation speeds, with no drive input reaching that routine, and the movement
+flags it publishes carry `_MOVEMENT_FLAGS.FORWARD` beside the rotation bit.
+The copied cell composes that desired hull direction with forward or reverse
+driving. Its traverse integrator reverses A/D steering under reverse drive, so
+the autorotation adapter converts the desired hull direction to that input
+convention first; otherwise reversing makes the hull turn away from the aim.
+How the retail cell merges those flags is server Python that no client build
+ships, so the exact composition remains an inference and the resulting feel
+still needs Windows play.
+
 LAN pose samples retain the fractional remainder of the nominal 30 Hz
 publication interval. Clearing the entire accumulator quantised a 40 FPS
 render loop to 20 Hz and 45/50/75 FPS to 22.5/25/25 Hz. At most one current
