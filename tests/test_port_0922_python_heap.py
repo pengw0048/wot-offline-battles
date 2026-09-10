@@ -282,8 +282,10 @@ class ForcedCollectTest(unittest.TestCase):
             [record] + keys + values)
         self.assertEqual(32, count)
         holds = dict(ranked)
-        self.assertEqual(16, holds['dict(len=<=128) -> tuple(len=1)'])
-        self.assertEqual(16, holds['dict(len=<=128) -> list(len=0)'])
+        self.assertEqual(
+            16, holds['dict(len=<=128)[sampled=64/100] -> tuple(len=1)'])
+        self.assertEqual(
+            16, holds['dict(len=<=128)[sampled=64/100] -> list(len=0)'])
 
     def test_edge_sampling_does_not_invoke_native_or_subclass_traversal(self):
         self.addCleanup(setattr, python_heap.gc, 'get_referents',
@@ -457,27 +459,58 @@ class ForcedCollectTest(unittest.TestCase):
         shape = python_heap._signature({'a\n' + 'x' * 100000: 1})
         self.assertLess(len(shape), 200)
         self.assertNotIn('\n', shape)
-        # A wide dict still names itself, because that is what identifies the
-        # leaked record: `dict(len=<=64)` was 84% of the sampled garbage in
-        # reports 20260910-045317 and -061701 and said nothing about what it
-        # was. Bounded to MAX_SIGNATURE_KEYS names plus a remainder count.
+        # Wide mappings expose a bounded key sample, not a complete identity.
         large = python_heap._signature(dict((str(n), n) for n in range(100)))
         self.assertTrue(large.startswith('dict{'), large)
-        self.assertTrue(large.endswith(',+92}'), large)
-        names = large[len('dict{'):-len(',+92}')].split(',')
+        self.assertTrue(large.endswith(',+92}[sampled=64/100]'), large)
+        names = large[len('dict{'):large.index(',+92}')].split(',')
         self.assertEqual(python_heap.MAX_SIGNATURE_KEYS, len(names))
         self.assertLess(len(large), 200)
         self.assertNotIn('\n', large)
-        # Only a mapping with no text key at all falls back to a bare length.
+        # A complete scan without text keys can report only its length.
         self.assertEqual(
             'dict(len=<=64)',
             python_heap._signature(dict((n, n) for n in range(40))))
-        # The scan is bounded, so a pathologically wide mapping is cheap.
+        # The number of visited entries does not grow with the mapping size.
         huge = python_heap._signature(
             dict(('k%05d' % n, n) for n in range(200000)))
         self.assertTrue(huge.startswith('dict{'), huge)
-        self.assertTrue(huge.endswith(',+199992}'), huge)
+        self.assertTrue(huge.endswith(',+199992}[sampled=64/200000]'), huge)
         self.assertLess(len(huge), 200)
+
+    def test_full_dictionary_key_samples_ignore_insertion_order(self):
+        pairs = [('field%02d' % n, n) for n in range(python_heap.KEY_SCAN_LIMIT)]
+        first = python_heap._signature(dict(pairs))
+        second = python_heap._signature(dict(reversed(pairs)))
+        self.assertEqual(first, second)
+        self.assertNotIn('sampled=', first)
+
+    def test_unvisited_text_key_is_reported_as_a_partial_key_sample(self):
+        mapping = dict((n, n) for n in range(python_heap.KEY_SCAN_LIMIT))
+        mapping['outside_sample'] = 0
+        signature = python_heap._signature(mapping)
+        self.assertEqual('dict(len=<=128)[sampled=64/65]', signature)
+
+    def test_signature_does_not_invoke_text_key_subclass_hooks(self):
+        calls = []
+
+        class HostileKey(str):
+            def __str__(self):
+                calls.append('str')
+                raise RuntimeError('must not inspect')
+
+            def __getitem__(self, unused):
+                calls.append('getitem')
+                raise RuntimeError('must not inspect')
+
+            def __len__(self):
+                calls.append('len')
+                raise RuntimeError('must not inspect')
+
+        self.assertEqual(
+            'dict{safe,+1}',
+            python_heap._signature({HostileKey('hidden'): 0, 'safe': 1}))
+        self.assertEqual([], calls)
 
     def test_sampling_failure_does_not_keep_cycles_in_exception_frames(self):
         class Cycle(object):
