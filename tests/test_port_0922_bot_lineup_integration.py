@@ -154,6 +154,72 @@ class BotLineupIntegrationTests(unittest.TestCase):
         self.assertEqual({(1, 1): 'ussr:regular', (2, 0): 'ussr:artillery'},
                          battle._bot_vehicle_assignments)
 
+    def _profile_exclusion_runtime(self, worker, mode, excluded, lineup=()):
+        names = ('ussr:Edited', 'usa:Regular', 'germany:Regular')
+        entries = {
+            index: types.SimpleNamespace(
+                name=name, level=8,
+                tags=('heavyTank' if index == 0 else 'mediumTank',))
+            for index, name in enumerate(names)
+        }
+        descriptor = types.SimpleNamespace(type=entries[0])
+        battle = BattleRuntime.__new__(BattleRuntime)
+        battle._runtime = types.SimpleNamespace(
+            nations=types.SimpleNamespace(
+                AVAILABLE_NAMES=('all',), INDICES={'all': 0}),
+            vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
+                getList=lambda unused: entries)))
+        battle._worker_mode = worker
+        battle._config = {'vehicle': names[0]}
+        battle.client = types.SimpleNamespace(team=1, player_id=1)
+        battle._resolve_descriptor = lambda unused: descriptor
+        battle._start_message = {
+            'round_id': 21, 'map': '01_karelia',
+            'players': [{'id': 1, 'team': 1, 'slot': 0, 'vehicle': names[0]}],
+            'bots': [{'id': team * 100 + slot, 'team': team, 'slot': slot}
+                     for team in (1, 2) for slot in range(1 if team == 1 else 0, 4)],
+            'bot_tier_mode': mode, 'bot_excluded_vehicles': excluded,
+            'bot_lineup': list(lineup),
+        }
+        return battle, descriptor
+
+    def test_profile_exclusions_cover_automatic_and_mirrored_human_vehicles(self):
+        for mode in bot_planner.BOT_TIER_MODES:
+            assignments = []
+            for worker in (False, True):
+                battle, descriptor = self._profile_exclusion_runtime(
+                    worker, mode, ['ussr:Edited'],
+                    [{'team': 2, 'slot': 0, 'skill': 'veteran'}])
+                self.assertTrue(battle._prepare_bot_vehicle_assignments(descriptor))
+                self.assertEqual(7, len(battle._bot_vehicle_assignments))
+                self.assertNotIn('ussr:Edited',
+                                 battle._bot_vehicle_assignments.values())
+                assignments.append(battle._bot_vehicle_assignments)
+            self.assertEqual(assignments[0], assignments[1])
+
+    def test_profile_exclusions_allow_only_slots_with_an_explicit_vehicle(self):
+        battle, descriptor = self._profile_exclusion_runtime(
+            True, 'same', ['ussr:Edited'],
+            [{'team': 2, 'slot': 0, 'vehicle': 'ussr:Edited'},
+             {'team': 2, 'slot': 1, 'skill': 'veteran'}])
+        self.assertTrue(battle._prepare_bot_vehicle_assignments(descriptor))
+        self.assertEqual([(2, 0)], [key for key, name in
+                         battle._bot_vehicle_assignments.items()
+                         if name == 'ussr:Edited'])
+
+    def test_all_excluded_pool_requires_every_bot_to_have_an_exact_vehicle(self):
+        excluded = ['ussr:Edited', 'usa:Regular', 'germany:Regular']
+        battle, descriptor = self._profile_exclusion_runtime(True, 'same', excluded)
+        self.assertFalse(battle._prepare_bot_vehicle_assignments(descriptor))
+        self.assertEqual({}, battle._bot_vehicle_assignments)
+        battle._start_message['bot_lineup'] = [
+            {'team': raw['team'], 'slot': raw['slot'], 'vehicle': 'ussr:Edited'}
+            for raw in battle._start_message['bots']]
+        self.assertTrue(battle._prepare_bot_vehicle_assignments(descriptor))
+        self.assertEqual(7, len(battle._bot_vehicle_assignments))
+        self.assertEqual({'ussr:Edited'},
+                         set(battle._bot_vehicle_assignments.values()))
+
     def _ui_saved_assignment(self):
         store, profile_name = bot_lineup_profiles.create(
             bot_lineup_profiles.empty_store(), "Exact duel")
@@ -192,10 +258,13 @@ class BotLineupIntegrationTests(unittest.TestCase):
 
         environment = launcher_core.server_environment(
             launcher_core.PORT_0_9_22, "/game", {},
-            bot_lineup=assignments)
+            bot_lineup=assignments, bot_excluded_vehicles=[expected_name])
         server_lineup = windows_server._bot_lineup_from_environment(
             environment)
         self.assertEqual(assignments, server_lineup)
+        exclusions = windows_server._bot_excluded_vehicles_from_environment(
+            environment)
+        self.assertEqual([expected_name], exclusions)
 
         roster = ({"id": 21, "team": 2, "slot": 0},)
         entries = {
@@ -228,6 +297,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
             "bots": list(roster),
             "bot_tier_mode": "same",
             "bot_lineup": server_lineup,
+            "bot_excluded_vehicles": exclusions,
         }
         battle.client = types.SimpleNamespace(team=1, player_id=1)
         battle._resolve_descriptor = descriptors.__getitem__

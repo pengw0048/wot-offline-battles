@@ -62,6 +62,8 @@ class _FakeTk(object):
     Label = _Widget
     Entry = _Widget
     Button = _Widget
+    Checkbutton = _Widget
+    BooleanVar = _StringVar
     StringVar = _StringVar
 
 
@@ -125,6 +127,9 @@ class _Service(object):
         self.conflict = ""
         self.current = "32"
         self.extra_fields = []
+        self.bot_exclusion = False
+        self.option_calls = []
+        self.option_error = None
         self.choices = [
             {"nation": "ussr", "vehicle": "R11_MS-1",
              "label": "MS-1", "vehicleClass": "lightTank", "level": 1,
@@ -138,6 +143,16 @@ class _Service(object):
              "member": (
                  "scripts/item_defs/vehicles/usa/A01_T1_Cunningham.xml")},
         ]
+
+    def get_vehicle_profile_options(self, game_root, profile_name):
+        return {"excludeEditedVehiclesFromBots": self.bot_exclusion}
+
+    def set_vehicle_profile_options(self, game_root, profile_name, selected):
+        self.option_calls.append((game_root, profile_name, selected))
+        if self.option_error:
+            raise self.VehicleOverlayError(self.option_error)
+        self.bot_exclusion = selected
+        return {"excludeEditedVehiclesFromBots": selected}
 
     def list_vehicle_choices(self, game_root):
         self.catalog_calls.append(game_root)
@@ -254,6 +269,24 @@ class VehicleEditorWindowTest(unittest.TestCase):
             self.parent, "C:/WoT", "Fast MS-1", _FakeTk, _FakeTtk,
             self.messagebox,
             log=self.log.append, service=self.service)
+
+    def test_bot_exclusion_option_saves_and_reloads_this_profile(self):
+        self.assertFalse(self.window.exclude_edited_vehicles_from_bots.get())
+        self.window.exclude_edited_vehicles_from_bots.set(True)
+        self.assertTrue(self.window.save_profile_options())
+        self.assertEqual([("C:/WoT", "Fast MS-1", True)],
+                         self.service.option_calls)
+        reopened = vehicle_editor_ui.VehicleEditorWindow(
+            self.parent, "C:/WoT", "Fast MS-1", _FakeTk, _FakeTtk,
+            self.messagebox, service=self.service)
+        self.assertTrue(reopened.exclude_edited_vehicles_from_bots.get())
+
+    def test_failed_bot_option_save_restores_the_displayed_value(self):
+        self.service.option_error = "profile store is read-only"
+        self.window.exclude_edited_vehicles_from_bots.set(True)
+        self.assertFalse(self.window.save_profile_options())
+        self.assertFalse(self.window.exclude_edited_vehicles_from_bots.get())
+        self.assertFalse(self.service.bot_exclusion)
 
     def test_opening_inspects_and_shows_the_original_contract(self):
         self.assertEqual(["C:/WoT"], self.service.catalog_calls)

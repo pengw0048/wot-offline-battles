@@ -60,6 +60,7 @@ SERVER_TEAM_SIZE_ENV_0922 = "WOT_0922_TEAM_SIZE"
 SERVER_TEAM1_SIZE_ENV_0922 = "WOT_0922_TEAM1_SIZE"
 SERVER_TEAM2_SIZE_ENV_0922 = "WOT_0922_TEAM2_SIZE"
 SERVER_BOT_LINEUP_ENV_0922 = "WOT_0922_BOT_LINEUP"
+SERVER_BOT_EXCLUDED_VEHICLES_ENV_0922 = "WOT_0922_BOT_EXCLUDED_VEHICLES"
 SERVER_LOOPBACK_ONLY_ENV_0922 = "WOT_0922_LOOPBACK_ONLY"
 SERVER_VEHICLE_OVERLAY_ROOT_ENV_0922 = "WOT_0922_VEHICLE_OVERLAY_ROOT"
 VEHICLE_OVERLAY_CAPABILITY = "vehicle_overlay_v1"
@@ -1900,7 +1901,8 @@ def server_argv(port_version, base_dir=None):
 
 def server_environment(port_version, game_root, environment=None,
                        team_size=DEFAULT_TEAM_SIZE, loopback_only=False,
-                       team1_size=None, team2_size=None, bot_lineup=None):
+                       team1_size=None, team2_size=None, bot_lineup=None,
+                       bot_excluded_vehicles=None):
     """Build the endpoint and roster environment for one LAN server."""
     environment = dict(os.environ if environment is None else environment)
     if port_version == PORT_0_9_22:
@@ -1916,6 +1918,8 @@ def server_environment(port_version, game_root, environment=None,
         environment[SERVER_TEAM2_SIZE_ENV_0922] = str(team2_size)
         environment[SERVER_BOT_LINEUP_ENV_0922] = json.dumps(
             list(bot_lineup or ()), separators=(",", ":"))
+        environment[SERVER_BOT_EXCLUDED_VEHICLES_ENV_0922] = json.dumps(
+            list(bot_excluded_vehicles or ()), separators=(",", ":"))
         environment[SERVER_VEHICLE_OVERLAY_ROOT_ENV_0922] = os.path.abspath(
             game_root)
         if loopback_only:

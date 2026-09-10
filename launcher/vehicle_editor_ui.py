@@ -67,6 +67,9 @@ _CHINESE = {
     "Replacement value": "新值",
     "Save field to profile": "保存到方案",
     "Clear all edits in this profile...": "清除该方案的全部修改…",
+    "Exclude edited vehicles from automatic Bots (exact lineup overrides)":
+        "随机/自动 Bot 不使用受此方案修改影响的车辆（精确阵容除外）",
+    "Bot exclusion option saved.": "已保存 Bot 车辆排除选项。",
     "Choose a vehicle field.": "请选择一项车辆属性。",
     "Choose one listed vehicle field.": "请选择列表中的一项车辆属性。",
     "Field is safe to edit.": "该属性可以安全修改。",
@@ -203,6 +206,7 @@ class VehicleEditorWindow(object):
         self._field_by_label = {}
         self._field_by_key = {}
         self._build(parent)
+        self._load_profile_options()
         self.refresh_catalog()
 
     def _build(self, parent):
@@ -244,7 +248,17 @@ class VehicleEditorWindow(object):
         self.overlay_path = tk.StringVar(value="-")
         self.status = tk.StringVar(value=self._t("Choose a vehicle field."))
 
-        row = 1
+        self.exclude_edited_vehicles_from_bots = tk.BooleanVar(value=False)
+        self.bot_exclusion_button = tk.Checkbutton(
+            frame, text=self._t(
+                "Exclude edited vehicles from automatic Bots "
+                "(exact lineup overrides)"),
+            variable=self.exclude_edited_vehicles_from_bots,
+            command=self.save_profile_options)
+        self.bot_exclusion_button.grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        row = 2
         row, self.nation_box = self._selector_row(
             frame, row, self._t("Nation"), self.nation,
             self._t("Only nations found in the original vehicle definitions."))
@@ -830,6 +844,28 @@ class VehicleEditorWindow(object):
         self.armor_viewer.update_field(
             member, field_path, result["currentValue"])
         self._log("Vehicle data editor: %s" % message)
+        return True
+
+    def _load_profile_options(self):
+        try:
+            options = self._service.get_vehicle_profile_options(
+                self._game_root, self._profile_name)
+        except self._service.VehicleOverlayError as error:
+            self.bot_exclusion_button.config(state="disabled")
+            return self._show_error(error)
+        self.exclude_edited_vehicles_from_bots.set(
+            options["excludeEditedVehiclesFromBots"])
+        return True
+
+    def save_profile_options(self):
+        selected = bool(self.exclude_edited_vehicles_from_bots.get())
+        try:
+            self._service.set_vehicle_profile_options(
+                self._game_root, self._profile_name, selected)
+        except self._service.VehicleOverlayError as error:
+            self.exclude_edited_vehicles_from_bots.set(not selected)
+            return self._show_error(error)
+        self.status.set(self._t("Bot exclusion option saved."))
         return True
 
     def restore_defaults(self):
