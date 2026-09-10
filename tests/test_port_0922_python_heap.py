@@ -164,7 +164,7 @@ class ForcedCollectTest(unittest.TestCase):
 
     def test_the_lines_report_the_accounting_and_the_cost(self):
         lines = python_heap.format_collect_lines('round_end', 6)
-        self.assertEqual(3, len(lines))
+        self.assertEqual(5, len(lines))
         self.assertIn('PYGC phase=round_end round=6', lines[0])
         for field in ('before=', 'unreachable=', 'after=', 'net_freed=',
                       'second_pass=', 'elapsed_ms=', 'gc_enabled_after='):
@@ -543,3 +543,131 @@ class ForcedCollectTest(unittest.TestCase):
         finally:
             if was_enabled:
                 gc.enable()
+
+
+class CycleAndRetentionTest(unittest.TestCase):
+    """Name the cycle itself, not one edge of it.
+
+    Reports 20260910-045317, -061701 and -065631 all show the dominant edge
+    with no returning edge, because `PYREF` reports pairs and a pair cannot
+    close a loop. These two walks close it: forward for the loop, backward for
+    what retains the shape that dominates.
+    """
+
+    class Registry(object):
+        def refresh(self):
+            return None
+
+    class Peer(object):
+        pass
+
+    def _leak_rounds(self, count):
+        for unused in range(count):
+            rows = dict((index, {'aim_yaw': 0.0, 'alive': True})
+                        for index in range(4))
+            registry = self.Registry()
+            registry.rows = rows
+            # instance -> dict -> bound method -> instance
+            registry.table = {'refresh': registry.refresh}
+            first = self.Peer()
+            second = self.Peer()
+            first.peer = second
+            second.peer = first
+
+    def _garbage(self):
+        gc.collect()
+        previous = gc.get_debug()
+        start = len(gc.garbage)
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        try:
+            self._leak_rounds(40)
+            gc.collect()
+            captured = gc.garbage[start:]
+        finally:
+            gc.set_debug(previous)
+        self.addCleanup(gc.collect)
+        self.addCleanup(lambda: gc.garbage.__delitem__(slice(start, None)))
+        return captured
+
+    def test_a_bound_method_cycle_is_reported_as_a_closed_loop(self):
+        captured = self._garbage()
+        unused_seeds, unused_truncated, cycles = python_heap.cycle_census(
+            captured)
+        joined = ' || '.join(cycles)
+        # py2.7 (the game) calls it `instancemethod`, py3 `method`.
+        self.assertIn(':refresh', joined)
+        self.assertIn('dict{refresh}', joined)
+        self.assertIn('Registry', joined)
+        for path in cycles:
+            steps = path.split(' -> ')
+            self.assertGreater(len(steps), 2)
+            self.assertEqual(steps[0], steps[-1], path)
+
+    def test_distinct_loops_are_not_reported_as_rotations(self):
+        captured = self._garbage()
+        unused_seeds, unused_truncated, cycles = python_heap.cycle_census(
+            captured)
+        self.assertGreaterEqual(len(cycles), 2)
+        self.assertEqual(len(cycles), len(set(cycles)))
+        # Every reported loop starts at its own smallest signature, so two
+        # entry points into one loop collapse to one report.
+        for path in cycles:
+            steps = path.split(' -> ')[:-1]
+            self.assertEqual(min(steps), steps[0], path)
+
+    def test_the_walk_crosses_instances_and_bound_methods(self):
+        # `_edge_referents` is exact-type and yields nothing for an instance,
+        # which found zero cycles. `gc.get_referents` is a C-level traverse.
+        registry = self.Registry()
+        self.assertEqual([], list(python_heap._edge_referents(registry)))
+        self.assertTrue(list(python_heap._walk_referents(registry)))
+
+    def test_the_retention_walk_names_what_holds_the_dominant_shape(self):
+        captured = self._garbage()
+        dominant, holders = python_heap.retention_census(
+            captured, set([id(captured), id(gc.__dict__)]))
+        self.assertTrue(dominant)
+        self.assertTrue(holders)
+        self.assertNotIn('module', ' '.join(holders))
+
+    def test_retention_does_not_report_its_own_containers_as_holders(self):
+        captured = [{'aim_yaw': 0.0, 'alive': True} for unused in range(30)]
+        dominant, holders = python_heap.retention_census(
+            captured, set([id(captured), id(gc.__dict__)]))
+        self.assertEqual('dict{aim_yaw,alive}', dominant)
+        self.assertEqual([], holders)
+
+    def test_retention_reaches_a_real_owner_without_probe_container_levels(self):
+        owner = self.Registry()
+        owner.rows = [{'aim_yaw': 0.0, 'alive': True}
+                      for unused in range(4)]
+        captured = list(owner.rows)
+        unused_dominant, holders = python_heap.retention_census(
+            captured, set([id(captured), id(gc.__dict__)]))
+        self.assertEqual('list(len=4) x1', holders[0])
+        self.assertIn('Registry', ' '.join(holders))
+        self.assertNotIn('tuple(', ' '.join(holders))
+
+    def test_both_walks_are_bounded(self):
+        captured = self._garbage()
+        seeds, unused_truncated, unused_cycles = python_heap.cycle_census(
+            captured)
+        self.assertLessEqual(seeds, python_heap.CYCLE_SEEDS)
+        unused_dominant, holders = python_heap.retention_census(
+            captured, set([id(captured)]))
+        self.assertLessEqual(len(holders), python_heap.HOLD_DEPTH)
+
+    def test_an_acyclic_set_reports_no_cycle(self):
+        plain = [{'a': index} for index in range(50)]
+        unused_seeds, unused_truncated, cycles = python_heap.cycle_census(plain)
+        self.assertEqual([], cycles)
+
+    def test_the_lines_carry_both_walks(self):
+        lines = python_heap.format_collect_lines('round_end', 7)
+        self.assertEqual(5, len(lines))
+        self.assertIn('PYCYCLE phase=round_end round=7', lines[3])
+        self.assertIn('seeds=', lines[3])
+        self.assertIn('found=', lines[3])
+        self.assertIn('PYHOLD phase=round_end round=7', lines[4])
+        self.assertIn('dominant=', lines[4])
+        self.assertIn('chain=', lines[4])
