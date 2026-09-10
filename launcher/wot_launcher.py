@@ -289,6 +289,9 @@ _CHINESE = {
     "The latest diagnostic session boundary is unreadable.":
         "最近一局的日志边界无法读取；不会打包旧日志。",
     "Created error report: %s": "已创建错误报告：%s",
+    "Error report ready": "错误报告已生成",
+    "Please send this ZIP file to the author to report the problem:\n\n%s":
+        "请将下面的 ZIP 文件发送给作者，以便排查问题：\n\n%s",
     "Included files: %s": "已包含文件：%s",
     "Missing logs from this session: %s": "本局缺少日志：%s",
     "Not run in this session: %s": "本局未运行：%s",
@@ -1890,6 +1893,8 @@ class LauncherWindow(object):
                     self._log(self._t(
                         "Could not select the report in Windows Explorer: "
                         "%s") % error)
+                self.root.after(
+                    0, lambda: self._show_report_send_reminder(result["path"]))
             finally:
                 self._report_busy = False
                 self.root.after(0, self._update_action_controls)
@@ -1898,6 +1903,16 @@ class LauncherWindow(object):
         thread.daemon = True
         thread.start()
         return True
+
+    def _show_report_send_reminder(self, report_path):
+        from tkinter import messagebox
+
+        messagebox.showinfo(
+            self._t("Error report ready"),
+            self._t(
+                "Please send this ZIP file to the author to report the "
+                "problem:\n\n%s") % report_path,
+            parent=self.root)
 
     def _confirm_enable_crash_capture(self):
         from tkinter import messagebox
@@ -2526,6 +2541,9 @@ class LauncherWindow(object):
                     "persistent": True,
                     "require_owned": True,
                 }
+                if prepared.get("botExcludedVehicles"):
+                    start_options["bot_excluded_vehicles"] = prepared[
+                        "botExcludedVehicles"]
                 if bot_lineup:
                     start_options["bot_lineup"] = bot_lineup
                 started = self._start_server(
@@ -2667,6 +2685,8 @@ class LauncherWindow(object):
                 else:
                     prepared = vehicle_overlays.prepare_vehicle_profile(
                         game_root, session.get("vehicle_profile"))
+                    session["bot_excluded_vehicles"] = prepared.get(
+                        "botExcludedVehicles", [])
                     if prepared["profile"] is None:
                         self._log(
                             "No launcher-owned vehicle profile is active; "
@@ -2689,6 +2709,9 @@ class LauncherWindow(object):
                 }
                 if session.get("bot_lineup"):
                     start_options["bot_lineup"] = session["bot_lineup"]
+                if session.get("bot_excluded_vehicles"):
+                    start_options["bot_excluded_vehicles"] = session[
+                        "bot_excluded_vehicles"]
                 started = self._start_server(
                     game_root, session["client"], **start_options)
                 if not started:
@@ -2914,21 +2937,24 @@ class LauncherWindow(object):
 
     def _start_server(self, game_root, port_version,
                       loopback_only=False, persistent=False,
-                      bot_lineup=None, require_owned=False):
+                      bot_lineup=None, require_owned=False,
+                      bot_excluded_vehicles=None):
         requested_context = {
             "game_root": os.path.normcase(os.path.realpath(
                 os.path.abspath(game_root))),
             "port_version": port_version,
             "loopback_only": bool(loopback_only),
             "bot_lineup": list(bot_lineup or ()),
+            "bot_excluded_vehicles": sorted(set(bot_excluded_vehicles or ())),
         }
         if self._server_is_running():
             current_context = dict(self._server_context or {})
             current_context.setdefault("bot_lineup", [])
+            current_context.setdefault("bot_excluded_vehicles", [])
             if current_context != requested_context:
                 self._log(
                     "The launcher-owned LAN server uses a different game "
-                    "or visibility setting, or a different exact lineup. "
+                    "or visibility setting, or different Bot roster rules. "
                     "Stop it before starting this session.")
                 return False
             self._log("Reusing the launcher-owned %s LAN server." %
@@ -2945,9 +2971,10 @@ class LauncherWindow(object):
                     "compatible server already uses port %d. Close it "
                     "first." % core.DEFAULT_SERVER_PORT)
                 return False
-            if bot_lineup:
+            if bot_lineup or bot_excluded_vehicles:
                 self._log(
-                    "The exact Bot lineup needs a fresh launcher-owned "
+                    "The exact Bot lineup or vehicle exclusions need a "
+                    "fresh launcher-owned "
                     "server. Stop the compatible server already using port "
                     "%d first." % core.DEFAULT_SERVER_PORT)
                 return False
@@ -2962,7 +2989,8 @@ class LauncherWindow(object):
         command = core.server_child_command(port_version)
         environment = core.server_environment(
             port_version, game_root, loopback_only=loopback_only,
-            bot_lineup=bot_lineup)
+            bot_lineup=bot_lineup,
+            bot_excluded_vehicles=bot_excluded_vehicles)
         server_log_path = core.server_log_path()
         report_session = self._active_report_session
         if report_session is not None:
