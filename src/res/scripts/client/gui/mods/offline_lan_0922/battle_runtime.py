@@ -56,8 +56,8 @@ from gui.mods.offline_lan_0922 import (
     destructibles_compat, device_damage, effective_params,
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
-    graphics_probe, loadout as loadout_law, memory_probe, python_heap,
-    world_census, prebaked_destructibles,
+    gc_sweep, graphics_probe, loadout as loadout_law, memory_probe,
+    python_heap, world_census, prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
@@ -24479,7 +24479,10 @@ class BattleRuntime(object):
             # Cross the native teardown boundary and release its retained
             # Python owners before checking which cycles are reclaimable.
             # The token above also excludes cancelled or repeated callbacks.
-            python_heap.log_collect('round_end', round_identity)
+            # The diagnostic includes its own release pass. Fall back to a
+            # plain collection only if it could not produce a result.
+            if not python_heap.log_collect('round_end', round_identity):
+                gc_sweep.sweep('round_end', round_identity)
             if callable(on_complete):
                 try:
                     on_complete(lobby_restored)
