@@ -34,6 +34,10 @@
 #define PLAYER_MODE L"--player"
 #define PAIRED_PLAYER_MODE L"--paired-player"
 #define WORKER_ONLY_MODE L"--worker-only"
+/* Kept at 60 s deliberately.  launcher/core.py waits
+ * WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 plus a margin, so this side
+ * always reaches its own log_failure("wait_for_worker_ready") first and the
+ * report says why the worker never became ready. */
 #define WORKER_READY_TIMEOUT_MS 60000
 #define WORKER_READY_POLL_MS 50
 #define PLAYER_HANDOFF_GRACE_MS 10000

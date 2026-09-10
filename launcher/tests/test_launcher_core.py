@@ -2605,3 +2605,38 @@ class ExitCodeDescriptionTest(unittest.TestCase):
     def test_an_unlisted_windows_status_is_still_named_as_one(self):
         self.assertIn("Windows fatal status",
                       core.describe_exit_code(0xC0000409))
+
+
+class WorkerReadyTimeoutMarginTest(unittest.TestCase):
+    """Report 20260909-234646 arrived with no hidden-worker log at all.
+
+    The launcher and the native starter both waited 60 s for the ready
+    marker, so whichever noticed first was a race and the starter's own
+    explanation could be cut off before it was ever written.
+    """
+
+    def test_the_launcher_outwaits_the_starter(self):
+        self.assertGreater(
+            core.WORKER_READY_TIMEOUT_SECONDS_0922,
+            core.WORKER_STARTER_READY_TIMEOUT_SECONDS_0922)
+        self.assertGreaterEqual(
+            core.WORKER_READY_TIMEOUT_SECONDS_0922 -
+            core.WORKER_STARTER_READY_TIMEOUT_SECONDS_0922, 5.0)
+
+    def test_the_starter_still_gets_its_full_original_budget(self):
+        # Extending the launcher's side rather than shortening this one is
+        # what keeps a slow machine's existing 60 s to become ready.
+        self.assertEqual(
+            60.0, core.WORKER_STARTER_READY_TIMEOUT_SECONDS_0922)
+
+    def test_the_constant_matches_the_native_starter(self):
+        source = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            'native', 'offline_worker_starter.c')
+        with io.open(source, encoding='utf-8') as stream:
+            text = stream.read()
+        expected = int(
+            core.WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 * 1000)
+        self.assertIn(
+            '#define WORKER_READY_TIMEOUT_MS %d' % expected, text)

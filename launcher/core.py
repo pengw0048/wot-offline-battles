@@ -98,7 +98,19 @@ PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
 STOP_STARTER_ARGUMENT_0922 = "--stop-starter"
-WORKER_READY_TIMEOUT_SECONDS_0922 = 60.0
+# The starter runs its own 60 s ready wait (WORKER_READY_TIMEOUT_MS in
+# native/offline_worker_starter.c) and writes the reason it gave up to
+# hidden-worker-starter.log.  Both clocks used to expire together, so which
+# one reported first was a race - and report 20260909-234646 arrived with no
+# worker log of any kind.  Give the launcher a margin so the starter always
+# loses that race and its explanation survives.  Extending this side rather
+# than shortening the starter's keeps every machine's existing 60 s to become
+# ready.
+WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 = 60.0
+WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922 = 15.0
+WORKER_READY_TIMEOUT_SECONDS_0922 = (
+    WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 +
+    WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922)
 WORKER_FAILURE_DRAIN_SECONDS_0922 = 0.5
 STARTER_CONTROL_TIMEOUT_SECONDS_0922 = 5.0
 STARTER_SHUTDOWN_TIMEOUT_SECONDS_0922 = 45.0
