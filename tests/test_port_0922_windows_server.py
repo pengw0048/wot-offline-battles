@@ -42,6 +42,7 @@ class WindowsServerLauncherTests(unittest.TestCase):
             team_size=15,
             team1_size=15, team2_size=15,
             bot_lineup=[],
+            bot_excluded_vehicles=[],
             vehicle_overlay_root=None,
         )
 
@@ -88,6 +89,7 @@ class WindowsServerLauncherTests(unittest.TestCase):
             team_size=15,
             team1_size=15, team2_size=15,
             bot_lineup=[],
+            bot_excluded_vehicles=[],
             vehicle_overlay_root=None,
         )
 
@@ -129,6 +131,8 @@ class WindowsServerLauncherTests(unittest.TestCase):
                 windows_server.SERVER_BOT_LINEUP_ENV:
                     '[{"team":2,"slot":4,'
                     '"vehicle":"germany:G12_Ltraktor"}]',
+                windows_server.SERVER_BOT_EXCLUDED_VEHICLES_ENV:
+                    '["germany:G12_Ltraktor"]',
         }), mock.patch.object(
                 windows_server, '_load_server',
                 return_value=('server_random', run_server)), \
@@ -137,6 +141,14 @@ class WindowsServerLauncherTests(unittest.TestCase):
             self.assertEqual(0, windows_server.main())
 
         self.assertEqual(lineup, run_server.call_args.kwargs['bot_lineup'])
+        self.assertEqual(['germany:G12_Ltraktor'],
+                         run_server.call_args.kwargs['bot_excluded_vehicles'])
+
+    def test_invalid_bot_exclusions_do_not_silently_use_an_empty_list(self):
+        for value in ('{bad json', '{}', 'null'):
+            with self.assertRaises(ValueError):
+                windows_server._bot_excluded_vehicles_from_environment({
+                    windows_server.SERVER_BOT_EXCLUDED_VEHICLES_ENV: value})
 
     def test_invalid_exact_bot_lineup_json_fails_before_server_bind(self):
         run_server = mock.Mock()

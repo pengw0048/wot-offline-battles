@@ -3097,9 +3097,11 @@ class BattleRuntime(object):
             # this one startup callback; bot presentation staggering is a
             # separate later phase and never throttles this prewarm.
             lineup_ready = self._prepare_bot_vehicle_assignments(descriptor)
-            if self._start_message.get('bot_lineup') and not lineup_ready:
+            if (self._start_message.get('bot_lineup') or
+                    self._start_message.get('bot_excluded_vehicles')) and \
+                    not lineup_ready:
                 raise RuntimeError(
-                    'the exact Bot lineup is not available in this client')
+                    'the configured Bot roster is not available in this client')
             prewarm_enabled = getattr(
                 self._remote_factory, 'prewarm_wrecks_enabled', None)
             if callable(prewarm_enabled) and prewarm_enabled():
@@ -4638,6 +4640,8 @@ class BattleRuntime(object):
             tier = int(player_profile['level'])
             tier_mode = bot_planner.normalize_bot_tier_mode(
                 self._start_message.get('bot_tier_mode'))
+            excluded_names = set(
+                self._start_message.get('bot_excluded_vehicles') or ())
             all_candidates = []
             for nation in self._runtime.nations.AVAILABLE_NAMES:
                 nation_id = self._runtime.nations.INDICES[nation]
@@ -4654,6 +4658,14 @@ class BattleRuntime(object):
             ]
             if not candidates:
                 return False
+            automatic_candidates = [candidate for candidate in candidates
+                                    if candidate['name'] not in excluded_names]
+            if automatic_candidates:
+                candidates = automatic_candidates
+            # If every candidate was excluded, retain the template shape only
+            # until explicit slot overrides below can fill a fully pinned team.
+            # The final automatic pool and completeness check still forbid a
+            # fallback to an excluded player tank.
             candidates.sort(key=lambda value: (
                 int(value.get('level', 0)),
                 self._vehicle_class_order(value),
@@ -4738,18 +4750,26 @@ class BattleRuntime(object):
             template = bot_planner.build_match_template(
                 candidates, team_size, player_profile, match_tiers,
                 lineup_random, requirements)
+            automatic_candidates = [
+                candidate for candidate in candidates
+                if candidate['name'] not in excluded_names]
 
             assignments = {}
             for team in (1, 2):
                 team_bots = bots_by_team[team]
                 picked = bot_planner.remaining_match_template(
                     template, humans_by_team[team])
+                # Human tier/class reservations may mirror their exact tank.
+                # Apply profile exclusions after removing human slots so that
+                # those reservations cannot put an edited tank back in a Bot.
+                picked = [entry for entry in picked
+                          if entry['name'] not in excluded_names]
                 # Apply the bot-only quota after removing human slots. A human
                 # SPG must not force mirrored artillery onto the opposing bots.
                 # Explicit lineup overrides below retain the host's choices.
                 picked = bot_planner.select_bot_lineup(
-                    picked or candidates, len(team_bots), spg_limit=0,
-                    fallback_candidates=candidates)
+                    picked or automatic_candidates, len(team_bots),
+                    spg_limit=0, fallback_candidates=automatic_candidates)
                 picked = list(picked[:len(team_bots)])
                 lineup_random.shuffle(picked)
                 picked.sort(key=self._vehicle_class_order)
@@ -4758,6 +4778,8 @@ class BattleRuntime(object):
                         entry['name']
             allowed_names = set(
                 candidate['name'] for candidate in all_candidates)
+            bot_slots = set((team, int(raw.get('slot', 0)))
+                            for team in (1, 2) for raw in bots_by_team[team])
             for raw in self._start_message.get('bot_lineup') or ():
                 if not isinstance(raw, dict):
                     self._bot_vehicle_assignments = {}
@@ -4779,8 +4801,11 @@ class BattleRuntime(object):
                 if vehicle not in allowed_names:
                     self._bot_vehicle_assignments = {}
                     return False
-                if (team, slot) in assignments:
+                if (team, slot) in bot_slots:
                     assignments[(team, slot)] = vehicle
+            if excluded_names and set(assignments) != bot_slots:
+                self._bot_vehicle_assignments = {}
+                return False
             self._bot_vehicle_assignments = assignments
             return True
         except Exception:

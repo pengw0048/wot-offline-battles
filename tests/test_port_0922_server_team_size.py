@@ -76,6 +76,38 @@ def _attach_worker(state):
 
 
 class ServerTeamSizeTests(unittest.TestCase):
+    def test_profile_bot_exclusions_survive_every_battle_start_delivery(self):
+        excluded = ['ussr:R11_MS-1', 'germany:G12_Ltraktor']
+        state = BattleState(team_size=2, bot_excluded_vehicles=excluded)
+        worker = _attach_worker(state)
+        player, error = state.add_player(
+            _Connection(), ('10.0.0.1', 1001), _hello(1))
+        self.assertIsNone(error)
+        start, error = state.request_start(player.player_id)
+        self.assertIsNone(error)
+        self.assertEqual(sorted(excluded), start['bot_excluded_vehicles'])
+        stale = dict(start, bot_excluded_vehicles=[])
+        with mock.patch.object(player, 'offer_reliable', return_value=True) \
+                as visible_offer, mock.patch.object(
+                    worker, 'offer_reliable', return_value=True) as worker_offer:
+            self.assertTrue(state.broadcast_loading_transition(stale))
+        for offer in (visible_offer, worker_offer):
+            self.assertEqual(sorted(excluded),
+                             offer.call_args.args[0]['bot_excluded_vehicles'])
+        state.phase = 'battle'
+        self.assertEqual(sorted(excluded),
+                         state.current_battle_message()['bot_excluded_vehicles'])
+        state._reset_round()
+        self.assertEqual(sorted(excluded), state.bot_excluded_vehicles)
+
+    def test_profile_bot_exclusions_accept_only_vehicle_names(self):
+        for value in ('ussr:R11_MS-1', [True], ['R11_MS-1'], ['ussr:bad/name']):
+            with self.assertRaises(ValueError):
+                BattleState(bot_excluded_vehicles=value)
+        self.assertEqual(['ussr:R11_MS-1'], BattleState(
+            bot_excluded_vehicles=['ussr:R11_MS-1', 'ussr:R11_MS-1']
+        ).bot_excluded_vehicles)
+
     def test_0922_bot_callsigns_use_period_appropriate_chinese_names(self):
         self.assertGreaterEqual(len(BOT_CALLSIGNS_0922), 120)
         self.assertEqual(len(BOT_CALLSIGNS_0922), len(set(BOT_CALLSIGNS_0922)))
