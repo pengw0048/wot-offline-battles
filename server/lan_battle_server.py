@@ -1585,6 +1585,21 @@ def _track_repair_rows(value):
     return tuple(sorted(result, key=lambda row: row["name"]))
 
 
+def _even_shares(total, parts):
+    """Return ``parts`` integer shares of ``total`` that sum back to it.
+
+    A spotting assist is divided between the observers lighting the target,
+    and the statistic is a whole number of hit points, so the remainder goes
+    to the first shares in the caller's stable order rather than being lost.
+    """
+    parts = int(parts)
+    if parts <= 0:
+        return []
+    share, remainder = divmod(int(total), parts)
+    return [share + 1 if index < remainder else share
+            for index in range(parts)]
+
+
 def _destroyed_tracks(critical):
     """Return the track devices one critical payload reports as destroyed."""
     if not isinstance(critical, dict):
@@ -4730,6 +4745,7 @@ class BattleState:
                 (bot_id, set()) for bot_id in known_bots)
             direct_player_spots = dict(
                 (reporter_id, set()) for reporter_id in known_players)
+            team_lit = {1: set(), 2: set()}
             stale_observation = False
             contacts = []
             for raw in message.get("contacts"):
@@ -4874,6 +4890,8 @@ class BattleState:
                 contact["time_left"] = time_left
                 result_kind = ("player" if target_kind == "human"
                                else target_kind)
+                if contact["visible"]:
+                    team_lit[observing_team].add((result_kind, target_id))
                 for bot_id in bot_observer_ids:
                     direct_bot_spots[bot_id].add(
                         (result_kind, target_id))
@@ -4893,6 +4911,7 @@ class BattleState:
                 message.get("affordances"), known_bots, known_targets, now)
             self._replace_bot_spotted(direct_bot_spots)
             self._replace_player_spotted(direct_player_spots)
+            self._replace_team_lit(team_lit)
             self._commit_detections()
             if accepted_visibility:
                 return {
@@ -4928,6 +4947,12 @@ class BattleState:
         for player_id in sorted(direct_spots):
             spotted = frozenset(direct_spots[player_id])
             self.player_spotted[int(player_id)] = spotted
+        return True
+
+    def _replace_team_lit(self, lit_targets):
+        """Commit one complete validated team spot-lease batch."""
+        for team in (1, 2):
+            self.team_lit_targets[team] = set(lit_targets.get(team, ()))
         return True
 
     @staticmethod
@@ -11774,6 +11799,11 @@ class BattleState:
         # team -> the enemies that team can currently see, so a vehicle that
         # goes dark and reappears is a new detection for whoever finds it.
         self.team_visible_targets = {1: set(), 2: set()}
+        # team -> the enemies the worker's spot leases still light for that
+        # team.  A target stays detected for as long as its lease holds, so
+        # neither a blocked line of sight nor a budgeted-out visibility probe
+        # can turn one continuous contact into a second detection.
+        self.team_lit_targets = {1: set(), 2: set()}
         # every vehicle any enemy ever directly detected.
         self.ever_spotted_targets = set()
         # actor -> damage it dealt to its own team.
@@ -11824,11 +11854,14 @@ class BattleState:
 
         A vehicle is detected when it becomes visible to a team that could
         not see it a moment ago; every direct observer on that team that saw
-        it at that instant detected it.  The statistic counts distinct
-        enemies, so re-acquiring a target the observer already revealed adds
-        nothing, while an enemy that goes dark and is revealed again credits
-        whoever found it that time.  This is the ``spotted`` column the
-        results screen shows and the count Patrol Duty (``scout``) reads.
+        it at that instant detected it.  A team keeps seeing a target for
+        as long as the worker's spot lease lights it, so a broken line of
+        sight or a budgeted-out visibility probe is not a second detection.
+        The statistic counts distinct enemies, so re-acquiring a target the
+        observer already revealed adds nothing, while an enemy whose lease
+        expired and is found again credits whoever finds it that time.  This
+        is the ``spotted`` column the results screen shows and the count
+        Patrol Duty (``scout``) reads.
         """
         observers = [(("bot", int(bot_id)), spotted)
                      for bot_id, spotted in self.bot_spotted.items()]
@@ -11856,7 +11889,8 @@ class BattleState:
                     interaction["spotted"] = 1
                     row = self._statistics_row(*reporter)
                     row["spotted"] = int(row.get("spotted", 0)) + 1
-            self.team_visible_targets[team] = set(visible)
+            self.team_visible_targets[team] = set(visible) | set(
+                self.team_lit_targets.get(team, ()))
 
     def _direct_spotters(self, target):
         """Return every enemy observer that directly sees ``target``.
@@ -12099,14 +12133,31 @@ class BattleState:
                 0 if value.get("target_kind") == "player" else 1,
                 int(value.get("target_id", 0))))]
 
+    def _spots_target(self, actor, target):
+        """Return whether one actor currently holds this target in sight."""
+        actor = (str(actor[0]), int(actor[1]))
+        target = (str(target[0]), int(target[1]))
+        if actor[0] == "player":
+            return target in self.player_spotted.get(actor[1], ())
+        return target in self.bot_spotted.get(actor[1], ())
+
     def _radio_assisters(self, attacker, target, target_team):
-        """Return live direct observers whose set contains this target."""
+        """Return the live observers one spotting assist is divided between.
+
+        Wargaming pays a spotting assist for damage done to a target the
+        observer is spotting "by team members who are not spotting them
+        themselves", divided "by the number of team members spotting the
+        target".  An attacker that sees its own target therefore earns
+        nobody an assist instead of merely being skipped, which is the rule
+        the Patrol Duty ledger in ``_record_damage`` already applies.
+        """
+        if self._spots_target(attacker, target):
+            return []
         result = []
         for reporter_id in sorted(self.player_spotted):
             reporter = self.players.get(reporter_id)
             if (reporter is None or not reporter.connected or
                     not reporter.alive or reporter.team == target_team or
-                    ("player", reporter_id) == attacker or
                     target not in self.player_spotted[reporter_id]):
                 continue
             result.append(("player", reporter_id))
@@ -12115,7 +12166,6 @@ class BattleState:
             reporter = ("bot", int(bot_id))
             if (bot is None or not bot.get("alive") or
                     int(bot.get("team", 0)) == target_team or
-                    reporter == attacker or
                     target not in self.bot_spotted[bot_id]):
                 continue
             result.append(reporter)
@@ -12183,26 +12233,32 @@ class BattleState:
         if (holder is not None and holder != attacker and
                 self._vehicle_team(*holder) != target_team and
                 _destroyed_tracks(target_critical)):
-            credits.append(("track", holder))
+            credits.append(("track", holder, damage))
         holder = self._active_stun_assister(target)
         if (holder is not None and holder != attacker and
                 self._vehicle_team(*holder) != target_team):
-            credits.append(("stun", holder))
+            credits.append(("stun", holder, damage))
+        # A track or a stun has one owner, but a spotting assist is shared by
+        # every observer lighting the target, so each of them is paid its
+        # share of this damage rather than the whole of it.
+        assisters = self._radio_assisters(attacker, target, target_team)
         credits.extend(
-            ("radio", assister) for assister in
-            self._radio_assisters(attacker, target, target_team))
-        for category, assister in credits:
+            ("radio", assister, share) for assister, share in
+            zip(assisters, _even_shares(damage, len(assisters))))
+        for category, assister, amount in credits:
+            if amount <= 0:
+                continue
             self._statistics_row(*assister)[
-                "damage_assisted_%s" % category] += damage
+                "damage_assisted_%s" % category] += amount
             self._increment_interaction(
-                assister, target, "assist_%s" % category, damage)
+                assister, target, "assist_%s" % category, amount)
             self.pending_events.append({
                 "kind": "assist",
                 "category": category,
                 "assister_kind": assister[0], "assister_id": assister[1],
                 "attacker_kind": attacker[0], "attacker_id": attacker[1],
                 "target_kind": target[0], "target_id": target[1],
-                "damage": damage,
+                "damage": amount,
             })
 
     def _frozen_player_participant(self, player_id):

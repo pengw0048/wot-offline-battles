@@ -1389,6 +1389,47 @@ class ServerBotObservationRelayTests(unittest.TestCase):
             75, server._statistics_row(
                 'player', 1)['damage_assisted_radio'])
 
+    def test_a_live_lease_keeps_a_teammate_from_re_detecting(self):
+        server, unused_authority_socket, unused_guest_socket = self._server()
+        self.assertIsInstance(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            self._human_message(server.round_id, (1,))), dict)
+
+        # The worker still lights the enemy for the team while no observer
+        # currently holds it: a blocked line of sight, or a visibility probe
+        # the frame budget deferred.
+        lease_only = self._human_message(server.round_id, ())
+        lease_only['contacts'][0]['fresh'] = False
+        server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID, lease_only)
+        self.assertEqual({('bot', 11)}, server.team_lit_targets[1])
+        self.assertEqual(frozenset(), server.player_spotted[1])
+
+        self.assertIsInstance(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            self._human_message(server.round_id, (2,))), dict)
+
+        self.assertEqual(1, server._statistics_row('player', 1)['spotted'])
+        self.assertEqual(0, server._statistics_row('player', 2)['spotted'])
+
+    def test_an_expired_lease_credits_the_next_observer(self):
+        server, unused_authority_socket, unused_guest_socket = self._server()
+        self.assertIsInstance(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            self._human_message(server.round_id, (1,))), dict)
+
+        self.assertTrue(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            self._human_message(server.round_id, (), visible=False)))
+        self.assertEqual(set(), server.team_lit_targets[1])
+
+        self.assertIsInstance(server.update_bot_observation(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            self._human_message(server.round_id, (2,))), dict)
+
+        self.assertEqual(1, server._statistics_row('player', 1)['spotted'])
+        self.assertEqual(1, server._statistics_row('player', 2)['spotted'])
+
     def test_worker_human_spot_rejects_forged_observers(self):
         server, unused_authority_socket, unused_guest_socket = self._server()
         malformed = self._human_message(server.round_id)
