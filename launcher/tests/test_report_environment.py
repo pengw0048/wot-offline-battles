@@ -106,6 +106,23 @@ class CrashTextTest(unittest.TestCase):
         scanner.feed(payload[cut:])
         self.assertIn("EXCEPTION_ACCESS_VIOLATION", scanner.result())
 
+    def test_the_crash_is_reported_once_at_every_chunk_boundary(self):
+        # A cut inside the banner renders a truncated copy from one window
+        # and the whole one from the next.  The report must carry the crash
+        # once, whichever 64 KiB boundary the ZIP copy happens to land on.
+        payload = b"\0" * 3000 + self.BANNER + b"\0" * 3000
+        for cut in range(1, len(payload), 13):
+            scanner = report_environment.CrashTextScanner()
+            scanner.feed(payload[:cut])
+            scanner.feed(payload[cut:])
+            result = scanner.result()
+            if not result:
+                continue
+            self.assertEqual(
+                1, len(result.split("\n\n")),
+                "cut at %d reported the crash more than once" % cut)
+            self.assertIn("System: 3633459200/3221225472", result)
+
     def test_a_format_template_is_not_mistaken_for_the_event(self):
         # The same words live in the module image as printf templates. An
         # earlier version of this reader returned those instead of the crash.
@@ -201,3 +218,48 @@ class SectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnPayloadIsNotListedTest(unittest.TestCase):
+    """The listing must not spend its budget on this launcher's own files.
+
+    `prepare_worker_resource_root` unpacks the whole port `res` tree into
+    `mods/configs/offline_lan_0922/worker_res`.  On a machine that ran the
+    isolated worker that is hundreds of files, and walking them would
+    truncate the listing before it reached the player's third-party mods -
+    which is the only thing this section exists to show.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.game = os.path.join(self.root, "game")
+        own = os.path.join(self.game, core.WORKER_RESOURCE_ROOT_0922)
+        os.makedirs(own)
+        for index in range(500):
+            with open(os.path.join(own, "payload%03d.py" % index),
+                      "wb") as stream:
+                stream.write(b"# ours\n")
+        self.third_party = os.path.join(self.game, "mods", "0.9.22.0.1")
+        os.makedirs(self.third_party)
+        with open(os.path.join(self.third_party, "zz_aslain.wotmod"),
+                  "wb") as stream:
+            stream.write(b"x")
+        loose = os.path.join(self.game, "res_mods", "0.9.22.0.1", "scripts")
+        os.makedirs(loose)
+        with open(os.path.join(loose, "mod_quiet.py"), "wb") as stream:
+            stream.write(b"# silent\n")
+
+    def test_a_third_party_mod_survives_our_own_five_hundred_files(self):
+        text = report_environment.installed_mods_report(self.game)
+        self.assertIn("zz_aslain.wotmod", text)
+        self.assertIn("mod_quiet.py", text)
+        self.assertNotIn("payload000.py", text)
+        self.assertNotIn("truncated", text.lower())
+
+    def test_our_own_tree_is_counted_rather_than_hidden(self):
+        # Summarised, not silently dropped: how many files this launcher put
+        # there is still worth knowing.
+        text = report_environment.installed_mods_report(self.game)
+        self.assertIn("configs/", text)
+        self.assertIn("500 files, installed by this launcher", text)

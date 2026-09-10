@@ -36,6 +36,13 @@ except ImportError:
 
 
 MODS_LISTING_LIMIT = 400
+# Directories under `mods/` that this launcher owns.  They must be summarised
+# rather than walked: `prepare_worker_resource_root` unpacks the whole port
+# `res` tree into `mods/configs/offline_lan_0922/worker_res`, which on an
+# isolated-worker machine is hundreds of files.  Walking them would spend the
+# listing budget on our own payload and truncate before reaching the player's
+# third-party mods - the one thing this section exists to show.
+OWN_MOD_DIRECTORIES = ("configs",)
 # BigWorld writes its own crash banner onto the faulting thread's stack:
 # "Application <exe> crashed <date> at <time> / Message: / FATAL ERROR: ...".
 # The same words also appear in the module image as printf templates, so a
@@ -264,15 +271,22 @@ def environment_report(game_root, session=None):
     return "\n".join(lines) + "\n"
 
 
-def _listing(root, limit):
+def _listing(root, limit, skip=()):
+    """List files under root, summarising any top-level directory in skip."""
     rows = []
     truncated = False
+    summarised = []
     for base, directories, files in os.walk(root):
+        if os.path.normpath(base) == os.path.normpath(root):
+            for name in sorted(directories):
+                if name.lower() in skip:
+                    directories.remove(name)
+                    summarised.append(name)
         directories.sort()
         for name in sorted(files):
             if len(rows) >= limit:
                 truncated = True
-                return rows, truncated
+                return rows + _summary_rows(root, summarised), truncated
             path = os.path.join(base, name)
             try:
                 size = os.path.getsize(path)
@@ -280,7 +294,23 @@ def _listing(root, limit):
                 size = -1
             rows.append("%12d  %s" % (
                 size, os.path.relpath(path, root).replace("\\", "/")))
-    return rows, truncated
+    return rows + _summary_rows(root, summarised), truncated
+
+
+def _summary_rows(root, names):
+    """One counted line per launcher-owned directory, instead of its files."""
+    rows = []
+    for name in names:
+        total = 0
+        try:
+            for unused_base, unused_dirs, files in os.walk(
+                    os.path.join(root, name)):
+                total += len(files)
+        except OSError:
+            total = -1
+        rows.append("%12s  %s/  (%s files, installed by this launcher)" % (
+            "-", name, total if total >= 0 else "unreadable"))
+    return rows
 
 
 def installed_mods_report(game_root):
@@ -298,7 +328,9 @@ def installed_mods_report(game_root):
             lines.append("(absent)")
             continue
         try:
-            rows, truncated = _listing(root, MODS_LISTING_LIMIT)
+            rows, truncated = _listing(
+                root, MODS_LISTING_LIMIT,
+                skip=OWN_MOD_DIRECTORIES if relative == "mods" else ())
         except OSError as error:
             lines.append("unreadable: %s" % error)
             continue
@@ -479,10 +511,18 @@ class CrashTextScanner(object):
             pass
 
     def result(self):
-        """Return the banner text, or None when the dump held none."""
+        """Return the banner text, or None when the dump held none.
+
+        A chunk boundary inside the banner yields a truncated render from one
+        window and the whole one from the next, so drop any candidate that is
+        contained in another.  The report should carry the crash once.
+        """
         if not self._found:
             return None
-        return "\n\n".join(self._found)
+        kept = [text for text in self._found
+                if not any(text != other and text in other
+                           for other in self._found)]
+        return "\n\n".join(kept or self._found)
 
 
 def crash_text(path, limit=CRASH_TEXT_LIMIT):
