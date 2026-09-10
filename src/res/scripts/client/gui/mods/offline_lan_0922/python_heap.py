@@ -12,6 +12,7 @@ It is diagnostics: every failure is swallowed and the caller continues.
 """
 
 import gc
+import itertools
 import sys
 import types
 
@@ -36,6 +37,12 @@ MAX_CENSUS_OBJECTS = 2000000
 # Small dict key sets can distinguish candidate structures more precisely
 # than a type name, without identifying which owner retained them.
 SIGNATURE_SAMPLE = 4000
+# Bound both the object window and references inspected per source container.
+# Only targets inside that window count. These partial, shape-grouped edges
+# guide investigation; they do not identify complete cycles or retaining owners.
+EDGE_SAMPLE = 2000
+MAX_EDGE_REFERENTS = 32
+TOP_EDGES = 8
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
 MAX_SIGNATURE_TEXT = 64
@@ -218,13 +225,62 @@ def signature_census(items, limit=SIGNATURE_SAMPLE):
     return scanned, ranked[:TOP_SIGNATURES]
 
 
+def _edge_referents(item):
+    """Visit bounded direct references of exact built-in containers only."""
+    item_type = type(item)
+    if item_type is dict:
+        pairs = (item.iteritems() if sys.version_info[0] == 2 else
+                 iter(item.items()))
+        for key, value in itertools.islice(pairs, MAX_EDGE_REFERENTS // 2):
+            yield key
+            yield value
+    elif any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
+        for target in itertools.islice(item, MAX_EDGE_REFERENTS):
+            yield target
+
+
+def edge_census(items, sample=EDGE_SAMPLE):
+    """Summarize partial references between objects in the supplied window.
+
+    The collector supplies unreachable objects, which can include acyclic
+    contents held by cycles. An edge between two members does not prove both
+    belong to a cycle, and grouping by shape loses individual object identity.
+    Omitted targets, references beyond the per-container budget, subclasses,
+    and opaque/native objects are not traversed. Missing edges prove nothing
+    about those objects. Avoid gc.get_referents: it materializes every referent
+    before a caller can limit the result and can invoke native tp_traverse.
+    """
+    window = list(itertools.islice(items, max(0, min(sample, EDGE_SAMPLE))))
+    known = dict((id(item), _signature(item)) for item in window)
+    tally = {}
+    edges = 0
+    for item in window:
+        try:
+            for target in _edge_referents(item):
+                if id(target) not in known:
+                    continue
+                # Preserve repeated references and self-edges. Keep signatures
+                # separate until rendering so large labels are not recopied
+                # for every pair counted in the bounded window.
+                key = (known[id(item)], known[id(target)])
+                tally[key] = tally.get(key, 0) + 1
+                edges += 1
+        except Exception:
+            continue
+    ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
+    return len(window), edges, [('%s -> %s' % pair, count)
+                                for pair, count in ranked[:TOP_EDGES]]
+
+
 def _collect_saved_sample(garbage, first):
     """Keep temporary object references and exception frames out of pass two."""
     try:
         unreachable = gc.collect()
         sample = garbage[first:first + SIGNATURE_SAMPLE]
         scanned, signatures = signature_census(sample)
-        return unreachable, scanned, signatures, _by_type(sample)
+        edge_window, edge_count, edges = edge_census(sample)
+        return (unreachable, scanned, signatures, _by_type(sample),
+                edge_window, edge_count, edges)
     except Exception:
         return None
 
@@ -266,7 +322,8 @@ def collect_once():
             freed_second = gc.collect()
         if sample is None:
             return None
-        unreachable, scanned, signatures, garbage_types = sample
+        (unreachable, scanned, signatures, garbage_types,
+         edge_window, edge_count, edges) = sample
         elapsed_ms = int((time.time() - started) * 1000.0)
         after = len(gc.get_objects())
         return {
@@ -279,13 +336,16 @@ def collect_once():
             'scanned': scanned,
             'signatures': signatures,
             'types': garbage_types,
+            'edge_window': edge_window,
+            'edge_count': edge_count,
+            'edges': edges,
         }
     except Exception:
         return None
 
 
 def format_collect_lines(phase, round_id, state=None):
-    """Return the PYGC line and its PYSIG companion, or an empty tuple."""
+    """Return the PYGC/PYSIG/PYREF group, or an empty tuple."""
     state = collect_once() if state is None else state
     if not state:
         return ()
@@ -303,13 +363,30 @@ def format_collect_lines(phase, round_id, state=None):
                   phase, round_id, state.get('scanned', 0),
                   ','.join('%s:%d' % pair for pair in types) or '-',
                   ' | '.join('%s x%d' % pair for pair in signatures) or '-'))
-    return (head, detail)
+    edges = state.get('edges') or ()
+    held = ('[Offline LAN 0.9.22] PYREF phase=%s round=%s window=%d edges=%d '
+            'holds=%s' % (
+                phase, round_id, state.get('edge_window', 0),
+                state.get('edge_count', 0),
+                ' | '.join('%s x%d' % pair for pair in edges) or '-'))
+    return (head, detail, held)
 
 
 def log_collect(phase, round_id):
-    """Write the PYGC/PYSIG pair. Never raises into a caller."""
+    """Run diagnostics and return whether a result was produced. Never raises.
+
+    A logging failure does not require another collection: the diagnostic
+    already completed its sampling and release passes.
+    """
     try:
-        for line in format_collect_lines(phase, round_id):
+        lines = format_collect_lines(phase, round_id)
+    except Exception:
+        return False
+    if not lines:
+        return False
+    try:
+        for line in lines:
             sys.stdout.write(line + '\n')
     except Exception:
         pass
+    return True
