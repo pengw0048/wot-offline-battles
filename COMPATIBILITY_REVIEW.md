@@ -131,8 +131,16 @@ A Bot checkpoint that cannot be encoded now publishes an identity-only
 mandatory. The server retains that actor's last admitted pose and combat ACK;
 other rows advance normally. Frozen launches and ram reports involving that
 actor stay in the worker outbox until its checkpoint becomes encodable. The
-worker logs the round, actor and codec reason at a bounded cadence. Integration
-tests cover failure, retained ACK/state, frozen launch retention and recovery.
+Bot/Bot ram report carries both frozen contact positions so recovery movement
+cannot invalidate an already observed collision. The server checks bounded
+finite coordinates, contact proximity, and immutable retry identity. An actor
+with an unavailable checkpoint holds new fire triggers until recovery, while
+its accepted burst continues; this preserves the burst identity needed to
+admit its frozen launches. If recovery spans the completed reload, the server
+validates the shot debit and reload completion as two ordinary ammunition
+transactions. The worker logs the round, actor and codec reason at a bounded
+cadence. Integration tests cover failure, retained ACK/state, frozen launch
+and contact recovery, and duplicate delivery.
 This contains the `223753` field report's whole-round failure; its discarded
 original codec reason cannot be reconstructed from the report. Windows #1513
 acceptance of the recovery path remains outstanding.

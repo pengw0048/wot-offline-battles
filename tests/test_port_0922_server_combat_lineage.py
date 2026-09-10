@@ -462,6 +462,168 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
             server.last_bot_state_reject)
         self.assertIsNone(server.battle_result)
 
+    def test_deferred_ram_uses_frozen_contact_after_actors_move_apart(self):
+        from gui.mods.offline_lan_0922.lan_client import LANClient
+        from test_port_0922_tank_collision import _tank
+
+        runtime, server, unused_roster = self._runtime_and_server()
+        runtime._resolve_tank_contacts = lambda *unused: []
+        first = runtime.update(1.0 / 24.0, 1.0)[0]
+        self.assertTrue(server.update_bot_states(1, dict(
+            first, round_id=server.round_id)))
+        contact = self.bot_runtime.tank_collision.resolve_tank(
+            _tank(11, 0.0, 0.0, mass=25000.0, vx=10.0, team=1),
+            (_tank(25, 0.8, 0.0, mass=30000.0, team=2),), now=1.0)
+        report = runtime._ram_reports(
+            runtime.states[11], contact['ram_events'])[0]
+        self.assertEqual([0.0, 0.0, 0.8, 0.0],
+                         report['contact_positions'])
+        runtime._pending_ram_reports.append(report)
+        codec = self.bot_runtime.bot_state_codec
+        original = codec.encode_row
+
+        def invalid_pose(state):
+            if state['id'] == 11:
+                raise codec.BotStateCodecError('shot_yaw: not finite')
+            return original(state)
+
+        codec.encode_row = invalid_pose
+        try:
+            failed = runtime.update(1.0 / 24.0, 1.1)[0]
+        finally:
+            codec.encode_row = original
+        self.assertTrue(server.update_bot_states(1, dict(
+            failed, round_id=server.round_id)))
+        runtime.states[11]['x'] = 100.0
+        recovered = runtime.update(1.0 / 24.0, 1.2)
+        self.assertTrue(server.update_bot_states(1, dict(
+            recovered[0], round_id=server.round_id)))
+        recovered_report = next(message for message in recovered
+                                if message['type'] == 'bot_ram')
+        wire = []
+        client = types.SimpleNamespace(
+            is_bot_authority=lambda: True, round_id=server.round_id,
+            _send=lambda message: wire.append(message) or True)
+        LANClient.send_bot_ram(
+            client, recovered_report['bot_id'],
+            recovered_report['target_kind'], recovered_report['target_id'],
+            recovered_report['ram_seq'], recovered_report['damage_to_bot'],
+            recovered_report['damage_to_target'],
+            contact_positions=recovered_report['contact_positions'])
+        self.assertEqual('bot_ram_report', wire[0]['type'])
+        before = server.bot_states[25]['health']
+        self.assertTrue(server.report_bot_ram(1, wire[0]))
+        self.assertEqual(before - report['damage_to_target'],
+                         server.bot_states[25]['health'])
+        self.assertTrue(server.report_bot_ram(1, wire[0]))
+        self.assertEqual(before - report['damage_to_target'],
+                         server.bot_states[25]['health'])
+        self.assertEqual([], runtime._pending_ram_reports)
+        for positions in ([0.0, 0.0, 100.0, 0.0], [0.0],
+                          [True, 0.0, 0.0, 0.0],
+                          [float('nan'), 0.0, 0.0, 0.0],
+                          [5001.0, 0.0, 5001.0, 0.0]):
+            self.assertFalse(server.report_bot_ram(1, dict(
+                wire[0], ram_seq=2, contact_positions=positions)))
+        self.assertFalse(server.report_bot_ram(1, dict(
+            wire[0], contact_positions=[0.0, 0.0, 1.0, 0.0])))
+
+    def test_unavailable_shot_recovers_after_reload_before_next_trigger(self):
+        from test_port_0922_server_projectiles import _launch
+
+        runtime, server, unused_roster = self._runtime_and_server()
+        runtime._resolve_tank_contacts = lambda *unused: []
+        for index in range(12):
+            first = runtime.update(0.1, 1.0 + index * 0.1)[0]
+            self.assertTrue(server.update_bot_states(1, dict(
+                first, round_id=server.round_id)))
+        state = runtime.states[11]
+        gun = runtime._gun_states[11]
+        descriptor = runtime._descriptors[11]
+        previous = copy.deepcopy(server.bot_states[11])
+        preview = {'fire_seq': 1, 'shot_yaw': 0.0, 'shot_pitch': 0.0,
+                   'origin': (0.0, 1.0, 0.0)}
+        self.assertTrue(runtime._fire(
+            state, gun, 1.0, descriptor, launch_preview=preview))
+        frozen = dict(runtime._pending_launches[0])
+        codec = self.bot_runtime.bot_state_codec
+        original = codec.encode_row
+
+        def invalid_pose(actor):
+            if actor['id'] == 11:
+                raise codec.BotStateCodecError('shot_yaw: not finite')
+            return original(actor)
+
+        codec.encode_row = invalid_pose
+        try:
+            for index in range(12):
+                failed = runtime.update(0.1, 2.2 + index * 0.1)[0]
+                self.assertTrue(server.update_bot_states(1, dict(
+                    failed, round_id=server.round_id)))
+        finally:
+            codec.encode_row = original
+        self.assertTrue(gun.ready())
+        self.assertFalse(runtime._fire(
+            state, gun, 1.0, descriptor,
+            launch_preview=dict(preview, fire_seq=2)))
+        self.assertEqual(1, state['fire_seq'])
+        recovered = runtime.update(0.1, 3.4)[0]
+        self.assertEqual([frozen], recovered['launches'])
+        self.assertTrue(server.update_bot_states(1, dict(
+            recovered, round_id=server.round_id)))
+        self.assertIn((11, 1), server.bot_pending_projectile_launches)
+        current = copy.deepcopy(server.bot_states[11])
+        bad_ammo = dict(current, ammo_remaining=[45])
+        with self.assertRaises(ValueError):
+            server._validate_bot_ammo_transition(
+                previous, bad_ammo, unavailable_checkpoint=True)
+        with self.assertRaises(ValueError):
+            server._bot_burst_transition(
+                previous, dict(current, burst_group_seq=2))
+        launch = _launch(
+            11, 1, 'bot', launch_time_us=frozen['launch_time_us'],
+            launch_pose=list(frozen['launch_pose']),
+            origin=list(frozen['shot_origin']))
+        launch['authority_epoch'] = server.authority_epoch
+        self.assertTrue(server.launch_projectile(1, launch))
+        self.assertEqual(1, len(server.projectiles))
+        self.assertTrue(server.launch_projectile(1, launch))
+        self.assertEqual(1, len(server.projectiles))
+        self.assertTrue(runtime.ack_projectile_launch(11, 1))
+        self.assertTrue(runtime._fire(
+            state, gun, 1.0, descriptor,
+            launch_preview=dict(preview, fire_seq=2)))
+        second = runtime.update(0.1, 3.5)[0]
+        self.assertTrue(server.update_bot_states(1, dict(
+            second, round_id=server.round_id)))
+        self.assertIn((11, 2), server.bot_pending_projectile_launches)
+
+    def test_recovery_reload_keeps_magazine_and_shell_conservation(self):
+        for fired, after, loaded, clip in (
+                (1, [2, 5], 0, 2),
+                (3, [0, 5], 1, 3)):
+            previous = {
+                'ammo_remaining': [3, 5], 'shell_index': 0,
+                'next_shell_index': 0, 'fire_seq': 0,
+                'clip_size': 3, 'clip': 3, 'ammo_reload_pending': False,
+                'reload_time': 0.0, 'burst_active': False,
+            }
+            current = dict(
+                previous, ammo_remaining=after, fire_seq=fired,
+                shell_index=loaded, next_shell_index=loaded, clip=clip,
+                burst_shell_index=0, reload_duration=0.5)
+            self.assertTrue(BattleState._validate_bot_ammo_transition(
+                previous, current, unavailable_checkpoint=True))
+            with self.assertRaises(ValueError):
+                BattleState._validate_bot_ammo_transition(previous, current)
+            for broken in (
+                    dict(current, ammo_remaining=[3, 5]),
+                    dict(current, burst_shell_index=1),
+                    dict(current, clip=4)):
+                with self.assertRaises(ValueError):
+                    BattleState._validate_bot_ammo_transition(
+                        previous, broken, unavailable_checkpoint=True)
+
     def test_external_hit_crew_roster_survives_repeated_publication(self):
         runtime, server, unused_roster = self._runtime_and_server()
         human = _human()
