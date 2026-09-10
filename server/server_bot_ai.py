@@ -73,8 +73,8 @@ TARGET_REACH_SCORE_PER_METRE = 0.018
 # nearer target wins once the gap grows past roughly 200 m.
 NEAREST_TARGET_SCORE_PER_METRE = 0.12
 # The human is the round's real opponent, so the top rung goes for the player
-# ahead of an equally convenient Bot.  Deliberately below the point-blank
-# override: a tank in your face still comes first, at every rating.
+# ahead of an equally convenient Bot. This preference alone is weaker than
+# point-blank self-defence; retaliation also contributes to the total score.
 HUMAN_TARGET_SCORE_BONUS = 60.0
 # How much of the ranking the most nearly dead contact is worth.
 TARGET_HEALTH_SCORE_SPAN = 28.0
@@ -1758,7 +1758,7 @@ class BotPlanner(object):
         return order
 
     def _assign_targets(self, bots, contacts, now):
-        """Assign only locally shootable contacts, with a hard focus cap.
+        """Assign only locally shootable contacts, with a shared focus budget.
 
         Team spotting is shared intelligence, not proof that every tank has a
         firing lane. The authority client reports the bot ids whose own static

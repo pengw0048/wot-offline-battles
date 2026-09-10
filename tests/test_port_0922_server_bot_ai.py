@@ -2163,8 +2163,8 @@ class ServerBotTargetLadderTests(unittest.TestCase):
     Every Bot shoots what its gun can reach and answers a tank in its face.
     Above that, preferring the nearer contact and finishing the most nearly
     dead one arrive with any competence at all, turning on whoever just hit
-    you arrives at the regular anchor, and going for the human player instead
-    of a Bot arrives at the veteran anchor.
+    you arrives at the regular label boundary, and going for the human player
+    instead of a Bot arrives at the veteran label boundary.
     """
 
     def setUp(self):
@@ -2324,7 +2324,7 @@ class ServerBotTargetLadderTests(unittest.TestCase):
         self.assertEqual(('human', 3), self._target(planner, players))
 
     def test_the_focus_cap_treats_a_player_exactly_like_a_bot(self):
-        """Answers "will every Bot on brutal shoot only me": no, same cap."""
+        """Human preference uses the same descriptor-backed focus budget."""
         self.route = _route('lane', [
             (0, -100, False), (0, 100, False), (0, 500, False),
         ])
@@ -2345,28 +2345,38 @@ class ServerBotTargetLadderTests(unittest.TestCase):
             self.states.append(_state(bot_id, 1, float(slot) * 4.0, 0))
         baseline_states = list(self.states)
 
-        human_planner = BotPlanner()
-        human_players = self._report(
-            human_planner, [_contact(2, 0, 150, bot_ids)])
-        human_orders = human_planner.build_orders(
-            self.manifest, self.states, human_players, 1.0)['orders']
-        on_human = sum(1 for order in human_orders
-                       if order['target_id'] == 2)
-
-        self.states = baseline_states
-        bot_planner = BotPlanner()
-        bot_players = self._report(
-            bot_planner, [_bot_contact(2, 0, 150, bot_ids)],
-            enemy_bots=(2,))
-        bot_orders = bot_planner.build_orders(
-            self.manifest, self.states, bot_players, 1.0)['orders']
-        on_bot = sum(1 for order in bot_orders
-                     if order['target_id'] == 2 and
-                     order['target_kind'] == 'bot')
-
-        self.assertGreater(on_human, 0)
-        self.assertLess(on_human, len(bot_ids))
-        self.assertEqual(on_bot, on_human)
+        # Known damage reserves enough nominal damage plus a spare shot.
+        # Low damage can admit the whole roster; only missing descriptors
+        # use the fixed count fallback. Neither branch reads target kind.
+        for damage, expected in ((None, 2), (250.0, 5), (40.0, 15)):
+            with self.subTest(damage=damage):
+                for entry in self.manifest:
+                    entry['profile']['shells'] = ([] if damage is None else [{
+                        'index': 0,
+                        'kind': 'ARMOR_PIERCING',
+                        'penetration': 200.0,
+                        'damage': damage,
+                    }])
+                counts = {}
+                for kind in ('human', 'bot'):
+                    planner = BotPlanner()
+                    self.states = list(baseline_states)
+                    contact = (_contact(2, 0, 150, bot_ids)
+                               if kind == 'human' else
+                               _bot_contact(2, 0, 150, bot_ids))
+                    players = self._report(
+                        planner, [contact],
+                        enemy_bots=() if kind == 'human' else (2,))
+                    for now in (1.0, 1.1):
+                        orders = planner.build_orders(
+                            self.manifest, self.states, players, now)['orders']
+                        counts[kind, now] = sum(
+                            1 for order in orders
+                            if order['target_id'] == 2 and
+                            order['target_kind'] == kind)
+                        self.assertEqual(expected, counts[kind, now])
+                self.assertEqual(counts['bot', 1.0], counts['human', 1.0])
+                self.assertEqual(counts['bot', 1.1], counts['human', 1.1])
 
 
 class ServerBotArtilleryTests(unittest.TestCase):
