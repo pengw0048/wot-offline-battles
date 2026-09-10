@@ -104,6 +104,11 @@ SPOTTING_PROBE_SECONDS = 0.50
 SPOTTING_PHASE_BUCKETS = 5
 FALLEN_TREE_FOLIAGE_REFRESH_SECONDS = 0.10
 FALLEN_TREE_FOLIAGE_STABLE_READS = 3
+# How long one prepared broken-skin filter serves every spotting ray.
+# Rebuilding it per ray would cost more than the ray; the callback
+# resolves each hit against the live ledger, so the only staleness is a
+# just-broken item that keeps blocking for at most this long.
+SIGHT_COLLISION_FILTER_SECONDS = 0.25
 # Stock client code can republish the server half of a space visibility mask
 # after the local map has entered the battle.  Read it infrequently and only
 # write when it no longer selects this arena's gameplay.
@@ -1842,6 +1847,8 @@ class BattleRuntime(object):
         self._next_outline_report = 0.0
         self._next_spotting_time = 0.0
         self._foliage = None
+        self._sight_filter = None
+        self._sight_filter_built_at = None
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}
@@ -2137,6 +2144,8 @@ class BattleRuntime(object):
         self._overturn_started = None
         self._next_spotting_time = 0.0
         self._foliage = None
+        self._sight_filter = None
+        self._sight_filter_built_at = None
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}
@@ -20881,18 +20890,70 @@ class BattleRuntime(object):
                 self._remote_factory.track_animation_error))
         return True
 
+    def _sight_collision_filter(self):
+        """Return the broken-skin filter every spotting ray shares.
+
+        A destroyed fence keeps its native skin in the world for the rest of
+        the round, so an unfiltered mask-128 ray goes on treating it as cover.
+        The filter is rebuilt on a short interval rather than per ray:
+        spotting is the highest-volume ray consumer in the worker, and the
+        callback resolves each hit against the live ledger anyway, so the only
+        staleness is a fence that keeps blocking for at most one interval
+        after it breaks.
+        """
+        if self._destructibles is None:
+            return None
+        now = self._clock()
+        if (self._sight_filter_built_at is not None and
+                now - self._sight_filter_built_at <
+                SIGHT_COLLISION_FILTER_SECONDS and
+                now >= self._sight_filter_built_at):
+            return self._sight_filter
+        probe = getattr(self._destructibles, 'sight_collision_filter', None)
+        if not callable(probe):
+            self._sight_filter = None
+            self._sight_filter_built_at = now
+            return None
+        try:
+            prepared = probe()
+        except Exception:
+            prepared = None
+        self._sight_filter = prepared if callable(prepared) else None
+        self._sight_filter_built_at = now
+        return self._sight_filter
+
+    def _spot_segment_clear(self, observer_position, target_position):
+        """Static-world line of sight for one spotting pair.
+
+        The hidden worker owns spotting and the visible client samples the
+        same pair for its own presentation, so both cast this one ray. A more
+        permissive client ray would draw an enemy the authority never spotted.
+        """
+        start = self._vector((
+            observer_position[0],
+            observer_position[1] + spotting.OBSERVER_EYE_HEIGHT,
+            observer_position[2]))
+        end = self._vector((
+            target_position[0],
+            target_position[1] + spotting.TARGET_CHECK_HEIGHT,
+            target_position[2]))
+        broken_filter = self._sight_collision_filter()
+        if broken_filter is None:
+            hit = self._runtime.bigworld.wg_collideSegment(
+                self._avatar.spaceID, start, end, 128)
+        else:
+            hit = self._runtime.bigworld.wg_collideSegment(
+                self._avatar.spaceID, start, end, 128, broken_filter)
+        return bool(
+            hit is None or
+            (hit[0] - start).length + spotting.SIGHT_END_TOLERANCE >=
+            (end - start).length)
+
     def _bot_visibility(self, source, target, fired_recently=False):
         source_position = _xyz(source)
         target_position = target.get('position') or _xyz(target)
-        start = self._vector((source_position[0], source_position[1] + 2.0,
-                              source_position[2]))
-        end = self._vector((target_position[0], target_position[1] + 1.5,
-                            target_position[2]))
-        hit = self._runtime.bigworld.wg_collideSegment(
-            self._avatar.spaceID, start, end, 128)
-        line_of_sight = bool(
-            hit is None or
-            (hit[0] - start).length + 1.5 >= (end - start).length)
+        line_of_sight = self._spot_segment_clear(
+            source_position, target_position)
         foliage_bonus = 0.0
         if line_of_sight and self._foliage is not None:
             foliage_bonus = self._foliage_camouflage_bonus(
@@ -23256,24 +23317,7 @@ class BattleRuntime(object):
             return True
         if distance > spotting.MAX_SPOT_DISTANCE:
             return False
-        for target_height in (1.5, 2.2):
-            segment = bot_planner.trimmed_sight_segment(
-                observer_position, target, 2.5, target_height)
-            if segment is None:
-                has_line_of_sight = True
-                break
-            if not segment:
-                continue
-            start, end = segment
-            hit = self._runtime.bigworld.wg_collideSegment(
-                self._avatar.spaceID,
-                self._vector(start), self._vector(end), 128)
-            if hit is None:
-                has_line_of_sight = True
-                break
-        else:
-            has_line_of_sight = False
-        if not has_line_of_sight:
+        if not self._spot_segment_clear(observer_position, target):
             return False
         foliage_bonus = self._foliage_camouflage_bonus(
             observer_position, target, fired_recently)
@@ -24968,6 +25012,8 @@ class BattleRuntime(object):
         self._prebattle_deadline = None
         self._next_spotting_time = 0.0
         self._foliage = None
+        self._sight_filter = None
+        self._sight_filter_built_at = None
         self._next_fallen_tree_foliage_refresh = 0.0
         self._fallen_tree_foliage_seen_bodies = set()
         self._fallen_tree_foliage_stable = {}

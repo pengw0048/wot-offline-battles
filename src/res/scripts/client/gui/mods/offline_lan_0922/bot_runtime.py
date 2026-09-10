@@ -625,18 +625,24 @@ def _invisibility_aspect(profile, moving, still_device_ready):
 
 
 def _detection_upper_bound(distance, view_range, base_pair, moving,
-                           shot_factor, fired_recently):
+                           shot_factor, fired_recently, additive=0.0,
+                           multiplier=1.0):
     """Return detection with the best possible geometry for this pair.
 
-    Foliage camouflage is additive and clamped to a non-negative value, so
-    zero foliage is the minimum possible camouflage.  A clear line of sight is
-    likewise the maximum possible visibility.  If this upper bound is false,
-    neither the native collision ray nor the real foliage result can make the
-    target visible.
+    Vegetation camouflage is additive and clamped to a non-negative value, so
+    zero vegetation is the minimum possible camouflage.  A clear line of sight
+    is likewise the maximum possible visibility.  If this upper bound is
+    false, neither the native collision ray nor the real vegetation result can
+    make the target visible.
+
+    Every other term of the law is passed through rather than defaulted: a
+    multiplicative aspect below 1.0 would otherwise raise the assumed
+    camouflage above the real one and turn this bound into a false negative.
     """
     minimum_camouflage = spotting.effective_camouflage(
-        base_pair, moving=moving, shot_factor=shot_factor,
-        fired_recently=fired_recently, foliage_bonus=0.0)
+        base_pair, moving=moving, additive=additive, multiplier=multiplier,
+        shot_factor=shot_factor, fired_recently=fired_recently,
+        foliage_bonus=0.0)
     return spotting.is_detected(
         distance, view_range, minimum_camouflage, True)
 
@@ -4813,6 +4819,29 @@ class BotRuntime(object):
             cached is not None and cached[0] == cache_key and
             now < cached[1])
 
+    def _note_target_stillness(self, live_bots, live_humans, now):
+        """Sample every live target's stationary clock once per frame.
+
+        ``_target_still_seconds`` used to run only for a pair that survived
+        the visibility budget.  A target that moved while its pairs were
+        deferred therefore kept the stamp it had before it moved, and armed
+        its camouflage net the instant it stopped instead of waiting the
+        descriptor's ``activateWhenStillSec``.  Sampling here mirrors
+        ``_note_source_stillness`` and makes the clock independent of who
+        happened to look at it.
+        """
+        for state in live_bots:
+            self._target_still_seconds(
+                ('bot', int(state['id'])),
+                abs(_number(state.get('speed'), 0.0)) >
+                spotting.MOVING_SPEED_EPSILON, now)
+        for raw in live_humans:
+            self._target_still_seconds(
+                ('human', int(raw['id'])),
+                abs(_number(raw.get('speed'), 0.0)) >
+                spotting.MOVING_SPEED_EPSILON, now)
+        return True
+
     @timed('bot.visibility_schedule')
     def _prepare_visibility_frame(self, players, now, include_humans):
         """Select a bounded, fair stale-pair cohort before native calls."""
@@ -4827,6 +4856,7 @@ class BotRuntime(object):
                        if (isinstance(raw, dict) and
                            raw.get('id') is not None and
                            raw.get('alive', True))]
+        self._note_target_stillness(live_bots, live_humans, now)
         targets = []
         for state in live_bots:
             targets.append(('bot', int(state['id']),
@@ -5057,7 +5087,7 @@ class BotRuntime(object):
                  target, target_id, now, tick_cache)
             if not _detection_upper_bound(
                     distance, view_range, base_pair, moving, shot_factor,
-                    fired_recently):
+                    fired_recently, additive, multiplier):
                 value = False
             else:
                 if not self._visibility_probe_admitted(key):

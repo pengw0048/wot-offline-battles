@@ -3572,6 +3572,31 @@ def horizontal_collision_filter(start, end):
 	return prepare_horizontal_collision_filter(start, end)
 
 
+def sight_collision_filter():
+	"""Prepare one broken-skin filter for rays of unbounded length.
+
+	A spotting ray can cross the whole arena, so building its candidate set
+	from an 8 m spatial envelope would walk the entire map.  The candidate set
+	only decides which hits are considered for rejection at all, and a hit is
+	only ever rejected when its exact identity is already accepted or locally
+	predicted, so the accepted ledger plus the speculative set is an exact and
+	far smaller candidate set for this shape of ray.  The returned callback
+	still resolves every hit against the live ledger, exactly like the swept
+	hull filter.
+	"""
+	accepted_trees = _accepted_tree_collision_keys_1513()
+	if _destructible_catalog is None and not accepted_trees:
+		return None
+	reader = getattr(_get_destr_authority(), 'destroyed_identities', None)
+	members = set(reader()) if callable(reader) else set()
+	for key in (globals().get('g_offh_destr_speculative') or ()):
+		try:
+			members.add((int(key[0]), int(key[1])))
+		except (IndexError, TypeError, ValueError, OverflowError):
+			continue
+	return _live_broken_collision_filter_1513(members, accepted_trees)
+
+
 def _broken_item_materials_1513(authority, chunkID):
 	"""Index one chunk's accepted keys by item, refreshed as the set grows."""
 	cache = globals().setdefault('g_offh_destr_broken_cache', {})
