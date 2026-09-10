@@ -187,6 +187,7 @@ class SolidHitPipelineTests(unittest.TestCase):
         battle._worker_mode = True
         battle._projectile_current_positions = {}
         battle._destructibles = None
+        battle._detached_turret_obstacles = None
         battle._equipment_state = None
         return battle
 
@@ -303,6 +304,63 @@ class SolidHitPipelineTests(unittest.TestCase):
                              trace['stages']['native.projectile.armour']['calls'])
             self.assertEqual(1, trace['stages']['projectile.direct']['calls'])
         return terminal_data['impact'], effect, tester.calls
+
+    def test_a_landed_detached_turret_stops_the_shell_like_a_wall(self):
+        """Retail's ``DetachedTurret`` answers ``collideSegment``; ours does.
+
+        The hidden worker owns no entity to damage there, so a settled turret
+        terminates the shell exactly the way scenery does -- a world impact
+        with no victim -- and names itself as the stop reason.
+        """
+        battle = self._battle()
+        projectile_id = 'player:7:1'
+        battle._records['player:7'] = {
+            'engine_id': 41, 'network_id': 7, 'kind': 'player',
+            'local': False, 'ready': True,
+            'state': {'health': 100, 'alive': True}}
+        battle._server_entity = lambda unused_id: None
+        shot = {
+            'maxDistance': 100.0, 'piercingPower': (200.0, 200.0),
+            'deadeye': False,
+            'shell': {'kind': 'ARMOR_PIERCING', 'caliber': 105.0,
+                      'damage': (300.0, 100.0), 'explosionRadius': 0.0},
+        }
+        battle._projectile_meta[projectile_id] = {
+            'projectile_id': projectile_id, 'shooter_kind': 'player',
+            'shooter_id': 7, 'source_shot': shot, 'shell_index': 0,
+            'penetration_factor': PENETRATION_FACTOR, 'piercing_loss': 0.0,
+            'base_penetration_multiplier': 1.0, 'is_he': False,
+        }
+        state = {
+            'key': projectile_id, 'start': START,
+            'payload': {'range_origin': START}, 'distance': 0.0,
+            'elapsed': 0.0,
+        }
+        chord = _length(_subtract(END, START))
+        blocked_at = chord * 0.5
+        queries = []
+
+        def block_distance(start, end):
+            queries.append((tuple(start), tuple(end)))
+            return blocked_at
+
+        battle._detached_turret_block_distance = block_distance
+        battle._config = {}
+        battle._projectile_scene_stop_reasons = {}
+
+        terminal = battle._projectile_chord(state, START, END, 0.0, 1.0)
+
+        self.assertEqual('impact', terminal['reason'])
+        self.assertAlmostEqual(0.5, terminal['fraction'], places=6)
+        terminal_data = battle._projectile_terminal_data[projectile_id]
+        self.assertIsNone(terminal_data['target_key'])
+        self.assertIsNone(terminal_data['collisions'])
+        self.assertEqual('detached_turret', terminal_data['stop_reason'])
+        expected = _add(START, _scale(_subtract(END, START), 0.5))
+        for axis in range(3):
+            self.assertAlmostEqual(expected[axis],
+                                   terminal_data['impact'][axis], places=6)
+        self.assertEqual(1, len(queries))
 
     def test_ap_and_apcr_first_hit_pipeline_for_player_and_bot(self):
         for shooter_kind in ('player', 'bot'):

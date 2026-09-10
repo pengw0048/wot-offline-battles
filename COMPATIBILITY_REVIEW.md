@@ -2454,17 +2454,28 @@ here:
 - **The seed, not a wire field, keeps clients agreed.** The decision is
   already replicated -- `critical.ammo_rack_death` rides the combat event and
   `F_AMMO_RACK_DEATH` rides the positional Bot row -- so the arc is derived
-  from `stable_seed(round_id, engine_id)` and no new message was added.
-- **The flying turret is presentation only.** The hidden worker owns
-  projectiles and knows nothing about it, so it is not shootable and blocks
-  nothing. It keeps its stock `ProjectileAwareEntities` membership, because
+  from `stable_seed(round_id, engine_id)` and no new message was added. Its
+  other two inputs are replicated as well: the launch ring is
+  `chassis.hullPosition + hull.turretPositions[0]` over the *admitted*
+  terminal pose, exactly the point `Vehicle.getComponents` builds, rather
+  than `compoundModel.node('turret')` on this peer's interpolated render
+  compound. The hidden worker therefore resolves the identical arc, and the
+  turret it owns as collision rests where every client draws one.
+- **The flying turret is not a physics body.** Retail's `DetachedTurret` is a
+  cell-physics object that a tank can push and be crushed by
+  (`onDamageVehicle`, and `isCollidingWithWorld` feeding
+  `__checkIsBeingPulled`); nothing here reproduces that, so
+  `isCollidingWithWorld` stays false for its whole life -- it is the only
+  gate that makes `__checkIsBeingPulled` read native `Entity.velocity` off
+  the never-fed filter, and it drives nothing but the drag effect this
+  version does not produce -- and a landed turret blocks shots but not
+  vehicles. Shots are stopped by the worker's own obstacle, so the visible
+  entity keeps its stock `ProjectileAwareEntities` membership (because
   `onLeaveWorld` removes itself from that list and would raise on a missing
-  entry, and is excluded from dynamic collision through the same
-  `_offlineNativeRemote` draw gate an undrawn LAN remote uses.
-  `isCollidingWithWorld` stays false for its whole life: it is the only gate
-  that makes `__checkIsBeingPulled` read native `Entity.velocity` off the
-  never-fed filter, and it drives nothing but the drag effect this version
-  does not produce.
+  entry) and stays outside the client's dynamic collision through the same
+  `_offlineNativeRemote` draw gate an undrawn LAN remote uses. The client's
+  aim marker therefore does not colour on a landed turret even though a shell
+  fired at one terminates on it.
 
 The handshake order is load-bearing. `SynchronousDetachment._onDirectTick`
 runs synchronously inside `createEntity` and, while
@@ -2473,16 +2484,28 @@ runs synchronously inside `createEntity` and, while
 own never-fed `WGVehicleFilter`. The runtime therefore writes -13 and
 pre-sets `_Vehicle__turretDetachmentConfirmed` -- whose only writer in #1513
 is `confirmTurretDetachment`, which is that flag plus a models refresh --
-before creating the turret and calling `onHealthChanged`. Creation is
-attempted before the health callback requests a wreck assembler; a failed
-launch restores -5 and clears the confirmation flag first. That collapses
+before creating the turret and calling `onHealthChanged`. That collapses
 retail's two refreshes into the one `onHealthChanged` already performs, so a
 turretless assembler cannot
 lose a background-load race against a turreted one for the same `exploded`
-model state, and it keeps that native call from happening at all. An unseen
-target detaches nothing: retail has no `DetachedTurret` in AOI for a vehicle
-never spotted. A missing exploded model, a full turret budget or a failed
-`createEntity` leaves exactly the -5 burn-off wreck the port produced before.
+model state, and it keeps that native call from happening at all. Only
+`Vehicle.__init__` and `confirmTurretDetachment` write that flag in #1513, so
+nothing later in a wreck's life can put its turret back on.
+
+The detachment itself is not presentation and is not optional. `health` is
+ALL_CLIENTS in retail, so every peer -- the hidden worker included -- sees a
+turretless hull, and `Vehicle.getComponents` publishes exactly that as a
+collision fact: it returns `(compDescr, compMatrix, isAttached)` triples with
+`isAttached = not self.isTurretDetached` for the turret and the gun, and
+`Vehicle.__collideSegment` begins its loop with `if not isAttached: continue`.
+This port's own component enumeration is now the same triple, and every
+consumer of it -- armour collision, HE blast probes, damage-sticker encoding
+and the interior-module geometry -- skips an unattached part. Without that,
+an ammo-bay wreck kept a full-armour turret and gun hanging in the air above
+a hull that no longer had either. A missing exploded model, a full turret
+budget, an undrawn target or a failed `createEntity` therefore costs the
+*flight*, never the detachment: retail has no `DetachedTurret` in AOI for a
+vehicle never spotted, but its wreck is turretless for everyone regardless.
 
 The synchronous constructor handshake is separate from asynchronous world
 entry. Exact `DetachedTurret.prerequisites` returns a `CompoundAssembler` and
@@ -2502,7 +2525,7 @@ reviewed source, but its logs lacked these lifecycle transitions; this confirms
 a reproducible adapter defect, not native Windows flight acceptance.
 
 A late ammo-bay cause can arrive after the ordinary death edge. It now admits
-one detachment from the existing wreck's turret pose, even though the health
+one detachment from the wreck's admitted terminal pose, even though the health
 signature is already terminal. A per-record launch attempt fence and the
 native detached-health flag suppress repeated snapshot launches. Successful
 creation updates `appearance.damageState` with the special health, crew state
@@ -2510,17 +2533,35 @@ and water state, then calls `Vehicle.confirmTurretDetachment` for its single
 model refresh. Exact #1513 `CompoundAppearance.onVehicleHealthChanged` also
 calls the input-handler death hook and `processVehicleDeath`; the late path
 must not call it or replay `Vehicle.onHealthChanged`, kill credit or death
-feedback. Failed creation keeps the burn-off wreck and does not retry on every
-snapshot. The original reported match did not log terminal-cause ordering,
+feedback. Failed creation leaves the turretless wreck without a flight and does not
+retry on every snapshot. The original reported match did not log terminal-cause ordering,
 so this repairs a reproduced ordering gap without claiming that match's root
 cause is established.
+
+The landed turret is the room's obstacle, owned by the hidden worker.
+Retail's `DetachedTurret` is a shootable entity: its `.def` publishes
+`receiveShot`, `receiveExplosion` and `onDamageVehicle`, and the client half
+answers `collideSegment(startPoint, endPoint, skipGun)` out of the turret
+model matrix and the `TankPartNames.GUN` node against the same
+`__componentsDesc` hit testers a `Vehicle` uses, which is how
+`ProjectileMover.collideEntities` reaches it. There is no such entity inside
+the worker, so the worker resolves the same arc and tests the same two hit
+testers at the frozen rest frame. A turret is an obstacle only after its arc
+has ended -- while it is airborne no owner can move a hit tester with it, and
+a fabricated mid-flight sweep is not a replicated result -- and a shot it
+stops terminates the way scenery does, as a world impact with no victim and a
+`detached_turret` stop reason. The arc is walked with the same per-column
+broken-skin filter every motion probe uses, so a turret cannot come to rest on
+the ghost collision of a fence the room has already accepted as broken. The
+descriptor hit testers it holds are the factory's own, loaded once per round
+in `prepare_descriptor` and released only at `destroy_all`.
 
 The ABI audit pins all of it against `scripts.pkg`: the 22 `DetachedTurret`
 signatures, `Vehicle.confirmTurretDetachment`, both special health constants,
 the three `AMMOBAY_DESTRUCTION_MODE` values and the effect's energy window.
 None of that proves the arc looks right, that the two compounds swap without
-a visible seam, or that the turret rests convincingly -- that is Windows
-acceptance.
+a visible seam, that a shell visibly stops on a landed turret, or that the
+turret rests convincingly -- that is Windows acceptance.
 
 WG's [Update 9.0 notes](https://worldoftanks.com/en/content/docs/release_notes/90-update-notes/)
 establish the intended turret-detachment feature. Its later

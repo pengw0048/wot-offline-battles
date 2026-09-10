@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SCRIPTS = ROOT / 'src' / 'res' / 'scripts' / 'client'
 sys.path.insert(0, str(CLIENT_SCRIPTS))
 
+from gui.mods.offline_lan_0922 import shot_geometry
 from gui.mods.offline_lan_0922 import turret_detachment
 from gui.mods.offline_lan_0922.entities import detached_turret
 
@@ -220,15 +221,39 @@ class _Component(object):
         self.hitTester = _HitTester() if tester is None else tester
 
 
+class _Chassis(object):
+
+    def __init__(self, hull_position=None):
+        self.hullPosition = (_Vector(0.0, 0.6, 0.0)
+                             if hull_position is None else hull_position)
+
+
+class _Hull(object):
+
+    def __init__(self, ring=None):
+        self.turretPositions = (
+            (_Vector(0.0, 0.9, -1.5),) if ring is None else ring)
+
+
 class _Descriptor(object):
 
     def __init__(self, turret=None, gun=None):
+        self.chassis = _Chassis()
+        self.hull = _Hull()
         self.turret = _Component() if turret is None else turret
         self.gun = _Component('gun_exploded.model') if gun is None else gun
 
     @staticmethod
     def makeCompactDescr():
         return 'compact-descr'
+
+
+# The authoritative terminal pose one detachment starts from.  The turret ring
+# sits ``hullPosition + hull.turretPositions[0]`` = (0, 1.5, -1.5) above the
+# vehicle's own origin, exactly where #1513's ``Vehicle.getComponents`` puts
+# it.
+_POSE = {'x': 12.0, 'y': 3.0, 'z': -30.0, 'yaw': 0.0, 'pitch': 0.0,
+         'roll': 0.0, 'turret_yaw': 1.25}
 
 
 class _Matrix(object):
@@ -397,53 +422,73 @@ class DetachedTurretPresentationTest(unittest.TestCase):
             collide or _flat_ground(),
             log=lambda what, error: self.failures.append((what, str(error))))
 
-    def test_prepare_freezes_the_live_turret_pose(self):
+    def test_prepare_freezes_the_authoritative_ring_pose(self):
         presentation = self._presentation()
         vehicle = _Vehicle()
-        plan = presentation.prepare(vehicle)
+        plan = presentation.prepare(vehicle, _POSE)
         self.assertIsNotNone(plan)
         self.assertEqual(plan['entity_id'], 17)
         self.assertEqual(plan['compact_descr'], 'compact-descr')
-        self.assertEqual(plan['launch'], (12.0, 4.5, -30.0))
-        self.assertEqual(plan['attitude'], (1.25, 0.05, -0.02))
+        self.assertEqual(plan['launch'], (12.0, 4.5, -31.5))
+        self.assertEqual(plan['attitude'], (1.25, 0.0, 0.0))
         self.assertEqual(plan['space_id'], 5)
-        # The pose is read from the turret part, not the hull node: the part
-        # matrix carries the turret's own yaw.
-        self.assertEqual(vehicle.compound.requested, ['turret'])
+        # The launch point is derived from the replicated pose and the
+        # descriptor, never from this peer's interpolated render compound.
+        # That is what lets the worker's obstacle and every client's drawn
+        # turret share one arc without a wire field.
+        self.assertEqual(vehicle.compound.requested, [])
+
+    def test_the_ring_follows_the_authoritative_hull_attitude(self):
+        presentation = self._presentation()
+        pose = dict(_POSE, yaw=math.pi / 2.0)
+        plan = presentation.prepare(_Vehicle(), pose)
+        # Rotating (0, 1.5, -1.5) a quarter turn about Y moves the ring onto
+        # the hull's own left side.
+        self.assertAlmostEqual(plan['launch'][0], 10.5)
+        self.assertAlmostEqual(plan['launch'][1], 4.5)
+        self.assertAlmostEqual(plan['launch'][2], -30.0)
+        self.assertAlmostEqual(plan['attitude'][0], math.pi / 2.0 + 1.25)
+
+    def test_a_descriptor_without_a_turret_ring_is_skipped(self):
+        presentation = self._presentation()
+        vehicle = _Vehicle()
+        vehicle.typeDescriptor.hull.turretPositions = ()
+        self.assertIsNone(presentation.prepare(vehicle, _POSE))
+        self.assertEqual(self.failures, [])
 
     def test_the_clearance_comes_from_the_turret_hit_tester(self):
         presentation = self._presentation()
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         self.assertAlmostEqual(plan['clearance'], 0.8)
 
     def test_a_descriptor_without_an_exploded_turret_is_skipped(self):
         presentation = self._presentation()
         vehicle = _Vehicle()
         vehicle.typeDescriptor.turret.models.exploded = None
-        self.assertIsNone(presentation.prepare(vehicle))
+        self.assertIsNone(presentation.prepare(vehicle, _POSE))
         self.assertEqual(self.failures, [])
 
     def test_an_unstarted_remote_is_skipped(self):
         presentation = self._presentation()
         vehicle = _Vehicle()
         vehicle.isStarted = False
-        self.assertIsNone(presentation.prepare(vehicle))
+        self.assertIsNone(presentation.prepare(vehicle, _POSE))
 
     def test_the_active_turret_count_is_bounded(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
         for index in range(detached_turret.MAX_ACTIVE_TURRETS):
-            plan = presentation.prepare(_Vehicle(entity_id=index))
+            plan = presentation.prepare(_Vehicle(entity_id=index), _POSE)
             self.assertIsNotNone(plan)
             self.assertTrue(presentation.launch(plan, index, 0.0))
         self.assertEqual(
             presentation.active(), detached_turret.MAX_ACTIVE_TURRETS)
-        self.assertIsNone(presentation.prepare(_Vehicle(entity_id=99)))
+        self.assertIsNone(presentation.prepare(_Vehicle(entity_id=99), _POSE))
 
     def test_launch_creates_the_stock_entity_with_its_client_properties(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         self.assertTrue(presentation.launch(plan, 555, 100.0))
         self.assertEqual(len(bigworld.created), 1)
         name, space_id, vehicle_id, position, direction, state = \
@@ -452,9 +497,9 @@ class DetachedTurretPresentationTest(unittest.TestCase):
         self.assertEqual(space_id, 5)
         self.assertEqual(vehicle_id, 0)
         self.assertEqual((position.x, position.y, position.z),
-                         (12.0, 4.5, -30.0))
+                         (12.0, 4.5, -31.5))
         # BigWorld.createEntity takes (roll, pitch, yaw).
-        self.assertEqual(direction, (-0.02, 0.05, 1.25))
+        self.assertEqual(direction, (0.0, 0.0, 1.25))
         self.assertEqual(sorted(state), [
             'isCollidingWithWorld', 'isUnderWater', 'vehicleCompDescr',
             'vehicleID'])
@@ -468,7 +513,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_a_failed_creation_leaves_no_untracked_entity(self):
         bigworld = _BigWorld(fail_create=True)
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         self.assertFalse(presentation.launch(plan, 1, 0.0))
         self.assertEqual(presentation.active(), 0)
         self.assertEqual(len(self.failures), 1)
@@ -478,7 +523,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_advance_drives_the_compound_and_gates_it_out_of_collision(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         presentation.launch(plan, 77, 10.0)
         self.assertEqual(presentation.advance(10.0), 1)
         entity = bigworld.entities[901]
@@ -490,7 +535,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_the_landing_reports_one_impact_to_the_stock_effect(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         presentation.launch(plan, 77, 10.0)
         presentation.advance(10.0)
         entity = bigworld.entities[901]
@@ -507,7 +552,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_a_turret_whose_compound_is_not_resident_yet_is_not_bound(self):
         bigworld = _BigWorld(model=False)
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         presentation.launch(plan, 5, 0.0)
         self.assertEqual(presentation.advance(0.5), 0)
         self.assertEqual(presentation.active(), 1)
@@ -516,7 +561,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
         """#1513 returns an ID before prerequisites make entity(id) visible."""
         bigworld = _BigWorld(defer_enter=True)
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         self.assertTrue(presentation.launch(plan, 77, 10.0))
         self.assertIsNone(bigworld.entity(901))
 
@@ -542,7 +587,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_a_destroyed_entity_is_dropped_without_an_error(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         presentation.launch(plan, 5, 0.0)
         self.assertEqual(presentation.advance(0.0), 1)
         entity = bigworld.entity(901)
@@ -556,7 +601,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_a_seen_entity_lost_before_model_readiness_is_retired(self):
         bigworld = _BigWorld(model=False, defer_enter=True)
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         presentation.launch(plan, 5, 0.0)
         bigworld.enter_world(901)
         self.assertEqual(presentation.advance(0.1), 0)
@@ -571,7 +616,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
     def test_one_vehicle_throws_one_turret(self):
         bigworld = _BigWorld()
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         self.assertTrue(presentation.launch(plan, 5, 0.0))
         self.assertFalse(presentation.launch(plan, 5, 0.0))
         self.assertEqual(presentation.active(), 1)
@@ -583,7 +628,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
         self.assertEqual(presentation.destroy_all(), 0)
         self.assertEqual(presentation.destroy_all(), 0)
         presentation = self._presentation(bigworld)
-        plan = presentation.prepare(_Vehicle())
+        plan = presentation.prepare(_Vehicle(), _POSE)
         presentation.launch(plan, 5, 0.0)
         self.assertEqual(presentation.destroy_all(), 1)
         self.assertEqual(bigworld.destroyed, [901])
@@ -595,13 +640,13 @@ class DetachedTurretPresentationTest(unittest.TestCase):
             with self.subTest(retry=retry):
                 bigworld = _BigWorld(defer_enter=True)
                 presentation = self._presentation(bigworld)
-                plan = presentation.prepare(_Vehicle())
+                plan = presentation.prepare(_Vehicle(), _POSE)
                 presentation.launch(plan, 5, 0.0)
 
                 self.assertEqual(presentation.destroy_all(), 0)
                 self.assertEqual(presentation.destroy_all(), 0)
                 self.assertEqual(bigworld.destroy_attempts, [])
-                self.assertIsNone(presentation.prepare(_Vehicle(entity_id=18)))
+                self.assertIsNone(presentation.prepare(_Vehicle(entity_id=18), _POSE))
                 self.assertFalse(presentation.launch(plan, 5, 0.1))
                 self.assertEqual(len(bigworld.created), 1)
 
@@ -623,7 +668,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
         bigworld = _BigWorld(defer_enter=True)
         presentation = self._presentation(bigworld)
         for vehicle_id in (17, 18):
-            plan = presentation.prepare(_Vehicle(entity_id=vehicle_id))
+            plan = presentation.prepare(_Vehicle(entity_id=vehicle_id), _POSE)
             presentation.launch(plan, vehicle_id, 0.0)
         resident = bigworld.enter_world(901)
 
@@ -643,7 +688,7 @@ class DetachedTurretPresentationTest(unittest.TestCase):
             with self.subTest(retire=retire):
                 bigworld = _BigWorld()
                 presentation = self._presentation(bigworld)
-                plan = presentation.prepare(_Vehicle())
+                plan = presentation.prepare(_Vehicle(), _POSE)
                 presentation.launch(plan, 5, 0.0)
                 self.assertEqual(presentation.advance(0.0), 1)
                 old_entity = bigworld.entity(901)
@@ -697,3 +742,242 @@ class HandshakeOrderTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class _AffineMatrix(object):
+    """The Math.Matrix members ``DetachedTurretObstacles`` actually uses.
+
+    BigWorld transforms row vectors, so ``applyPoint`` is ``p * R + t`` and
+    ``preMultiply(B)`` composes B before self.  ``setRotateYPR`` uses the same
+    roll-then-pitch-then-yaw order ``shot_geometry`` documents for the #1513
+    vehicle matrix, so a rest frame built here matches the launch point the
+    plan froze.
+    """
+
+    def __init__(self, source=None):
+        if isinstance(source, _AffineMatrix):
+            self._rotation = [list(row) for row in source._rotation]
+            self._translation = list(source._translation)
+        else:
+            self._rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+                              [0.0, 0.0, 1.0]]
+            self._translation = [0.0, 0.0, 0.0]
+
+    @property
+    def translation(self):
+        return _Vector(*self._translation)
+
+    @translation.setter
+    def translation(self, value):
+        self._translation = [float(value.x), float(value.y), float(value.z)]
+
+    def setRotateYPR(self, angles):
+        yaw, pitch, roll = (float(value) for value in angles)
+        rows = []
+        for basis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
+            rows.append(list(shot_geometry.transform_vehicle_vector(
+                basis, yaw, pitch, roll)))
+        self._rotation = rows
+        self._translation = [0.0, 0.0, 0.0]
+
+    def setTranslate(self, value):
+        self._rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        self._translation = [float(value.x), float(value.y), float(value.z)]
+
+    def invert(self):
+        rotation = [[self._rotation[column][row] for column in range(3)]
+                    for row in range(3)]
+        translation = [
+            -sum(self._translation[axis] * rotation[axis][column]
+                 for axis in range(3)) for column in range(3)]
+        self._rotation = rotation
+        self._translation = translation
+
+    def preMultiply(self, other):
+        rotation = [
+            [sum(other._rotation[row][axis] * self._rotation[axis][column]
+                 for axis in range(3)) for column in range(3)]
+            for row in range(3)]
+        translation = [
+            sum(other._translation[axis] * self._rotation[axis][column]
+                for axis in range(3)) + self._translation[column]
+            for column in range(3)]
+        self._rotation = rotation
+        self._translation = translation
+
+    def applyPoint(self, point):
+        source = (float(point.x), float(point.y), float(point.z))
+        return _Vector(*[
+            sum(source[axis] * self._rotation[axis][column]
+                for axis in range(3)) + self._translation[column]
+            for column in range(3)])
+
+
+class _AffineMath(object):
+    Matrix = _AffineMatrix
+    Vector3 = _Vector
+
+
+class _BoxHitTester(object):
+    """One #1513 hit tester whose armour is a single local box."""
+
+    def __init__(self, bbox=((-1.2, -0.8, -1.2), (1.2, 0.9, 1.2), 3.0),
+                 material_kind=1):
+        self.bbox = bbox
+        self._material_kind = material_kind
+        self.queries = []
+
+    def localHitTest(self, start, end):
+        self.queries.append(((start.x, start.y, start.z),
+                             (end.x, end.y, end.z)))
+        lower, upper = self.bbox[0], self.bbox[1]
+        origin = (start.x, start.y, start.z)
+        direction = (end.x - start.x, end.y - start.y, end.z - start.z)
+        length = math.sqrt(sum(value * value for value in direction))
+        if length <= 0.0:
+            return None
+        near, far = 0.0, 1.0
+        for axis in range(3):
+            if abs(direction[axis]) < 1.0e-9:
+                if not lower[axis] <= origin[axis] <= upper[axis]:
+                    return None
+                continue
+            first = (lower[axis] - origin[axis]) / direction[axis]
+            second = (upper[axis] - origin[axis]) / direction[axis]
+            if first > second:
+                first, second = second, first
+            near = max(near, first)
+            far = min(far, second)
+            if near > far:
+                return None
+        return [(near * length, None, 1.0, self._material_kind)]
+
+
+def _obstacle_descriptor():
+    descriptor = _Descriptor()
+    descriptor.turret.hitTester = _BoxHitTester()
+    descriptor.turret.gunPosition = _Vector(0.0, 0.0, 1.0)
+    descriptor.gun.hitTester = _BoxHitTester(
+        bbox=((-0.2, -0.2, 0.0), (0.2, 0.2, 3.0), 3.0))
+    return descriptor
+
+
+class DetachedTurretObstacleTest(unittest.TestCase):
+    """Retail's DetachedTurret answers collideSegment; so must the worker.
+
+    ``DetachedTurret.collideSegment`` in scripts.pkg tests the turret model
+    matrix and the gun node against the same ``__componentsDesc`` hit testers
+    a Vehicle uses, so a shot that reaches a thrown turret stops on it.  This
+    port has no such entity inside the hidden worker, so the worker resolves
+    the identical arc and owns the landed turret's geometry directly.
+    """
+
+    def setUp(self):
+        self.failures = []
+
+    def _obstacles(self, collide=None):
+        return detached_turret.DetachedTurretObstacles(
+            _AffineMath(), collide or _flat_ground(),
+            log=lambda what, error: self.failures.append((what, str(error))))
+
+    def _plan(self, entity_id=17, pose=None):
+        vehicle = _Vehicle(entity_id=entity_id)
+        vehicle.typeDescriptor = _obstacle_descriptor()
+        return detached_turret.detachment_plan(vehicle, pose or _POSE)
+
+    def _settled(self, seed=555, now=100.0):
+        obstacles = self._obstacles()
+        plan = self._plan()
+        self.assertTrue(obstacles.add(plan, seed, now))
+        impulse = turret_detachment.launch_impulse(seed)
+        flight = turret_detachment.resolve_flight(
+            plan['launch'], impulse['velocity'], _flat_ground(),
+            clearance=plan['clearance'])
+        self.assertTrue(flight['landed'])
+        return obstacles, flight, now
+
+    def test_a_settled_turret_stops_a_shot_through_its_rest_pose(self):
+        obstacles, flight, now = self._settled()
+        rest = flight['rest']
+        start = _Vector(rest[0] - 20.0, rest[1], rest[2])
+        end = _Vector(rest[0] + 20.0, rest[1], rest[2])
+        distance = obstacles.block_distance(
+            start, end, now + flight['duration'])
+        self.assertIsNotNone(distance)
+        # The box reaches 1.2 m out along its own widest axis, so a level ray
+        # from 20 m away enters somewhere inside the last two metres.
+        self.assertGreater(distance, 17.0)
+        self.assertLess(distance, 20.0)
+
+    def test_a_turret_still_in_the_air_owns_no_obstacle(self):
+        obstacles, flight, now = self._settled()
+        rest = flight['rest']
+        start = _Vector(rest[0] - 20.0, rest[1], rest[2])
+        end = _Vector(rest[0] + 20.0, rest[1], rest[2])
+        self.assertIsNone(obstacles.block_distance(
+            start, end, now + flight['duration'] - 0.01))
+
+    def test_a_shot_that_misses_the_rest_pose_is_not_blocked(self):
+        obstacles, flight, now = self._settled()
+        rest = flight['rest']
+        start = _Vector(rest[0] - 20.0, rest[1] + 40.0, rest[2])
+        end = _Vector(rest[0] + 20.0, rest[1] + 40.0, rest[2])
+        self.assertIsNone(obstacles.block_distance(
+            start, end, now + flight['duration']))
+
+    def test_the_broad_phase_measures_the_barrel_from_the_ring(self):
+        """The barrel reaches past its own mount, so the sphere must too.
+
+        A sphere measured only from each box's own origin would reject a ray
+        the exact gun hit test still answers, and a shell would pass through a
+        barrel it should have stopped on.
+        """
+        gun = _Component('gun_exploded.model')
+        gun.hitTester = _BoxHitTester(
+            bbox=((-0.2, -0.2, 0.0), (0.2, 0.2, 3.0), 3.0))
+        mounted = detached_turret._component_radius(gun, (0.0, 0.0, 1.0))
+        self.assertAlmostEqual(
+            mounted, math.sqrt(0.2 ** 2 + 0.2 ** 2 + 4.0 ** 2))
+        self.assertGreater(
+            mounted, detached_turret._component_radius(gun, (0.0, 0.0, 0.0)))
+
+    def test_an_unreadable_box_never_narrows_the_broad_phase(self):
+        blind = _Component('gun_exploded.model')
+        blind.hitTester = None
+        self.assertEqual(
+            float('inf'), detached_turret._component_radius(blind, (0.0,) * 3))
+
+    def test_one_wreck_owns_one_obstacle(self):
+        obstacles = self._obstacles()
+        self.assertTrue(obstacles.add(self._plan(), 555, 0.0))
+        self.assertFalse(obstacles.add(self._plan(), 555, 0.0))
+        self.assertEqual(obstacles.active(), 1)
+
+    def test_the_resident_obstacle_count_is_bounded(self):
+        obstacles = self._obstacles()
+        for index in range(detached_turret.MAX_ACTIVE_TURRETS):
+            self.assertTrue(obstacles.add(
+                self._plan(entity_id=index), index, 0.0))
+        self.assertFalse(obstacles.add(self._plan(entity_id=99), 99, 0.0))
+
+    def test_clear_and_drop_are_safe_twice(self):
+        obstacles = self._obstacles()
+        self.assertTrue(obstacles.add(self._plan(), 555, 0.0))
+        self.assertEqual(obstacles.drop(17), 1)
+        self.assertEqual(obstacles.drop(17), 0)
+        self.assertEqual(obstacles.clear(), 0)
+        self.assertEqual(obstacles.clear(), 0)
+
+    def test_the_arc_matches_the_presentation_for_the_same_inputs(self):
+        # The worker's obstacle and every client's drawn turret must land in
+        # the same place, and they only do so because both derive the arc
+        # from the replicated pose, the descriptor and the round seed.
+        plan = self._plan()
+        impulse = turret_detachment.launch_impulse(555)
+        flight = turret_detachment.resolve_flight(
+            plan['launch'], impulse['velocity'], _flat_ground(),
+            clearance=plan['clearance'])
+        drawn, unused_attitude = turret_detachment.pose_at(
+            flight, plan['attitude'], impulse['spin'],
+            flight['duration'] + 5.0)
+        self.assertEqual(tuple(drawn), tuple(flight['rest']))

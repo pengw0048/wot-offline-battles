@@ -366,7 +366,7 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
         descriptor = target.typeDescriptor
         descriptor.radio = types.SimpleNamespace(maxHealth=100.0)
         descriptor.gun.maxHealth = 100.0
-        target.getComponents = lambda: ((descriptor.hull, _Matrix()),)
+        target.getComponents = lambda: ((descriptor.hull, _Matrix(), True),)
         return {'valid': True, 'targets': tuple({
             'parent': 'hull', 'entity': name,
             'primitives': ({

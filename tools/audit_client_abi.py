@@ -1445,7 +1445,16 @@ EXPECTED_CODE_NAMES = {
     },
     'scripts/client/Vehicle.pyc': {
         'Vehicle.__collideSegment': (
-            'SegmentCollisionResultExt', 'itemTypeName'),
+            'SegmentCollisionResultExt', 'itemTypeName', 'getComponents'),
+        # The turret/gun attachment bit is a collision fact, not a model one:
+        # getComponents publishes ``not self.isTurretDetached`` for both, and
+        # __collideSegment skips an unattached component before it ever
+        # reaches the hit tester.  This port's own component enumeration
+        # mirrors it, so an ammo-bay wreck stops answering above its ring.
+        'Vehicle.getComponents': (
+            'typeDescriptor', 'chassis', 'hullPosition', 'hull',
+            'turretPositions', 'turret', 'gun', 'isTurretDetached',
+            'appearance', 'turretMatrix', 'gunMatrix'),
         'Vehicle.__startWGPhysics': ('filter', 'syncGunAngles', 'speedInfo'),
         'Vehicle.getSpeed': ('_Vehicle__speedInfo', 'value'),
         'Vehicle.getServerGunAngles': (
@@ -1490,6 +1499,14 @@ EXPECTED_CODE_NAMES = {
         'DetachedTurret.onEnterWorld': (
             '_DetachedTurret__vehDescr', 'name', 'model', 'matrix',
             '_DetachedTurret__detachConfirmationTimer', 'onEnterWorld'),
+        # Retail's thrown turret is a shootable obstacle, answering the same
+        # collideSegment shape a Vehicle does out of the turret model matrix
+        # and the gun node.  The hidden worker owns no such entity, so it
+        # tests the identical two hit testers at the frozen rest frame.
+        'DetachedTurret.collideSegment': (
+            'filter', 'model', 'matrix', 'node',
+            'TankPartNames', 'GUN', '_DetachedTurret__componentsDesc',
+            'hitTester', 'localHitTest', 'SegmentCollisionResult'),
     },
     'scripts/client/AvatarInputHandler/gun_marker_ctrl.pyc': {
         '_CrosshairShotResults._getAllCollisionDetails': (

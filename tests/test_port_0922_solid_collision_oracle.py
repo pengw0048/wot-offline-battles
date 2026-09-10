@@ -439,6 +439,56 @@ class SolidCollisionOracleTests(unittest.TestCase):
         self.assertGreater(_oracle_length(_oracle_subtract(
             tuple(actual_chassis_start), body_chassis_start)), 0.5)
 
+    def test_a_detached_turret_leaves_no_armour_above_the_wreck(self):
+        """Exact #1513 skips an unattached component before the hit tester.
+
+        ``Vehicle.getComponents`` publishes ``not self.isTurretDetached`` as
+        the turret and gun attachment bit and ``Vehicle.__collideSegment``
+        starts its loop with ``if not isAttached: continue``.  Without that,
+        an ammo-bay wreck keeps a full-armour turret and gun hanging in the
+        air above a hull that no longer has either.
+        """
+        body = _oracle_pose(0.63, -0.31, 0.22, (13.0, -4.0, 8.0))
+        chain = _component_oracle(
+            body, body, HULL_OFFSET, TURRET_OFFSET, GUN_OFFSET,
+            STATIC_TURRET_YAW, STATIC_GUN_PITCH)
+        descriptor, unused_rays, unused_materials = _descriptor_for_ray(
+            chain, START, END, FRACTIONS)
+        appearance = types.SimpleNamespace(
+            turretMatrix=self._matrix(STATIC_TURRET_YAW, 0.0, 0.0,
+                                      (0.0, 0.0, 0.0)),
+            gunMatrix=self._matrix(0.0, STATIC_GUN_PITCH, 0.0,
+                                   (0.0, 0.0, 0.0)))
+        math_module = types.SimpleNamespace(Vector3=Vector, Matrix=Matrix)
+        matrix = self._matrix(0.63, -0.31, 0.22, (13.0, -4.0, 8.0))
+
+        attached = types.SimpleNamespace(
+            typeDescriptor=descriptor, appearance=appearance,
+            isTurretDetached=False)
+        before = collide_vehicle_at_matrix(
+            attached, matrix, Vector(START), Vector(END), math_module)
+        self.assertEqual(
+            ['vehicleChassis', 'vehicleGun', 'vehicleHull', 'vehicleTurret'],
+            sorted(item.compName for item in before))
+
+        for component in (descriptor.chassis, descriptor.hull,
+                          descriptor.turret, descriptor.gun):
+            del component.hitTester.calls[:]
+        detached = types.SimpleNamespace(
+            typeDescriptor=descriptor, appearance=appearance,
+            isTurretDetached=True)
+        after = collide_vehicle_at_matrix(
+            detached, matrix, Vector(START), Vector(END), math_module)
+
+        self.assertEqual(
+            ['vehicleChassis', 'vehicleHull'],
+            sorted(item.compName for item in after))
+        # The hull below the ring is untouched: only the thrown half stops
+        # answering, and it stops answering before the ray is even built.
+        self.assertTrue(descriptor.hull.hitTester.calls)
+        self.assertEqual([], descriptor.turret.hitTester.calls)
+        self.assertEqual([], descriptor.gun.hitTester.calls)
+
     def test_frozen_target_uses_historical_pose_and_static_angles_for_hits(self):
         body = _oracle_pose(0.63, -0.31, 0.22, (13.0, -4.0, 8.0))
         # A frozen historic pose has one body matrix.  The first tuple's root

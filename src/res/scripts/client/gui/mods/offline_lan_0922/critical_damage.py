@@ -449,7 +449,10 @@ def _offh_internal_ray_hits(target_mock, td, start_pos, end_pos, covered=()):
 	_vs = inv.applyPoint(Math.Vector3(start_pos.x, start_pos.y, start_pos.z))
 	_ve = inv.applyPoint(Math.Vector3(end_pos.x, end_pos.y, end_pos.z))
 	local = {}
-	for compDescr, compMatrix in target_mock.getComponents():
+	for compDescr, compMatrix, isAttached in target_mock.getComponents():
+		if not isAttached:
+			# A detached turret took its interior modules and crew with it.
+			continue
 		name = None
 		for candidate in ('chassis', 'hull', 'turret', 'gun'):
 			if compDescr is getattr(td, candidate, None):
@@ -549,7 +552,9 @@ def _offh_internal_cone_hits(target_mock, td, burst_pos, direction, shell,
 	vehicle_burst = inv.applyPoint(world_burst)
 	vehicle_tip = inv.applyPoint(world_tip)
 	contexts = {}
-	for compDescr, compMatrix in target_mock.getComponents():
+	for compDescr, compMatrix, isAttached in target_mock.getComponents():
+		if not isAttached:
+			continue
 		name = None
 		for candidate in ('chassis', 'hull', 'turret', 'gun'):
 			if compDescr is getattr(td, candidate, None):
