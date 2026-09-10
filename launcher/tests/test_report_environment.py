@@ -165,6 +165,68 @@ class SectionTest(unittest.TestCase):
         self.assertIn("== game", text)
         self.assertIn("client address space:", text)
 
+    def _dependency_report(self, names):
+        with mock.patch.object(report_environment, "_import_table",
+                               return_value=names), mock.patch.object(
+                report_environment, "_search_directories",
+                return_value=[self.game]):
+            return report_environment.missing_dependencies_report(self.game)
+
+    def test_api_set_names_are_virtual_contracts_in_any_case(self):
+        names = [
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "API-MS-WIN-CRT-STDIO-L1-1-0.DLL",
+            "ext-ms-win-ntuser-window-l1-1-0.dll",
+            "EXT-MS-WIN-NTUSER-WINDOW-L1-1-0.DLL",
+        ]
+
+        text = self._dependency_report(names)
+
+        contracts = [line for line in text.splitlines()
+                     if line.startswith("API-SET")]
+        self.assertEqual(len(names), len(contracts))
+        for name in names:
+            matching = [line for line in contracts if name in line]
+            self.assertEqual(1, len(matching), name)
+            self.assertIn("virtual contract", matching[0])
+            self.assertIn("loader resolution not checked", matching[0])
+        self.assertFalse(any(line.startswith("MISSING")
+                             for line in text.splitlines()))
+        self.assertIn("physical import files: found=0 not_found=0", text)
+        self.assertIn("cannot identify the cause of 0xC0000135", text)
+
+    def test_missing_ordinary_imports_remain_a_physical_file_observation(self):
+        present = "shipped-helper.dll"
+        missing = "missing-helper.dll"
+        with open(os.path.join(self.game, present), "wb") as stream:
+            stream.write(b"physical file only\n")
+
+        text = self._dependency_report([
+            present, missing, "api-ms-win-crt-runtime-l1-1-0.dll"])
+
+        missing_names = [line.split()[1] for line in text.splitlines()
+                         if line.startswith("MISSING")]
+        self.assertEqual([missing], missing_names)
+        self.assertTrue(any(line.startswith("found") and present in line
+                            for line in text.splitlines()))
+        self.assertIn("scanned directories", text)
+        self.assertIn("physical import files: found=1 not_found=1", text)
+        self.assertIn("cannot identify the cause of 0xC0000135", text)
+        self.assertNotIn("this is what 0xC0000135 means", text)
+
+    def test_existing_import_files_do_not_prove_loader_resolution(self):
+        name = "shipped-helper.dll"
+        # The scanner observes existence; this is not a loadable DLL.
+        with open(os.path.join(self.game, name), "wb") as stream:
+            stream.write(b"physical file only\n")
+
+        text = self._dependency_report([name])
+
+        self.assertIn("physical import files: found=1 not_found=0", text)
+        self.assertIn("cannot identify the cause of 0xC0000135", text)
+        self.assertNotIn("every load-time import resolved", text)
+        self.assertNotIn("would come from a dependency", text)
+
     def test_loose_mod_files_are_listed_not_just_packaged_ones(self):
         # Blame for the address-space growth turned on whether a worker was
         # really mod-free, and a loose res_mods script announces nothing.

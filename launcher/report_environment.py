@@ -10,9 +10,9 @@ without it:
   whether one worker was really mod-free, and the only evidence was the
   client's own ``Mod file`` lines, which name packaged wotmods and nothing
   else.
-* ``missing-dependencies.txt`` - report 20260909-205956 died with
-  ``0xC0000135`` (a load-time DLL was missing) and there is no way to name the
-  DLL from outside that machine.
+* ``missing-dependencies.txt`` - report 20260909-205956 exited with
+  ``0xC0000135`` without naming a DLL. A static import-file inventory can
+  identify candidates, but cannot replace the Windows loader's diagnosis.
 * ``crash-text.txt`` - report 20260909-232240 carried a 1.27 GB dump whose
   entire diagnostic value was one sentence BigWorld had already written into
   its own stack: ``FATAL ERROR: The device has been removed.``
@@ -410,11 +410,10 @@ def _search_directories(game_root):
 
 
 def missing_dependencies_report(game_root):
-    """Name the load-time DLLs Windows would not have found.
+    """Inventory ordinary import files in a bounded set of directories.
 
-    Report 20260909-205956 stopped at ``exit code 3221225781`` with no way to
-    learn which import was missing; this answers exactly that question on the
-    machine that has the problem.
+    API-set names are virtual contracts and need not name a file on disk.
+    This scan neither loads DLLs nor determines their runtime resolution.
     """
     executable = os.path.join(game_root, core.GAME_EXECUTABLE)
     lines = _lines("load-time imports of %s" % core.GAME_EXECUTABLE)
@@ -426,7 +425,15 @@ def missing_dependencies_report(game_root):
         return "\n".join(lines + ["no import table"]) + "\n"
     directories = _search_directories(game_root)
     missing = []
+    found_count = 0
+    contracts = 0
     for name in sorted(names, key=str.lower):
+        if name.lower().startswith(("api-ms-", "ext-ms-")):
+            contracts += 1
+            lines.append(
+                "API-SET  %s  (virtual contract; loader resolution not checked)"
+                % name)
+            continue
         found = None
         for directory in directories:
             candidate = os.path.join(directory, name)
@@ -437,16 +444,19 @@ def missing_dependencies_report(game_root):
             missing.append(name)
             lines.append("MISSING  %s" % name)
         else:
+            found_count += 1
             lines.append("found    %s  (%s)" % (name, found))
     lines.extend(_lines("verdict"))
-    if missing:
-        lines.append(
-            "%d import(s) resolved nowhere on the search path; this is what "
-            "0xC0000135 means: %s" % (len(missing), ", ".join(missing)))
-    else:
-        lines.append(
-            "every load-time import resolved; a 0xC0000135 here would come "
-            "from a dependency of one of these, not from the client itself")
+    lines.append(
+        "physical import files: found=%d not_found=%d (scanned directories)"
+        % (found_count, len(missing)))
+    lines.append("virtual API-set contracts: %d (loader resolution not checked)"
+                 % contracts)
+    lines.append(
+        "Missing files are candidates only; file presence does not prove "
+        "loadability. This static scan cannot identify the cause of "
+        "0xC0000135. API-set mapping, other loader search rules and transitive "
+        "dependencies are not checked.")
     return "\n".join(lines) + "\n"
 
 
