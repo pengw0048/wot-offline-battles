@@ -12143,7 +12143,8 @@ class BotRuntime(object):
             self._sample_time_us = step_end_time_us
             return []
         wire_rows = []
-        launches = [dict(launch) for launch in self._pending_launches]
+        failed_ids = set()
+        published_states = []
         for state in self._ordered_states():
             if diagnostic is not None:
                 diagnostic.actor(state['id'])
@@ -12154,16 +12155,45 @@ class BotRuntime(object):
             try:
                 row = observed_call(
                     'bot.wire_projection', bot_state_codec.encode_row, state)
-            except bot_state_codec.BotStateCodecError:
-                raise RuntimeError('bot publication projection failed')
+            except (bot_state_codec.BotStateCodecError, ValueError,
+                    TypeError, OverflowError) as error:
+                # An identity-only row explicitly retains the server's last
+                # checkpoint. Do not acknowledge combat or fabricate a pose.
+                bot_id = int(state['id'])
+                failed_ids.add(bot_id)
+                row = [bot_id]
+                previous = state.get('_wire_projection_failure')
+                reason = str(error)
+                if (previous is None or previous[0] != reason or
+                        now - previous[1] >= 5.0):
+                    print('[BOT STATE] projection unavailable round=%s '
+                          'bot=%s reason=%s' % (
+                              self.round_id, bot_id, reason))
+                    state['_wire_projection_failure'] = (reason, now)
+                wire_rows.append(row)
+                continue
+            state.pop('_wire_projection_failure', None)
+            published_states.append(state)
             if 'equipment_states' in state:
                 self._equipment_wire_exposed_in_update.add(int(state['id']))
             wire_rows.append(row)
         if diagnostic is not None:
             diagnostic.actor(None)
         self._sample_time_us = step_end_time_us
+        # Keep frozen launches and contact barriers pending until their
+        # participants can publish again; unrelated actors continue normally.
+        launches = [dict(launch) for launch in self._pending_launches
+                    if not failed_ids or int(launch['id']) not in failed_ids]
+        ram_reports = []
+        deferred_ram = []
+        for report in self._pending_ram_reports:
+            blocked = bool(failed_ids) and (
+                int(report['bot_id']) in failed_ids or
+                (report.get('target_kind') == 'bot' and
+                 int(report['target_id']) in failed_ids))
+            (deferred_ram if blocked else ram_reports).append(report)
         edge_sample_time_us, edge_revision = self._mark_publication_edge(
-            ordered_states, launches, self._pending_ram_reports,
+            published_states, launches, ram_reports,
             self._sample_time_us)
         publication = {
             'type': 'bot_state', 'rows': wire_rows,
@@ -12178,8 +12208,8 @@ class BotRuntime(object):
         outgoing = [publication]
         # The server validates ram proximity against its latest authority pose.
         # Publish state first, then the cooldown-gated damage reports.
-        outgoing.extend(self._pending_ram_reports)
-        self._pending_ram_reports = []
+        outgoing.extend(ram_reports)
+        self._pending_ram_reports = deferred_ram
         if collect_observation:
             self._next_observation = now + OBSERVATION_SECONDS
             outgoing.append({

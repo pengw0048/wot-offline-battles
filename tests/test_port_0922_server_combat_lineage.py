@@ -357,6 +357,111 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
                         self.assertEqual(1, current['combat_ack_seq'])
                         self.assertEqual(3, current['combat_base_revision'])
 
+    def test_unavailable_projection_preserves_actor_and_recovers(self):
+        runtime, server, unused_roster = self._runtime_and_server()
+        first = runtime.update(1.0 / 24.0, 1.0)[0]
+        self.assertTrue(server.update_bot_states(1, dict(
+            first, round_id=server.round_id)), server.last_bot_state_reject)
+        previous = copy.deepcopy(server.bot_states[11])
+        other_x = server.bot_states[12]['x']
+        codec = self.bot_runtime.bot_state_codec
+        original = codec.encode_row
+
+        def invalid_pose(state):
+            if state['id'] == 11:
+                return original(dict(state, shot_yaw=float('nan'),
+                                     shot_pitch=0.0))
+            if state['id'] == 12:
+                return original(dict(state, x=other_x + 3.0))
+            return original(state)
+
+        codec.encode_row = invalid_pose
+        try:
+            failed = runtime.update(1.0 / 24.0, 1.1)[0]
+        finally:
+            codec.encode_row = original
+        self.assertIn([11], failed['rows'])
+        self.assertEqual(29, len(failed['rows']))
+        self.assertTrue(server.update_bot_states(1, dict(
+            failed, round_id=server.round_id)), server.last_bot_state_reject)
+        self.assertEqual(previous, server.bot_states[11])
+        self.assertEqual(other_x + 3.0, server.bot_states[12]['x'])
+        self.assertIsNone(server.battle_result)
+        self.assertFalse(runtime.finished)
+        recovered = runtime.update(1.0 / 24.0, 1.2)[0]
+        self.assertTrue(all(len(row) > 1 for row in recovered['rows']))
+        self.assertTrue(server.update_bot_states(1, dict(
+            recovered, round_id=server.round_id)), server.last_bot_state_reject)
+        self.assertNotIn('_wire_projection_failure', runtime.states[11])
+
+    def test_unavailable_projection_does_not_ack_or_discard_frozen_launch(self):
+        runtime, server, unused_roster = self._runtime_and_server()
+        frozen = {'id': 11, 'fire_seq': 1, 'shot_yaw': 0.2}
+        runtime._pending_launches.append(frozen)
+        codec = self.bot_runtime.bot_state_codec
+        original = codec.encode_row
+
+        def invalid_pose(state):
+            if state['id'] == 11:
+                raise codec.BotStateCodecError('shot_yaw: not finite')
+            return original(state)
+
+        codec.encode_row = invalid_pose
+        try:
+            failed = runtime.update(1.0 / 24.0, 1.0)[0]
+        finally:
+            codec.encode_row = original
+        self.assertNotIn('launches', failed)
+        self.assertEqual([frozen], runtime._pending_launches)
+        recovered = runtime.update(1.0 / 24.0, 1.1)[0]
+        self.assertEqual([frozen], recovered['launches'])
+        self.assertEqual([frozen], runtime._pending_launches)
+
+    def test_unavailable_projection_retains_contact_barriers_for_both_actors(self):
+        runtime, server, unused_roster = self._runtime_and_server()
+        reports = [
+            {'type': 'bot_ram', 'bot_id': 11, 'target_kind': 'bot',
+             'target_id': 12, 'ram_seq': 1},
+            {'type': 'bot_ram', 'bot_id': 12, 'target_kind': 'bot',
+             'target_id': 11, 'ram_seq': 2},
+            {'type': 'bot_ram', 'bot_id': 12, 'target_kind': 'human',
+             'target_id': 1, 'ram_seq': 3},
+        ]
+        runtime._pending_ram_reports.extend(reports)
+        runtime._resolve_tank_contacts = lambda *unused: []
+        codec = self.bot_runtime.bot_state_codec
+        original = codec.encode_row
+
+        def invalid_pose(state):
+            if state['id'] == 11:
+                raise codec.BotStateCodecError('shot_yaw: not finite')
+            return original(state)
+
+        codec.encode_row = invalid_pose
+        try:
+            outgoing = runtime.update(1.0 / 24.0, 1.0)
+        finally:
+            codec.encode_row = original
+        self.assertEqual([reports[2]], [message for message in outgoing
+                                       if message['type'] == 'bot_ram'])
+        self.assertEqual(reports[:2], runtime._pending_ram_reports)
+        recovered = runtime.update(1.0 / 24.0, 1.1)
+        self.assertEqual(reports[:2], [message for message in recovered
+                                      if message['type'] == 'bot_ram'])
+        self.assertEqual([], runtime._pending_ram_reports)
+
+    def test_unavailable_rows_still_require_unique_manifest_identities(self):
+        runtime, server, unused_roster = self._runtime_and_server()
+        rows = [[bot_id] for bot_id in sorted(server.bot_states)]
+        for invalid in (rows[:-1], rows[:-1] + [rows[0]],
+                        rows[:-1] + [[99999]]):
+            self.assertFalse(server.update_bot_states(1, {
+                'round_id': server.round_id, 'rows': invalid}))
+        self.assertTrue(server.update_bot_states(1, {
+            'round_id': server.round_id, 'rows': rows}),
+            server.last_bot_state_reject)
+        self.assertIsNone(server.battle_result)
+
     def test_external_hit_crew_roster_survives_repeated_publication(self):
         runtime, server, unused_roster = self._runtime_and_server()
         human = _human()

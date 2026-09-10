@@ -126,6 +126,17 @@ simulation to the server: `BattleRuntime` continues to consume the original
 complete update locally. The optional shot yaw/pitch pair remains atomic at the
 projection boundary.
 
+A Bot checkpoint that cannot be encoded now publishes an identity-only
+`[bot_id]` row. The complete manifest roster and unique identities remain
+mandatory. The server retains that actor's last admitted pose and combat ACK;
+other rows advance normally. Frozen launches and ram reports involving that
+actor stay in the worker outbox until its checkpoint becomes encodable. The
+worker logs the round, actor and codec reason at a bounded cadence. Integration
+tests cover failure, retained ACK/state, frozen launch retention and recovery.
+This contains the `223753` field report's whole-round failure; its discarded
+original codec reason cannot be reconstructed from the report. Windows #1513
+acceptance of the recovery path remains outstanding.
+
 The short 0.0975-second generic planning cache remains a steering and slope
 refresh. A typed exact 3x3 receipt has an independent containment contract and
 may cross that refresh only under its exact origin, yaw, travel sign and

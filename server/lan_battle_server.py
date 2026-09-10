@@ -6394,7 +6394,17 @@ class BattleState:
                 if identity is None:
                     return self._set_protocol_reject(
                         "bot_state", "bot_identity", "bot=%s" % bot_id)
+                if bot_id in next_states:
+                    return self._set_protocol_reject(
+                        "bot_state", "batch_members",
+                        "duplicate bot=%s" % bot_id)
                 previous = self.bot_states.get(bot_id)
+                if len(row) == 1 and previous is not None:
+                    # The worker could not project this actor's checkpoint.
+                    # Retain all admitted ledgers without advancing its ACK;
+                    # the next valid row can reconcile the pending changes.
+                    next_states[bot_id] = previous
+                    continue
                 try:
                     raw = bot_state_codec.decode_row(row, identity)
                 except (bot_state_codec.BotStateCodecError, TypeError,
