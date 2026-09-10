@@ -16,6 +16,8 @@ them.
 Both peers import this module: the worker through the client script root inside
 the game, the server through the same path on ``sys.path``.  It is the single
 source of truth for the layout, and it must parse and run on CPython 2.7.
+An identity-only row ``[bot_id]`` is an explicit unavailable checkpoint, handled
+by the server before decoding: it retains the last admitted state and ACK.
 
 The immutable consumable contracts ride ``bot_manifest`` once per round instead
 of every row, because they were the largest part of the old encoding and never
@@ -235,7 +237,8 @@ def encode_row(state):
         if all(present):
             flags |= bit
         elif any(present):
-            raise BotStateCodecError('bot state group is incomplete')
+            raise BotStateCodecError('bot state group is incomplete: %s' %
+                                     ','.join(names))
     if movement > 0.01:
         flags |= F_MOVING_FORWARD
     elif movement < -0.01:
@@ -255,15 +258,21 @@ def encode_row(state):
                 row.append(0)
                 continue
             raw = state[name]
-            if name == 'shot_yaw':
-                raw = _wrapped_angle(raw)
-            row.append(_fixed(raw, scale, CLAMPS.get(name)))
+            try:
+                if name == 'shot_yaw':
+                    raw = _wrapped_angle(raw)
+                row.append(_fixed(raw, scale, CLAMPS.get(name)))
+            except (ValueError, TypeError, OverflowError) as error:
+                raise BotStateCodecError('%s: %s' % (name, error))
             continue
         value = state.get(name, 0)
-        if scale is None:
-            row.append(_exact(value))
-        else:
-            row.append(_fixed(value, scale, CLAMPS.get(name)))
+        try:
+            if scale is None:
+                row.append(_exact(value))
+            else:
+                row.append(_fixed(value, scale, CLAMPS.get(name)))
+        except (ValueError, TypeError, OverflowError) as error:
+            raise BotStateCodecError('%s: %s' % (name, error))
 
     if flags & F_HAS_AMMO:
         shells = list(ammo)
