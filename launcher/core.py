@@ -98,8 +98,8 @@ PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
 STOP_STARTER_ARGUMENT_0922 = "--stop-starter"
-# The starter can spend 10 seconds attaching ProcDump before its own
-# 60-second ready wait. Let it record failure before launcher cancellation.
+# The starter waits up to 60 seconds for readiness, then can spend another
+# 10 seconds attaching ProcDump. Leave room for its own failure diagnostics.
 WORKER_READY_TIMEOUT_SECONDS_0922 = 90.0
 WORKER_FAILURE_DRAIN_SECONDS_0922 = 0.5
 STARTER_CONTROL_TIMEOUT_SECONDS_0922 = 5.0
