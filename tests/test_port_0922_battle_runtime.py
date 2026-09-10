@@ -28481,6 +28481,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual([], battle._retired_native_owners)
 
     def test_round_collection_waits_for_released_native_owners(self):
+        """The sweep runs past the native teardown boundary, once.
+
+        Collecting before `_retired_native_owners` is released would traverse
+        native objects the round still owned, which is the one thing
+        BigWorld's decision to disable the collector avoids.
+        """
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.state = 'running'
@@ -28489,69 +28495,35 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._local_model = native_owner
         observed = []
 
-        def collect(phase, round_id):
-            observed.append((phase, round_id,
-                             list(battle._retired_native_owners)))
-            return True
-
-        with mock.patch.object(battle_runtime_module.python_heap,
-                               'log_collect', side_effect=collect), \
-                mock.patch.object(battle_runtime_module.gc_sweep,
-                                  'sweep') as sweep:
-            battle.stop(show_login=False)
-            self.assertEqual([], observed)
-            self.assertIn(native_owner, battle._retired_native_owners)
-            callback = runtime.bigworld.callbacks.pop()
-            callback()
-            self.assertEqual([('round_end', 42, [])], observed)
-            callback()
-            battle.stop(show_login=False)
-            self.assertEqual([('round_end', 42, [])], observed)
-            sweep.assert_not_called()
-
-    def test_failed_round_diagnostic_falls_back_after_native_owner_release(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle.state = 'running'
-        battle._start_message = {'round_id': 43}
-        native_owner = object()
-        battle._local_model = native_owner
-        observed = []
-
         def sweep(phase, round_id):
             observed.append((phase, round_id,
                              list(battle._retired_native_owners)))
+            return 0
 
-        with mock.patch.object(battle_runtime_module.python_heap,
-                               'log_collect', return_value=False) as collect, \
-                mock.patch.object(battle_runtime_module.gc_sweep,
-                                  'sweep', side_effect=sweep):
+        with mock.patch.object(battle_runtime_module.gc_sweep,
+                               'sweep', side_effect=sweep):
             battle.stop(show_login=False)
-            collect.assert_not_called()
+            # Nothing yet: the native owners are still retained.
             self.assertEqual([], observed)
             self.assertIn(native_owner, battle._retired_native_owners)
             callback = runtime.bigworld.callbacks.pop()
             callback()
-            collect.assert_called_once_with('round_end', 43)
-            self.assertEqual([('round_end', 43, [])], observed)
+            self.assertEqual([('round_end', 42, [])], observed)
+            # A repeated or late callback must not collect again.
             callback()
             battle.stop(show_login=False)
-            collect.assert_called_once_with('round_end', 43)
-            self.assertEqual([('round_end', 43, [])], observed)
+            self.assertEqual([('round_end', 42, [])], observed)
 
     def test_cancelled_lobby_restore_does_not_collect(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.state = 'running'
-        with mock.patch.object(battle_runtime_module.python_heap,
-                               'log_collect') as collect, \
-                mock.patch.object(battle_runtime_module.gc_sweep,
-                                  'sweep') as sweep:
+        with mock.patch.object(battle_runtime_module.gc_sweep,
+                               'sweep') as sweep:
             battle.stop(show_login=False)
             callback = runtime.bigworld.callbacks.pop()
             battle.stop(restore_account=False)
             callback()
-            collect.assert_not_called()
             sweep.assert_not_called()
 
     def test_cleanup_leaves_vehicle_teardown_to_native_avatar_then_map(self):
