@@ -1,3 +1,4 @@
+import errno
 import json
 from collections import OrderedDict
 from pathlib import Path
@@ -192,6 +193,353 @@ def _wait_until(predicate, timeout=2.0):
             return
         time.sleep(0.01)
     raise AssertionError('timed out waiting for server state')
+
+
+class OutboundFailureDiagnosticsTests(unittest.TestCase):
+    @staticmethod
+    def _message(kind='events', body=None):
+        return {
+            'type': kind, 'round_id': 7, 'server_tick': 43,
+            'private_body': body,
+        }
+
+    def _failure(self, logger):
+        logger.assert_called_once()
+        line = logger.call_args[0][0]
+        self.assertTrue(line.startswith('OUTBOUND FAILURE '))
+        self.assertNotIn('private_body', line)
+        self.assertNotIn('private exception text', line)
+        return json.loads(line[len('OUTBOUND FAILURE '):])
+
+    def test_oversized_offers_record_first_failure_without_closing(self):
+        for async_outbox in (False, True):
+            for method in ('send', 'offer_reliable', 'offer_snapshot'):
+                with self.subTest(async_outbox=async_outbox, method=method):
+                    connection = _Connection()
+                    connection.shutdown = mock.Mock()
+                    player = Player(3, connection, ('127.0.0.1', 1))
+                    player._force_async_outbox = async_outbox
+                    message = self._message(
+                        body='x' * server_module.MAX_LINE_BYTES)
+                    expected_bytes = len((json.dumps(
+                        message, separators=(',', ':')) + '\n').encode())
+                    with mock.patch.object(server_module, '_server_log') as log:
+                        self.assertFalse(getattr(player, method)(message))
+                        self.assertFalse(getattr(player, method)(message))
+                    failure = self._failure(log)
+                    self.assertEqual('message_too_large', failure['reason'])
+                    self.assertEqual('player', failure['endpoint_role'])
+                    self.assertEqual(3, failure['endpoint_id'])
+                    self.assertEqual('events', failure['message_type'])
+                    self.assertEqual(7, failure['round_id'])
+                    self.assertEqual(43, failure['server_tick'])
+                    self.assertEqual(expected_bytes, failure['payload_bytes'])
+                    self.assertEqual(0, failure['sent_bytes'])
+                    self.assertEqual(0, failure['reliable_messages'])
+                    self.assertEqual(0, failure['reliable_bytes'])
+                    self.assertIsNone(failure['errno'])
+                    self.assertTrue(player.connected)
+                    self.assertEqual([], connection.messages)
+                    connection.shutdown.assert_not_called()
+
+    def test_encoding_failures_remain_exceptions_and_omit_payload(self):
+        circular = []
+        circular.append(circular)
+        for body, error_type in ((object(), TypeError), (circular, ValueError)):
+            for method in ('send', 'offer_reliable', 'offer_snapshot'):
+                with self.subTest(error=error_type, method=method):
+                    player = Player(3, _Connection(), ('127.0.0.1', 1))
+                    player._force_async_outbox = method != 'send'
+                    with mock.patch.object(server_module, '_server_log') as log:
+                        with self.assertRaises(error_type):
+                            getattr(player, method)(self._message(body=body))
+                    failure = self._failure(log)
+                    self.assertEqual('encode_error', failure['reason'])
+                    self.assertEqual(error_type.__name__, failure['error_type'])
+                    self.assertIsNone(failure['payload_bytes'])
+                    self.assertTrue(player.connected)
+
+    def test_malformed_framing_metadata_is_bounded_and_does_not_log_objects(self):
+        player = Player(3, _Connection(), ('127.0.0.1', 1))
+        message = self._message(kind='x' * 1000, body=object())
+        message['round_id'] = {'private exception text': 'do not log'}
+        message['server_tick'] = 1 << 128
+        with mock.patch.object(server_module, '_server_log') as log:
+            with self.assertRaises(TypeError):
+                player.send(message)
+        failure = self._failure(log)
+        self.assertEqual('x' * 64, failure['message_type'])
+        self.assertIsNone(failure['round_id'])
+        self.assertIsNone(failure['server_tick'])
+        self.assertLess(len(log.call_args[0][0]), 600)
+
+    def test_reliable_limits_record_backlog_before_it_is_cleared(self):
+        for reason, body_size in (('reliable_message_limit', 0),
+                                  ('reliable_byte_limit', 240000)):
+            with self.subTest(reason=reason):
+                connection = _Connection()
+                connection.shutdown = mock.Mock()
+                worker = SimulationWorker(connection, ('127.0.0.1', 1))
+                worker._force_async_outbox = True
+                message = self._message(body='x' * body_size)
+                size = len((json.dumps(
+                    message, separators=(',', ':')) + '\n').encode())
+                accepted = min(
+                    server_module.MAX_RELIABLE_OUTBOUND_MESSAGES,
+                    server_module.MAX_RELIABLE_OUTBOUND_BYTES // size)
+                with mock.patch.object(worker, '_start_outbox_locked'), \
+                        mock.patch.object(server_module, '_server_log') as log:
+                    for unused in range(accepted):
+                        self.assertTrue(worker.offer_reliable(message))
+                    self.assertFalse(worker.offer_reliable(message))
+                    self.assertFalse(worker.offer_reliable(message))
+                failure = self._failure(log)
+                self.assertEqual(reason, failure['reason'])
+                self.assertEqual('worker', failure['endpoint_role'])
+                self.assertEqual(-1, failure['endpoint_id'])
+                self.assertEqual(size, failure['payload_bytes'])
+                self.assertEqual(accepted, failure['reliable_messages'])
+                self.assertEqual(accepted * size, failure['reliable_bytes'])
+                self.assertFalse(worker.connected)
+                self.assertEqual([], list(worker._outbox_reliable))
+                self.assertEqual(0, worker._outbox_reliable_bytes)
+                connection.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+
+    def test_sync_timeout_records_queued_frame_and_keeps_close_semantics(self):
+        connection = _Connection()
+        connection.shutdown = mock.Mock()
+        player = Player(3, connection, ('127.0.0.1', 1))
+        player._force_async_outbox = True
+        done = mock.Mock()
+        done.wait.return_value = False
+        message = self._message()
+        with mock.patch.object(player, '_start_outbox_locked'), \
+                mock.patch.object(server_module.threading, 'Event', return_value=done), \
+                mock.patch.object(server_module, '_server_log') as log:
+            self.assertFalse(player.send(message))
+        failure = self._failure(log)
+        self.assertEqual('sync_timeout', failure['reason'])
+        self.assertIsNone(failure['sent_bytes'])
+        self.assertEqual(1, failure['reliable_messages'])
+        self.assertEqual(failure['payload_bytes'], failure['reliable_bytes'])
+        done.wait.assert_called_once_with(server_module.OUTBOUND_SYNC_TIMEOUT_SECONDS)
+        done.set.assert_called_once_with()
+        connection.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+        self.assertFalse(player.connected)
+
+    def test_direct_socket_error_records_errno_without_closing_socket(self):
+        connection = _Connection()
+        connection.sendall = mock.Mock(side_effect=BrokenPipeError(
+            errno.EPIPE, 'private exception text'))
+        connection.shutdown = mock.Mock()
+        player = Player(3, connection, ('127.0.0.1', 1))
+        with mock.patch.object(server_module, '_server_log') as log:
+            self.assertFalse(player.send(self._message()))
+        failure = self._failure(log)
+        self.assertEqual('socket_error', failure['reason'])
+        self.assertEqual(errno.EPIPE, failure['errno'])
+        self.assertEqual('BrokenPipeError', failure['error_type'])
+        self.assertIsNone(failure['sent_bytes'])
+        self.assertFalse(player.connected)
+        connection.shutdown.assert_not_called()
+
+    def test_zero_byte_send_records_peer_close(self):
+        connection = _Connection()
+        connection.send = mock.Mock(return_value=0)
+        player = Player(3, connection, ('127.0.0.1', 1))
+        with mock.patch.object(server_module, '_server_log') as log:
+            self.assertFalse(player.send(self._message()))
+        failure = self._failure(log)
+        self.assertEqual('peer_closed', failure['reason'])
+        self.assertEqual(0, failure['sent_bytes'])
+        self.assertFalse(player.connected)
+
+    def test_writer_failure_records_current_frame_and_pending_queue(self):
+        connection = _Connection()
+        started, release, closed = (threading.Event() for unused in range(3))
+
+        def fail_send(payload):
+            started.set()
+            if not release.wait(2.0):
+                raise AssertionError('writer was not released')
+            raise ConnectionResetError(errno.ECONNRESET, 'private exception text')
+
+        connection.sendall = fail_send
+        connection.shutdown = lambda unused: closed.set()
+        player = Player(3, connection, ('127.0.0.1', 1))
+        player._force_async_outbox = True
+        message = self._message()
+        with mock.patch.object(server_module, '_server_log') as log:
+            try:
+                self.assertTrue(player.offer_reliable(message))
+                self.assertTrue(started.wait(1.0))
+                self.assertTrue(player.offer_reliable(message))
+                self.assertTrue(player.offer_snapshot(self._message('snapshot')))
+                release.set()
+                self.assertTrue(closed.wait(1.0))
+                player._outbox_thread.join(1.0)
+                self.assertFalse(player._outbox_thread.is_alive())
+                self.assertFalse(player.offer_reliable(message))
+            finally:
+                release.set()
+                player.disconnect()
+        failure = self._failure(log)
+        self.assertEqual('socket_error', failure['reason'])
+        self.assertEqual(errno.ECONNRESET, failure['errno'])
+        self.assertEqual(1, failure['reliable_messages'])
+        self.assertEqual(failure['payload_bytes'], failure['reliable_bytes'])
+        self.assertGreater(failure['snapshot_bytes'], 0)
+        self.assertFalse(player.connected)
+        self.assertEqual([], list(player._outbox_reliable))
+
+    def test_sync_timeout_and_later_writer_error_only_record_first_failure(self):
+        connection = _Connection()
+        started, release = threading.Event(), threading.Event()
+
+        def fail_send(payload):
+            started.set()
+            if not release.wait(2.0):
+                raise AssertionError('writer was not released')
+            raise ConnectionResetError(errno.ECONNRESET, 'private exception text')
+
+        connection.sendall = fail_send
+        connection.shutdown = mock.Mock()
+        player = Player(3, connection, ('127.0.0.1', 1))
+        player._force_async_outbox = True
+        done = mock.Mock()
+
+        def timeout_after_writer_started(unused_timeout):
+            self.assertTrue(started.wait(1.0))
+            return False
+
+        done.wait.side_effect = timeout_after_writer_started
+        real_event = threading.Event
+        events = [done]
+
+        def make_event():
+            return events.pop() if events else real_event()
+
+        with mock.patch.object(server_module.threading, 'Event', make_event), \
+                mock.patch.object(server_module, '_server_log') as log:
+            try:
+                self.assertFalse(player.send(self._message()))
+                release.set()
+                player._outbox_thread.join(1.0)
+                self.assertFalse(player._outbox_thread.is_alive())
+            finally:
+                release.set()
+                player.disconnect()
+        self.assertEqual('sync_timeout', self._failure(log)['reason'])
+
+    def test_partial_write_stall_is_distinct_from_socket_error(self):
+        connection = _Connection()
+        connection.send = mock.Mock(side_effect=[
+            3, socket.timeout(), socket.timeout()])
+        player = Player(3, connection, ('127.0.0.1', 1))
+        with mock.patch.object(server_module.time, 'monotonic', side_effect=[
+                10.0, 10.0 + server_module.OUTBOUND_STALL_TIMEOUT_SECONDS]), \
+                mock.patch.object(server_module, '_server_log') as log:
+            self.assertFalse(player.send(self._message()))
+        failure = self._failure(log)
+        self.assertEqual('send_stall', failure['reason'])
+        self.assertEqual(3, failure['sent_bytes'])
+        self.assertEqual('TimeoutError', failure['error_type'])
+        self.assertFalse(player.connected)
+
+    def test_short_stall_and_normal_disconnect_do_not_log_failures(self):
+        player = Player(3, _ShortStallConnection(), ('127.0.0.1', 1))
+        with mock.patch.object(server_module, '_server_log') as log:
+            self.assertTrue(player.send(self._message()))
+            player.disconnect()
+            player._outbox_loop()
+            self.assertFalse(player.offer_reliable(self._message()))
+        log.assert_not_called()
+
+    def test_log_io_failure_does_not_change_rejection_or_close_behavior(self):
+        for oversized in (True, False):
+            with self.subTest(oversized=oversized):
+                connection = _Connection()
+                connection.sendall = mock.Mock(side_effect=OSError(
+                    errno.EPIPE, 'private exception text'))
+                player = Player(3, connection, ('127.0.0.1', 1))
+                message = self._message(body=(
+                    'x' * server_module.MAX_LINE_BYTES if oversized else None))
+                with mock.patch.object(server_module, '_server_log',
+                                       side_effect=OSError('log unavailable')):
+                    self.assertFalse(player.send(message))
+                self.assertEqual(oversized, player.connected)
+
+    def test_queue_overflow_wakes_sync_sender_even_when_logging_fails(self):
+        connection = _Connection()
+        connection.shutdown = mock.Mock()
+        player = Player(3, connection, ('127.0.0.1', 1))
+        player._force_async_outbox = True
+        queued = threading.Event()
+        finished = threading.Event()
+        results = []
+
+        def send_sync():
+            try:
+                results.append(player.send(self._message()))
+            finally:
+                finished.set()
+
+        with mock.patch.object(player, '_start_outbox_locked',
+                               side_effect=queued.set), \
+                mock.patch.object(server_module, '_server_log',
+                                  side_effect=OSError('log unavailable')) as log:
+            sender = threading.Thread(target=send_sync, daemon=True)
+            sender.start()
+            self.assertTrue(queued.wait(1.0))
+            for unused in range(server_module.MAX_RELIABLE_OUTBOUND_MESSAGES - 1):
+                self.assertTrue(player.offer_reliable(self._message()))
+            self.assertFalse(player.offer_reliable(self._message()))
+            self.assertTrue(finished.wait(1.0))
+            sender.join(1.0)
+        self.assertEqual([False], results)
+        self.assertEqual('reliable_message_limit', self._failure(log)['reason'])
+        connection.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+
+    def test_restored_direct_endpoint_can_report_without_reentering_send_lock(self):
+        player = Player(3, _Connection(), ('127.0.0.1', 1))
+        del player._outbox_condition
+        finished = threading.Event()
+        results = []
+
+        def send_oversized():
+            try:
+                results.append(player.send(self._message(
+                    body='x' * server_module.MAX_LINE_BYTES)))
+            finally:
+                finished.set()
+
+        with mock.patch.object(server_module, '_server_log') as log:
+            sender = threading.Thread(target=send_oversized, daemon=True)
+            sender.start()
+            self.assertTrue(finished.wait(1.0))
+            sender.join(1.0)
+        self.assertEqual([False], results)
+        self.assertEqual('message_too_large', self._failure(log)['reason'])
+        self.assertTrue(player.connected)
+
+    def test_worker_failure_log_uses_round_and_reason_before_empty_room_reset(self):
+        state = BattleState(map_name='01_karelia')
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        worker = SimulationWorker(_Connection(), ('127.0.0.1', 1))
+        state.simulation_worker = worker
+        state.bot_authority_id = SIMULATION_WORKER_AUTHORITY_ID
+        round_id = state.round_id
+        with mock.patch.object(server_module, '_server_log') as log:
+            removed, failed = state.remove_simulation_worker(
+                worker, 'worker_send_stalled')
+        self.assertIs(worker, removed)
+        self.assertTrue(failed)
+        self.assertEqual(round_id + 1, state.round_id)
+        self.assertEqual('', state.worker_failure_reason)
+        log.assert_called_once_with(
+            'WORKER FAILURE round=%d reason=worker_send_stalled; round terminated' %
+            round_id)
 
 
 class SimulationWorkerStateTests(unittest.TestCase):
