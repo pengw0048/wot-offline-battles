@@ -24476,6 +24476,10 @@ class BattleRuntime(object):
                 sys.stdout.write(
                     '[Offline LAN 0.9.22] deferred lobby Account restored\n')
             self._retired_native_owners = []
+            # Cross the native teardown boundary and release its retained
+            # Python owners before checking which cycles are reclaimable.
+            # The token above also excludes cancelled or repeated callbacks.
+            python_heap.log_collect('round_end', round_identity)
             if callable(on_complete):
                 try:
                     on_complete(lobby_restored)

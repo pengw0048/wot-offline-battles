@@ -90,3 +90,247 @@ class PythonHeapTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ForcedCollectTest(unittest.TestCase):
+    """The experiment that separates unreachable cycles from live references.
+
+    Report 20260910-034953: the worker went from 1.14M tracked objects on
+    round 1 to 2.87M on round 6 (~+347k per round, linear) while the visible
+    client on the same machine and the same six rounds stayed flat near
+    1.19M. Both report `gc_enabled=0`. This experiment observes collectable
+    cycles; it does not exclude reachable objects as a source of growth.
+    """
+
+    def setUp(self):
+        self._debug = gc.get_debug()
+        self._enabled = gc.isenabled()
+        self.addCleanup(gc.set_debug, self._debug)
+
+    def tearDown(self):
+        # Nothing here may change whether the collector is running.
+        self.assertEqual(self._enabled, gc.isenabled())
+
+    def _leak_cycles(self, count):
+        for index in range(count):
+            record = {'id': index, 'pos': (0, 0, 0), 'yaw': 0.0, 'rows': []}
+            holder = [record]
+            record['self'] = holder          # the cycle
+            # Participate in the cycle; an all-integer tuple may be untracked
+            # by the collector and cannot be required in the garbage sample.
+            record['rows'].append((index, index, record))
+
+    def test_a_cyclic_leak_is_found_and_freed(self):
+        gc.collect()
+        self._leak_cycles(2000)
+        state = python_heap.collect_once()
+        self.assertGreater(state['unreachable'], 0)
+        self.assertGreaterEqual(state['before'], state['after'])
+
+    def test_the_leaked_record_is_named_by_its_keys(self):
+        # "dict" is not a diagnosis. The key set is.
+        gc.collect()
+        self._leak_cycles(2000)
+        state = python_heap.collect_once()
+        shapes = dict(state['signatures'])
+        named = [name for name in shapes
+                 if name.startswith('dict{') and 'yaw' in name]
+        self.assertTrue(named, 'no dict signature named the leaked record: %r'
+                        % (shapes,))
+        self.assertIn('id', named[0])
+        self.assertIn('rows', named[0])
+
+    def test_list_and_tuple_shapes_are_reported_by_length(self):
+        gc.collect()
+        self._leak_cycles(2000)
+        shapes = dict(python_heap.collect_once()['signatures'])
+        self.assertTrue(any(name.startswith('list(len=')
+                            for name in shapes), repr(shapes))
+        self.assertTrue(any(name.startswith('tuple(len=')
+                            for name in shapes), repr(shapes))
+
+    def test_the_debug_flags_are_restored(self):
+        python_heap.collect_once()
+        self.assertEqual(self._debug, gc.get_debug())
+
+    def test_the_garbage_list_is_left_empty(self):
+        # DEBUG_SAVEALL parks everything the collector found in gc.garbage.
+        # Leaving it there would turn a diagnostic into a second leak.
+        self._leak_cycles(500)
+        python_heap.collect_once()
+        self.assertEqual([], gc.garbage)
+
+    def test_the_lines_report_the_accounting_and_the_cost(self):
+        lines = python_heap.format_collect_lines('round_end', 6)
+        self.assertEqual(2, len(lines))
+        self.assertIn('PYGC phase=round_end round=6', lines[0])
+        for field in ('before=', 'unreachable=', 'after=', 'net_freed=',
+                      'second_pass=', 'elapsed_ms=', 'gc_enabled_after='):
+            self.assertIn(field, lines[0])
+        self.assertIn('PYSIG phase=round_end round=6', lines[1])
+        self.assertIn('sampled=', lines[1])
+        self.assertIn('shapes=', lines[1])
+
+    def test_a_function_signature_carries_its_source_location(self):
+        def _closure_target():
+            return None
+
+        signature = python_heap._signature(_closure_target)
+        self.assertIn('test_port_0922_python_heap.py', signature)
+        self.assertTrue(signature.startswith('function@'), signature)
+
+    def test_the_signature_sample_is_bounded(self):
+        scanned, ranked = python_heap.signature_census(
+            [{} for unused in range(python_heap.SIGNATURE_SAMPLE + 500)])
+        self.assertEqual(python_heap.SIGNATURE_SAMPLE, scanned)
+        self.assertLessEqual(len(ranked), python_heap.TOP_SIGNATURES)
+
+    def test_a_broken_gc_never_raises_into_the_round(self):
+        original = python_heap.gc.get_objects
+        python_heap.gc.get_objects = lambda: (_ for _ in ()).throw(
+            RuntimeError('no heap'))
+        self.addCleanup(setattr, python_heap.gc, 'get_objects', original)
+        self.assertIsNone(python_heap.collect_once())
+        self.assertEqual((), python_heap.format_collect_lines('round_end', 1))
+        python_heap.log_collect('round_end', 1)
+
+    def test_preexisting_garbage_is_not_owned_by_the_probe(self):
+        collector = self._install_fake_collector()
+        existing = collector.garbage[0]
+        state = python_heap.collect_once()
+        self.assertIsNotNone(state)
+        self.assertEqual([existing], collector.garbage)
+        self.assertEqual(1, state['scanned'])
+        self.assertEqual(2, collector.calls)
+
+    def test_existing_saveall_session_keeps_ownership(self):
+        collector = self._install_fake_collector()
+        collector.debug = collector.DEBUG_SAVEALL
+        existing = list(collector.garbage)
+        self.assertIsNone(python_heap.collect_once())
+        self.assertEqual(existing, collector.garbage)
+        self.assertEqual(collector.DEBUG_SAVEALL, collector.debug)
+        self.assertEqual(0, collector.calls)
+
+    def test_sampling_failure_still_releases_owned_cycles_and_restores_flags(self):
+        collector = self._install_fake_collector()
+        existing = collector.garbage[0]
+        original = python_heap.signature_census
+        self.addCleanup(setattr, python_heap, 'signature_census', original)
+
+        def fail(unused):
+            raise RuntimeError('sampling failed')
+
+        python_heap.signature_census = fail
+        self.assertIsNone(python_heap.collect_once())
+        self.assertEqual([existing], collector.garbage)
+        self.assertEqual(2, collector.calls)
+        self.assertEqual(0, collector.debug)
+
+    def test_second_collection_failure_still_restores_flags(self):
+        collector = self._install_fake_collector(fail_second=True)
+        self.assertIsNone(python_heap.collect_once())
+        self.assertEqual(0, collector.debug)
+
+    def _install_fake_collector(self, fail_second=False):
+        class Collector(object):
+            DEBUG_SAVEALL = 32
+
+            def __init__(self):
+                self.debug = 0
+                self.garbage = [{'preexisting': True}]
+                self.calls = 0
+
+            def get_objects(self):
+                return []
+
+            def get_debug(self):
+                return self.debug
+
+            def set_debug(self, value):
+                self.debug = value
+
+            def isenabled(self):
+                return False
+
+            def collect(self):
+                self.calls += 1
+                if fail_second and self.calls == 2:
+                    raise RuntimeError('second collection failed')
+                if self.debug & self.DEBUG_SAVEALL:
+                    self.garbage.append({'new_cycle': True})
+                return 1
+
+        collector = Collector()
+        self.addCleanup(setattr, python_heap, 'gc', python_heap.gc)
+        python_heap.gc = collector
+        return collector
+
+    def test_signatures_never_call_user_properties_or_container_overrides(self):
+        calls = []
+
+        class Hostile(object):
+            @property
+            def func_code(self):
+                calls.append('property')
+                raise RuntimeError('must not inspect')
+
+        class HostileDict(dict):
+            def keys(self):
+                calls.append('keys')
+                return ['wrong']
+
+        class HostileMeta(type):
+            @property
+            def __name__(cls):
+                calls.append('metaclass')
+                return 'wrong'
+
+            def __eq__(cls, unused):
+                calls.append('equality')
+                return False
+
+        custom_type = HostileMeta('SafeTypeName', (object,), {})
+        python_heap._signature(Hostile())
+        python_heap._signature(HostileDict(real=1))
+        self.assertEqual('SafeTypeName', python_heap._signature(custom_type()))
+        self.assertEqual([], calls)
+
+    def test_dictionary_signatures_have_bounded_single_line_output(self):
+        shape = python_heap._signature({'a\n' + 'x' * 100000: 1})
+        self.assertLess(len(shape), 200)
+        self.assertNotIn('\n', shape)
+        large = python_heap._signature(dict((str(n), n) for n in range(100)))
+        self.assertEqual('dict(len=<=128)', large)
+
+    def test_sampling_failure_does_not_keep_cycles_in_exception_frames(self):
+        class Cycle(object):
+            pass
+
+        original = python_heap.signature_census
+        self.addCleanup(setattr, python_heap, 'signature_census', original)
+
+        def fail(items):
+            # Keep both the sample and its last item in the raising frame.
+            for item in items:
+                if type(item) is Cycle:
+                    raise RuntimeError('sampling failed')
+            raise AssertionError('cycle was not sampled')
+
+        gc.collect()
+        was_enabled = gc.isenabled()
+        try:
+            gc.disable()
+            item = Cycle()
+            item.cycle = item
+            del item
+            python_heap.signature_census = fail
+            self.assertIsNone(python_heap.collect_once())
+            # Weakrefs can be cleared by SAVEALL's first pass before the
+            # referent is freed. Inspect the tracked instance itself instead.
+            self.assertFalse(any(type(item) is Cycle for item in gc.get_objects()))
+            self.assertFalse(gc.isenabled())
+            self.assertEqual(self._debug, gc.get_debug())
+        finally:
+            if was_enabled:
+                gc.enable()
