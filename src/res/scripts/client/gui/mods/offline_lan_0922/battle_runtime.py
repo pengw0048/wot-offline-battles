@@ -20085,7 +20085,8 @@ class BattleRuntime(object):
                 position[1] + self._local_vertical_speed * dt,
                 next_z)
 
-    def _local_autorotation_turn(self, entity, turn, tracks_blocked=False):
+    def _local_autorotation_turn(self, entity, turn, drive_intent=0.0,
+                                 tracks_blocked=False):
         """Apply #1513's limited-traverse autorotation to copied physics.
 
         The stock input handler owns whether autorotation is enabled in the
@@ -20101,8 +20102,8 @@ class BattleRuntime(object):
         yaw, the current turret yaw, the installed yaw limits and the turret
         and vehicle rotation speeds; no drive input reaches that routine, and
         the movement flags it publishes carry ``_MOVEMENT_FLAGS.FORWARD``
-        beside the rotation bit.  Autorotation therefore composes with a live
-        throttle exactly like the player holding W and D together.
+        beside the rotation bit.  The copied cell preserves that desired hull
+        direction when composing it with either forward or reverse driving.
         """
         turn = float(turn)
         if turn != 0.0:
@@ -20145,7 +20146,11 @@ class BattleRuntime(object):
         elif relative_yaw > maximum + GUN_TRAVERSE_LIMIT_EPSILON:
             autorotation_turn = 1.0
         if autorotation_turn:
-            return autorotation_turn
+            # traverse_step interprets steering as an A/D key and reverses it
+            # under reverse drive. Convert the desired hull yaw direction to
+            # that input convention so autorotation still approaches the aim.
+            return (-autorotation_turn if float(drive_intent) < 0.0 else
+                    autorotation_turn)
         return turn
 
     def _local_siege_drive_locked(self, entity):
@@ -20249,7 +20254,7 @@ class BattleRuntime(object):
                     self._sender.forward)
         turn = (0.0 if siege_drive_locked or overturned else
                 self._local_autorotation_turn(
-                    entity, self._sender.turn,
+                    entity, self._sender.turn, throttle,
                     tracks_blocked=self._sender.handbrake))
         is_tracked = bool(getattr(entity, 'is_tracked', False))
         is_engine_dead = bool(getattr(entity, 'is_engine_dead', False))

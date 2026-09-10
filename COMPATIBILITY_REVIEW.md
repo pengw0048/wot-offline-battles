@@ -1931,9 +1931,13 @@ executable computes the direction in `WGGunRotatorImpl` from elapsed time, the
 desired yaw, the current turret yaw, the yaw limits and the turret and vehicle
 rotation speeds, with no drive input reaching that routine, and the movement
 flags it publishes carry `_MOVEMENT_FLAGS.FORWARD` beside the rotation bit.
-Autorotation therefore composes with driving exactly like holding W and D. How
-the retail cell merges those flags is server Python that no client build ships,
-so only Windows play can confirm the resulting feel.
+The copied cell composes that desired hull direction with forward or reverse
+driving. Its traverse integrator reverses A/D steering under reverse drive, so
+the autorotation adapter converts the desired hull direction to that input
+convention first; otherwise reversing makes the hull turn away from the aim.
+How the retail cell merges those flags is server Python that no client build
+ships, so the exact composition remains an inference and the resulting feel
+still needs Windows play.
 
 LAN pose samples retain the fractional remainder of the nominal 30 Hz
 publication interval. Clearing the entire accumulator quantised a 40 FPS

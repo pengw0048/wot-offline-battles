@@ -15926,6 +15926,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
         # #1513's WGGunRotatorImpl publishes the rotation direction without
         # reading any drive input, so driving does not suppress the hull turn.
         self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
+        # Explicit A/D still owns steering, including its reverse convention.
+        for throttle in (-1.0, 1.0):
+            for turn in (-1.0, 1.0):
+                self.assertEqual(turn, battle._local_autorotation_turn(
+                    entity, turn, drive_intent=throttle))
 
     def test_limited_traverse_autorotation_respects_block_tracks(self):
         runtime = _runtime()
@@ -15975,6 +15980,37 @@ class BattleRuntimeContractTests(unittest.TestCase):
         # ``FORWARD | ROTATE_RIGHT`` command #1513's rotator publishes.
         self.assertEqual((2, 9), entity.engineMode)
         self.assertEqual(0.5, runtime.bigworld.avatar.positions[-1][3])
+
+    def test_autorotation_tracks_target_while_driving_in_either_direction(self):
+        for throttle in (-1.0, -0.25, 0.0, 0.25, 1.0):
+            for aim_yaw in (-0.75, 0.75):
+                with self.subTest(throttle=throttle, aim_yaw=aim_yaw):
+                    runtime = _runtime()
+                    battle = BattleRuntime(runtime)
+                    battle.client = _Client()
+                    battle._avatar = runtime.bigworld.avatar
+                    battle._avatar.inputHandler.getAutorotation = lambda: True
+                    descriptor = _Descriptor()
+                    descriptor.gun.turretYawLimits = (-0.10, 0.10)
+                    entity = _Vehicle(
+                        10, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+                    runtime.bigworld.entities[10] = entity
+                    battle._server = types.SimpleNamespace(vehicle_id=10)
+                    battle._sender = types.SimpleNamespace(
+                        forward=throttle, turn=0.0, aim_yaw=aim_yaw,
+                        handbrake=False, send_current=lambda: None)
+                    battle._local_descriptor = descriptor
+                    battle._attach_local_presentation()
+
+                    # Exercise the real integrator: reverse steering changes
+                    # the input sign, but aiming must still close the yaw error.
+                    battle._drive_local(0.1)
+
+                    self.assertGreater(battle._local_yaw * aim_yaw, 0.0)
+                    self.assertLess(abs(aim_yaw - battle._local_yaw),
+                                    abs(aim_yaw))
+                    if throttle:
+                        self.assertGreater(battle._local_speed * throttle, 0.0)
 
     def test_drowning_countdown_keeps_movement_until_the_vehicle_drowns(self):
         runtime = _runtime()
