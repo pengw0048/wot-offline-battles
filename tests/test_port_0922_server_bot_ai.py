@@ -7,7 +7,16 @@ import unittest
 PORT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PORT_ROOT / 'server'))
 
-from server_bot_ai import BotPlanner, _order_signature  # noqa: E402
+from server_bot_ai import (  # noqa: E402
+    CLOSE_THREAT_SCORE_BONUS,
+    HUMAN_TARGET_SCORE_BONUS,
+    NEAREST_TARGET_SCORE_PER_METRE,
+    RECENT_ATTACKER_SCORE_BONUS,
+    TARGET_HEALTH_SCORE_SPAN,
+    TARGET_REACH_SCORE_PER_METRE,
+    BotPlanner,
+    _order_signature,
+)
 from lan_battle_server import (  # noqa: E402
     BOT_PLANNER_INTERVAL_TICKS,
     CLIENT_BUILD_0922,
@@ -18,6 +27,7 @@ from lan_battle_server import (  # noqa: E402
     Player,
     SimulationWorker,
 )
+from gui.mods.offline_lan_0922 import bot_gunnery  # noqa: E402
 from gui.mods.offline_lan_0922.bot_runtime import (  # noqa: E402
     _overlay_live_target_pose,
 )
@@ -123,6 +133,12 @@ def _contact(target_id, x, z, observers, class_tag='mediumTank'):
         'max_health': 1000,
         'class_tag': class_tag,
     }
+
+
+def _bot_contact(target_id, x, z, observers, class_tag='mediumTank'):
+    result = _contact(target_id, x, z, observers, class_tag)
+    result['target_kind'] = 'bot'
+    return result
 
 
 def _cover_report(bot_id, target_id, candidate_id='rock', x=12.0,
@@ -2139,6 +2155,218 @@ class ServerBotCompetenceTests(unittest.TestCase):
             self.assertEqual(
                 first._capable(bot, capability, 'x'),
                 second._capable(bot, capability, 'x'), capability)
+
+
+class ServerBotTargetLadderTests(unittest.TestCase):
+    """Which enemy a Bot prefers is a ladder, not one on/off competence.
+
+    Every Bot shoots what its gun can reach and answers a tank in its face.
+    Above that, preferring the nearer contact and finishing the most nearly
+    dead one arrive with any competence at all, turning on whoever just hit
+    you arrives at the regular anchor, and going for the human player instead
+    of a Bot arrives at the veteran anchor.
+    """
+
+    def setUp(self):
+        self.route = _route('lane', [
+            (0, -100, False), (0, 100, False), (0, 500, False),
+        ])
+        self.manifest = [_bot(
+            11, 1, 0, self.route, 'mediumTank', {'support': 1.0})]
+        self.manifest[0]['profile'].update({
+            'armor': 120.0,
+            'dominant_role': 'support',
+            'desired_range': 180.0,
+            'fire_range': 520.0,
+        })
+        self.states = [_state(11, 1, 0, 0)]
+
+    def _rate(self, rating):
+        self.manifest[0]['skill_rating'] = rating
+
+    def _report(self, planner, contacts, enemy_bots=()):
+        """Report contacts of either kind and return the player roster."""
+        players = [
+            {'id': raw['target_id'], 'team': 2, 'alive': True}
+            for raw in contacts if raw['target_kind'] == 'human'
+        ]
+        states = list(self.states) + [
+            _state(bot_id, 2, 0.0, 0.0) for bot_id in enemy_bots
+        ]
+        self.states = states
+        self.assertEqual(len(contacts), planner.report_contacts(
+            contacts, planner.known_targets(states, players), 1.0))
+        return players
+
+    def _order(self, planner, players, now=1.0):
+        return next(
+            order for order in planner.build_orders(
+                self.manifest, self.states, players, now)['orders']
+            if order['id'] == 11)
+
+    def _target(self, planner, players, now=1.0):
+        order = self._order(planner, players, now)
+        return order['target_kind'], order['target_id']
+
+    def test_the_ranking_weights_stay_in_their_reviewed_order(self):
+        """Each rung must be able to outweigh the rung below it."""
+        # The nearest rung has to be able to beat finishing a wreck that is
+        # a couple of hundred metres further away, or it is decoration.
+        self.assertGreater(
+            (NEAREST_TARGET_SCORE_PER_METRE +
+             TARGET_REACH_SCORE_PER_METRE) * 220.0,
+            TARGET_HEALTH_SCORE_SPAN)
+        # Going for the player outweighs finishing a wreck, a tank in your
+        # face outweighs going for the player, and answering the tank that
+        # just hit you outweighs all of them.
+        self.assertLess(TARGET_HEALTH_SCORE_SPAN, HUMAN_TARGET_SCORE_BONUS)
+        self.assertLess(HUMAN_TARGET_SCORE_BONUS, CLOSE_THREAT_SCORE_BONUS)
+        self.assertLess(CLOSE_THREAT_SCORE_BONUS,
+                        RECENT_ATTACKER_SCORE_BONUS)
+
+    def test_a_hopeless_bot_does_not_answer_the_tank_that_hit_it(self):
+        planner = BotPlanner()
+        self._rate(0.0)
+        contacts = [
+            _contact(2, 0, 300, [11]),
+            _contact(3, 0, 120, [11]),
+        ]
+        players = self._report(planner, contacts)
+        planner.report_damage(11, 'player', 2, 200, 1.0)
+
+        self.assertEqual(('human', 3), self._target(planner, players))
+
+    def test_a_rookie_below_the_retaliation_rung_cannot_reach_it(self):
+        """The rung is a real onset, not a low probability."""
+        planner = BotPlanner()
+        onset = bot_gunnery.capability_onset(
+            bot_gunnery.CAPABILITY_TARGET_RETALIATION)
+        self._rate(onset - 0.01)
+        contacts = [
+            _contact(2, 0, 300, [11]),
+            _contact(3, 0, 120, [11]),
+        ]
+        players = self._report(planner, contacts)
+        planner.report_damage(11, 'player', 2, 200, 1.0)
+
+        self.assertEqual(('human', 3), self._target(planner, players))
+
+    def test_a_complete_bot_answers_the_tank_that_hit_it(self):
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [
+            _contact(2, 0, 300, [11]),
+            _contact(3, 0, 120, [11]),
+        ]
+        players = self._report(planner, contacts)
+        planner.report_damage(11, 'player', 2, 200, 1.0)
+
+        self.assertEqual(('human', 2), self._target(planner, players))
+
+    def test_a_bot_below_the_human_rung_shoots_the_nearer_enemy_bot(self):
+        planner = BotPlanner()
+        self._rate(bot_gunnery.capability_onset(
+            bot_gunnery.CAPABILITY_TARGET_HUMAN) - 0.01)
+        contacts = [
+            _contact(2, 0, 250, [11]),
+            _bot_contact(3, 0, 150, [11]),
+        ]
+        players = self._report(planner, contacts, enemy_bots=(3,))
+
+        self.assertEqual(('bot', 3), self._target(planner, players))
+
+    def test_a_complete_bot_goes_for_the_player(self):
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [
+            _contact(2, 0, 250, [11]),
+            _bot_contact(3, 0, 150, [11]),
+        ]
+        players = self._report(planner, contacts, enemy_bots=(3,))
+
+        self.assertEqual(('human', 2), self._target(planner, players))
+
+    def test_a_tank_in_your_face_still_beats_going_for_the_player(self):
+        """Self-defence is not a tactic and does not sit on the ladder."""
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [
+            _contact(2, 0, 340, [11]),
+            _bot_contact(3, 0, 30, [11]),
+        ]
+        players = self._report(planner, contacts, enemy_bots=(3,))
+
+        self.assertEqual(('bot', 3), self._target(planner, players))
+
+    def test_the_nearest_rung_holds_a_complete_bot_off_a_distant_wreck(self):
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [
+            _contact(2, 0, 100, [11]),
+            _contact(3, 0, 320, [11]),
+        ]
+        contacts[1]['health'] = 50
+        players = self._report(planner, contacts)
+
+        self.assertEqual(('human', 2), self._target(planner, players))
+
+    def test_a_nearby_wreck_is_still_finished_first(self):
+        """The nearest rung must not stop a Bot finishing a kill in reach."""
+        planner = BotPlanner()
+        self._rate(1.0)
+        contacts = [
+            _contact(2, 0, 100, [11]),
+            _contact(3, 0, 150, [11]),
+        ]
+        contacts[1]['health'] = 50
+        players = self._report(planner, contacts)
+
+        self.assertEqual(('human', 3), self._target(planner, players))
+
+    def test_the_focus_cap_treats_a_player_exactly_like_a_bot(self):
+        """Answers "will every Bot on brutal shoot only me": no, same cap."""
+        self.route = _route('lane', [
+            (0, -100, False), (0, 100, False), (0, 500, False),
+        ])
+        bot_ids = list(range(11, 26))
+        self.manifest = []
+        self.states = []
+        for slot, bot_id in enumerate(bot_ids):
+            entry = _bot(bot_id, 1, slot, self.route, 'mediumTank',
+                         {'support': 1.0})
+            entry['profile'].update({
+                'armor': 120.0,
+                'dominant_role': 'support',
+                'desired_range': 180.0,
+                'fire_range': 520.0,
+            })
+            entry['skill_rating'] = 1.0
+            self.manifest.append(entry)
+            self.states.append(_state(bot_id, 1, float(slot) * 4.0, 0))
+        baseline_states = list(self.states)
+
+        human_planner = BotPlanner()
+        human_players = self._report(
+            human_planner, [_contact(2, 0, 150, bot_ids)])
+        human_orders = human_planner.build_orders(
+            self.manifest, self.states, human_players, 1.0)['orders']
+        on_human = sum(1 for order in human_orders
+                       if order['target_id'] == 2)
+
+        self.states = baseline_states
+        bot_planner = BotPlanner()
+        bot_players = self._report(
+            bot_planner, [_bot_contact(2, 0, 150, bot_ids)],
+            enemy_bots=(2,))
+        bot_orders = bot_planner.build_orders(
+            self.manifest, self.states, bot_players, 1.0)['orders']
+        on_bot = sum(1 for order in bot_orders
+                     if order['target_id'] == 2 and
+                     order['target_kind'] == 'bot')
+
+        self.assertGreater(on_human, 0)
+        self.assertLess(on_human, len(bot_ids))
+        self.assertEqual(on_bot, on_human)
 
 
 class ServerBotArtilleryTests(unittest.TestCase):
