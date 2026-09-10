@@ -1898,15 +1898,28 @@ this port answers. Leaving that mode restores the saved setting.
 once the vehicle has yaw hull aiming, `True` for a fully rotating turret on a
 centre-pivot chassis, `False` for one on a track-pivot chassis, and `None`
 when the player vehicle is not yet in `BigWorld.entities`. Entering sniper on
-a limited-traverse vehicle therefore forces autorotation off, and `enableSwitchAutorotationMode` — `preferred is not
-False` — makes both the `CMD_CM_VEHICLE_SWITCH_AUTOROTATION` key and
-`PlayerAvatar.moveVehicle`'s re-enable no-ops for exactly those vehicles while
-sniper is active. Outside sniper the key toggles the lock and any key-down
-movement command without `_MOVEMENT_FLAGS.BLOCK_TRACKS` turns it back on.
+a limited-traverse vehicle therefore forces autorotation off, and
+`enableSwitchAutorotationMode` — `preferred is not False` — makes both the
+`CMD_CM_VEHICLE_SWITCH_AUTOROTATION` key and `PlayerAvatar.moveVehicle`'s
+re-enable no-ops for every vehicle the mode prefers `False` for, which is both
+the limited-traverse case and a fully rotating turret on a track-pivot
+chassis. Only the first of those has an arc to notice it. Outside sniper the
+key toggles the lock and any key-down movement command without
+`_MOVEMENT_FLAGS.BLOCK_TRACKS` turns it back on.
 `SiegeModeControl.handleKeyEvent` consumes that same key first on a siege
-vehicle. #1513 carries no user setting for any of this; `options.py` exposes
-only the key binding. The ABI audit pins the signatures, the code names and the
-control flow of all five methods.
+vehicle. The whole package writes `__isAutorotation` in five places, all in
+`AvatarInputHandler`, so nothing else can release the lock while sniper is
+active. The ABI audit pins the signatures, the code names and the control flow
+of all five methods.
+
+Modern retail behaves differently, and the difference is a version boundary,
+not a defect here. Wargaming added both the in-battle `X` toggle for sniper
+hull lock and the game setting for its default state in Update 1.12.1 of April
+2021, describing the behaviour it replaced as "when you enter Sniper mode, the
+hull is automatically locked and you cannot aim outside of the aiming angles",
+which is exactly what this January 2018 build does. Reproducing the 1.12.1
+convenience would be a deliberate product deviation from #1513, not a parity
+fix.
 
 Only the cell behaviour is ours. The copied local physics reads the stock
 `getAutorotation()` and, when the unclamped mouse target leaves the installed
