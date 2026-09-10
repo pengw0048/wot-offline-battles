@@ -1276,6 +1276,24 @@ def _worker_resource_sources(game_root):
     return package, config
 
 
+def _worker_vehicle_overlay(game_root):
+    """Read only vehicle resources owned by the active launcher profile."""
+    try:
+        from . import vehicle_overlays
+    except ImportError:
+        import vehicle_overlays
+
+    try:
+        if not os.path.exists(vehicle_overlays.manifest_path(game_root)):
+            return {}, ""
+        unused_manifest, payload, digest = \
+            vehicle_overlays.active_vehicle_overlay(game_root)
+        return payload, digest
+    except vehicle_overlays.VehicleOverlayError as error:
+        raise LauncherError("The active vehicle profile is unavailable: %s" %
+                            error)
+
+
 def _extract_worker_resource_root(package, config, target):
     """Unpack the package's ``res`` tree plus the worker engine config."""
     import shutil
@@ -1333,8 +1351,10 @@ def prepare_worker_resource_root(game_root):
     root = worker_resource_root(game_root)
     stamp_path = _worker_resource_stamp_path(game_root)
     try:
-        stamp = {"package": _file_stamp(package), "config": _file_stamp(config)}
-    except OSError as error:
+        overlay, overlay_digest = _worker_vehicle_overlay(game_root)
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config),
+                 "vehicle_overlay": overlay_digest}
+    except (OSError, LauncherError) as error:
         return ["The hidden worker keeps the client's own mod paths: %s" %
                 error]
     if os.path.isdir(root):
@@ -1351,6 +1371,14 @@ def prepare_worker_resource_root(game_root):
         staging = tempfile.mkdtemp(
             prefix=".worker-res-", dir=os.path.dirname(root))
         written = _extract_worker_resource_root(package, config, staging)
+        # Profile members have already passed the overlay ownership and
+        # integrity checks. Other files in res_mods stay outside this root.
+        for relative, payload in overlay.items():
+            destination = os.path.join(staging, *relative.split("/"))
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as stream:
+                stream.write(payload)
+        written += len(overlay)
         if os.path.isdir(root):
             shutil.rmtree(root)
         os.replace(staging, root)
@@ -1413,12 +1441,14 @@ def worker_resource_path_list(game_root):
         return None
     package, config = sources
     try:
-        stamp = {"package": _file_stamp(package), "config": _file_stamp(config)}
+        unused_overlay, overlay_digest = _worker_vehicle_overlay(game_root)
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config),
+                 "vehicle_overlay": overlay_digest}
         with open(_worker_resource_stamp_path(game_root), "r",
                   encoding="utf-8") as stream:
             if json.load(stream) != stamp:
                 return None
-    except (IOError, OSError, ValueError):
+    except (IOError, OSError, ValueError, LauncherError):
         return None
     entries = client_resource_paths(game_root)
     if not entries:
