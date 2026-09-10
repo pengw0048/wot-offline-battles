@@ -1309,6 +1309,31 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertEqual(collisions[:2], list(limited))
         self.assertAlmostEqual(10.8, trace_end.x)
 
+    def test_vehicle_trace_never_reaches_less_than_half_a_metre(self):
+        """Ten calibres, but not less than 0.5 m: a 37 mm gun gets 0.5 m."""
+        collisions = [
+            types.SimpleNamespace(dist=0.20),
+            types.SimpleNamespace(dist=0.69),
+            types.SimpleNamespace(dist=0.71),
+        ]
+
+        limited, unused_start, trace_end = BattleRuntime._vehicle_trace(
+            {'shell': {'caliber': 37.0}}, _Vector(),
+            _Vector((0.0, 0.0, 2.0)), collisions)
+
+        self.assertEqual(collisions[:2], list(limited))
+        self.assertAlmostEqual(0.70, trace_end.z)
+
+    def test_vehicle_trace_gives_a_calibreless_shell_no_interior(self):
+        collisions = [types.SimpleNamespace(dist=0.20),
+                      types.SimpleNamespace(dist=0.21)]
+
+        limited, unused_start, trace_end = BattleRuntime._vehicle_trace(
+            {'shell': {}}, _Vector(), _Vector((0.0, 0.0, 2.0)), collisions)
+
+        self.assertEqual(collisions[:1], list(limited))
+        self.assertAlmostEqual(0.20, trace_end.z)
+
     def test_projectile_takeover_cannot_lower_the_penetration_roll(self):
         battle, unused_bigworld = _battle()
         normalized = battle._projectile_wire_meta(_event())

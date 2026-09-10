@@ -443,6 +443,10 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
         self.assertEqual((1.0, 0.0, 0.0),
                          _xyz(critical.call_args.args[3]))
         self.assertIs(True, critical.call_args.kwargs['allow_interior'])
+        # 240 of a 400 roll survived the plate, so the interior contacts the
+        # blast had to reach through it carry 0.6 of the device roll.
+        self.assertAlmostEqual(
+            0.6, critical.call_args.kwargs['interior_damage_factor'])
 
     def test_nonpenetrating_he_owes_the_published_damage_not_the_roll(self):
         """A stopped HE shell owes its listed damage, never a live roll.
@@ -489,6 +493,13 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
         self.assertIs(True, effect['high_explosive'])
 
     def test_penetrating_he_keeps_full_direct_damage_without_surface_search(self):
+        """A penetrating HE round takes the solid ray, not the blast cone.
+
+        The published law draws the 45-degree cone only for a hit that did
+        NOT get through; a penetration "deals standard damage", so it goes
+        down the same path as AP.  It stays an explosion for the saving
+        throws, which is the only place the two chance columns differ.
+        """
         battle, meta, unused_target, unused_collision, terminal, state = \
             self._direct_fixture()
         contact = {
@@ -505,12 +516,18 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
                         'penetrating HE must keep the direct path')), \
                 mock.patch.object(
                     critical_damage, 'propose_explosion',
-                    return_value=(400, None, {})):
+                    side_effect=AssertionError(
+                        'penetrating HE must not draw a blast cone')), \
+                mock.patch.object(
+                    critical_damage, 'propose_direct',
+                    return_value=(400, None, {})) as critical:
             effect = battle._projectile_direct_effect(meta, state, terminal)
 
         self.assertEqual(400, effect['damage'])
         self.assertEqual(2, effect['shot_result'])
         self.assertEqual(400, effect['potential_damage'])
+        self.assertIs(True, critical.call_args.kwargs['penetrated'])
+        self.assertIs(True, critical.call_args.kwargs['by_explosion'])
 
     def test_nonpenetrating_he_without_proved_structural_surface_is_zero_damage(self):
         battle, meta, unused_target, collision, terminal, state = \
@@ -603,6 +620,11 @@ class HEBlastEffectRuntimeTests(unittest.TestCase):
                          _xyz(critical.call_args.args[2]))
         self.assertEqual((1.0, 0.0, 0.0),
                          _xyz(critical.call_args.args[3]))
+        # A vehicle that was only caught by the blast has no impact point of
+        # its own, so the published cone does not apply to it: it keeps the
+        # exposed modules the blast really touched and gets no invented
+        # interior contact.
+        self.assertIs(False, critical.call_args.kwargs['allow_interior'])
         self.assertEqual(120, effects[0]['damage'])
         self.assertEqual(3.5, effects[0]['target_x'])
         self.assertEqual(0.0, effects[0]['target_y'])

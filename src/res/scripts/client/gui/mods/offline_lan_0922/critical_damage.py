@@ -491,8 +491,15 @@ def _offh_internal_ray_hits(target_mock, td, start_pos, end_pos, covered=()):
 	return unique
 
 
-_OFFH_HE_CONE_COS = 0.7071067811865476  # cos(45 degrees)
-_OFFH_HE_CONE_EDGE_FACTOR = 1.4142135623730951  # 1 / cos(45 degrees)
+# The published law describes "a cone-shaped area 45 degrees wide originating
+# from the point of impact of the shell along the normalized impact vector to a
+# distance of 10 times weapon caliber".  45 degrees WIDE is the full aperture,
+# so the half angle these cosines describe is 22.5 degrees.  This module used
+# to pass cos(45), a 90-degree aperture, which presents about 5.8 times the
+# cross section at the same depth; internal_hit_layouts.resolve_explosion has
+# always defaulted to the 22.5-degree reading.
+_OFFH_HE_CONE_COS = 0.9238795325112867  # cos(22.5 degrees)
+_OFFH_HE_CONE_EDGE_FACTOR = 1.0823922002923940  # 1 / cos(22.5 degrees)
 
 
 def _offh_xyz(value):
@@ -502,13 +509,30 @@ def _offh_xyz(value):
 		return float(value[0]), float(value[1]), float(value[2])
 
 
-def _offh_he_internal_depth(shell):
-	'''0.9.22 HE interior-cone depth in metres: shell caliber / 100.'''
+def shell_interior_reach(shell):
+	'''Metres a shell's damage may travel inside a hull, from where it entered.
+
+	The published law is ten shell calibers but NOT LESS THAN HALF A METRE; a
+	caliber in millimetres divided by 100 is exactly ten calibers in metres.
+	The floor is what this port was missing: every gun below 50 mm reached less
+	interior than the law allows.  One distance serves both consumers -
+	``BattleRuntime._vehicle_trace`` clips the solid ray with it and the HE
+	blast cone uses it as its depth - so they cannot drift apart.  A descriptor
+	with no caliber gets no reach rather than the floor: an unknown shell must
+	not be handed half a metre of interior it never proved.
+	'''
 	try:
 		caliber = float(_descriptor_value(shell, 'caliber', 0.0) or 0.0)
 	except Exception:
 		caliber = 0.0
-	return max(0.0, caliber / 100.0)
+	if caliber <= 0.0:
+		return 0.0
+	return max(0.5, caliber / 100.0)
+
+
+def _offh_he_internal_depth(shell):
+	'''#1513 HE interior-cone depth in metres.'''
+	return shell_interior_reach(shell)
 
 
 def _offh_internal_cone_hits(target_mock, td, burst_pos, direction, shell,
@@ -877,7 +901,8 @@ def _track_hp_loss(td, name, material, component, distance, contacts,
 
 def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 		attacker_id, penetrated=None, by_explosion=False, internal_hits=None,
-		distance_filters=True, deadeye=False, collision_contacts=None):
+		distance_filters=True, deadeye=False, collision_contacts=None,
+		interior_damage_factor=1.0):
 	'''Roll module and crew crits for one strike.
 
 	penetrated: True the shell got through, False it did not, None unknown (the
@@ -899,7 +924,16 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 	collision_contacts: private (component, distance, local_point) evidence for
 	this exact strike, produced beside the native collisions themselves. Only
 	the track zone law reads it; without it a track hit keeps the previous
-	device-damage behaviour.'''
+	device-damage behaviour.
+
+	interior_damage_factor: how much of the blast survived the plate it did not
+	get through. The published law says a non-penetrating HE hit damages
+	interior modules "reduced by armor, and distance from initial impact" but
+	does not publish that arithmetic, so the caller hands down the fraction the
+	HULL channel kept - actual over nominal - and the interior contacts are
+	scaled by it. It applies only to contacts the blast had to reach THROUGH
+	armour: external device materials the blast touches directly, tracks above
+	all, keep the unscaled roll.'''
 	import BigWorld, Math, random
 	from gui.mods.offline_lan_0922 import device_damage as _device_damage
 	try:
@@ -987,8 +1021,18 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 	# (or explicitly retained authored profiles) supply interior contacts. A
 	# missing source must not fabricate a compartment hit.
 	_scored = all_hits
-	if (internal_hits is not None or penetrated is not False) and bool(
-			_MDCFG.get('internal_module_damage', True)):
+	_interior_names = set()
+	try:
+		_interior_factor = float(interior_damage_factor)
+	except (TypeError, ValueError):
+		_interior_factor = 1.0
+	if _interior_factor != _interior_factor or _interior_factor < 0.0:
+		_interior_factor = 0.0
+	elif _interior_factor > 1.0:
+		_interior_factor = 1.0
+	if (_interior_factor > 0.0 and
+			(internal_hits is not None or penetrated is not False) and bool(
+			_MDCFG.get('internal_module_damage', True))):
 		try:
 			# Query the selected component-local geometry. Multiple reached
 			# pieces of one device produce one saving throw; distinct devices
@@ -1015,6 +1059,7 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 							for _d2, _n2 in _real])))
 					_scored = list(all_hits)
 					for _d2, _n2 in _real:
+						_interior_names.add(_n2)
 						_scored.append((_d2, 1.0, _SynthMaterial(_n2), None))
 				else:
 					LOG_DEBUG('INTERIOR GEOMETRY: shell path crossed no interior box')
@@ -1098,6 +1143,8 @@ def _apply_module_damage(target_mock, all_hits, start_pos, end_pos, dmg, _shell,
 			# splash stay on the previous device-damage law until the same
 			# evidence covers them.
 			_loss = _shell_dmg
+			if _interior_factor < 1.0 and _name in _interior_names:
+				_loss *= _interior_factor
 			_track_decision = None
 			if _name in _track_damage.TRACK_DEVICE_NAMES and not by_explosion:
 				_loss, _track_decision = _track_hp_loss(
@@ -1372,7 +1419,8 @@ def _damage_delta(before, after, descriptor, operations=None):
 def apply_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
                  shell, attacker_id, penetrated=None, by_explosion=False,
                  deadeye=False, _internal_hits=None,
-                 _distance_filters=True, collision_contacts=None):
+                 _distance_filters=True, collision_contacts=None,
+                 interior_damage_factor=1.0):
     """Run the copied 0.8.2 crit loop and return its authoritative delta."""
     if getattr(vehicle, 'devices_hp', None) is None:
         vehicle.devices_hp = {}
@@ -1390,7 +1438,8 @@ def apply_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
         attacker_id, penetrated, by_explosion,
         internal_hits=_internal_hits,
         distance_filters=_distance_filters, deadeye=deadeye,
-        collision_contacts=collision_contacts)
+        collision_contacts=collision_contacts,
+        interior_damage_factor=interior_damage_factor)
     after = _state(vehicle)
     return damage, _payload(
         before, after, getattr(vehicle, 'typeDescriptor', None),
@@ -1458,7 +1507,13 @@ class _CriticalProposalVehicle(object):
 def propose_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
                    shell, attacker_id, penetrated=None, by_explosion=False,
                    deadeye=False, with_delta=False, collision_contacts=None):
-    """Return a critical-hit proposal without mutating the live Vehicle."""
+    """Return a critical-hit proposal without mutating the live Vehicle.
+
+    ``by_explosion`` selects the explosion column of every saving throw while
+    keeping the solid ray, which is what an HE round that DID get through
+    needs: the published law gives a penetrating HE ordinary damage, and it is
+    still a blast for the two materials whose two chances differ.
+    """
     if vehicle is None:
         raise ValueError('critical proposal requires a vehicle')
     shadow = _CriticalProposalVehicle(vehicle)
@@ -1482,14 +1537,18 @@ def propose_direct(vehicle, collisions, start_pos, end_pos, hull_damage,
 
 
 def apply_explosion(vehicle, collisions, burst, direction, hull_damage,
-                    shell, attacker_id, deadeye=False, allow_interior=True):
-    """Apply one HE interior cone and return its authoritative delta.
+                    shell, attacker_id, deadeye=False, allow_interior=True,
+                    interior_damage_factor=1.0):
+    """Apply one non-penetrating HE blast cone and return its delta.
 
-    Penetrating HE, a non-penetrating direct hit, and remote splash all use this
-    same entry point. Native collision materials still score exposed modules;
-    adopted interior targets come only from the finite cone, never the solid
-    projectile ray. Without a reachable structural surface, callers disable
-    the interior cone while preserving collisions with exposed modules.
+    The published law draws the cone only for a hit that did NOT get through:
+    an HE penetration deals its damage the ordinary way, so that case now goes
+    to ``propose_direct`` with the solid ray instead of arriving here. Native
+    collision materials still score exposed modules; adopted interior targets
+    come only from the finite cone, never the solid projectile ray. Without a
+    reachable structural surface, callers disable the interior cone while
+    preserving collisions with exposed modules, and a blast the plate absorbed
+    entirely carries ``interior_damage_factor`` 0.
     """
     covered = set()
     for collision in collisions or ():
@@ -1513,12 +1572,13 @@ def apply_explosion(vehicle, collisions, burst, direction, hull_damage,
         vehicle, tuple(collisions or ()), burst, burst, hull_damage,
         shell, attacker_id, penetrated=None, by_explosion=True,
         deadeye=deadeye, _internal_hits=tuple(hits),
-        _distance_filters=False)
+        _distance_filters=False,
+        interior_damage_factor=interior_damage_factor)
 
 
 def propose_explosion(vehicle, collisions, burst, direction, hull_damage,
                       shell, attacker_id, deadeye=False, with_delta=False,
-                      allow_interior=True):
+                      allow_interior=True, interior_damage_factor=1.0):
     """Return an HE-cone critical proposal without mutating the live Vehicle."""
     if vehicle is None:
         raise ValueError('critical proposal requires a vehicle')
@@ -1526,7 +1586,8 @@ def propose_explosion(vehicle, collisions, burst, direction, hull_damage,
     before = _state(shadow)
     damage, payload = apply_explosion(
         shadow, collisions, burst, direction, hull_damage, shell,
-        attacker_id, deadeye, allow_interior=allow_interior)
+        attacker_id, deadeye, allow_interior=allow_interior,
+        interior_damage_factor=interior_damage_factor)
     if with_delta:
         after = _state(shadow)
         delta = _damage_delta(
