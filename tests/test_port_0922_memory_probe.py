@@ -12,6 +12,7 @@ guards the walk against ever stopping at the 2 GB line again.
 """
 
 import ctypes
+import subprocess
 import sys
 from pathlib import Path
 import unittest
@@ -87,6 +88,32 @@ class MemoryProbeTest(unittest.TestCase):
 
     def _install(self, kernel):
         memory_probe._kernel32 = lambda: kernel
+
+    def test_missing_native_ctypes_cannot_abort_client_startup(self):
+        # #1513 carries ctypes Python code, but not its _ctypes extension.
+        # A fresh interpreter avoids the host test runner's cached ctypes.
+        program = '''
+import builtins
+import importlib.util
+import sys
+original_import = builtins.__import__
+def without_native_ctypes(name, *args, **kwargs):
+    if name == '_ctypes':
+        raise ImportError('No module named _ctypes')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_native_ctypes
+spec = importlib.util.spec_from_file_location('memory_probe', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.snapshot() is None
+module.log('round_start', 42)
+'''
+        result = subprocess.run(
+            [sys.executable, '-c', program, memory_probe.__file__],
+            capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('MEMORY phase=round_start round=42 unavailable=ctypes',
+                      result.stdout)
 
     def test_the_walk_separates_private_image_reserved_and_free(self):
         self._install(_FakeKernel(_regions()))

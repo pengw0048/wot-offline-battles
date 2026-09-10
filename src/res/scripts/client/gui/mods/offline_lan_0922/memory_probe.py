@@ -19,8 +19,14 @@ dump at all.  It is diagnostics: every failure is swallowed and the caller
 continues.
 """
 
-import ctypes
 import sys
+
+try:
+    import ctypes
+except ImportError:
+    # #1513 includes ctypes Python files but omits the native _ctypes module.
+    # Optional measurements must never prevent BattleRuntime from importing.
+    ctypes = None
 
 MEM_COMMIT = 0x1000
 MEM_RESERVE = 0x2000
@@ -47,30 +53,31 @@ ALLOC_256KIB_BYTES = 256 * 1024
 ADDRESS_SPACE_LIMIT = 0xFFFF0000
 
 
-class _MemoryBasicInformation(ctypes.Structure):
-    _fields_ = [
-        ('BaseAddress', ctypes.c_void_p),
-        ('AllocationBase', ctypes.c_void_p),
-        ('AllocationProtect', ctypes.c_ulong),
-        ('RegionSize', ctypes.c_size_t),
-        ('State', ctypes.c_ulong),
-        ('Protect', ctypes.c_ulong),
-        ('Type', ctypes.c_ulong),
-    ]
+if ctypes is not None:
+    class _MemoryBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ('BaseAddress', ctypes.c_void_p),
+            ('AllocationBase', ctypes.c_void_p),
+            ('AllocationProtect', ctypes.c_ulong),
+            ('RegionSize', ctypes.c_size_t),
+            ('State', ctypes.c_ulong),
+            ('Protect', ctypes.c_ulong),
+            ('Type', ctypes.c_ulong),
+        ]
 
 
-class _MemoryStatusEx(ctypes.Structure):
-    _fields_ = [
-        ('dwLength', ctypes.c_ulong),
-        ('dwMemoryLoad', ctypes.c_ulong),
-        ('ullTotalPhys', ctypes.c_ulonglong),
-        ('ullAvailPhys', ctypes.c_ulonglong),
-        ('ullTotalPageFile', ctypes.c_ulonglong),
-        ('ullAvailPageFile', ctypes.c_ulonglong),
-        ('ullTotalVirtual', ctypes.c_ulonglong),
-        ('ullAvailVirtual', ctypes.c_ulonglong),
-        ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
-    ]
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ('dwLength', ctypes.c_ulong),
+            ('dwMemoryLoad', ctypes.c_ulong),
+            ('ullTotalPhys', ctypes.c_ulonglong),
+            ('ullAvailPhys', ctypes.c_ulonglong),
+            ('ullTotalPageFile', ctypes.c_ulonglong),
+            ('ullAvailPageFile', ctypes.c_ulonglong),
+            ('ullTotalVirtual', ctypes.c_ulonglong),
+            ('ullAvailVirtual', ctypes.c_ulonglong),
+            ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+        ]
 
 
 def _kernel32():
@@ -190,6 +197,9 @@ def _megabytes(value):
 
 def format_line(phase, round_id, state=None):
     """Return the one MEMORY line for this boundary, or None."""
+    if state is None and ctypes is None:
+        return ('[Offline LAN 0.9.22] MEMORY phase=%s round=%s '
+                'unavailable=ctypes' % (phase, round_id))
     state = snapshot() if state is None else state
     if not state:
         return None
