@@ -33,6 +33,11 @@ half is consumed by the server planner, not here: this module owns the number
 and the draw, so worker, server and launcher reach the same answer from
 identity alone.
 
+A capability may also declare an onset: the rating below which a Bot never
+reaches for it at all.  That is what turns one probability into a ladder, so
+a stronger roster does not merely hesitate less often, it has strictly more
+tactics available.  An onset of zero is the original behaviour exactly.
+
 Every draw is seeded from stable round, Bot and target identity, so authority
 takeover reproduces the same gunner rather than re-rolling one mid-engagement.
 The radius law matches ``bot_runtime._dispersed_barrel_angles`` so the project
@@ -73,7 +78,6 @@ PROVEN_CREW_LEVELS = (75, 90, 100)
 # hesitate uniformly.
 CAPABILITY_WEAK_SPOT = 'weak_spot'
 CAPABILITY_SHELL_CHOICE = 'shell_choice'
-CAPABILITY_TARGET_PRIORITY = 'target_priority'
 CAPABILITY_URGENT_COVER = 'urgent_cover'
 CAPABILITY_TACTICAL_COVER = 'tactical_cover'
 CAPABILITY_COVER_PEEK = 'cover_peek'
@@ -82,12 +86,26 @@ CAPABILITY_WITHDRAW = 'withdraw'
 CAPABILITY_HULL_ANGLING = 'hull_angling'
 CAPABILITY_FLANK = 'flank'
 
+# Choosing which enemy to shoot is four separate competences, each with its
+# own onset below.  They are deliberately not one draw: a Bot that ranked a
+# contact list by remaining health would otherwise also, in the same instant,
+# know to answer the tank that just hit it and to prefer the human over a
+# Bot, and the difficulty ladder would have one rung instead of four.
+CAPABILITY_TARGET_NEAREST = 'target_nearest'
+CAPABILITY_TARGET_PRIORITY = 'target_priority'
+CAPABILITY_TARGET_RETALIATION = 'target_retaliation'
+CAPABILITY_TARGET_HUMAN = 'target_human'
+
+TARGET_CAPABILITIES = (
+    CAPABILITY_TARGET_NEAREST, CAPABILITY_TARGET_PRIORITY,
+    CAPABILITY_TARGET_RETALIATION, CAPABILITY_TARGET_HUMAN)
+
 CAPABILITIES = (
     CAPABILITY_WEAK_SPOT, CAPABILITY_SHELL_CHOICE,
-    CAPABILITY_TARGET_PRIORITY, CAPABILITY_URGENT_COVER,
+    CAPABILITY_URGENT_COVER,
     CAPABILITY_TACTICAL_COVER, CAPABILITY_COVER_PEEK,
     CAPABILITY_CROSSFIRE, CAPABILITY_WITHDRAW,
-    CAPABILITY_HULL_ANGLING, CAPABILITY_FLANK)
+    CAPABILITY_HULL_ANGLING, CAPABILITY_FLANK) + TARGET_CAPABILITIES
 
 # Rolled once for the whole round from round and slot identity.
 LATCHED_CAPABILITIES = frozenset((
@@ -99,6 +117,35 @@ LATCHED_CAPABILITIES = frozenset((
 # one exponent is the whole correction if playtesting says the tactical half
 # bites harder than the gunnery half.
 CAPABILITY_EXPONENT = 1.0
+
+# The rating one capability first appears at.  Below its onset a Bot never
+# reaches for that tactic; from the onset the chance rises to certainty at
+# rating 1, so the ends of every preset stay exactly as honest as before and
+# a stronger Bot still never has fewer tactics than a weaker one.
+#
+# Target selection is what this table exists for, and the onsets are the
+# points where the tier labels change, so the launcher's own vocabulary
+# describes the ladder truthfully: every roster answers a tank in its face
+# and shoots what its gun can reach, a rookie-and-up may prefer the nearest
+# enemy, a regular-and-up may turn on whoever just hit it, and a
+# veteran-and-up may go for the human player instead of a Bot.  A capability
+# absent from this table starts at 0 and behaves exactly as it did before
+# the table existed.
+#
+# An onset is the midpoint between two anchors, not an anchor.  A rating at
+# its own onset never reaches the rung, and a launcher lineup pin resolves a
+# tier name to that tier's exact anchor - so an onset placed on the anchor
+# would hand a Bot labelled ``veteran`` a rung it can never use.
+# ``skill_for_rating`` rounds a tie down, which puts the midpoint in the
+# lower tier and makes "this tier and up" literally true.
+CAPABILITY_ONSETS = {
+    CAPABILITY_TARGET_NEAREST: RATING_ANCHORS[0],
+    CAPABILITY_TARGET_PRIORITY: RATING_ANCHORS[0],
+    CAPABILITY_TARGET_RETALIATION: (
+        RATING_ANCHORS[0] + RATING_ANCHORS[1]) * 0.5,
+    CAPABILITY_TARGET_HUMAN: (
+        RATING_ANCHORS[1] + RATING_ANCHORS[2]) * 0.5,
+}
 
 # One aim-point bias is held for this long before the gunner re-lays the gun.
 # A single frozen bias would make a whole engagement uniformly lucky or
@@ -361,6 +408,32 @@ def resolve_skill(mode, round_id, team, slot):
     return skill_for_rating(resolve_rating(mode, round_id, team, slot))
 
 
+def capability_onset(capability):
+    """Return the rating at which one capability starts to appear at all."""
+    return normalize_rating(CAPABILITY_ONSETS.get(capability, 0.0))
+
+
+def capability_probability(rating, capability):
+    """Return the chance one Bot reaches for one tactic on one occasion.
+
+    The rating is remapped onto the span above the capability's onset, so a
+    Bot at the onset never reaches for it, a Bot at rating 1 always does, and
+    the tactics with a higher onset are the ones only a strong roster brings.
+    """
+    rating = normalize_rating(rating)
+    if rating <= 0.0:
+        return 0.0
+    onset = capability_onset(capability)
+    if onset >= 1.0:
+        return 1.0 if rating >= 1.0 else 0.0
+    reach = (rating - onset) / (1.0 - onset)
+    if reach <= 0.0:
+        return 0.0
+    if reach >= 1.0:
+        return 1.0
+    return reach ** CAPABILITY_EXPONENT
+
+
 def capability_allowed(rating, capability, *occasion):
     """Return whether one Bot does the tactically right thing this time.
 
@@ -372,12 +445,12 @@ def capability_allowed(rating, capability, *occasion):
     tick and an authority takeover cannot make a Bot change its mind.
 
     A rating of 0 never succeeds and a rating of 1 always does, so the ends
-    of a preset stay honest.
+    of a preset stay honest.  In between, a capability with an onset above 0
+    stays out of reach until the rating passes it.
     """
-    rating = normalize_rating(rating)
-    if rating <= 0.0:
+    probability = capability_probability(rating, capability)
+    if probability <= 0.0:
         return False
-    probability = rating ** CAPABILITY_EXPONENT
     if probability >= 1.0:
         return True
     parts = ('bot-capability-v1', capability) + occasion
