@@ -56,7 +56,7 @@ from gui.mods.offline_lan_0922 import (
     destructibles_compat, device_damage, effective_params,
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
-    graphics_probe, loadout as loadout_law, memory_probe,
+    graphics_probe, loadout as loadout_law, memory_probe, python_heap,
     prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
@@ -2258,6 +2258,10 @@ class BattleRuntime(object):
                 self._has_deadeye = bool(skills['deadeye'])
             round_identity = (self._start_message or {}).get('round_id', '-')
             memory_probe.log('round_start', round_identity)
+            # Peng's standing question is whether this port leaks Python.
+            # The dumps only proved Python was not what exhausted the address
+            # space; a rate needs one census per round, not one at death.
+            python_heap.log('round_start', round_identity)
             # MemoryCriticalController can lower TERRAIN_QUALITY mid-session,
             # and this port's ground probes and BSP collision read the terrain
             # it lowers.  Record the preset at both boundaries so a round that
@@ -24385,6 +24389,7 @@ class BattleRuntime(object):
             'lobby Account restore\n')
         round_identity = (self._start_message or {}).get('round_id', '-')
         memory_probe.log('round_end', round_identity)
+        python_heap.log('round_end', round_identity)
         graphics_probe.log('round_end', round_identity)
 
         def restore_after_native_boundary():

@@ -34,6 +34,12 @@ MEM_IMAGE = 0x1000000
 # stalling a frame; it is not meant to bound a healthy walk.
 MAX_REGIONS = 32768
 POOL_BLOCK_BYTES = 1024 * 1024
+# CPython 2.7's obmalloc arena.  Counting private allocations of exactly this
+# size is how Python's own footprint is separated from BigWorld's C++ heap
+# without asking Python anything: 84/99/78 of them in the three 2026-09-09/10
+# dumps, 21.0/24.8/19.5 MiB.  Whether that number *grows* per round is the
+# open question, and one dump could never answer it.
+ARENA_BYTES = 256 * 1024
 
 # Top of the 32-bit user address space on a large-address-aware image, less the
 # final no-access guard page.  A process that only gets 2 GB simply fails the
@@ -98,6 +104,7 @@ def _walk(kernel32):
     free_total = 0
     free_largest = 0
     pool_blocks = 0
+    arenas = 0
     allocation_sizes = {}
     while address < limit:
         if query(ctypes.c_void_p(address), ctypes.byref(info), size) != size:
@@ -125,9 +132,13 @@ def _walk(kernel32):
                 base = int(info.AllocationBase or 0)
                 allocation_sizes[base] = allocation_sizes.get(base, 0) + region
         address += region
+    histogram = {}
     for total in allocation_sizes.values():
         if total == POOL_BLOCK_BYTES:
             pool_blocks += 1
+        elif total == ARENA_BYTES:
+            arenas += 1
+        histogram[total] = histogram.get(total, 0) + 1
     result = {
         'private': committed[MEM_PRIVATE],
         'mapped': committed[MEM_MAPPED],
@@ -137,6 +148,8 @@ def _walk(kernel32):
         'largest_free': free_largest,
         'regions': regions,
         'pool_blocks': pool_blocks,
+        'arenas': arenas,
+        'classes': _top_classes(histogram),
         'truncated': truncated,
         'system_load': -1,
         'total_virtual': 0,
@@ -157,6 +170,20 @@ def _walk(kernel32):
     return result
 
 
+# How many distinct allocation sizes to name.  The point is to see *which*
+# size class grows across rounds: in the crashed workers the 1 MiB class held
+# 1739 blocks, but 32768 KiB x 13 and 240448 KiB x 1 were also present, and a
+# bare private_mb total cannot tell those apart.
+TOP_CLASSES = 6
+
+
+def _top_classes(histogram):
+    """Return the allocation sizes holding the most bytes, largest first."""
+    ranked = sorted(histogram.items(),
+                    key=lambda item: item[0] * item[1], reverse=True)
+    return [(size, count) for size, count in ranked[:TOP_CLASSES]]
+
+
 def _megabytes(value):
     return round(float(value) / (1024.0 * 1024.0), 1)
 
@@ -168,17 +195,29 @@ def format_line(phase, round_id, state=None):
         return None
     return ('[Offline LAN 0.9.22] MEMORY phase=%s round=%s private_mb=%s '
             'image_mb=%s mapped_mb=%s reserved_mb=%s free_mb=%s '
-            'largest_free_mb=%s regions=%d pool_1mib=%d system_load=%d '
+            'largest_free_mb=%s regions=%d pool_1mib=%d arenas=%d '
+            'arena_mb=%s classes=%s system_load=%d '
             'total_virtual_mb=%s total_phys_mb=%s truncated=%d' % (
                 phase, round_id,
                 _megabytes(state['private']), _megabytes(state['image']),
                 _megabytes(state['mapped']), _megabytes(state['reserved']),
                 _megabytes(state['free']), _megabytes(state['largest_free']),
                 state['regions'], state['pool_blocks'],
+                state.get('arenas', 0),
+                _megabytes(state.get('arenas', 0) * ARENA_BYTES),
+                _format_classes(state.get('classes')),
                 state['system_load'],
                 _megabytes(state.get('total_virtual', 0)),
                 _megabytes(state.get('total_phys', 0)),
                 state['truncated']))
+
+
+def _format_classes(classes):
+    """Render the size histogram as KiBxCOUNT pairs, largest bytes first."""
+    if not classes:
+        return '-'
+    return ','.join('%dKx%d' % (size // 1024, count)
+                    for size, count in classes)
 
 
 def log(phase, round_id):
