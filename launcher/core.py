@@ -72,6 +72,17 @@ ALLOW_MULTIPLE_CLIENTS_ENV_0922 = "OFFLINE_LAN_0922_ALLOW_MULTIPLE_CLIENTS"
 HIDDEN_DESKTOP_ENV_0922 = "OFFLINE_LAN_0922_HIDDEN_DESKTOP"
 WORKER_READY_MARKER_ENV_0922 = "OFFLINE_LAN_0922_WORKER_READY_MARKER"
 WORKER_STARTER_FILENAME_0922 = "offline_worker_starter.exe"
+WORKER_RES_PATH_ENV_0922 = "WOT_OFFLINE_WORKER_RES_PATH"
+WORKER_RESOURCE_ROOT_0922 = (
+    "mods/configs/offline_lan_0922/worker_res")
+WORKER_RESOURCE_STAMP_FILENAME_0922 = "worker_res_stamp.json"
+CLIENT_PATHS_FILENAME = "paths.xml"
+# The hidden worker renders for nobody, so every third-party mod it loads is
+# waste at best.  Field reports show worse: a battle-loading hook from another
+# mod ended every round instantly, and a worker carrying a fifteen-mod pack ran
+# out of 32-bit address space.  These two roots hold every mod the client
+# mounts, so an isolated worker resource list simply leaves them out.
+CLIENT_MOD_PATH_ROOTS = ("mods", "res_mods")
 WORKER_READY_MARKER_FILENAME_0922 = "offline-worker.ready"
 WORKER_FAILURE_LOG_FILENAME_0922 = "offline-worker-starter.log"
 SERVER_LOG_FILENAME = "server.log"
@@ -82,12 +93,13 @@ BUILD_IDENTITY_RELATIVE_PATH_0922 = (
 BUILD_SEMANTIC_VERSION_ENV = "WOT_OFFLINE_SEMANTIC_VERSION"
 BUILD_IDENTITY_ENV = "WOT_OFFLINE_BUILD_IDENTITY"
 PLAYER_ENGINE_CONFIG_0922 = "engine_config.offline-player.xml"
+WORKER_ENGINE_CONFIG_0922 = "engine_config.offline-worker.xml"
 PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
 STOP_STARTER_ARGUMENT_0922 = "--stop-starter"
-# The starter can spend 10 seconds attaching ProcDump before its own
-# 60-second ready wait. Let it record failure before launcher cancellation.
+# The starter waits up to 60 seconds for readiness, then can spend another
+# 10 seconds attaching ProcDump. Leave room for its own failure diagnostics.
 WORKER_READY_TIMEOUT_SECONDS_0922 = 90.0
 WORKER_FAILURE_DRAIN_SECONDS_0922 = 0.5
 STARTER_CONTROL_TIMEOUT_SECONDS_0922 = 5.0
@@ -246,13 +258,19 @@ def starter_stop_command(game_root, process_id):
 def worker_environment(game_root, host=LOCAL_HOST,
                        port=DEFAULT_SERVER_PORT,
                        team_size=DEFAULT_TEAM_SIZE, environment=None,
-                       team1_size=None, team2_size=None):
+                       team1_size=None, team2_size=None,
+                       isolated_mods=True):
     """Build the endpoint inherited by the hidden simulation client."""
     environment = server_environment(
         PORT_0_9_22, game_root, environment, team_size=team_size,
         team1_size=team1_size, team2_size=team2_size)
     environment[CLIENT_SERVER_HOST_ENV_0922] = str(host)
     environment[CLIENT_SERVER_PORT_ENV_0922] = str(int(port))
+    environment.pop(WORKER_RES_PATH_ENV_0922, None)
+    if isolated_mods:
+        entries = worker_resource_path_list(game_root)
+        if entries:
+            environment[WORKER_RES_PATH_ENV_0922] = ";".join(entries)
     return environment
 
 
@@ -1191,7 +1209,269 @@ def _transactional_install(game_root, staged_root, members, layout):
     return actions, len(operations)
 
 
+# Exit codes a field report actually produced.  A raw decimal tells a player
+# nothing, and the two that matter are not even crashes of ours: 0xC0000135 is
+# Windows refusing to start the client because a runtime DLL is missing, and 3
+# is the client's own abort() after its fatal-error handler ran.
+_EXIT_CODE_NOTES = {
+    3: ("the client stopped itself (abort); its own fatal-error message is "
+        "in the game log of that session"),
+    0xC0000005: "access violation inside the client",
+    0xC0000135: ("a DLL the client needs was not found, so Windows never "
+                 "started it: install the DirectX 9 (June 2010) end-user "
+                 "runtime and the Visual C++ x86 redistributable, then "
+                 "verify the game folder is complete"),
+}
+
+
+def describe_exit_code(code):
+    """Render a process exit code with its meaning when one is known."""
+    try:
+        value = int(code)
+    except (TypeError, ValueError):
+        return str(code)
+    unsigned = value & 0xFFFFFFFF
+    note = _EXIT_CODE_NOTES.get(unsigned)
+    if note is not None:
+        return "%d (0x%08X, %s)" % (value, unsigned, note)
+    if unsigned >= 0xC0000000:
+        return "%d (0x%08X, a Windows fatal status)" % (value, unsigned)
+    return str(value)
+
+
+def worker_resource_root(game_root):
+    """Return the launcher-owned resource root the hidden worker mounts."""
+    return os.path.join(
+        game_root, *WORKER_RESOURCE_ROOT_0922.split("/"))
+
+
+def _worker_resource_stamp_path(game_root):
+    return os.path.join(
+        os.path.dirname(worker_resource_root(game_root)),
+        WORKER_RESOURCE_STAMP_FILENAME_0922)
+
+
+def installed_client_package(game_root):
+    """Return the installed 0.9.22 mod package, or None."""
+    matches = sorted(glob.glob(os.path.join(game_root, _MOD_MARKER_0_9_22)))
+    return matches[-1] if matches else None
+
+
+def _file_stamp(path):
+    state = os.stat(path)
+    return {"name": os.path.basename(path), "size": state.st_size,
+            "mtime": getattr(
+                state, "st_mtime_ns", int(state.st_mtime * 1000000000))}
+
+
+def _worker_resource_sources(game_root):
+    """Return (package, worker engine config) or None when either is absent."""
+    package = installed_client_package(game_root)
+    if package is None:
+        return None
+    config = os.path.join(
+        game_root, "res_mods", "0.9.22.0.1", WORKER_ENGINE_CONFIG_0922)
+    if not os.path.isfile(config):
+        return None
+    return package, config
+
+
+def _worker_vehicle_overlay(game_root):
+    """Read only vehicle resources owned by the active launcher profile."""
+    try:
+        from . import vehicle_overlays
+    except ImportError:
+        import vehicle_overlays
+
+    try:
+        if not os.path.exists(vehicle_overlays.manifest_path(game_root)):
+            return {}, ""
+        unused_manifest, payload, digest = \
+            vehicle_overlays.active_vehicle_overlay(game_root)
+        return payload, digest
+    except vehicle_overlays.VehicleOverlayError as error:
+        raise LauncherError("The active vehicle profile is unavailable: %s" %
+                            error)
+
+
+def _extract_worker_resource_root(package, config, target):
+    """Unpack the package's ``res`` tree plus the worker engine config."""
+    import shutil
+    import zipfile
+
+    try:
+        archive = zipfile.ZipFile(package)
+    except (IOError, OSError, ValueError, zipfile.BadZipFile) as error:
+        raise LauncherError(
+            "The installed 0.9.22 package cannot be opened: %s" % error)
+    with archive:
+        members = []
+        for info in archive.infolist():
+            name = info.filename
+            if info.is_dir() or not name.startswith("res/"):
+                continue
+            relative = name[len("res/"):]
+            if (not relative or relative.startswith("/") or
+                    "\\" in relative or ".." in relative.split("/")):
+                raise LauncherError(
+                    "The installed 0.9.22 package holds an unsafe member: %s" %
+                    name)
+            members.append((info, relative))
+        if not members:
+            raise LauncherError(
+                "The installed 0.9.22 package holds no client resources.")
+        for info, relative in members:
+            destination = os.path.join(target, *relative.split("/"))
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with archive.open(info) as source:
+                with open(destination, "wb") as stream:
+                    shutil.copyfileobj(source, stream)
+    shutil.copyfile(config, os.path.join(target, os.path.basename(config)))
+    return len(members) + 1
+
+
+def prepare_worker_resource_root(game_root):
+    """Build the isolated resource root the hidden worker starts against.
+
+    The worker mounts this directory instead of the client's own ``mods`` and
+    ``res_mods`` roots, so it runs this port and nothing else.  Every failure
+    here is recoverable: the worker then starts exactly as it did before, from
+    the client's own ``paths.xml``.
+    """
+    import shutil
+    import tempfile
+    import zipfile
+
+    sources = _worker_resource_sources(game_root)
+    if sources is None:
+        return ["The hidden worker keeps the client's own mod paths; the "
+                "installed 0.9.22 package or its worker engine config is "
+                "missing."]
+    package, config = sources
+    root = worker_resource_root(game_root)
+    stamp_path = _worker_resource_stamp_path(game_root)
+    try:
+        overlay, overlay_digest = _worker_vehicle_overlay(game_root)
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config),
+                 "vehicle_overlay": overlay_digest}
+    except (OSError, LauncherError) as error:
+        return ["The hidden worker keeps the client's own mod paths: %s" %
+                error]
+    if os.path.isdir(root):
+        try:
+            with open(stamp_path, "r", encoding="utf-8") as stream:
+                if json.load(stream) == stamp:
+                    return ["The hidden worker's isolated resource root is "
+                            "already up to date."]
+        except (IOError, OSError, ValueError):
+            pass
+    staging = None
+    try:
+        os.makedirs(os.path.dirname(root), exist_ok=True)
+        staging = tempfile.mkdtemp(
+            prefix=".worker-res-", dir=os.path.dirname(root))
+        written = _extract_worker_resource_root(package, config, staging)
+        # Profile members have already passed the overlay ownership and
+        # integrity checks. Other files in res_mods stay outside this root.
+        for relative, payload in overlay.items():
+            destination = os.path.join(staging, *relative.split("/"))
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as stream:
+                stream.write(payload)
+        written += len(overlay)
+        if os.path.isdir(root):
+            shutil.rmtree(root)
+        os.replace(staging, root)
+        staging = None
+        _write_json(stamp_path, stamp)
+    except (IOError, OSError, LauncherError, ValueError,
+            zipfile.BadZipFile) as error:
+        return ["The hidden worker keeps the client's own mod paths; its "
+                "isolated resource root could not be built: %s" % error]
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+    return ["Built the hidden worker's isolated resource root (%d files)." %
+            written]
+
+
+def client_resource_paths(game_root):
+    """Return the client's own resource search path, mod roots removed.
+
+    ``paths.xml`` is the exact #1513 search path, in priority order.  Every
+    entry is kept verbatim except the two that mount mods; the result is the
+    list the hidden worker uses instead.
+    """
+    path = os.path.join(game_root, CLIENT_PATHS_FILENAME)
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (IOError, OSError, ElementTree.ParseError):
+        return None
+    entries = []
+    for node in root.iter("Path"):
+        text = (node.text or "").strip().replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        if not text or text.startswith("/") or ".." in text.split("/"):
+            continue
+        if text.split("/")[0] in CLIENT_MOD_PATH_ROOTS:
+            continue
+        entry = os.path.normpath(
+            os.path.join(game_root, *text.split("/")))
+        # ``type="sd,hd"`` selects which packages this content type installs,
+        # and a flat search path cannot carry that attribute.  Keeping only the
+        # entries that exist reaches the same list without reimplementing the
+        # filter, on an SD install as well as an HD one.
+        if os.path.exists(entry):
+            entries.append(entry)
+    return entries or None
+
+
+def worker_resource_path_list(game_root):
+    """Return the hidden worker's complete resource list, or None."""
+    root = worker_resource_root(game_root)
+    if not os.path.isfile(
+            os.path.join(root, WORKER_ENGINE_CONFIG_0922)):
+        return None
+    # A failed rebuild may leave the previous root intact. Only mount it when
+    # its recorded inputs still match the installed package and engine config;
+    # otherwise the logged fallback must really use the client's own paths.
+    sources = _worker_resource_sources(game_root)
+    if sources is None:
+        return None
+    package, config = sources
+    try:
+        unused_overlay, overlay_digest = _worker_vehicle_overlay(game_root)
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config),
+                 "vehicle_overlay": overlay_digest}
+        with open(_worker_resource_stamp_path(game_root), "r",
+                  encoding="utf-8") as stream:
+            if json.load(stream) != stamp:
+                return None
+    except (IOError, OSError, ValueError, LauncherError):
+        return None
+    entries = client_resource_paths(game_root)
+    if not entries:
+        return None
+    # The stock resource root itself is the floor: without it the worker has
+    # no client at all, and running it on a partial list would be worse than
+    # leaving it on paths.xml.
+    if os.path.normpath(os.path.join(game_root, "res")) not in entries:
+        return None
+    return [root] + entries
+
+
 def install_client_mod(game_root, port_version, base_dir=None, force=False):
+    """Install the bundled mod, then rebuild the hidden worker's own root."""
+    actions = _install_client_payload(
+        game_root, port_version, base_dir=base_dir, force=force)
+    if port_version == PORT_0_9_22:
+        actions = list(actions) + prepare_worker_resource_root(game_root)
+    return actions
+
+
+def _install_client_payload(game_root, port_version, base_dir=None,
+                            force=False):
     """Install the bundled mod and report what changed.
 
     The user's own files stay: this only clears the directories the package
