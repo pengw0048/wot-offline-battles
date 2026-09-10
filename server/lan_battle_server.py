@@ -7884,12 +7884,10 @@ class BattleState:
                     shells_before_shot == 1)
             if shooter_kind == "player":
                 shooter.fire_seq = shot_seq
-                if bool(intent.get("shell_change_pending", False)):
-                    shooter.shell_index = int(intent["next_shell_index"])
-                else:
-                    shooter.shell_index = shell_index
-                shooter.next_shell_index = shooter.shell_index
-                shooter.shell_change_pending = False
+                # The visible gun reports the post-shot shell selection in
+                # its next input checkpoint. A launch alone cannot promote a
+                # queued shell: the cassette may still contain rounds, and
+                # a newer input may already have changed the queued choice.
                 shooter.pending_fire_intents.pop(fire_intent_seq, None)
                 shooter.fire_intent_results[fire_intent_seq] = (
                     True, projectile_id)
@@ -7905,12 +7903,9 @@ class BattleState:
                     launch_time_us)
             statistics = self._statistics_row(shooter_kind, shooter_id)
             statistics["shots_fired"] += 1
-            # A pending shell change is applied above, so the round actually
-            # drawn is the shooter's resolved index rather than the one the
-            # launch message carried.
-            fired_index = str(max(0, min(9, int(
-                shooter.shell_index if shooter_kind == "player"
-                else shell_index))))
+            # Charge the shell frozen into this launch, independent of later
+            # loaded or queued selections reported by the visible client.
+            fired_index = str(shell_index)
             # The key is a string because this row is broadcast as JSON, which
             # would turn an integer key into one anyway and make the row stop
             # round-tripping.
