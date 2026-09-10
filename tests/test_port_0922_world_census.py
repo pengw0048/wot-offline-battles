@@ -1,10 +1,4 @@
-"""Whether the engine still holds last round's world.
-
-Peng's 2026-09-10 case: our code makes the game create something each round
-and never cleans it up.  The memory is C++, so `PYHEAP` and the obmalloc
-arena count both attribute it to nobody, but the cause is ours.  A count that
-climbs with the round number is last round's world still resident.
-"""
+"""Registry counts for lifecycle investigation, without leak attribution."""
 
 import sys
 from pathlib import Path
@@ -44,10 +38,9 @@ class WorldCensusTest(unittest.TestCase):
         self.assertEqual(1, state['userDataObjects'])
         self.assertEqual(1, state['spaces'])
 
-    def test_entities_left_over_from_last_round_are_visible(self):
-        # 30 vehicles still resident at the next round's start is the exact
-        # shape being hunted: each one drags a compound model, appearance,
-        # tracks and sound sources with it.
+    def test_entities_in_the_registry_are_visible(self):
+        # Report the registry count; it does not establish the entities' age
+        # or which native resources they retain.
         self._install(_BigWorld(entities=dict((i, i) for i in range(30)),
                                 user_data_objects={}))
         line = world_census.format_line('round_start', 8)

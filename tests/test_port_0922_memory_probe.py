@@ -12,6 +12,7 @@ guards the walk against ever stopping at the 2 GB line again.
 """
 
 import ctypes
+import subprocess
 import sys
 from pathlib import Path
 import unittest
@@ -88,6 +89,32 @@ class MemoryProbeTest(unittest.TestCase):
     def _install(self, kernel):
         memory_probe._kernel32 = lambda: kernel
 
+    def test_missing_native_ctypes_cannot_abort_client_startup(self):
+        # #1513 carries ctypes Python code, but not its _ctypes extension.
+        # A fresh interpreter avoids the host test runner's cached ctypes.
+        program = '''
+import builtins
+import importlib.util
+import sys
+original_import = builtins.__import__
+def without_native_ctypes(name, *args, **kwargs):
+    if name == '_ctypes':
+        raise ImportError('No module named _ctypes')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_native_ctypes
+spec = importlib.util.spec_from_file_location('memory_probe', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.snapshot() is None
+module.log('round_start', 42)
+'''
+        result = subprocess.run(
+            [sys.executable, '-c', program, memory_probe.__file__],
+            capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('MEMORY phase=round_start round=42 unavailable=ctypes',
+                      result.stdout)
+
     def test_the_walk_separates_private_image_reserved_and_free(self):
         self._install(_FakeKernel(_regions()))
         state = memory_probe.snapshot()
@@ -139,11 +166,25 @@ class MemoryProbeTest(unittest.TestCase):
         self.assertIn('total_virtual_mb=4095.9', line)
         self.assertIn('total_phys_mb=8192.0', line)
 
-    def test_one_mib_private_allocations_are_counted_on_their_own(self):
-        # 1739 and 1599 of these held most of the address space in the two
-        # crashed workers, so the count is the number worth trending.
-        self._install(_FakeKernel(_regions()))
-        self.assertEqual(2, memory_probe.snapshot()['pool_blocks'])
+    def test_private_allocation_size_classes_have_neutral_labels(self):
+        # Size classes include reserves and do not identify an allocator.
+        self._install(_FakeKernel([
+            (0, 0x100000, memory_probe.MEM_COMMIT, memory_probe.MEM_PRIVATE),
+            (0x100000, 0x40000, memory_probe.MEM_COMMIT,
+             memory_probe.MEM_PRIVATE),
+            (0x140000, 0x40000, memory_probe.MEM_RESERVE,
+             memory_probe.MEM_PRIVATE),
+        ]))
+        state = memory_probe.snapshot()
+        self.assertEqual(1, state['alloc_1mib'])
+        self.assertEqual(2, state['alloc_256kib'])
+        self.assertEqual(0x140000, state['private'])
+        line = memory_probe.format_line('round_end', 7, state)
+        self.assertIn('alloc_1mib=1', line)
+        self.assertIn('alloc_256kib=2', line)
+        self.assertIn('alloc_256kib_mb=0.5', line)
+        self.assertNotIn('arenas=', line)
+        self.assertNotIn('arena_mb=', line)
 
     def test_a_pathological_process_truncates_instead_of_stalling(self):
         cap = 64
@@ -168,7 +209,7 @@ class MemoryProbeTest(unittest.TestCase):
         line = memory_probe.format_line('round_end', 7)
         self.assertIn('MEMORY phase=round_end round=7', line)
         self.assertIn('private_mb=2.0', line)
-        self.assertIn('pool_1mib=2', line)
+        self.assertIn('alloc_1mib=2', line)
 
     def test_a_client_without_the_windows_api_reports_nothing(self):
         self._install(None)

@@ -2258,13 +2258,12 @@ class BattleRuntime(object):
                 self._has_deadeye = bool(skills['deadeye'])
             round_identity = (self._start_message or {}).get('round_id', '-')
             memory_probe.log('round_start', round_identity)
-            # Peng's standing question is whether this port leaks Python.
-            # The dumps only proved Python was not what exhausted the address
-            # space; a rate needs one census per round, not one at death.
+            # Track GC-visible object counts across equivalent boundaries;
+            # neither these counts nor allocation sizes measure all Python
+            # memory or identify the owner of a suspected leak.
             python_heap.log('round_start', round_identity)
-            # The other half of that question: an entity or space the engine
-            # still holds from last round is our bug even though the memory
-            # is C++, and nothing in Python can see it.
+            # Registry trends can guide lifecycle investigation, but do not
+            # prove a leak or cover resources outside those registries.
             world_census.log('round_start', round_identity)
             # MemoryCriticalController can lower TERRAIN_QUALITY mid-session,
             # and this port's ground probes and BSP collision read the terrain
@@ -9187,7 +9186,7 @@ class BattleRuntime(object):
         return True
 
     def _collection_counts(self):
-        """Return the per-round collection sizes a leak would grow.
+        """Return per-round collection sizes for retention trend analysis.
 
         The client runs against a 32-bit address-space ceiling, so every
         structure that lives for the whole round is reported once per window.
@@ -9299,7 +9298,7 @@ class BattleRuntime(object):
     )
 
     def _measured_module_structures(self):
-        """Module caches that outlive a round, so a leak shows across rounds."""
+        """Report module caches for comparing retention across rounds."""
         rows = []
         for module_name, attribute, label in (
                 ('internal_hit_layouts', '_LAYOUT_CACHE', 'hit_layout_cache'),
@@ -20113,16 +20112,19 @@ class BattleRuntime(object):
         local cell must feed that same binary direction into its sole pose
         integrator.  The descriptor, native gun rotator and copied traverse
         physics continue to own the arc, gun speed and resulting dispersion.
+
+        The direction is independent of the throttle.  The pinned executable
+        computes it in ``WGGunRotatorImpl`` from the elapsed time, the desired
+        yaw, the current turret yaw, the installed yaw limits and the turret
+        and vehicle rotation speeds; no drive input reaches that routine, and
+        the movement flags it publishes carry ``_MOVEMENT_FLAGS.FORWARD``
+        beside the rotation bit.  The copied cell preserves that desired hull
+        direction when composing it with either forward or reverse driving.
         """
         turn = float(turn)
         if turn != 0.0:
-            return turn
-        # Retail autorotation is an idle arcade-mode convenience.  Any live
-        # drive command owns the hull even when the vehicle is physically
-        # blocked and its measured speed is zero.  ``forward`` also carries
-        # the native R/F cruise presets, so this covers both keyboard drive
-        # and cruise without inferring motion from speed.
-        if float(drive_intent) != 0.0:
+            # A live A/D command owns the hull.  Only the rotation half of the
+            # retail command is in question here; the throttle keeps driving.
             return turn
         # CMD_BLOCK_TRACKS is independent from the persistent autorotation
         # setting.  Holding Space does not clear that setting, but the retail
@@ -20160,7 +20162,11 @@ class BattleRuntime(object):
         elif relative_yaw > maximum + GUN_TRAVERSE_LIMIT_EPSILON:
             autorotation_turn = 1.0
         if autorotation_turn:
-            return autorotation_turn
+            # traverse_step interprets steering as an A/D key and reverses it
+            # under reverse drive. Convert the desired hull yaw direction to
+            # that input convention so autorotation still approaches the aim.
+            return (-autorotation_turn if float(drive_intent) < 0.0 else
+                    autorotation_turn)
         return turn
 
     def _local_siege_drive_locked(self, entity):
@@ -21356,13 +21362,17 @@ class BattleRuntime(object):
             return self.client.send_bot_observation(
                 message.get('contacts'), message.get('affordances'))
         if kind == 'bot_ram':
+            contact_kwargs = {}
+            if 'contact_positions' in message:
+                contact_kwargs['contact_positions'] = message[
+                    'contact_positions']
             return self.client.send_bot_ram(
                 message.get('bot_id'), message.get('target_kind'),
                 message.get('target_id'), message.get('ram_seq'),
                 message.get('damage_to_bot'),
                 message.get('damage_to_target'),
                 message.get('ram_contact_player_id'),
-                message.get('ram_contact_seq'))
+                message.get('ram_contact_seq'), **contact_kwargs)
         if kind == 'rules_state':
             rules = message.get('rules') or {}
             return self.client.send_rules_state(rules.get('bases'))

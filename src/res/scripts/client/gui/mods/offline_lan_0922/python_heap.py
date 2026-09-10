@@ -5,7 +5,8 @@ The regular census is read-only and does not call ``gc.collect()``.
 boundary. Neither measurement covers all Python memory: untracked objects,
 extension buffers, and native resources can grow without changing the census.
 Growth or reclamation identifies paths to investigate, not a retaining owner
-or proof of a leak. Reachable acyclic objects can accumulate too.
+or proof of a leak. Reachable acyclic objects can accumulate too. Stable
+counts cannot rule out growth in object size or untracked allocations.
 
 It is diagnostics: every failure is swallowed and the caller continues.
 """
@@ -58,11 +59,10 @@ def _census():
     types = None
     if total <= MAX_CENSUS_OBJECTS:
         types = _by_type(tracked)
-    # Drop the census list's own reference before reporting, so the number
-    # reported is not inflated by the act of measuring.
+    # Release the temporary references held by the census before reporting.
     del tracked
     result = {
-        'objects': total,
+        'gc_tracked_objects': total,
         'gc_counts': tuple(counts),
         'types': types,
         'modules': 0,
@@ -75,9 +75,8 @@ def _census():
     except Exception:
         pass
     try:
-        # Uncollectable objects gc gave up on. Non-zero here is its own bug,
-        # and it is exactly the shape a reference cycle through a native
-        # object takes.
+        # Objects retained in gc.garbage need investigation. Their presence
+        # alone does not identify a native owner or the cause of retention.
         result['garbage'] = len(gc.garbage)
     except Exception:
         pass
@@ -106,10 +105,10 @@ def format_line(phase, round_id, state=None):
     types = state.get('types')
     rendered = ('-' if not types else
                 ','.join('%s:%d' % (name, count) for name, count in types))
-    return ('[Offline LAN 0.9.22] PYHEAP phase=%s round=%s objects=%d '
+    return ('[Offline LAN 0.9.22] PYHEAP phase=%s round=%s gc_tracked_objects=%d '
             'modules=%d gc_counts=%s gc_thresholds=%s gc_enabled=%d '
             'gc_garbage=%d top=%s' % (
-                phase, round_id, state['objects'], state['modules'],
+                phase, round_id, state['gc_tracked_objects'], state['modules'],
                 '/'.join(str(value) for value in state['gc_counts']),
                 '/'.join(str(value) for value in state['thresholds']),
                 state['enabled'], state['garbage'], rendered))

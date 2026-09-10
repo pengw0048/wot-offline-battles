@@ -1,23 +1,11 @@
-"""Count what the engine still holds from previous rounds.
+"""Count selected engine registries at equivalent round boundaries.
 
-Peng's case (2026-09-10): our code makes the game create something each round
-and never cleans it up.  The memory is BigWorld's, on the C++ heap, so neither
-`PYHEAP` nor `MEMORY`'s arena count would attribute it to us - but the cause
-is ours, and a leaked entity is not a small thing.  One Vehicle drags its
-compound model, appearance, track spline, sound sources and particle systems
-with it.
-
-That case splits in two:
-
-* Python still references the object, directly or through a live callback or
-  closure.  `PYHEAP`'s type histogram already catches this and names the type.
-* Python dropped it but the native resource was never released.  Nothing in
-  Python can see that one, and it is the case this module exists for.
-
-So count the stock registries instead.  At a round boundary in the lobby these
-should return to roughly where they started; a count that climbs with the
-round number is last round's world still resident, which is exactly the shape
-Peng described.
+Growth can help investigate entities or spaces retained across rounds, but a
+registry count does not identify an object's age, retaining owner, memory
+cost, or whether retention is expected. A count alone cannot prove a leak.
+Native resources can also remain after an entity leaves these registries, so
+stable counts cannot rule out a leak or attribute memory to Python or C++.
+Use these trends alongside PYHEAP, MEMORY, and lifecycle evidence.
 
 Only reads whose shape the stock #1513 client itself relies on are treated as
 known: `BigWorld.entities` is indexed with `.get`/`.keys()` in `vehicle.py`,

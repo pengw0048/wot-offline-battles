@@ -42,7 +42,7 @@ MODS_LISTING_LIMIT = 400
 # isolated-worker machine is hundreds of files.  Walking them would spend the
 # listing budget on our own payload and truncate before reaching the player's
 # third-party mods - the one thing this section exists to show.
-OWN_MOD_DIRECTORIES = ("configs",)
+OWN_MOD_DIRECTORIES = ("configs/offline_lan_0922",)
 # BigWorld writes its own crash banner onto the faulting thread's stack:
 # "Application <exe> crashed <date> at <time> / Message: / FATAL ERROR: ...".
 # The same words also appear in the module image as printf templates, so a
@@ -272,16 +272,17 @@ def environment_report(game_root, session=None):
 
 
 def _listing(root, limit, skip=()):
-    """List files under root, summarising any top-level directory in skip."""
+    """List files under root, summarising only owned relative directories."""
     rows = []
     truncated = False
     summarised = []
     for base, directories, files in os.walk(root):
-        if os.path.normpath(base) == os.path.normpath(root):
-            for name in sorted(directories):
-                if name.lower() in skip:
-                    directories.remove(name)
-                    summarised.append(name)
+        for name in sorted(directories):
+            relative = os.path.relpath(
+                os.path.join(base, name), root).replace("\\", "/")
+            if relative.lower() in skip:
+                directories.remove(name)
+                summarised.append(relative)
         directories.sort()
         for name in sorted(files):
             if len(rows) >= limit:

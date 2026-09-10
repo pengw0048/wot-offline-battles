@@ -870,6 +870,7 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
             'pair': pair,
             'self_id': self_id,
             'other_id': other_id,
+            'contact_positions': (x, z, other_x, other_z),
             'self_vehicle': str(
                 _tank_value(tank, 'vehicle', '') or ''),
             'other_vehicle': str(

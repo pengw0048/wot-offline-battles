@@ -98,16 +98,11 @@ PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
 STOP_STARTER_ARGUMENT_0922 = "--stop-starter"
-# The starter runs its own 60 s ready wait (WORKER_READY_TIMEOUT_MS in
-# native/offline_worker_starter.c) and writes the reason it gave up to
-# hidden-worker-starter.log.  Both clocks used to expire together, so which
-# one reported first was a race - and report 20260909-234646 arrived with no
-# worker log of any kind.  Give the launcher a margin so the starter always
-# loses that race and its explanation survives.  Extending this side rather
-# than shortening the starter's keeps every machine's existing 60 s to become
-# ready.
+# The starter waits up to 60 seconds for readiness, then can spend another
+# 10 seconds attaching ProcDump. Keep the launcher's 90-second budget so the
+# starter can record its own failure before launcher cancellation.
 WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 = 60.0
-WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922 = 15.0
+WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922 = 30.0
 WORKER_READY_TIMEOUT_SECONDS_0922 = (
     WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 +
     WORKER_READY_TIMEOUT_MARGIN_SECONDS_0922)
@@ -1286,6 +1281,24 @@ def _worker_resource_sources(game_root):
     return package, config
 
 
+def _worker_vehicle_overlay(game_root):
+    """Read only vehicle resources owned by the active launcher profile."""
+    try:
+        from . import vehicle_overlays
+    except ImportError:
+        import vehicle_overlays
+
+    try:
+        if not os.path.exists(vehicle_overlays.manifest_path(game_root)):
+            return {}, ""
+        unused_manifest, payload, digest = \
+            vehicle_overlays.active_vehicle_overlay(game_root)
+        return payload, digest
+    except vehicle_overlays.VehicleOverlayError as error:
+        raise LauncherError("The active vehicle profile is unavailable: %s" %
+                            error)
+
+
 def _extract_worker_resource_root(package, config, target):
     """Unpack the package's ``res`` tree plus the worker engine config."""
     import shutil
@@ -1332,6 +1345,7 @@ def prepare_worker_resource_root(game_root):
     """
     import shutil
     import tempfile
+    import zipfile
 
     sources = _worker_resource_sources(game_root)
     if sources is None:
@@ -1342,8 +1356,10 @@ def prepare_worker_resource_root(game_root):
     root = worker_resource_root(game_root)
     stamp_path = _worker_resource_stamp_path(game_root)
     try:
-        stamp = {"package": _file_stamp(package), "config": _file_stamp(config)}
-    except OSError as error:
+        overlay, overlay_digest = _worker_vehicle_overlay(game_root)
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config),
+                 "vehicle_overlay": overlay_digest}
+    except (OSError, LauncherError) as error:
         return ["The hidden worker keeps the client's own mod paths: %s" %
                 error]
     if os.path.isdir(root):
@@ -1360,12 +1376,21 @@ def prepare_worker_resource_root(game_root):
         staging = tempfile.mkdtemp(
             prefix=".worker-res-", dir=os.path.dirname(root))
         written = _extract_worker_resource_root(package, config, staging)
+        # Profile members have already passed the overlay ownership and
+        # integrity checks. Other files in res_mods stay outside this root.
+        for relative, payload in overlay.items():
+            destination = os.path.join(staging, *relative.split("/"))
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as stream:
+                stream.write(payload)
+        written += len(overlay)
         if os.path.isdir(root):
             shutil.rmtree(root)
         os.replace(staging, root)
         staging = None
         _write_json(stamp_path, stamp)
-    except (IOError, OSError, LauncherError, ValueError) as error:
+    except (IOError, OSError, LauncherError, ValueError,
+            zipfile.BadZipFile) as error:
         return ["The hidden worker keeps the client's own mod paths; its "
                 "isolated resource root could not be built: %s" % error]
     finally:
@@ -1412,6 +1437,23 @@ def worker_resource_path_list(game_root):
     root = worker_resource_root(game_root)
     if not os.path.isfile(
             os.path.join(root, WORKER_ENGINE_CONFIG_0922)):
+        return None
+    # A failed rebuild may leave the previous root intact. Only mount it when
+    # its recorded inputs still match the installed package and engine config;
+    # otherwise the logged fallback must really use the client's own paths.
+    sources = _worker_resource_sources(game_root)
+    if sources is None:
+        return None
+    package, config = sources
+    try:
+        unused_overlay, overlay_digest = _worker_vehicle_overlay(game_root)
+        stamp = {"package": _file_stamp(package), "config": _file_stamp(config),
+                 "vehicle_overlay": overlay_digest}
+        with open(_worker_resource_stamp_path(game_root), "r",
+                  encoding="utf-8") as stream:
+            if json.load(stream) != stamp:
+                return None
+    except (IOError, OSError, ValueError, LauncherError):
         return None
     entries = client_resource_paths(game_root)
     if not entries:
@@ -2230,6 +2272,16 @@ def wait_for_server(port_version, host, port, timeout=20.0, interval=0.25,
         if clock() >= deadline:
             return False
         sleep(interval)
+
+
+def worker_startup_exit_hint(exit_code):
+    """Explain loader failures that happen before the client can write a log."""
+    if exit_code is not None and (int(exit_code) & 0xffffffff) == 0xc0000135:
+        return ("0xC0000135: a required DLL could not be loaded. "
+                "Verify the game files and install the DirectX 9 June 2010 "
+                "runtime and Visual C++ x86 runtime. The exit code alone "
+                "does not identify the missing DLL.")
+    return ""
 
 
 def wait_for_worker_ready(process, game_root,

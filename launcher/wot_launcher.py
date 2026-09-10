@@ -43,10 +43,14 @@ _SHOP_HELP = (
     "next game startup. Owned or queued vehicles cannot be added twice. "
     "Close the game before adding vehicles.")
 
-LAUNCHER_VERSION = "0.7.4"
+LAUNCHER_VERSION = "0.7.5"
 WINDOW_TITLE = "World of Tanks Offline Battles %s" % LAUNCHER_VERSION
 
 _CHINESE = {
+    core.worker_startup_exit_hint(0xc0000135):
+        "0xC0000135：无法加载必需的 DLL。请检查游戏文件完整性，并安装 "
+        "DirectX 9 June 2010 运行库和 Visual C++ x86 运行库。"
+        "仅凭退出码无法确定具体缺失哪个 DLL。",
     "Language": "语言",
     "Game client": "游戏客户端",
     "Game folder": "游戏目录",
@@ -3029,6 +3033,10 @@ class LauncherWindow(object):
         it, fall back to the client's own mod paths once rather than leave the
         player with no worker at all.
         """
+        # Session and room setup activate their vehicle profile after package
+        # installation. Capture those owned resources at the startup boundary.
+        for action in core.prepare_worker_resource_root(game_root):
+            self._log(action)
         if self._start_worker_attempt(
                 game_root, host, port, room_owned=room_owned,
                 isolated_mods=True):
@@ -3103,6 +3111,9 @@ class LauncherWindow(object):
                 self._log(
                     "The hidden simulation worker stopped with exit code %s." %
                     core.describe_exit_code(exit_code))
+                hint = core.worker_startup_exit_hint(exit_code)
+                if hint:
+                    self._log(hint)
             self._log_worker_failure(game_root)
         self._stop_worker(room_owned=room_owned)
         return False
