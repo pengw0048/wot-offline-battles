@@ -110,10 +110,27 @@ class ErrorReportTest(unittest.TestCase):
             stream.write(payload)
 
     @staticmethod
-    def _archive(report):
+    def _archive_all(report):
         with zipfile.ZipFile(report["path"], "r") as archive:
             return dict((name, archive.read(name))
                         for name in archive.namelist())
+
+    @classmethod
+    def _archive(cls, report):
+        """The collected members only.
+
+        Generated sections (environment, installed mods, missing
+        dependencies, crash banners) describe the machine rather than the
+        session, so they are excluded here: every assertion below is about
+        which *logs and dumps* were selected, and that is what must not
+        drift. `_archive_all` sees everything.
+        """
+        generated = set(error_reports._CRASH_TEXT_FILENAMES.values())
+        generated.update(("environment.txt", "installed-mods.txt",
+                          "missing-dependencies.txt"))
+        return dict((name, payload)
+                    for name, payload in cls._archive_all(report).items()
+                    if name not in generated)
 
     @staticmethod
     def _minidump(*stream_types):
@@ -577,6 +594,98 @@ class ErrorReportTest(unittest.TestCase):
             error_reports.TRAIL_MAX_BYTES,
             len(payloads["hidden-worker.exceptions.txt"]))
 
+    def test_the_report_describes_the_machine_it_ran_on(self):
+        # Report 20260909-234646 carried a launcher log and a server log and
+        # nothing that said what kind of machine it was, so the only clue was
+        # a lowercase `C:\users\xuser` path in a log line.
+        session = error_reports.begin_session(
+            self.game, session_id=self.SESSION_1, started_at="start")
+        self._write(
+            self._game_log(error_reports.ROLE_VISIBLE_CLIENT), b"visible\n")
+        error_reports.finalize_session(session, ended_at="end")
+
+        payloads = self._archive_all(error_reports.create_report())
+
+        for name in ("environment.txt", "installed-mods.txt",
+                     "missing-dependencies.txt"):
+            self.assertIn(name, payloads)
+            self.assertTrue(payloads[name])
+        environment = payloads["environment.txt"].decode("utf-8")
+        self.assertIn("== machine", environment)
+        self.assertIn("== game", environment)
+        self.assertIn("session: %s" % self.SESSION_1, environment)
+
+    def test_a_dump_gives_up_its_crash_banner_as_text(self):
+        # The 1.27 GB dump in report 20260909-232240 was worth exactly one
+        # sentence, which the client had already written onto its own stack.
+        banner = (b"\0Application C:/wot/WorldOfTanks.exe crashed "
+                  b"09.09.2026 at 23:22:27\r\nMessage:\r\nFATAL ERROR: The "
+                  b"device has been removed. \r\nMemory status:\r\n"
+                  b"System: 1022021632/3221225472 [31.73% used]\0")
+        session = error_reports.begin_session(
+            self.game, needs_worker=True, session_id=self.SESSION_1,
+            started_at="start")
+        paths = error_reports.session_dump_paths(session)
+        self._write(paths[error_reports.ROLE_HIDDEN_WORKER],
+                    b"\0" * 4096 + banner + b"\0" * 4096)
+        self.assertTrue(error_reports.set_session_crash_roles(
+            session, [error_reports.ROLE_HIDDEN_WORKER]))
+        error_reports.finalize_session(session, ended_at="end")
+
+        report = error_reports.create_report()
+        payloads = self._archive_all(report)
+
+        text = payloads["hidden-worker.crash-text.txt"].decode("utf-8")
+        self.assertIn("FATAL ERROR: The device has been removed.", text)
+        self.assertIn("System: 1022021632/3221225472 [31.73% used]", text)
+        self.assertIn("hidden-worker.crash-text.txt", report["included"])
+        # The dump itself is still copied whole, byte for byte.
+        self.assertEqual(b"\0" * 4096 + banner + b"\0" * 4096,
+                         payloads["hidden-worker.dmp"])
+
+    def test_a_dump_without_a_banner_adds_no_crash_text(self):
+        session = error_reports.begin_session(
+            self.game, needs_worker=True, session_id=self.SESSION_1,
+            started_at="start")
+        paths = error_reports.session_dump_paths(session)
+        self._write(paths[error_reports.ROLE_HIDDEN_WORKER], b"no banner here")
+        self.assertTrue(error_reports.set_session_crash_roles(
+            session, [error_reports.ROLE_HIDDEN_WORKER]))
+        error_reports.finalize_session(session, ended_at="end")
+
+        payloads = self._archive_all(error_reports.create_report())
+
+        self.assertNotIn("hidden-worker.crash-text.txt", payloads)
+        self.assertIn("hidden-worker.dmp", payloads)
+
+    def test_a_session_with_nothing_collected_is_still_refused(self):
+        # The generated sections describe the machine, not the session. They
+        # must not make an empty session look like a collectable report.
+        session = error_reports.begin_session(
+            self.game, session_id=self.SESSION_1, started_at="start")
+        error_reports.finalize_session(session, ended_at="end")
+
+        with self.assertRaises(core.LauncherError):
+            error_reports.create_report()
+
+    def test_a_failing_section_does_not_cost_the_logs(self):
+        session = error_reports.begin_session(
+            self.game, session_id=self.SESSION_1, started_at="start")
+        self._write(
+            self._game_log(error_reports.ROLE_VISIBLE_CLIENT), b"visible\n")
+        error_reports.finalize_session(session, ended_at="end")
+
+        with mock.patch.object(
+                error_reports.report_environment, "installed_mods_report",
+                side_effect=RuntimeError("disk fell over")):
+            payloads = self._archive_all(error_reports.create_report())
+
+        self.assertEqual(b"visible\n", payloads["visible-client.log"])
+        self.assertIn(
+            "disk fell over",
+            payloads["installed-mods.txt"].decode("utf-8"))
+        self.assertIn("environment.txt", payloads)
+
     def test_partial_single_player_report_names_missing_current_logs(self):
         session = error_reports.begin_session(
             self.game, needs_worker=True, local_server=True,
@@ -587,7 +696,11 @@ class ErrorReportTest(unittest.TestCase):
 
         report = error_reports.create_report()
 
-        self.assertEqual(("visible-client.log",), report["included"])
+        # The generated sections are named too: the player is sending a
+        # description of their machine and mod list, so the launcher says so.
+        self.assertEqual(
+            ("visible-client.log", "environment.txt", "installed-mods.txt",
+             "missing-dependencies.txt"), report["included"])
         self.assertEqual(
             ("server.log", "hidden-worker.log"), report["missing"])
         self.assertEqual((), report["notRun"])
