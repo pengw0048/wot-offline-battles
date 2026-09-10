@@ -616,6 +616,15 @@ class ServerPayloadTest(unittest.TestCase):
             '[{"team":1,"slot":2,"vehicle":"ussr:R11_MS-1"}]',
             environment[core.SERVER_BOT_LINEUP_ENV_0922])
 
+    def test_server_receives_profile_exclusions_and_clears_inherited_values(self):
+        name = "ussr:R11_MS-1"
+        key = core.SERVER_BOT_EXCLUDED_VEHICLES_ENV_0922
+        environment = core.server_environment(
+            core.PORT_0_9_22, "/game", {}, bot_excluded_vehicles=[name])
+        self.assertEqual('["ussr:R11_MS-1"]', environment[key])
+        self.assertEqual("[]", core.server_environment(
+            core.PORT_0_9_22, "/game", environment)[key])
+
     def test_single_player_server_is_explicitly_loopback_only(self):
         environment = core.server_environment(
             core.PORT_0_9_22, "/game", {}, loopback_only=True)

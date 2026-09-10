@@ -534,11 +534,13 @@ class WindowTest(unittest.TestCase):
             "missing": ("hidden-worker.log",),
             "notRun": (),
         }
+        notice = mock.Mock()
+        tkinter = mock.Mock(messagebox=mock.Mock(showinfo=notice))
         with mock.patch.object(
                 wot_launcher.error_reports, "create_report",
                 return_value=report) as create, mock.patch.object(
                     wot_launcher.error_reports, "select_in_explorer") \
-                as select:
+                as select, mock.patch.dict("sys.modules", {"tkinter": tkinter}):
             self.assertTrue(self.window._create_error_report())
             for unused in range(200):
                 if not self.window._report_busy:
@@ -547,6 +549,11 @@ class WindowTest(unittest.TestCase):
 
         create.assert_called_once_with()
         select.assert_called_once_with(report["path"])
+        notice.assert_called_once_with(
+            "Error report ready",
+            "Please send this ZIP file to the author to report the problem:"
+            "\n\n%s" % report["path"],
+            parent=self.window.root)
         self.assertIn("Created error report", self._log_text())
         self.assertIn("server.log, visible-client.log", self._log_text())
         self.assertIn("hidden-worker.log", self._log_text())
@@ -732,9 +739,10 @@ class WindowTest(unittest.TestCase):
                     "wot_launcher.vehicle_overlays.prepare_vehicle_profile",
                     return_value={"profile": "Fast MS-1",
                                   "installedMembers": 2,
-                                  "removedMembers": 0}) as prepare, \
+                                  "removedMembers": 0,
+                                  "botExcludedVehicles": ["ussr:R11_MS-1"]}) as prepare, \
                 mock.patch.object(
-                    self.window, "_start_server", return_value=True), \
+                    self.window, "_start_server", return_value=True) as start_server, \
                 mock.patch.object(
                     self.window, "_start_worker", return_value=True):
             self.window.vehicle_profile.set("Fast MS-1")
@@ -745,6 +753,9 @@ class WindowTest(unittest.TestCase):
                 time.sleep(0.01)
 
         prepare.assert_called_once_with(game_root, "Fast MS-1")
+        start_server.assert_called_once_with(
+            game_root, core.PORT_0_9_22, persistent=True, require_owned=True,
+            bot_excluded_vehicles=["ussr:R11_MS-1"])
         self.assertIn("pins vehicle profile", self._log_text())
         self.assertIn("Fast MS-1", self._log_text())
 
@@ -2073,6 +2084,7 @@ class WindowTest(unittest.TestCase):
             "profile": "Fast MS-1",
             "installedMembers": 1,
             "removedMembers": 0,
+            "botExcludedVehicles": ["ussr:R11_MS-1"],
         }
         with mock.patch("core.install_client_mod", return_value=[]), \
                 mock.patch(
@@ -2112,7 +2124,8 @@ class WindowTest(unittest.TestCase):
             self.window._run_session(self.settings_dir, session, "Peng")
 
         start_server.assert_called_once_with(
-            self.settings_dir, core.PORT_0_9_22, loopback_only=True)
+            self.settings_dir, core.PORT_0_9_22, loopback_only=True,
+            bot_excluded_vehicles=["ussr:R11_MS-1"])
         start_worker.assert_called_once_with(
             self.settings_dir, core.LOCAL_HOST, core.DEFAULT_SERVER_PORT)
         run_game.assert_called_once_with(

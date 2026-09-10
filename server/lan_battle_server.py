@@ -2175,7 +2175,7 @@ class BattleState:
                  team_size=15,
                  receipt_state_path=None, team1_size=None, team2_size=None,
                  bot_tier_mode='random', bot_lineup=None,
-                 bot_skill_mode=None):
+                 bot_skill_mode=None, bot_excluded_vehicles=None):
         self.map_option = map_name
         self.map_name = self._choose_map()
         self.client_build = None
@@ -2191,6 +2191,8 @@ class BattleState:
         self.bot_skill_mode = bot_gunnery.normalize_skill_mode(
             bot_skill_mode)
         self.bot_lineup = self._normalize_bot_lineup(bot_lineup)
+        self.bot_excluded_vehicles = self._normalize_bot_excluded_vehicles(
+            bot_excluded_vehicles)
         # Keep the old scalar on the wire for older protocol-v5 consumers.
         # New consumers use team_sizes; max remains a safe roster upper bound.
         self.team_size = max(team1_size, team2_size)
@@ -2316,6 +2318,19 @@ class BattleState:
         self.last_projectile_resolve_reject = ""
         self.last_projectile_resolve_reject_code = ""
         self._logged_protocol_reject_codes = {}
+
+    @staticmethod
+    def _normalize_bot_excluded_vehicles(value):
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)) or len(value) > 4096:
+            raise ValueError("invalid Bot vehicle exclusions")
+        for name in value:
+            if (not isinstance(name, str) or len(name) > 96 or
+                    re.fullmatch(r"[a-z][a-z0-9_]*:[A-Za-z0-9][A-Za-z0-9_.-]*",
+                                 name) is None):
+                raise ValueError("invalid Bot vehicle exclusion name")
+        return sorted(set(value))
 
     @staticmethod
     def _normalize_bot_lineup(value):
@@ -3658,6 +3673,7 @@ class BattleState:
                 "bot_tier_mode": self.bot_tier_mode,
                 "bot_skill_mode": self.bot_skill_mode,
                 "bot_lineup": list(self.bot_lineup),
+                "bot_excluded_vehicles": list(self.bot_excluded_vehicles),
                 "bot_authority_id": self.bot_authority_id,
                 "bot_manifest": list(self.bot_manifest),
                 "bot_order_revision": self.bot_orders["revision"],
@@ -4338,6 +4354,7 @@ class BattleState:
                 "bot_tier_mode": self.bot_tier_mode,
                 "bot_skill_mode": self.bot_skill_mode,
                 "bot_lineup": list(self.bot_lineup),
+                "bot_excluded_vehicles": list(self.bot_excluded_vehicles),
                 "bot_authority_id": self.bot_authority_id,
                 "bot_manifest": takeover_manifest,
                 "bot_order_revision": self.bot_orders["revision"],
@@ -13785,6 +13802,7 @@ class BattleState:
                     "bot_tier_mode": self.bot_tier_mode,
                     "bot_skill_mode": self.bot_skill_mode,
                     "bot_lineup": list(self.bot_lineup),
+                    "bot_excluded_vehicles": list(self.bot_excluded_vehicles),
                     "bot_authority_id": self.bot_authority_id,
                     "authority_epoch": self.authority_epoch,
                     "server_time_ms": self._server_time_ms(),
@@ -14778,7 +14796,7 @@ def run_server(host, port, map_name, max_players,
                team1_size=None, team2_size=None,
                bot_tier_mode="random", bot_lineup=None,
                bot_skill_mode=None,
-               vehicle_overlay_root=None):
+               vehicle_overlay_root=None, bot_excluded_vehicles=None):
     if receipt_state_path is None:
         receipt_state_path = _default_result_receipt_state_path(port)
     state = BattleState(map_name=map_name, max_players=max_players,
@@ -14787,7 +14805,8 @@ def run_server(host, port, map_name, max_players,
                         team1_size=team1_size, team2_size=team2_size,
                         bot_tier_mode=bot_tier_mode,
                         bot_lineup=bot_lineup,
-                        bot_skill_mode=bot_skill_mode)
+                        bot_skill_mode=bot_skill_mode,
+                        bot_excluded_vehicles=bot_excluded_vehicles)
     if vehicle_overlay_root:
         try:
             overlay = VehicleOverlayStore(vehicle_overlay_root)
