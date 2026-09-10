@@ -29033,6 +29033,16 @@ class BattleRuntimeContractTests(unittest.TestCase):
             11, 'human', 2, 5, 21, 41, 2, 9)
         battle._bots.ack_human_ram_receipt.assert_not_called()
 
+        battle.client.send_bot_ram.reset_mock()
+        self.assertTrue(battle._send_bot_message({
+            'type': 'bot_ram', 'bot_id': 11, 'target_kind': 'bot',
+            'target_id': 12, 'ram_seq': 6, 'damage_to_bot': 21,
+            'damage_to_target': 41,
+            'contact_positions': [0.0, 0.0, 0.8, 0.0]}))
+        battle.client.send_bot_ram.assert_called_once_with(
+            11, 'bot', 12, 6, 21, 41, None, None,
+            contact_positions=[0.0, 0.0, 0.8, 0.0])
+
     def test_bot_state_uses_the_already_projected_client_boundary(self):
         battle = BattleRuntime(_runtime())
         battle.client = types.SimpleNamespace(
