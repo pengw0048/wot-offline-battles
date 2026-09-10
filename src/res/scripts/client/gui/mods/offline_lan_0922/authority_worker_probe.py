@@ -72,7 +72,7 @@ def _probe_delta(start, end):
 
 def write_probe_record(record, path=DEFAULT_REPORT_PATH):
     """Append one compact JSON record without ever affecting gameplay."""
-    payload = json.dumps(record, sort_keys=True, separators=(',', ':'))
+    payload = json.dumps(record, separators=(',', ':'))
     wrote = False
     try:
         sys.stdout.write('[AUTHORITY_WORKER_PROBE] %s\n' % payload)

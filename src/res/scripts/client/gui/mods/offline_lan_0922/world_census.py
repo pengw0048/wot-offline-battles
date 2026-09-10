@@ -5,7 +5,7 @@ registry count does not identify an object's age, retaining owner, memory
 cost, or whether retention is expected. A count alone cannot prove a leak.
 Native resources can also remain after an entity leaves these registries, so
 stable counts cannot rule out a leak or attribute memory to Python or C++.
-Use these trends alongside PYHEAP, MEMORY, and lifecycle evidence.
+Use these trends alongside process-memory measurements and lifecycle evidence.
 
 Only reads whose shape the stock #1513 client itself relies on are treated as
 known: `BigWorld.entities` is indexed with `.get`/`.keys()` in `vehicle.py`,

@@ -6270,7 +6270,7 @@ class BotRuntime(object):
                                     if int(state['id']) in pair),
         })
         print('[BOT MOTION] %s' % json.dumps(
-            trace, sort_keys=True, separators=(',', ':')))
+            trace, separators=(',', ':')))
 
     def set_camera_position(self, position):
         """Publish the viewpoint that drives the presentation detail tiers."""
