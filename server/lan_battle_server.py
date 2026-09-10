@@ -1585,6 +1585,21 @@ def _track_repair_rows(value):
     return tuple(sorted(result, key=lambda row: row["name"]))
 
 
+def _even_shares(total, parts):
+    """Return ``parts`` integer shares of ``total`` that sum back to it.
+
+    A spotting assist is divided between the observers lighting the target,
+    and the statistic is a whole number of hit points, so the remainder goes
+    to the first shares in the caller's stable order rather than being lost.
+    """
+    parts = int(parts)
+    if parts <= 0:
+        return []
+    share, remainder = divmod(int(total), parts)
+    return [share + 1 if index < remainder else share
+            for index in range(parts)]
+
+
 def _destroyed_tracks(critical):
     """Return the track devices one critical payload reports as destroyed."""
     if not isinstance(critical, dict):
@@ -1629,6 +1644,7 @@ class _EndpointSendMixin:
         self._outbox_reliable_bytes = 0
         self._outbox_snapshot = None
         self._outbox_thread = None
+        self._outbox_failure_reported = False
 
     def __post_init__(self):
         self._initialize_outbox()
@@ -1666,11 +1682,64 @@ class _EndpointSendMixin:
             self.connected = False
             condition.notify_all()
 
+    def _record_outbound_failure(self, reason, message, payload=None,
+                                 error=None, sent_bytes=None):
+        """Record the first failed send without retaining or logging content."""
+        try:
+            with self._ensure_outbox():
+                if self._outbox_failure_reported or not self.connected:
+                    return
+                self._outbox_failure_reported = True
+                metadata = message if isinstance(message, dict) else {}
+                message_type = metadata.get("type")
+                worker = isinstance(self, SimulationWorker)
+                snapshot = self._outbox_snapshot
+                failure = {
+                    "endpoint_role": "worker" if worker else "player",
+                    "endpoint_id": (self.worker_id if worker else
+                                    self.player_id),
+                    "reason": reason,
+                    "message_type": (
+                        message_type[:64]
+                        if isinstance(message_type, str) else None),
+                    "round_id": metadata.get("round_id"),
+                    "server_tick": metadata.get("server_tick"),
+                    "payload_bytes": (
+                        len(payload) if payload is not None else None),
+                    "sent_bytes": sent_bytes,
+                    "reliable_messages": len(self._outbox_reliable),
+                    "reliable_bytes": self._outbox_reliable_bytes,
+                    "snapshot_bytes": (len(snapshot["payload"])
+                                       if snapshot is not None else 0),
+                    "error_type": (
+                        type(error).__name__[:64]
+                        if error is not None else None),
+                    "errno": getattr(error, "errno", None),
+                }
+                # Malformed framing metadata must not leak arbitrary values
+                # or prevent a diagnostic for the original encoding failure.
+                for key in ("endpoint_id", "round_id", "server_tick", "errno"):
+                    if (type(failure[key]) is not int or
+                            not -(1 << 63) <= failure[key] < (1 << 63)):
+                        failure[key] = None
+            _server_log("OUTBOUND FAILURE " + json.dumps(
+                failure, sort_keys=True, separators=(",", ":")))
+        except Exception:
+            # A broken log destination must not change send/close semantics.
+            pass
+
     def _serialize_message(self, message):
         outgoing = _monotonic_endpoint_server_time(self, message)
-        payload = (json.dumps(
-            outgoing, separators=(",", ":")) + "\n").encode("utf-8")
+        try:
+            payload = (json.dumps(
+                outgoing, separators=(",", ":")) + "\n").encode("utf-8")
+        except Exception as error:
+            self._record_outbound_failure(
+                "encode_error", message, error=error, sent_bytes=0)
+            raise
         if len(payload) > MAX_LINE_BYTES:
+            self._record_outbound_failure(
+                "message_too_large", message, payload, sent_bytes=0)
             return None
         return payload
 
@@ -1691,42 +1760,54 @@ class _EndpointSendMixin:
     def _send_direct(self, message):
         if not self.connected:
             return False
+        # A restored endpoint may lack its outbox. Initialize before taking
+        # send_lock so a failure diagnostic cannot re-enter that plain lock.
+        self._ensure_outbox()
         try:
             with self.send_lock:
                 payload = self._serialize_message(message)
                 if payload is None:
                     return False
-                self._write_payload(payload)
+                self._write_payload(payload, message)
             self._mark_message_sent(message)
             return True
         except (BrokenPipeError, ConnectionError, OSError):
             self.connected = False
             return False
 
-    def _write_payload(self, payload):
+    def _write_payload(self, payload, message=None):
         """Finish one frame across short socket stalls without duplication."""
         sender = getattr(self.conn, "send", None)
-        if not callable(sender):
-            self.conn.sendall(payload)
-            return
-        offset = 0
+        # sendall does not expose partial progress if it raises.
+        offset = 0 if callable(sender) else None
         stalled_since = None
-        while offset < len(payload):
-            try:
-                count = sender(payload[offset:])
-                if count is None or int(count) <= 0:
-                    raise ConnectionError("peer closed during send")
-                offset += int(count)
-                stalled_since = None
-            except socket.timeout:
-                now = time.monotonic()
-                if stalled_since is None:
-                    stalled_since = now
-                elif (now - stalled_since >=
-                      OUTBOUND_STALL_TIMEOUT_SECONDS):
-                    raise socket.timeout(
-                        "peer did not accept LAN state for %.0f seconds" %
-                        OUTBOUND_STALL_TIMEOUT_SECONDS)
+        reason = "socket_error"
+        try:
+            if not callable(sender):
+                self.conn.sendall(payload)
+                return
+            while offset < len(payload):
+                try:
+                    count = sender(payload[offset:])
+                    if count is None or int(count) <= 0:
+                        reason = "peer_closed"
+                        raise ConnectionError("peer closed during send")
+                    offset += int(count)
+                    stalled_since = None
+                except socket.timeout:
+                    now = time.monotonic()
+                    if stalled_since is None:
+                        stalled_since = now
+                    elif (now - stalled_since >=
+                          OUTBOUND_STALL_TIMEOUT_SECONDS):
+                        reason = "send_stall"
+                        raise socket.timeout(
+                            "peer did not accept LAN state for %.0f seconds" %
+                            OUTBOUND_STALL_TIMEOUT_SECONDS)
+        except (BrokenPipeError, ConnectionError, OSError) as error:
+            self._record_outbound_failure(
+                reason, message, payload, error, offset)
+            raise
 
     def _start_outbox_locked(self):
         thread = self._outbox_thread
@@ -1761,6 +1842,12 @@ class _EndpointSendMixin:
                     MAX_RELIABLE_OUTBOUND_MESSAGES or
                     self._outbox_reliable_bytes + len(payload) >
                     MAX_RELIABLE_OUTBOUND_BYTES):
+                reason = ("reliable_message_limit"
+                          if len(self._outbox_reliable) >=
+                          MAX_RELIABLE_OUTBOUND_MESSAGES else
+                          "reliable_byte_limit")
+                self._record_outbound_failure(
+                    reason, message, payload, sent_bytes=0)
                 self._fail_outbox()
                 self._shutdown_transport()
                 return False
@@ -1776,6 +1863,7 @@ class _EndpointSendMixin:
         if done is None:
             return True
         if not done.wait(OUTBOUND_SYNC_TIMEOUT_SECONDS):
+            self._record_outbound_failure("sync_timeout", message, payload)
             self._fail_outbox()
             self._shutdown_transport()
             return False
@@ -1886,7 +1974,7 @@ class _EndpointSendMixin:
                     self._outbox_snapshot = None
             try:
                 with self.send_lock:
-                    self._write_payload(item["payload"])
+                    self._write_payload(item["payload"], item["message"])
             except (BrokenPipeError, ConnectionError, OSError):
                 self._fail_outbox(item)
                 self._shutdown_transport()
@@ -3005,6 +3093,8 @@ class BattleState:
             if round_failed:
                 self.worker_failure_reason = str(
                     failure_reason or "worker_disconnected")
+                failed_round_id = self.round_id
+                recorded_failure_reason = self.worker_failure_reason
                 self.pending_live_message = None
                 # A loading client has already entered the native offline
                 # arena. Publish the same explicit terminal result used in a
@@ -3025,7 +3115,7 @@ class BattleState:
             if round_failed:
                 _server_log(
                     "WORKER FAILURE round=%d reason=%s; round terminated" % (
-                        self.round_id, self.worker_failure_reason))
+                        failed_round_id, recorded_failure_reason))
         worker._shutdown_transport()
         return worker, round_failed
 
@@ -4730,6 +4820,7 @@ class BattleState:
                 (bot_id, set()) for bot_id in known_bots)
             direct_player_spots = dict(
                 (reporter_id, set()) for reporter_id in known_players)
+            team_lit = {1: {}, 2: {}}
             stale_observation = False
             contacts = []
             for raw in message.get("contacts"):
@@ -4781,8 +4872,16 @@ class BattleState:
                         int(target.get("team", 0)) == observing_team or
                         target_team != int(target.get("team", 0))):
                     return False
+                reported_fresh = bool(
+                    contact["visible_by_bot_ids"] or
+                    contact["visible_by_player_ids"])
+                if (contact["fresh"] != reported_fresh or
+                        contact["visible"] != (time_left > 0.0) or
+                        (reported_fresh and not contact["visible"]) or
+                        (not reported_fresh and
+                         contact["shootable_by_bot_ids"])):
+                    return False
                 bot_observer_ids = []
-                stale_contact = False
                 for raw_bot_id in contact.get("visible_by_bot_ids"):
                     try:
                         bot_id = _exact_int(
@@ -4790,15 +4889,15 @@ class BattleState:
                     except ValueError:
                         return False
                     bot = known_bots.get(bot_id)
-                    if bot is not None and not bot.get("alive"):
-                        stale_observation = True
-                        stale_contact = True
-                        continue
                     if (bot is None or
                             int(bot.get("team", 0)) != observing_team or
                             bot_id in bot_observer_ids):
                         return False
                     bot_observer_ids.append(bot_id)
+                    if not bot.get("alive"):
+                        stale_observation = True
+                bot_observer_ids = [bot_id for bot_id in bot_observer_ids
+                                    if known_bots[bot_id].get("alive")]
                 contact["visible_by_bot_ids"] = sorted(bot_observer_ids)
 
                 observer_ids = []
@@ -4810,17 +4909,15 @@ class BattleState:
                     except ValueError:
                         return False
                     observer = known_players.get(observer_id)
-                    if observer is not None and not observer.alive:
-                        stale_observation = True
-                        stale_contact = True
-                        continue
                     if (observer is None or
                             int(observer.team) != observing_team or
                             observer_id in observer_ids):
                         return False
                     observer_ids.append(observer_id)
-                if observer_ids and not contact["visible"]:
-                    return False
+                    if not observer.alive:
+                        stale_observation = True
+                observer_ids = [observer_id for observer_id in observer_ids
+                                if known_players[observer_id].alive]
                 contact["visible_by_player_ids"] = sorted(observer_ids)
                 shooter_ids = []
                 for raw_bot_id in contact.get("shootable_by_bot_ids"):
@@ -4830,15 +4927,15 @@ class BattleState:
                     except ValueError:
                         return False
                     bot = known_bots.get(bot_id)
-                    if bot is not None and not bot.get("alive"):
-                        stale_observation = True
-                        stale_contact = True
-                        continue
                     if (bot is None or
                             int(bot.get("team", 0)) != observing_team or
                             bot_id in shooter_ids):
                         return False
                     shooter_ids.append(bot_id)
+                    if not bot.get("alive"):
+                        stale_observation = True
+                shooter_ids = [bot_id for bot_id in shooter_ids
+                               if known_bots[bot_id].get("alive")]
                 contact["shootable_by_bot_ids"] = sorted(shooter_ids)
                 # A threat is advisory native geometry: a malformed row must
                 # not make an otherwise valid observation batch fail or give
@@ -4864,16 +4961,20 @@ class BattleState:
                     contact["threatened_bot_ids"] = sorted(
                         threatened_ids if contact["visible"] else ())
                 fresh = bool(bot_observer_ids or observer_ids)
-                if stale_contact and not fresh:
-                    continue
-                if (contact["fresh"] != fresh or
-                        contact["visible"] != (time_left > 0.0) or
-                        (fresh and not contact["visible"]) or
-                        (not fresh and shooter_ids)):
-                    return False
+                # An observer may die before its in-flight report arrives.
+                # Retire its direct sight and firing evidence, but keep the
+                # valid lease that still lights this target for the team.
+                contact["fresh"] = fresh
+                if not fresh:
+                    contact["shootable_by_bot_ids"] = []
+                    if "threatened_bot_ids" in contact:
+                        contact["threatened_bot_ids"] = []
                 contact["time_left"] = time_left
                 result_kind = ("player" if target_kind == "human"
                                else target_kind)
+                if contact["visible"]:
+                    team_lit[observing_team][
+                        (result_kind, target_id)] = time_left
                 for bot_id in bot_observer_ids:
                     direct_bot_spots[bot_id].add(
                         (result_kind, target_id))
@@ -4882,6 +4983,10 @@ class BattleState:
                         (result_kind, target_id))
                 contacts.append(contact)
             now = time.monotonic()
+            team_lit = {
+                team: {target: now + time_left
+                       for target, time_left in targets.items()}
+                for team, targets in team_lit.items()}
             accepted_visibility = []
             accepted_contacts = self.bot_planner.report_contacts(
                 contacts, known_targets, now,
@@ -4893,6 +4998,7 @@ class BattleState:
                 message.get("affordances"), known_bots, known_targets, now)
             self._replace_bot_spotted(direct_bot_spots)
             self._replace_player_spotted(direct_player_spots)
+            self._replace_team_lit(team_lit, now=now)
             self._commit_detections()
             if accepted_visibility:
                 return {
@@ -4928,6 +5034,20 @@ class BattleState:
         for player_id in sorted(direct_spots):
             spotted = frozenset(direct_spots[player_id])
             self.player_spotted[int(player_id)] = spotted
+        return True
+
+    def _replace_team_lit(self, lit_targets, now=None):
+        """Expire old leases before committing a complete deadline batch."""
+        now = time.monotonic() if now is None else now
+        for team in (1, 2):
+            # A lease can expire between reports without an explicit hidden
+            # sample. Compare the previous lease before a fresh observer's
+            # renewal replaces it, so that observer gets the new detection.
+            still_lit = {
+                target for target, deadline in
+                self.team_lit_targets[team].items() if deadline > now}
+            self.team_visible_targets[team].intersection_update(still_lit)
+            self.team_lit_targets[team] = dict(lit_targets.get(team, {}))
         return True
 
     @staticmethod
@@ -7884,12 +8004,10 @@ class BattleState:
                     shells_before_shot == 1)
             if shooter_kind == "player":
                 shooter.fire_seq = shot_seq
-                if bool(intent.get("shell_change_pending", False)):
-                    shooter.shell_index = int(intent["next_shell_index"])
-                else:
-                    shooter.shell_index = shell_index
-                shooter.next_shell_index = shooter.shell_index
-                shooter.shell_change_pending = False
+                # The visible gun reports the post-shot shell selection in
+                # its next input checkpoint. A launch alone cannot promote a
+                # queued shell: the cassette may still contain rounds, and
+                # a newer input may already have changed the queued choice.
                 shooter.pending_fire_intents.pop(fire_intent_seq, None)
                 shooter.fire_intent_results[fire_intent_seq] = (
                     True, projectile_id)
@@ -7905,12 +8023,9 @@ class BattleState:
                     launch_time_us)
             statistics = self._statistics_row(shooter_kind, shooter_id)
             statistics["shots_fired"] += 1
-            # A pending shell change is applied above, so the round actually
-            # drawn is the shooter's resolved index rather than the one the
-            # launch message carried.
-            fired_index = str(max(0, min(9, int(
-                shooter.shell_index if shooter_kind == "player"
-                else shell_index))))
+            # Charge the shell frozen into this launch, independent of later
+            # loaded or queued selections reported by the visible client.
+            fired_index = str(shell_index)
             # The key is a string because this row is broadcast as JSON, which
             # would turn an integer key into one anyway and make the row stop
             # round-tripping.
@@ -11476,8 +11591,24 @@ class BattleState:
                     player, intent_seq, False, "equipment_ineligible")
             payload = None
             if effect.get("action") != "set_rpm_limiter":
-                payload = player_critical_mechanics.apply_equipment(
-                    player, effect, now)
+                try:
+                    payload = player_critical_mechanics.apply_equipment(
+                        player, effect, now)
+                    if payload is not None:
+                        payload = _critical_payload(payload)
+                except Exception as error:
+                    # Resolution uses a detached target, before consuming the
+                    # kit or committing critical state. Finish this intent so
+                    # the client can retry with a new trigger after failure.
+                    detail = str(error).replace(
+                        "\r", " ").replace("\n", " ")[:160]
+                    _server_log(
+                        "EQUIPMENT INTENT failed sender=%d seq=%d item=%d "
+                        "error=%s detail=%s" % (
+                            player_id, intent_seq, equipment_id,
+                            type(error).__name__, detail))
+                    return self._finish_equipment_intent(
+                        player, intent_seq, False, "equipment_failed")
                 if payload is None and not effect.get("clearStun", False):
                     return self._finish_equipment_intent(
                         player, intent_seq, False, "equipment_no_effect")
@@ -11489,7 +11620,7 @@ class BattleState:
                     "canonical player equipment commit diverged")
             if payload is not None:
                 self._commit_player_critical_progress(
-                    player, _critical_payload(payload))
+                    player, payload)
             if effect.get("clearStun", False):
                 if not self._clear_vehicle_stun(("player", player_id)):
                     raise RuntimeError("canonical medkit stun clear diverged")
@@ -11779,6 +11910,11 @@ class BattleState:
         # team -> the enemies that team can currently see, so a vehicle that
         # goes dark and reappears is a new detection for whoever finds it.
         self.team_visible_targets = {1: set(), 2: set()}
+        # team -> enemy -> server monotonic deadline for the worker's spot
+        # lease. A target stays detected for as long as its lease holds, so
+        # neither a blocked line of sight nor a budgeted-out visibility probe
+        # can turn one continuous contact into a second detection.
+        self.team_lit_targets = {1: {}, 2: {}}
         # every vehicle any enemy ever directly detected.
         self.ever_spotted_targets = set()
         # actor -> damage it dealt to its own team.
@@ -11829,11 +11965,14 @@ class BattleState:
 
         A vehicle is detected when it becomes visible to a team that could
         not see it a moment ago; every direct observer on that team that saw
-        it at that instant detected it.  The statistic counts distinct
-        enemies, so re-acquiring a target the observer already revealed adds
-        nothing, while an enemy that goes dark and is revealed again credits
-        whoever found it that time.  This is the ``spotted`` column the
-        results screen shows and the count Patrol Duty (``scout``) reads.
+        it at that instant detected it.  A team keeps seeing a target for
+        as long as the worker's spot lease lights it, so a broken line of
+        sight or a budgeted-out visibility probe is not a second detection.
+        The statistic counts distinct enemies, so re-acquiring a target the
+        observer already revealed adds nothing, while an enemy whose lease
+        expired and is found again credits whoever finds it that time.  This
+        is the ``spotted`` column the results screen shows and the count
+        Scout (``scout``) reads.
         """
         observers = [(("bot", int(bot_id)), spotted)
                      for bot_id, spotted in self.bot_spotted.items()]
@@ -11861,7 +12000,8 @@ class BattleState:
                     interaction["spotted"] = 1
                     row = self._statistics_row(*reporter)
                     row["spotted"] = int(row.get("spotted", 0)) + 1
-            self.team_visible_targets[team] = set(visible)
+            self.team_visible_targets[team] = set(visible) | set(
+                self.team_lit_targets.get(team, ()))
 
     def _direct_spotters(self, target):
         """Return every enemy observer that directly sees ``target``.
@@ -12104,14 +12244,36 @@ class BattleState:
                 0 if value.get("target_kind") == "player" else 1,
                 int(value.get("target_id", 0))))]
 
+    def _spots_target(self, actor, target):
+        """Return whether one live observer currently sees this target."""
+        actor = (str(actor[0]), int(actor[1]))
+        target = (str(target[0]), int(target[1]))
+        if actor[0] == "player":
+            player = self.players.get(actor[1])
+            return bool(player is not None and player.connected and
+                        player.alive and
+                        target in self.player_spotted.get(actor[1], ()))
+        bot = self.bot_states.get(actor[1])
+        return bool(bot is not None and bot.get("alive") and
+                    target in self.bot_spotted.get(actor[1], ()))
+
     def _radio_assisters(self, attacker, target, target_team):
-        """Return live direct observers whose set contains this target."""
+        """Return the live observers one spotting assist is divided between.
+
+        Wargaming pays a spotting assist for damage done to a target the
+        observer is spotting "by team members who are not spotting them
+        themselves", divided "by the number of team members spotting the
+        target".  An attacker that sees its own target therefore earns
+        nobody an assist instead of merely being skipped, which is the rule
+        the Patrol Duty ledger in ``_record_damage`` already applies.
+        """
+        if self._spots_target(attacker, target):
+            return []
         result = []
         for reporter_id in sorted(self.player_spotted):
             reporter = self.players.get(reporter_id)
             if (reporter is None or not reporter.connected or
                     not reporter.alive or reporter.team == target_team or
-                    ("player", reporter_id) == attacker or
                     target not in self.player_spotted[reporter_id]):
                 continue
             result.append(("player", reporter_id))
@@ -12120,7 +12282,6 @@ class BattleState:
             reporter = ("bot", int(bot_id))
             if (bot is None or not bot.get("alive") or
                     int(bot.get("team", 0)) == target_team or
-                    reporter == attacker or
                     target not in self.bot_spotted[bot_id]):
                 continue
             result.append(reporter)
@@ -12188,26 +12349,32 @@ class BattleState:
         if (holder is not None and holder != attacker and
                 self._vehicle_team(*holder) != target_team and
                 _destroyed_tracks(target_critical)):
-            credits.append(("track", holder))
+            credits.append(("track", holder, damage))
         holder = self._active_stun_assister(target)
         if (holder is not None and holder != attacker and
                 self._vehicle_team(*holder) != target_team):
-            credits.append(("stun", holder))
+            credits.append(("stun", holder, damage))
+        # A track or a stun has one owner, but a spotting assist is shared by
+        # every observer lighting the target, so each of them is paid its
+        # share of this damage rather than the whole of it.
+        assisters = self._radio_assisters(attacker, target, target_team)
         credits.extend(
-            ("radio", assister) for assister in
-            self._radio_assisters(attacker, target, target_team))
-        for category, assister in credits:
+            ("radio", assister, share) for assister, share in
+            zip(assisters, _even_shares(damage, len(assisters))))
+        for category, assister, amount in credits:
+            if amount <= 0:
+                continue
             self._statistics_row(*assister)[
-                "damage_assisted_%s" % category] += damage
+                "damage_assisted_%s" % category] += amount
             self._increment_interaction(
-                assister, target, "assist_%s" % category, damage)
+                assister, target, "assist_%s" % category, amount)
             self.pending_events.append({
                 "kind": "assist",
                 "category": category,
                 "assister_kind": assister[0], "assister_id": assister[1],
                 "attacker_kind": attacker[0], "attacker_id": attacker[1],
                 "target_kind": target[0], "target_id": target[1],
-                "damage": damage,
+                "damage": amount,
             })
 
     def _frozen_player_participant(self, player_id):

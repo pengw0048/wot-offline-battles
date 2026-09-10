@@ -1730,7 +1730,76 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         }))
         self.assertEqual(2, player.input_seq)
 
-    def test_player_queued_shell_is_promoted_by_the_canonical_shot(self):
+    def test_player_queued_shell_changes_only_with_a_new_client_checkpoint(self):
+        for clip_size, clip in ((1, 1), (3, 1), (3, 3)):
+            with self.subTest(clip_size=clip_size, clip=clip):
+                state = _state()
+                player = state.players[1]
+                self.assertTrue(_update_player_input(
+                    state, 1, shell_index=0, next_shell_index=1,
+                    shell_change_pending=True,
+                    gun_checkpoint=_gun_checkpoint(
+                        clip=clip, clip_size=clip_size)))
+                self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+                    state, shot_direction=[1.0, 0.0, 0.0])))
+                relay = player.pending_fire_intents[1]
+
+                self.assertTrue(state.launch_projectile(
+                    SIMULATION_WORKER_AUTHORITY_ID, _launch(
+                        authority_epoch=state.authority_epoch,
+                        fire_intent_seq=relay['intent_seq'],
+                        fire_input_seq=relay['input_seq'])))
+
+                public = state._public_player(player)
+                self.assertEqual(0, public['shell_index'])
+                self.assertEqual(1, public['next_shell_index'])
+                self.assertTrue(public['shell_change_pending'])
+                # The visible gun consumes the admitted round and reports
+                # whether this was an intra-clip or full reload boundary.
+                loaded = 1 if clip == 1 else 0
+                self.assertTrue(_update_player_input(
+                    state, 1, shell_index=loaded, next_shell_index=1,
+                    shell_change_pending=clip > 1,
+                    gun_checkpoint=_gun_checkpoint(
+                        reload_time=5.0 if clip == 1 else 1.0,
+                        clip=clip - 1, clip_size=clip_size)))
+                public = state._public_player(player)
+                self.assertEqual(loaded, public['shell_index'])
+                self.assertEqual(1, public['next_shell_index'])
+                self.assertEqual(clip > 1, public['shell_change_pending'])
+
+    def test_player_launch_preserves_a_later_queued_shell_input(self):
+        state = _state()
+        player = state.players[1]
+        self.assertTrue(_update_player_input(
+            state, 1, shell_index=0, next_shell_index=1,
+            shell_change_pending=True,
+            gun_checkpoint=_gun_checkpoint(clip=3, clip_size=3)))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
+            state, shot_direction=[1.0, 0.0, 0.0])))
+        relay = player.pending_fire_intents[1]
+        self.assertEqual(1, relay['next_shell_index'])
+        self.assertTrue(relay['shell_change_pending'])
+        self.assertTrue(_update_player_input(
+            state, 1, shell_index=0, next_shell_index=2,
+            shell_change_pending=True,
+            gun_checkpoint=_gun_checkpoint(clip=3, clip_size=3)))
+
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID, _launch(
+                authority_epoch=state.authority_epoch,
+                fire_intent_seq=relay['intent_seq'],
+                fire_input_seq=relay['input_seq'])))
+
+        self.assertEqual(0, player.shell_index)
+        self.assertEqual(2, player.next_shell_index)
+        self.assertTrue(player.shell_change_pending)
+        public = state._public_player(player)
+        self.assertEqual(0, public['shell_index'])
+        self.assertEqual(2, public['next_shell_index'])
+        self.assertTrue(public['shell_change_pending'])
+
+    def test_player_shell_cost_tracks_the_fired_type_once_across_a_swap(self):
         state = _state()
         player = state.players[1]
         self.assertTrue(_update_player_input(
@@ -1739,22 +1808,29 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(state.submit_fire_intent(1, _fire_intent(
             state, shot_direction=[1.0, 0.0, 0.0])))
         relay = player.pending_fire_intents[1]
-        self.assertEqual(1, relay['next_shell_index'])
-        self.assertTrue(relay['shell_change_pending'])
+        launch = _launch(
+            authority_epoch=state.authority_epoch,
+            fire_intent_seq=relay['intent_seq'],
+            fire_input_seq=relay['input_seq'])
 
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                authority_epoch=state.authority_epoch,
-                fire_intent_seq=relay['intent_seq'],
-                fire_input_seq=relay['input_seq'])))
+            SIMULATION_WORKER_AUTHORITY_ID, launch))
+        statistics = state._statistics_row('player', 1)
+        self.assertEqual(1, statistics['shots_fired'])
+        self.assertEqual({'0': 1}, statistics['shells_fired'])
+        self.assertEqual(0, state.pending_events[-1]['shell_index'])
+        self.assertTrue(state.launch_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID, dict(launch)))
+        self.assertEqual(1, statistics['shots_fired'])
+        self.assertEqual({'0': 1}, statistics['shells_fired'])
 
-        self.assertEqual(1, player.shell_index)
-        self.assertEqual(1, player.next_shell_index)
-        self.assertFalse(player.shell_change_pending)
-        public = state._public_player(player)
-        self.assertEqual(1, public['shell_index'])
-        self.assertEqual(1, public['next_shell_index'])
-        self.assertFalse(public['shell_change_pending'])
+        self.assertTrue(_update_player_input(
+            state, 1, shell_index=1, next_shell_index=1,
+            shell_change_pending=False))
+        self.assertTrue(_launch_authority(
+            state, _launch(shot_seq=2, shell_index=1)))
+        self.assertEqual(2, statistics['shots_fired'])
+        self.assertEqual({'0': 1, '1': 1}, statistics['shells_fired'])
 
     def test_unidentifiable_fire_intents_do_not_advance_the_frontier(self):
         state = _state()

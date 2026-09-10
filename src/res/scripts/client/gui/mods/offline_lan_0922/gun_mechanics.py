@@ -421,29 +421,29 @@ class GunState(object):
             self.reload_time = 0.0
             return True
         self._burst_total = 0
-        if self.clip > 0:
+        if self.clip > 0 and self.ammo[index] > 0:
             self.reload_time = self.clip_reload
             self.reload_duration = self.clip_reload
-        else:
-            self.reload_time = self.reload * max(0.0, float(reload_factor))
-            self.reload_duration = self.reload_time
-        if self.ammo[index] <= 0:
+            return True
+        # A queued shell waits for the whole cassette, not its next intra-clip
+        # interval. Select the next type before beginning one empty full
+        # reload; publishing loaded rounds here makes #1513 classify that
+        # full reload as an intra-clip interval.
+        pending = self.pending_index
+        self.pending_index = None
+        if (pending is not None and 0 <= pending < len(self.ammo) and
+                self.ammo[pending] > 0):
+            self.shot_index = pending
+        elif self.ammo[index] <= 0:
             for offset in range(1, len(self.ammo) + 1):
                 candidate = (index + offset) % len(self.ammo)
                 if self.ammo[candidate] > 0:
                     self.shot_index = candidate
-                    self.clip = min(self.clip_size, self.ammo[candidate])
-                    self.reload_time = max(self.reload_time, self.reload)
-                    self.reload_duration = self.reload_time
                     break
-        pending = self.pending_index
-        self.pending_index = None
-        if (pending is not None and pending != self.shot_index and
-                pending < len(self.ammo) and self.ammo[pending] > 0):
-            self.shot_index = pending
-            self.clip = 0
-            self.reload_time = self.reload
-            self.reload_duration = self.reload
+        self.clip = 0
+        self.reload_time = self.reload * max(0.0, float(reload_factor))
+        self.reload_duration = self.reload_time
+        if self.shot_index != index:
             self.load_started = False
         return True
 

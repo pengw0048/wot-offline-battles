@@ -58,6 +58,26 @@ CAPTURE_STAGING_RADIUS = 30.0
 MIN_ROUTE_CLASS_AFFINITY = 0.20
 RECENT_HIT_SECONDS = 6.0
 RECENT_ATTACKER_SCORE_BONUS = 140.0
+# Target ranking weights.  A lower score wins, so a per-metre term prefers a
+# nearer enemy and a bonus is subtracted.  All four are product numbers for
+# this project; none of them is retail data.
+#
+# Every Bot pays the reach term at every rating.  How far a gun has to shoot
+# is a fact about the gun, not a tactic, and without it a Bot that has not
+# reached the nearest-enemy rung would rank a 400 m contact ahead of a 100 m
+# one on nothing but a contact id.
+TARGET_REACH_SCORE_PER_METRE = 0.018
+# Deliberately preferring the nearer enemy is the ladder's first rung, so it
+# is weighted to matter against the other rungs rather than to dominate them:
+# a weakened target still wins inside roughly 100 m of extra travel, and the
+# nearer target wins once the gap grows past roughly 200 m.
+NEAREST_TARGET_SCORE_PER_METRE = 0.12
+# The human is the round's real opponent, so the top rung goes for the player
+# ahead of an equally convenient Bot. This preference alone is weaker than
+# point-blank self-defence; retaliation also contributes to the total score.
+HUMAN_TARGET_SCORE_BONUS = 60.0
+# How much of the ranking the most nearly dead contact is worth.
+TARGET_HEALTH_SCORE_SPAN = 28.0
 LOW_HEALTH_BASE_FRACTION = 0.18
 CROSSFIRE_MIN_ANGLE = math.radians(55.0)
 CROSSFIRE_MAX_DISTANCE = 360.0
@@ -1738,12 +1758,17 @@ class BotPlanner(object):
         return order
 
     def _assign_targets(self, bots, contacts, now):
-        """Assign only locally shootable contacts, with a hard focus cap.
+        """Assign only locally shootable contacts, with a shared focus budget.
 
         Team spotting is shared intelligence, not proof that every tank has a
         firing lane. The authority client reports the bot ids whose own static
         ray succeeded, so a shared red dot cannot pull the rest of a flank off
         its route.
+
+        Which of those lanes a Bot prefers is a difficulty ladder: see the
+        rungs and their onsets below and in ``bot_gunnery``. The focus cap
+        does not read the ladder, so a human contact is reserved exactly like
+        a Bot contact however hard the roster is.
         """
         if not bots or not contacts:
             return {}
@@ -1751,26 +1776,30 @@ class BotPlanner(object):
         assigned = {}
         candidates = []
         by_bot = {}
-        priority = {}
+        tactics = {}
         for bot in bots:
             bx = _number(bot["state"].get("x"))
             bz = _number(bot["state"].get("z"))
-            # Ranking a whole contact list by how nearly dead each target is,
-            # and turning on whoever last hit you, is a competence. The
-            # occasion is the target lease this assignment already runs on,
-            # not the wall clock: a Bot that re-decided on a timer would
-            # change its mind mid-lease, and every candidate's score would
-            # move at once for no reason the enemy gave it. Decided once per
-            # call and reused below, so the score and the attacker override
-            # cannot disagree. Distance and the point-blank override survive
-            # either way: closing to your own gun and answering a tank in
-            # your face are not tactics.
+            # Choosing an enemy is a ladder of separate competences, not one
+            # decision: preferring the nearer contact, finishing the most
+            # nearly dead one, turning on whoever just hit you, and going for
+            # the human instead of a Bot each have their own onset on the
+            # rating axis, so a stronger roster reaches for strictly more of
+            # them instead of only hesitating less often. The occasion is the
+            # target lease this assignment already runs on, not the wall
+            # clock: a Bot that re-decided on a timer would change its mind
+            # mid-lease, and every candidate's score would move at once for
+            # no reason the enemy gave it. Decided once per call and reused
+            # below, so a score and its override cannot disagree. Gun reach
+            # and the point-blank override survive at every rating: neither
+            # is a tactic.
             lease = self._target_assignments.get(bot["id"])
-            reads_priority = self._capable(
-                bot, bot_gunnery.CAPABILITY_TARGET_PRIORITY,
-                round(_number(lease.get("until")), 3)
-                if isinstance(lease, dict) else None)
-            priority[bot["id"]] = reads_priority
+            occasion = (round(_number(lease.get("until")), 3)
+                        if isinstance(lease, dict) else None)
+            reads = dict(
+                (capability, self._capable(bot, capability, occasion))
+                for capability in bot_gunnery.TARGET_CAPABILITIES)
+            tactics[bot["id"]] = reads
             for contact in contacts:
                 if (not contact.get("visible") or
                         bot["id"] not in contact.get(
@@ -1782,16 +1811,23 @@ class BotPlanner(object):
                 if distance > self._engagement_range(bot, contact):
                     continue
                 score = 0.0
-                if reads_priority:
-                    score += contact["health"] / float(
-                        max(1, contact["max_health"])) * 28.0
-                score += distance * 0.018
+                if reads[bot_gunnery.CAPABILITY_TARGET_PRIORITY]:
+                    score += (contact["health"] / float(
+                        max(1, contact["max_health"])) *
+                        TARGET_HEALTH_SCORE_SPAN)
+                score += distance * TARGET_REACH_SCORE_PER_METRE
+                if reads[bot_gunnery.CAPABILITY_TARGET_NEAREST]:
+                    score += distance * NEAREST_TARGET_SCORE_PER_METRE
                 hit = self._recent_hit(bot["id"], now)
-                if (reads_priority and hit is not None and
+                if (reads[bot_gunnery.CAPABILITY_TARGET_RETALIATION] and
+                        hit is not None and
                         hit.get("attacker") == (
                             str(contact.get("target_kind") or ""),
                             _integer(contact.get("id")))):
                     score -= RECENT_ATTACKER_SCORE_BONUS
+                if (reads[bot_gunnery.CAPABILITY_TARGET_HUMAN] and
+                        str(contact.get("target_kind") or "") == "human"):
+                    score -= HUMAN_TARGET_SCORE_BONUS
                 if distance <= CLOSE_THREAT_DISTANCE:
                     # A point-blank enemy is an immediate self-defence problem,
                     # even while a previous long-range target still owns a
@@ -1886,7 +1922,8 @@ class BotPlanner(object):
             attacker_override = bool(
                 hit is not None and best_key == hit.get("attacker") and
                 best_key != previous.get("target") and
-                priority.get(bot["id"], True))
+                tactics.get(bot["id"], {}).get(
+                    bot_gunnery.CAPABILITY_TARGET_RETALIATION, True))
             if close_override or attacker_override:
                 continue
             if (lease_expired and

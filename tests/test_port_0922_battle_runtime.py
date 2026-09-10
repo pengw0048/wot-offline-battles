@@ -8545,6 +8545,84 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._publish_reload_event.assert_called_once_with(
             state.reload_time, state.reload_duration, force=True)
 
+    def test_exhausted_autoloader_publishes_full_reload_then_fires_new_shell(self):
+        for preselected in (False, True):
+            with self.subTest(preselected=preselected):
+                battle, state, settings, client, record = \
+                    self._pending_fire_shell_change_battle(clip_size=4, clip=1)
+                state.ammo = [1, 10]
+                stock = {'current': None, 'ammo': {}, 'reload': None}
+
+                def ammo_update(unused_id, compact, quantity, clip,
+                                unused_remaining):
+                    stock['ammo'][compact] = (quantity, clip)
+
+                def setting_update(unused_id, code, compact):
+                    if code == settings.CURRENT_SHELLS:
+                        stock['current'] = compact
+
+                def reload_update(unused_id, remaining, duration):
+                    # Exact #1513 AmmoController.setGunReloadTime uses the
+                    # current cassette count to choose full vs intra-clip
+                    # duration. A prematurely filled clip selects the latter.
+                    clip = stock['ammo'][stock['current']][1]
+                    if not ((clip == 1 and remaining == 0) or
+                            (clip == 0 and remaining > 0)):
+                        duration = state.clip_reload
+                    stock['reload'] = (remaining, duration)
+
+                battle._avatar.updateVehicleAmmo = ammo_update
+                battle._avatar.updateVehicleSetting = setting_update
+                battle._avatar.updateVehicleGunReloadTime = reload_update
+                if preselected:
+                    battle.change_vehicle_setting(settings.NEXT_SHELLS, 102)
+                self.assertTrue(battle.shoot(0.0, 0.0))
+                pending = dict(battle._local_fire_intent)
+                self.assertTrue(battle._accept_player_fire_commit({
+                    'shooter_kind': 'player', 'shooter_id': 1,
+                    'fire_intent_seq': pending['intent_seq'],
+                    'fire_input_seq': pending['input_seq'],
+                    'shot_seq': 1, 'shell_index': 0,
+                }, record))
+
+                self.assertEqual(102, stock['current'])
+                self.assertEqual((state.reload, state.reload), stock['reload'])
+                self.assertEqual((10, 0), stock['ammo'][102])
+                checkpoint = self._last_input_gun_checkpoint(client)
+                self.assertEqual(0, checkpoint['clip'])
+                self.assertEqual(state.reload, checkpoint['reload_time'])
+                self.assertFalse(battle.shoot(0.0, 0.0))
+
+                battle._runtime.bigworld.now += state.reload
+                battle._ammo_tick()
+                self.assertEqual(0.0, stock['reload'][0])
+                self.assertEqual((10, 4), stock['ammo'][102])
+                self.assertTrue(battle.shoot(0.0, 0.0))
+                fire = [message for message in client.sent
+                        if message[0] == 'fire_intent'][-1]
+                self.assertEqual((1,), fire[1])
+
+    def test_pending_fire_current_switch_reloads_remaining_autoloader_clip(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle(clip_size=4, clip=3)
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        pending = dict(battle._local_fire_intent)
+        battle.change_vehicle_setting(settings.NEXT_SHELLS, 102)
+        battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102)
+        self.assertEqual(0, state.shot_index)
+        self.assertTrue(battle._accept_player_fire_commit({
+            'shooter_kind': 'player', 'shooter_id': 1,
+            'fire_intent_seq': pending['intent_seq'],
+            'fire_input_seq': pending['input_seq'],
+            'shot_seq': 1, 'shell_index': 0,
+        }, record))
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(1, state.shot_index)
+        self.assertIsNone(state.pending_index)
+        self.assertEqual(0, state.clip)
+        self.assertEqual(state.reload, state.reload_time)
+        self.assertEqual(0, self._last_input_gun_checkpoint(client)['clip'])
+
     def test_pending_fire_commits_loaded_round_before_current_shell_switch(self):
         battle, state, settings, client, record = \
             self._pending_fire_shell_change_battle()
@@ -28401,6 +28479,80 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime.bigworld.callbacks.pop()()
         self.assertEqual(['destroy', 'restore'], calls)
         self.assertEqual([], battle._retired_native_owners)
+
+    def test_round_collection_waits_for_released_native_owners(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        battle._start_message = {'round_id': 42}
+        native_owner = object()
+        battle._local_model = native_owner
+        observed = []
+
+        def collect(phase, round_id):
+            observed.append((phase, round_id,
+                             list(battle._retired_native_owners)))
+            return True
+
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect', side_effect=collect), \
+                mock.patch.object(battle_runtime_module.gc_sweep,
+                                  'sweep') as sweep:
+            battle.stop(show_login=False)
+            self.assertEqual([], observed)
+            self.assertIn(native_owner, battle._retired_native_owners)
+            callback = runtime.bigworld.callbacks.pop()
+            callback()
+            self.assertEqual([('round_end', 42, [])], observed)
+            callback()
+            battle.stop(show_login=False)
+            self.assertEqual([('round_end', 42, [])], observed)
+            sweep.assert_not_called()
+
+    def test_failed_round_diagnostic_falls_back_after_native_owner_release(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        battle._start_message = {'round_id': 43}
+        native_owner = object()
+        battle._local_model = native_owner
+        observed = []
+
+        def sweep(phase, round_id):
+            observed.append((phase, round_id,
+                             list(battle._retired_native_owners)))
+
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect', return_value=False) as collect, \
+                mock.patch.object(battle_runtime_module.gc_sweep,
+                                  'sweep', side_effect=sweep):
+            battle.stop(show_login=False)
+            collect.assert_not_called()
+            self.assertEqual([], observed)
+            self.assertIn(native_owner, battle._retired_native_owners)
+            callback = runtime.bigworld.callbacks.pop()
+            callback()
+            collect.assert_called_once_with('round_end', 43)
+            self.assertEqual([('round_end', 43, [])], observed)
+            callback()
+            battle.stop(show_login=False)
+            collect.assert_called_once_with('round_end', 43)
+            self.assertEqual([('round_end', 43, [])], observed)
+
+    def test_cancelled_lobby_restore_does_not_collect(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        with mock.patch.object(battle_runtime_module.python_heap,
+                               'log_collect') as collect, \
+                mock.patch.object(battle_runtime_module.gc_sweep,
+                                  'sweep') as sweep:
+            battle.stop(show_login=False)
+            callback = runtime.bigworld.callbacks.pop()
+            battle.stop(restore_account=False)
+            callback()
+            collect.assert_not_called()
+            sweep.assert_not_called()
 
     def test_cleanup_leaves_vehicle_teardown_to_native_avatar_then_map(self):
         runtime = _runtime()

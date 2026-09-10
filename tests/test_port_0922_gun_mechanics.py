@@ -198,6 +198,77 @@ class GunMechanicsParityTests(unittest.TestCase):
         self.assertEqual(1.0, state.reload_time)
         self.assertEqual(1.0, state.reload_duration)
 
+    def test_exhausted_shell_starts_an_empty_full_reload(self):
+        for clip_size in (1, 3):
+            with self.subTest(clip_size=clip_size):
+                descriptor = _descriptor(clip=(clip_size, 1.0))
+                state = GunState(
+                    descriptor, ammo_layout={1: 1, 2: 5, 3: 4})
+                state.clip = 1
+                state.reload_time = 0.0
+
+                self.assertTrue(state.commit_fire(2.0))
+
+                self.assertEqual(1, state.shot_index)
+                self.assertEqual(0, state.clip)
+                self.assertEqual([0, 5, 4], state.ammo)
+                self.assertAlmostEqual(state.reload * 2.0, state.reload_time)
+                self.assertEqual(state.reload_time, state.reload_duration)
+                self.assertFalse(state.can_fire())
+                state.tick(state.reload_time / 2.0, True, 0, 0, 0, descriptor)
+                self.assertEqual(0, state.clip)
+                self.assertFalse(state.can_fire())
+                state.tick(state.reload_time, True, 0, 0, 0, descriptor)
+                self.assertEqual(clip_size, state.clip)
+                self.assertTrue(state.can_fire())
+                self.assertTrue(state.commit_fire())
+                self.assertEqual([0, 4, 4], state.ammo)
+
+    def test_queued_shell_waits_for_the_empty_cassette(self):
+        descriptor = _descriptor(clip=(3, 1.0))
+        state = GunState(descriptor, ammo_layout={1: 6, 2: 2, 3: 4})
+        state.clip = 3
+        state.reload_time = 0.0
+        self.assertFalse(state.request_shell_index(1))
+
+        for remaining in (2, 1):
+            self.assertTrue(state.commit_fire(2.0))
+            self.assertEqual(0, state.shot_index)
+            self.assertEqual(1, state.pending_index)
+            self.assertEqual(remaining, state.clip)
+            self.assertEqual(state.clip_reload, state.reload_time)
+            state.tick(state.reload_time, True, 0, 0, 0, descriptor)
+
+        self.assertTrue(state.commit_fire(2.0))
+        self.assertEqual(1, state.shot_index)
+        self.assertIsNone(state.pending_index)
+        self.assertEqual(0, state.clip)
+        self.assertEqual([3, 2, 4], state.ammo)
+        self.assertEqual(state.reload * 2.0, state.reload_time)
+        self.assertEqual(state.reload_time, state.reload_duration)
+        self.assertFalse(state.can_fire())
+        state.tick(state.reload_time, True, 0, 0, 0, descriptor)
+        self.assertEqual(2, state.clip)
+        self.assertTrue(state.commit_fire())
+        self.assertEqual([3, 1, 4], state.ammo)
+
+    def test_exhausted_shell_promotes_the_queued_choice_before_fallback(self):
+        for queued in (1, 2):
+            with self.subTest(queued=queued):
+                state = GunState(
+                    _descriptor(), ammo_layout={1: 1, 2: 5, 3: 4})
+                state.clip = 1
+                state.reload_time = 0.0
+                self.assertFalse(state.request_shell_index(queued))
+
+                self.assertTrue(state.commit_fire(2.0))
+
+                self.assertEqual(queued, state.shot_index)
+                self.assertIsNone(state.pending_index)
+                self.assertEqual(0, state.clip)
+                self.assertEqual(state.reload * 2.0, state.reload_time)
+                self.assertEqual(state.reload_time, state.reload_duration)
+
     def test_manual_shell_change_empties_clip_for_full_reload(self):
         state = GunState(_descriptor())
         state.clip = 3

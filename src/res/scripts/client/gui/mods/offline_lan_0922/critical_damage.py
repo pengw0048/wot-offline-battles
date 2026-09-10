@@ -640,8 +640,14 @@ def _offh_internal_cone_hits(target_mock, td, burst_pos, direction, shell,
 
 
 def _device_td(mock):
-	import BigWorld
-	return getattr(mock, 'typeDescriptor', getattr(BigWorld.player(), 'vehicleTypeDescriptor', None))
+	# Server projections already own their descriptor and cannot import BigWorld.
+	# An explicit None also belongs to this vehicle; only a missing attribute
+	# retains the stock player-descriptor fallback.
+	try:
+		return mock.typeDescriptor
+	except AttributeError:
+		import BigWorld
+		return getattr(BigWorld.player(), 'vehicleTypeDescriptor', None)
 
 
 def _crew_roster(td):
@@ -1814,10 +1820,8 @@ def tick_fire(vehicle, dt, now=None, module_test_mode=False):
         # The interval may complete the final burn tick before the fire-out
         # transition. Only time after this exact boundary is excluded.
         _offh_extinguish(vehicle, False, 'burnt out')
-        # ``_offh_extinguish`` is a copied presentation helper and imports
-        # BigWorld before resolving the descriptor.  The authority simulator is
-        # intentionally engine-free, so complete the same fuel-tank transition
-        # through the pure descriptor seam as part of this public tick contract.
+        # Keep the public fire-tick contract explicit about restoring the
+        # destroyed fuel tank to its exact descriptor regeneration pool.
         _restore_fuel_regen_cap(vehicle)
     after = _state(vehicle)
     return damage, _payload(

@@ -1,33 +1,57 @@
-"""Per-round census of objects tracked by Python's cyclic garbage collector.
+"""Measure GC-tracked objects and explicitly probe collectable cycles.
 
-This reports counts and common types, not total Python memory. Strings and
-other untracked objects, extension buffers, and native resources retained by
-Python references can consume memory without appearing in this census.
-Private allocation sizes reported by MEMORY do not identify their allocator
-either, so neither measurement can exclude Python as a source of pressure.
-
-Growth across equivalent round boundaries identifies types to investigate.
-It does not distinguish a leak from a cache or identify the retaining owner;
-stable counts likewise cannot rule out growth in object size or untracked
-allocations. Compare these trends with address-space and lifecycle evidence.
-
-Everything here is read-only.  In particular it never calls ``gc.collect()``:
-the question is what the process is actually holding during play, and
-collecting first would measure something the game never experiences.
+The regular census is read-only and does not call ``gc.collect()``.
+``collect_once`` is a separate, explicit collection experiment at a lifecycle
+boundary. Neither measurement covers all Python memory: untracked objects,
+extension buffers, and native resources can grow without changing the census.
+Growth or reclamation identifies paths to investigate, not a retaining owner
+or proof of a leak. Reachable acyclic objects can accumulate too. Stable
+counts cannot rule out growth in object size or untracked allocations.
 
 It is diagnostics: every failure is swallowed and the caller continues.
 """
 
 import gc
+import itertools
 import sys
+import types
+
+try:
+    _TEXT_TYPES = (str, unicode)
+except NameError:
+    _TEXT_TYPES = (str,)
+_TYPE_NAME = type.__dict__['__name__']
 
 # How many type names to report.  Enough to cover the port's own containers
 # plus the stock client's entity and GUI objects, short enough for one line.
 TOP_TYPES = 12
 # Guard against a pathological heap making a round boundary visibly stall.
-# The two crashed workers are the shape this is sized for; a census beyond
-# this many objects reports the count and skips the per-type histogram.
+# Deliberately left where it is: report 20260910-034953 crossed it on round 4,
+# so `top=` is blank from there on, but rounds 1-3 already establish the shape
+# and the per-round growth is linear.  Repeating the same histogram for later
+# rounds would buy nothing, and the signature census below answers the
+# question the histogram cannot.
 MAX_CENSUS_OBJECTS = 2000000
+
+# Maximum objects to fingerprint across all types, and signatures to report.
+# Small dict key sets can distinguish candidate structures more precisely
+# than a type name, without identifying which owner retained them.
+SIGNATURE_SAMPLE = 4000
+# Bound both the object window and references inspected per source container.
+# Only targets inside that window count. These partial, shape-grouped edges
+# guide investigation; they do not identify complete cycles or retaining owners.
+EDGE_SAMPLE = 2000
+MAX_EDGE_REFERENTS = 32
+TOP_EDGES = 8
+TOP_SIGNATURES = 10
+MAX_SIGNATURE_KEYS = 8
+MAX_SIGNATURE_TEXT = 64
+# Maximum dictionary entries visited for a key sample. Wider mappings report
+# a partial sample, whose members can vary with the runtime's dictionary order.
+KEY_SCAN_LIMIT = 64
+# List and tuple lengths are reported as exact small values and then in
+# powers-of-two buckets, so one dominant shape is still visible.
+SMALL_LENGTH = 8
 
 
 def snapshot():
@@ -74,12 +98,13 @@ def _by_type(tracked):
     tally = {}
     for item in tracked:
         try:
-            name = type(item).__name__
+            # Read the built-in type slot, bypassing metaclass descriptors.
+            name = _TYPE_NAME.__get__(type(item))
         except Exception:
             name = '?'
         tally[name] = tally.get(name, 0) + 1
     ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
-    return ranked[:TOP_TYPES]
+    return [(_label(name), count) for name, count in ranked[:TOP_TYPES]]
 
 
 def format_line(phase, round_id, state=None):
@@ -107,3 +132,278 @@ def log(phase, round_id):
             sys.stdout.write(line + '\n')
     except Exception:
         pass
+
+
+def _signature(item):
+    """Describe a bounded shape without invoking arbitrary object code."""
+    item_type = type(item)
+    kind = _type_name(item)
+    try:
+        # Exact types only: subclasses may override keys, length, or attribute
+        # lookup and run application/native code while garbage is retained.
+        if item_type is dict:
+            # Include key names beyond the display limit while bounding the
+            # scan itself. A sorted partial sample is not a stable mapping
+            # identity: Python 2 dictionary order can change which keys fit.
+            length = len(item)
+            keys = []
+            scanned = 0
+            for key in itertools.islice(item, KEY_SCAN_LIMIT):
+                scanned += 1
+                if _is_text(key):
+                    keys.append(_label(key))
+            sampled = ('[sampled=%d/%d]' % (scanned, length)
+                       if scanned < length else '')
+            if not keys:
+                return 'dict(len=%s)%s' % (_bucket(length), sampled)
+            keys.sort()
+            shown = keys[:MAX_SIGNATURE_KEYS]
+            more = ''
+            if length > len(shown):
+                more = ',+%d' % (length - len(shown))
+            return 'dict{%s%s}%s' % (','.join(shown), more, sampled)
+        if any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
+            return '%s(len=%s)' % (kind, _bucket(len(item)))
+        code = None
+        if item_type is types.FunctionType:
+            code = getattr(item, 'func_code', None) or item.__code__
+        elif item_type is types.CodeType:
+            code = item
+        if code is not None:
+            return '%s@%s:%d' % (kind,
+                                 _leaf(code.co_filename),
+                                 code.co_firstlineno)
+        if item_type is types.MethodType:
+            function = (item.im_func if sys.version_info[0] == 2 else
+                        item.__func__)
+            if type(function) is types.FunctionType:
+                return '%s:%s' % (kind, _label(function.__name__))
+            return kind
+        if item_type is types.FrameType:
+            return 'frame@%s:%d' % (_leaf(item.f_code.co_filename),
+                                    item.f_lineno)
+        return kind
+    except Exception:
+        return kind
+
+
+def _type_name(item):
+    try:
+        return _label(_TYPE_NAME.__get__(type(item)))
+    except Exception:
+        return '?'
+
+
+def _label(value):
+    """Bound log text and keep one structural sample on one line."""
+    if not _is_text(value):
+        return '?'
+    text = ''.join(str(char) if 32 <= ord(char) < 127 and
+                   char not in ',{}|' else '_'
+                   for char in value[:MAX_SIGNATURE_TEXT])
+    return text + ('...' if len(value) > MAX_SIGNATURE_TEXT else '')
+
+
+def _is_text(value):
+    return any(type(value) is builtin for builtin in _TEXT_TYPES)
+
+
+def _leaf(path):
+    try:
+        if not _is_text(path):
+            return '?'
+        text = _label(path[-MAX_SIGNATURE_TEXT:]).replace('\\', '/')
+        return text.rsplit('/', 1)[-1]
+    except Exception:
+        return '?'
+
+
+def _bucket(length):
+    """Exact for short lengths, powers of two above, so a shape stands out."""
+    if length <= SMALL_LENGTH:
+        return str(length)
+    edge = SMALL_LENGTH
+    while edge < length:
+        edge *= 2
+    return '<=%d' % edge
+
+
+def signature_census(items, limit=SIGNATURE_SAMPLE):
+    """Return the most common structural fingerprints in ``items``."""
+    tally = {}
+    scanned = 0
+    for item in items:
+        if scanned >= limit:
+            break
+        scanned += 1
+        name = _signature(item)
+        tally[name] = tally.get(name, 0) + 1
+    ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
+    return scanned, ranked[:TOP_SIGNATURES]
+
+
+def _edge_referents(item):
+    """Visit bounded direct references of exact built-in containers only."""
+    item_type = type(item)
+    if item_type is dict:
+        pairs = (item.iteritems() if sys.version_info[0] == 2 else
+                 iter(item.items()))
+        for key, value in itertools.islice(pairs, MAX_EDGE_REFERENTS // 2):
+            yield key
+            yield value
+    elif any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
+        for target in itertools.islice(item, MAX_EDGE_REFERENTS):
+            yield target
+
+
+def edge_census(items, sample=EDGE_SAMPLE):
+    """Summarize partial references between objects in the supplied window.
+
+    The collector supplies unreachable objects, which can include acyclic
+    contents held by cycles. An edge between two members does not prove both
+    belong to a cycle, and grouping by shape loses individual object identity.
+    Omitted targets, references beyond the per-container budget, subclasses,
+    and opaque/native objects are not traversed. Missing edges prove nothing
+    about those objects. Avoid gc.get_referents: it materializes every referent
+    before a caller can limit the result and can invoke native tp_traverse.
+    """
+    window = list(itertools.islice(items, max(0, min(sample, EDGE_SAMPLE))))
+    known = dict((id(item), _signature(item)) for item in window)
+    tally = {}
+    edges = 0
+    for item in window:
+        try:
+            for target in _edge_referents(item):
+                if id(target) not in known:
+                    continue
+                # Preserve repeated references and self-edges. Keep signatures
+                # separate until rendering so large labels are not recopied
+                # for every pair counted in the bounded window.
+                key = (known[id(item)], known[id(target)])
+                tally[key] = tally.get(key, 0) + 1
+                edges += 1
+        except Exception:
+            continue
+    ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
+    return len(window), edges, [('%s -> %s' % pair, count)
+                                for pair, count in ranked[:TOP_EDGES]]
+
+
+def _collect_saved_sample(garbage, first):
+    """Keep temporary object references and exception frames out of pass two."""
+    try:
+        unreachable = gc.collect()
+        sample = garbage[first:first + SIGNATURE_SAMPLE]
+        scanned, signatures = signature_census(sample)
+        edge_window, edge_count, edges = edge_census(sample)
+        return (unreachable, scanned, signatures, _by_type(sample),
+                edge_window, edge_count, edges)
+    except Exception:
+        return None
+
+
+def collect_once():
+    """Sample unreachable objects and perform a second pass to release cycles.
+
+    DEBUG_SAVEALL retains the first pass's objects long enough to fingerprint
+    a bounded sample. Only this call's additions to gc.garbage are removed;
+    an existing SAVEALL session is left untouched and this probe is skipped.
+    Both normal and failed sampling restore the caller's debug flags and run
+    the release pass. The automatic collector's enabled state is not changed.
+
+    Reclaimed cycles are evidence of collectable retention, not proof of its
+    cause or of native lifecycle safety. Live references can also accumulate.
+    Exact Windows acceptance is still needed for native traversal and timing.
+    """
+    try:
+        import time
+        previous_debug = gc.get_debug()
+        if previous_debug & gc.DEBUG_SAVEALL:
+            return None
+        garbage = gc.garbage
+        if type(garbage) is not list:
+            return None
+        first = len(garbage)
+        before = len(gc.get_objects())
+        started = time.time()
+        try:
+            gc.set_debug(previous_debug | gc.DEBUG_SAVEALL)
+            sample = _collect_saved_sample(garbage, first)
+        finally:
+            try:
+                del garbage[first:]
+            finally:
+                gc.set_debug(previous_debug)
+            # The sampling helper has returned, dropping references even if
+            # it failed. Clearing SAVEALL's list alone cannot release cycles.
+            freed_second = gc.collect()
+        if sample is None:
+            return None
+        (unreachable, scanned, signatures, garbage_types,
+         edge_window, edge_count, edges) = sample
+        elapsed_ms = int((time.time() - started) * 1000.0)
+        after = len(gc.get_objects())
+        return {
+            'before': before,
+            'after': after,
+            'unreachable': unreachable,
+            'second_pass': freed_second,
+            'elapsed_ms': elapsed_ms,
+            'enabled_after': 1 if gc.isenabled() else 0,
+            'scanned': scanned,
+            'signatures': signatures,
+            'types': garbage_types,
+            'edge_window': edge_window,
+            'edge_count': edge_count,
+            'edges': edges,
+        }
+    except Exception:
+        return None
+
+
+def format_collect_lines(phase, round_id, state=None):
+    """Return the PYGC/PYSIG/PYREF group, or an empty tuple."""
+    state = collect_once() if state is None else state
+    if not state:
+        return ()
+    head = ('[Offline LAN 0.9.22] PYGC phase=%s round=%s before=%d '
+            'unreachable=%d after=%d net_freed=%d second_pass=%d '
+            'elapsed_ms=%d gc_enabled_after=%d' % (
+                phase, round_id, state['before'], state['unreachable'],
+                state['after'], state['before'] - state['after'],
+                state['second_pass'], state['elapsed_ms'],
+                state['enabled_after']))
+    types = state.get('types') or ()
+    signatures = state.get('signatures') or ()
+    detail = ('[Offline LAN 0.9.22] PYSIG phase=%s round=%s sampled=%d '
+              'types=%s shapes=%s' % (
+                  phase, round_id, state.get('scanned', 0),
+                  ','.join('%s:%d' % pair for pair in types) or '-',
+                  ' | '.join('%s x%d' % pair for pair in signatures) or '-'))
+    edges = state.get('edges') or ()
+    held = ('[Offline LAN 0.9.22] PYREF phase=%s round=%s window=%d edges=%d '
+            'holds=%s' % (
+                phase, round_id, state.get('edge_window', 0),
+                state.get('edge_count', 0),
+                ' | '.join('%s x%d' % pair for pair in edges) or '-'))
+    return (head, detail, held)
+
+
+def log_collect(phase, round_id):
+    """Run diagnostics and return whether a result was produced. Never raises.
+
+    A logging failure does not require another collection: the diagnostic
+    already completed its sampling and release passes.
+    """
+    try:
+        lines = format_collect_lines(phase, round_id)
+    except Exception:
+        return False
+    if not lines:
+        return False
+    try:
+        for line in lines:
+            sys.stdout.write(line + '\n')
+    except Exception:
+        pass
+    return True

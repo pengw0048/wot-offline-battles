@@ -56,8 +56,8 @@ from gui.mods.offline_lan_0922 import (
     destructibles_compat, device_damage, effective_params,
     equipment_mechanics, gun_mechanics, hull_aiming,
     lan_client as lan_protocol,
-    graphics_probe, loadout as loadout_law, memory_probe, python_heap,
-    world_census, prebaked_destructibles,
+    gc_sweep, graphics_probe, loadout as loadout_law, memory_probe,
+    python_heap, world_census, prebaked_destructibles,
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
@@ -7961,6 +7961,32 @@ class BattleRuntime(object):
             self._present_loader_intuition()
         return True
 
+    @staticmethod
+    def _defer_gun_setting(pending, state, code, value):
+        # Later NEXT inputs may update the blinking selection immediately.
+        # Replay them after the queued CURRENT/R operation, not before it.
+        if 'deferred_gun_settings' not in pending:
+            pending['deferred_gun_settings'] = []
+            pending['deferred_gun_pending_index'] = state.pending_index
+        pending['deferred_gun_settings'].append((code, value))
+
+    def _apply_deferred_gun_settings(self, state, pending, intuition=False):
+        """Replay post-trigger inputs in order against the settled gun."""
+        settings = self._runtime.constants.VEHICLE_SETTING
+        intuition_used = False
+        for code, value in pending.get('deferred_gun_settings', ()):
+            if code == settings.CURRENT_SHELLS:
+                instant = (
+                    intuition and state.clip_size <= 1 and
+                    state.burst_count <= 1 and self._roll_loader_intuition())
+                changed = state.sync_shell_index(value, instant=instant)
+                intuition_used = intuition_used or (changed and instant)
+            elif code == settings.RELOAD_PARTIAL_CLIP:
+                state.reload_partial_clip()
+            elif code == settings.NEXT_SHELLS:
+                state.request_shell_index(value)
+        return intuition_used
+
     def change_vehicle_setting(self, code, value):
         settings = self._runtime.constants.VEHICLE_SETTING
         if code == getattr(settings, 'SIEGE_MODE_ENABLED', None):
@@ -7996,7 +8022,7 @@ class BattleRuntime(object):
             if isinstance(pending_fire, dict):
                 if state.clip_size <= 1 or not state.shots:
                     return False
-                pending_fire['deferred_partial_clip_reload'] = True
+                self._defer_gun_setting(pending_fire, state, code, value)
                 return True
             return self._reload_partial_clip_now(state)
         current_shells = getattr(settings, 'CURRENT_SHELLS', None)
@@ -8020,8 +8046,8 @@ class BattleRuntime(object):
                     previous_duration = state.reload_duration
                     previous_selection = (
                         int(state.shot_index), state.pending_index)
+                    self._defer_gun_setting(pending_fire, state, code, index)
                     changed = state.request_shell_index(index)
-                    pending_fire['deferred_current_shell_index'] = int(index)
                     if changed:
                         self._apply_current_reload_factor(state, entity)
                         self._publish_loaded_shell_change(
@@ -8038,6 +8064,10 @@ class BattleRuntime(object):
             previous_duration = state.reload_duration
             previous_selection = (
                 int(state.shot_index), state.pending_index)
+            pending_fire = self._local_fire_intent
+            if (isinstance(pending_fire, dict) and
+                    pending_fire.get('deferred_gun_settings')):
+                self._defer_gun_setting(pending_fire, state, code, index)
             changed = state.request_shell_index(index)
             if changed:
                 self._apply_current_reload_factor(state, entity)
@@ -8763,15 +8793,22 @@ class BattleRuntime(object):
             sys.stdout.write(
                 '[Offline LAN 0.9.22] FIRE INTENT rejected intent=%d '
                 'reason=%s repeats=%d\n' % (sequence, reason, seen + 1))
-        deferred_shell = pending.get('deferred_current_shell_index')
-        deferred_partial_reload = bool(
-            pending.get('deferred_partial_clip_reload'))
         self._local_fire_intent = None
         self._cancel_native_shot_wait()
-        if deferred_shell is not None and self._gun_state is not None:
-            self._switch_current_shell(self._gun_state, deferred_shell)
-        if deferred_partial_reload and self._gun_state is not None:
-            self._reload_partial_clip_now(self._gun_state)
+        if pending.get('deferred_gun_settings') and self._gun_state is not None:
+            state = self._gun_state
+            edge = self._advance_local_gun_edge(state)
+            entity = edge[0] if edge is not None else None
+            previous_reload = state.reload_time
+            previous_duration = state.reload_duration
+            state.pending_index = pending['deferred_gun_pending_index']
+            intuition_used = self._apply_deferred_gun_settings(
+                state, pending, intuition=True)
+            self._apply_current_reload_factor(state, entity)
+            self._publish_loaded_shell_change(
+                state, previous_reload, previous_duration)
+            if intuition_used:
+                self._present_loader_intuition()
         return True
 
     def _cancel_native_shot_wait(self):
@@ -11285,15 +11322,16 @@ class BattleRuntime(object):
             entity = (edge[0] if edge is not None else
                       self._server_entity(record['engine_id']))
             reload_factor = critical_damage.stat_factor(entity, 'reload')
+            if pending.get('deferred_gun_settings'):
+                gun.pending_index = pending['deferred_gun_pending_index']
             if (shell_index != gun.shot_index or
                     not gun.commit_fire(reload_factor)):
                 raise RuntimeError(
                     'canonical local shot violates presented gun state')
-            if pending.get('deferred_partial_clip_reload'):
-                gun.reload_partial_clip()
+            self._apply_deferred_gun_settings(gun, pending)
             # commit_fire applies the factor to a normal empty-magazine cycle.
-            # A queued shell promotion or deferred partial reload replaces that
-            # duration with the base reload, so normalize the final transaction
+            # A deferred shell change or partial reload replaces that duration
+            # with the base reload, so normalize the final transaction
             # state before its first native publication and checkpoint.
             self._rescale_current_reload(gun, reload_factor)
             self._publish_ammo_state(gun, force=True)
@@ -24467,6 +24505,13 @@ class BattleRuntime(object):
                 sys.stdout.write(
                     '[Offline LAN 0.9.22] deferred lobby Account restored\n')
             self._retired_native_owners = []
+            # Cross the native teardown boundary and release its retained
+            # Python owners before checking which cycles are reclaimable.
+            # The token above also excludes cancelled or repeated callbacks.
+            # The diagnostic includes its own release pass. Fall back to a
+            # plain collection only if it could not produce a result.
+            if not python_heap.log_collect('round_end', round_identity):
+                gc_sweep.sweep('round_end', round_identity)
             if callable(on_complete):
                 try:
                     on_complete(lobby_restored)
