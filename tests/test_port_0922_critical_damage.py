@@ -182,6 +182,49 @@ class CriticalDamageTests(unittest.TestCase):
         self.bigworld.time = lambda: 12.0
         self.math = types.ModuleType('Math')
 
+    def test_owned_descriptor_is_read_once_without_native_player_lookup(self):
+        descriptor = _descriptor()
+        for value in (descriptor, None):
+            with self.subTest(descriptor=value):
+                class Vehicle(object):
+                    reads = 0
+
+                    @property
+                    def typeDescriptor(self):
+                        self.reads += 1
+                        return value
+
+                vehicle = Vehicle()
+                with mock.patch.dict(sys.modules, {'BigWorld': None}):
+                    self.assertIs(value, critical_damage._device_td(vehicle))
+                self.assertEqual(1, vehicle.reads)
+
+    def test_missing_descriptor_keeps_native_player_fallback(self):
+        native_player = mock.Mock(return_value=self.player)
+        with mock.patch.dict(sys.modules, {'BigWorld': self.bigworld}), \
+                mock.patch.object(self.bigworld, 'player', native_player):
+            self.assertIs(self.player.vehicleTypeDescriptor,
+                          critical_damage._device_td(object()))
+        native_player.assert_called_once_with()
+
+    def test_medkit_preserves_surviving_casualty_combined_roles_without_native(self):
+        descriptor = _descriptor()
+        descriptor.type.crewRoles = (
+            ('commander', 'radioman'), ('driver',), ('loader', 'gunner'))
+        vehicle = types.SimpleNamespace(
+            typeDescriptor=descriptor, health=500,
+            devices_hp={}, _destroyed_devices=set(),
+            _crew_ko={'commander', 'loader1'}, is_on_fire=False)
+
+        with mock.patch.dict(sys.modules, {'BigWorld': None}):
+            payload = critical_damage.restore_crew(vehicle, 'commander')
+
+        self.assertEqual(['loader1'], payload['crew_ko'])
+        self.assertEqual(frozenset(('loader', 'gunner')), vehicle._crew_impaired)
+        self.assertEqual(
+            [{'kind': 'crew', 'name': 'commander', 'state': 'normal',
+              'cause': 'repair'}], payload['events'])
+
     def test_native_1513_components_never_call_forbidden_legacy_get(self):
         descriptor = _strict_1513_descriptor()
 
@@ -2057,6 +2100,64 @@ def _repair_player(hp, state, destroyed=()):
                  'regen_hp': 130.0}]},
             'loadout': {'repair_factor': device_damage.CREW_FACTOR_BASE,
                         'has_big_kit': False}})
+
+
+class ServerConsumableDescriptorTests(unittest.TestCase):
+
+    def test_medkit_server_projection_preserves_other_injuries_without_native(self):
+        for crew_ko, repair_all, expected in (
+                (['commander'], False, []),
+                (['commander', 'driver'], False, ['driver']),
+                (['commander', 'loader1', 'loader2'], False,
+                 ['loader1', 'loader2']),
+                (['commander', 'driver'], True, [])):
+            with self.subTest(crew_ko=crew_ko, repair_all=repair_all):
+                player = _repair_player(170.0, 'normal')
+                player.critical['crew_ko'] = list(crew_ko)
+                player.effective_params['critical']['crew_roster'] = list(crew_ko)
+                effect = {'action': 'restore_crew', 'repairAll': repair_all,
+                          'selected': None if repair_all else 'commander'}
+
+                with mock.patch.dict(sys.modules, {'BigWorld': None}):
+                    payload = player_critical_mechanics.apply_equipment(
+                        player, effect, 10.0)
+
+                self.assertEqual(expected, payload['crew_ko'])
+                self.assertEqual(crew_ko, player.critical['crew_ko'])
+                self.assertEqual(player.critical['devices'], payload['devices'])
+                self.assertEqual(
+                    [{'kind': 'crew', 'name': name, 'state': 'normal',
+                      'cause': 'repair'}
+                     for name in sorted(set(crew_ko) - set(expected))],
+                    payload['events'])
+
+    def test_server_extinguisher_restores_exact_fuel_regen_pool_without_native(self):
+        player = _repair_player(170.0, 'normal')
+        player.effective_params['critical']['devices'].append({
+            'name': 'fuelTankHealth', 'max_hp': 160.0, 'regen_hp': 120.0})
+        player.critical['devices'].append({
+            'name': 'fuelTankHealth', 'hp': 0.0,
+            'max_hp': 160.0, 'state': 'destroyed'})
+        player.critical.update(
+            fire=True, destroyed=['fuelTankHealth'], crew_ko=['commander'])
+
+        with mock.patch.dict(sys.modules, {'BigWorld': None}):
+            payload = player_critical_mechanics.apply_equipment(
+                player, {'action': 'extinguish_fire'}, 10.0)
+
+        self.assertFalse(payload['fire'])
+        self.assertEqual([], payload['destroyed'])
+        self.assertEqual(['commander'], payload['crew_ko'])
+        self.assertEqual(
+            {'name': 'fuelTankHealth', 'hp': 120.0,
+             'max_hp': 160.0, 'state': 'critical'}, payload['devices'][1])
+        self.assertEqual(
+            [{'kind': 'device', 'name': 'fuelTankHealth',
+              'old_state': 'destroyed', 'state': 'critical', 'cause': 'repair'},
+             {'kind': 'fire', 'state': False, 'cause': 'repair'}],
+            payload['events'])
+        self.assertTrue(player.critical['fire'])
+        self.assertEqual(0.0, player.critical['devices'][1]['hp'])
 
 
 class ModuleRepairSpeedTests(unittest.TestCase):
