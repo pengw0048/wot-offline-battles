@@ -534,11 +534,13 @@ class WindowTest(unittest.TestCase):
             "missing": ("hidden-worker.log",),
             "notRun": (),
         }
+        notice = mock.Mock()
+        tkinter = mock.Mock(messagebox=mock.Mock(showinfo=notice))
         with mock.patch.object(
                 wot_launcher.error_reports, "create_report",
                 return_value=report) as create, mock.patch.object(
                     wot_launcher.error_reports, "select_in_explorer") \
-                as select:
+                as select, mock.patch.dict("sys.modules", {"tkinter": tkinter}):
             self.assertTrue(self.window._create_error_report())
             for unused in range(200):
                 if not self.window._report_busy:
@@ -547,6 +549,11 @@ class WindowTest(unittest.TestCase):
 
         create.assert_called_once_with()
         select.assert_called_once_with(report["path"])
+        notice.assert_called_once_with(
+            "Error report ready",
+            "Please send this ZIP file to the author to report the problem:"
+            "\n\n%s" % report["path"],
+            parent=self.window.root)
         self.assertIn("Created error report", self._log_text())
         self.assertIn("server.log, visible-client.log", self._log_text())
         self.assertIn("hidden-worker.log", self._log_text())

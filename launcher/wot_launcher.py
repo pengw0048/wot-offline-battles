@@ -289,6 +289,9 @@ _CHINESE = {
     "The latest diagnostic session boundary is unreadable.":
         "最近一局的日志边界无法读取；不会打包旧日志。",
     "Created error report: %s": "已创建错误报告：%s",
+    "Error report ready": "错误报告已生成",
+    "Please send this ZIP file to the author to report the problem:\n\n%s":
+        "请将下面的 ZIP 文件发送给作者，以便排查问题：\n\n%s",
     "Included files: %s": "已包含文件：%s",
     "Missing logs from this session: %s": "本局缺少日志：%s",
     "Not run in this session: %s": "本局未运行：%s",
@@ -1890,6 +1893,8 @@ class LauncherWindow(object):
                     self._log(self._t(
                         "Could not select the report in Windows Explorer: "
                         "%s") % error)
+                self.root.after(
+                    0, lambda: self._show_report_send_reminder(result["path"]))
             finally:
                 self._report_busy = False
                 self.root.after(0, self._update_action_controls)
@@ -1898,6 +1903,16 @@ class LauncherWindow(object):
         thread.daemon = True
         thread.start()
         return True
+
+    def _show_report_send_reminder(self, report_path):
+        from tkinter import messagebox
+
+        messagebox.showinfo(
+            self._t("Error report ready"),
+            self._t(
+                "Please send this ZIP file to the author to report the "
+                "problem:\n\n%s") % report_path,
+            parent=self.root)
 
     def _confirm_enable_crash_capture(self):
         from tkinter import messagebox
