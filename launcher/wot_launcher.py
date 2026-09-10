@@ -3029,6 +3029,10 @@ class LauncherWindow(object):
         it, fall back to the client's own mod paths once rather than leave the
         player with no worker at all.
         """
+        # Session and room setup activate their vehicle profile after package
+        # installation. Capture those owned resources at the startup boundary.
+        for action in core.prepare_worker_resource_root(game_root):
+            self._log(action)
         if self._start_worker_attempt(
                 game_root, host, port, room_owned=room_owned,
                 isolated_mods=True):
