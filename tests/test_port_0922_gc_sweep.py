@@ -1,18 +1,12 @@
-"""The per-round cycle collection, and proof of where the cycle is not.
-
-BigWorld disables CPython's cyclic collector at startup, so in this runtime a
-reference cycle is a permanent leak.  Report 20260910-045317 measured 348581
-and 333240 unreachable objects per round in the hidden worker against 4832 and
-3010 in the visible client on the same machine, and one collect per round
-turned the worker's round_start census from 1.14M -> 2.87M over six rounds
-into a flat 1133959 -> 1033952 -> 1044656.
-"""
+"""Round-boundary collection and a bounded update-fixture regression."""
 
 import gc
 import os
 import sys
+import types
 from pathlib import Path
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_ROOT = ROOT / 'src' / 'res' / 'scripts' / 'client'
@@ -55,7 +49,7 @@ class GcSweepTest(unittest.TestCase):
         sys.stdout = self._stdout
         self.assertGreater(collected, 0)
         self.assertIn('PYSWEEP phase=round_end round=4', text)
-        self.assertIn('collected=%d' % collected, text)
+        self.assertIn('unreachable=%d' % collected, text)
         self.assertIn('elapsed_ms=', text)
         self.assertIn('gc_enabled=', text)
 
@@ -72,23 +66,38 @@ class GcSweepTest(unittest.TestCase):
         gc_sweep.gc.collect = lambda *args: (_ for _ in ()).throw(
             RuntimeError('no collector'))
         self.addCleanup(setattr, gc_sweep.gc, 'collect', original)
+        sys.stdout = _Sink()
         self.assertEqual(-1, gc_sweep.sweep('round_end', 1))
+        self.assertIn('PYSWEEP phase=round_end round=1 error=collection_failed',
+                      sys.stdout.text)
+
+    def test_sweep_preserves_an_existing_saveall_session(self):
+        existing = {'owned_by_debugger': True}
+        garbage = [existing]
+        collect = mock.Mock(side_effect=lambda: garbage.append({}) or 1)
+        collector = types.SimpleNamespace(
+            DEBUG_SAVEALL=gc.DEBUG_SAVEALL, garbage=garbage,
+            get_debug=lambda: gc.DEBUG_SAVEALL, collect=collect,
+            isenabled=lambda: False)
+        sys.stdout = _Sink()
+        with mock.patch.object(gc_sweep, 'gc', collector):
+            self.assertEqual(-1, gc_sweep.sweep('round_end', 2))
+        collect.assert_not_called()
+        self.assertEqual([existing], garbage)
+        self.assertIn('skipped=debug_saveall', sys.stdout.text)
 
 
-class BotUpdateCreatesNoCyclesTest(unittest.TestCase):
-    """Where the leak is *not*, recorded so the search does not repeat.
+class BotUpdateCollectionRegressionTest(unittest.TestCase):
+    """Check unreachable garbage left by one controlled update fixture.
 
-    200 `BotRuntime.update` calls with four Bots and a human player produce
-    zero cycles, so the Bot update path is not the source of the 348581
-    unreachable objects a real worker round produces.  If this ever starts
-    failing, someone has just written the cycle.
+    The Python 3 fixture exercises 200 stationary updates with four Bots and a
+    human player on the non-fixed-control path while retaining the runtime.
+    A zero result excludes neither live reference cycles nor behavior absent
+    from this fake scene, including native calls and worker publication. It
+    does not rule out the production update path.
 
-    It runs in a subprocess on purpose.  Driving a real runtime populates
-    process-global state - `bot_runtime._LOGGED_CREW_LEVEL_REJECTIONS` is
-    documented as "once per level per process" - and the loadout tests assert
-    exactly that once-per-process behaviour.  An in-process version of this
-    test passed on its own and broke four unrelated tests under
-    `unittest discover`.
+    Run it in a subprocess because BotRuntime changes process-global logging
+    state that unrelated loadout tests also exercise.
     """
 
     DRIVER = r"""
@@ -114,7 +123,7 @@ cycles = gc.collect()
 sys.stderr.write('CYCLES=%d\n' % cycles)
 """
 
-    def test_two_hundred_updates_create_no_reference_cycles(self):
+    def test_two_hundred_fixture_updates_leave_no_unreachable_objects(self):
         import subprocess
 
         root = Path(__file__).resolve().parents[1]
@@ -139,8 +148,7 @@ sys.stderr.write('CYCLES=%d\n' % cycles)
         cycles = int(marker[-1].split('=', 1)[1])
         self.assertEqual(
             0, cycles,
-            'the Bot update path created %d cyclic objects; it used to create '
-            'none, so this is a new leak' % cycles)
+            'the controlled update fixture left %d unreachable objects' % cycles)
 
 
 if __name__ == '__main__':
