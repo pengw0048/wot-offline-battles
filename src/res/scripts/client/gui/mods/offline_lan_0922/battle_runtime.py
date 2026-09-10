@@ -24479,15 +24479,10 @@ class BattleRuntime(object):
             # Cross the native teardown boundary and release its retained
             # Python owners before checking which cycles are reclaimable.
             # The token above also excludes cancelled or repeated callbacks.
-            python_heap.log_collect('round_end', round_identity)
-            # The fix, on the far side of the same boundary. BigWorld disables
-            # the cyclic collector, so every cycle this round created would
-            # otherwise be permanent - 348581 of them in one worker round of
-            # report 20260910-045317. While the diagnostic above is wired it
-            # has already swept and PYSWEEP reports a small count; with
-            # python_heap.DIAGNOSTIC_COLLECT off this is the only collection
-            # and its elapsed_ms is the fix's real cost.
-            gc_sweep.sweep('round_end', round_identity)
+            # The diagnostic includes its own release pass. Fall back to a
+            # plain collection only if it could not produce a result.
+            if not python_heap.log_collect('round_end', round_identity):
+                gc_sweep.sweep('round_end', round_identity)
             if callable(on_complete):
                 try:
                     on_complete(lobby_restored)

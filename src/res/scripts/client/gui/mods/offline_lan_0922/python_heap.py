@@ -12,6 +12,7 @@ It is diagnostics: every failure is swallowed and the caller continues.
 """
 
 import gc
+import itertools
 import sys
 import types
 
@@ -36,12 +37,11 @@ MAX_CENSUS_OBJECTS = 2000000
 # Small dict key sets can distinguish candidate structures more precisely
 # than a type name, without identifying which owner retained them.
 SIGNATURE_SAMPLE = 4000
-# Reference edges reported between two objects that are BOTH unreachable.
-# The shape census says what is in the leaked graph; only an edge inside that
-# graph says what holds it together, which is the difference between "dicts
-# leaked" and "this structure is the cycle". Stock #1513's own
-# GarbageCollectionDebug.get_refs builds the same source/target edges.
+# Bound both the object window and references inspected per source container.
+# Only targets inside that window count. These partial, shape-grouped edges
+# guide investigation; they do not identify complete cycles or retaining owners.
 EDGE_SAMPLE = 2000
+MAX_EDGE_REFERENTS = 32
 TOP_EDGES = 8
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
@@ -244,40 +244,51 @@ def signature_census(items, limit=SIGNATURE_SAMPLE):
     return scanned, ranked[:TOP_SIGNATURES]
 
 
-def edge_census(items, sample=EDGE_SAMPLE):
-    """Return the most common reference edges *within* an unreachable set.
+def _edge_referents(item):
+    """Visit bounded direct references of exact built-in containers only."""
+    item_type = type(item)
+    if item_type is dict:
+        pairs = (item.iteritems() if sys.version_info[0] == 2 else
+                 iter(item.items()))
+        for key, value in itertools.islice(pairs, MAX_EDGE_REFERENTS // 2):
+            yield key
+            yield value
+    elif any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
+        for target in itertools.islice(item, MAX_EDGE_REFERENTS):
+            yield target
 
-    An object whose referents include another member of the same unreachable
-    set is part of what keeps that set alive. Reporting those pairs by
-    signature names the cycle: ``dict{...} -> list(len=1)`` is a diagnosis,
-    where ``dict`` on its own is not. An edge leaving the set says nothing
-    about what leaked, so only edges whose target is also unreachable count.
+
+def edge_census(items, sample=EDGE_SAMPLE):
+    """Summarize partial references between objects in the supplied window.
+
+    The collector supplies unreachable objects, which can include acyclic
+    contents held by cycles. An edge between two members does not prove both
+    belong to a cycle, and grouping by shape loses individual object identity.
+    Omitted targets, references beyond the per-container budget, subclasses,
+    and opaque/native objects are not traversed. Missing edges prove nothing
+    about those objects. Avoid gc.get_referents: it materializes every referent
+    before a caller can limit the result and can invoke native tp_traverse.
     """
-    try:
-        window = items[:sample]
-    except TypeError:
-        window = list(items)[:sample]
-    known = {}
-    for item in window:
-        known[id(item)] = True
+    window = list(itertools.islice(items, max(0, min(sample, EDGE_SAMPLE))))
+    known = dict((id(item), _signature(item)) for item in window)
     tally = {}
     edges = 0
     for item in window:
         try:
-            referents = gc.get_referents(item)
+            for target in _edge_referents(item):
+                if id(target) not in known:
+                    continue
+                # Preserve repeated references and self-edges. Keep signatures
+                # separate until rendering so large labels are not recopied
+                # for every pair counted in the bounded window.
+                key = (known[id(item)], known[id(target)])
+                tally[key] = tally.get(key, 0) + 1
+                edges += 1
         except Exception:
             continue
-        source = None
-        for target in referents:
-            if target is item or id(target) not in known:
-                continue
-            if source is None:
-                source = _signature(item)
-            key = '%s -> %s' % (source, _signature(target))
-            tally[key] = tally.get(key, 0) + 1
-            edges += 1
     ranked = sorted(tally.items(), key=lambda pair: pair[1], reverse=True)
-    return len(window), edges, ranked[:TOP_EDGES]
+    return len(window), edges, [('%s -> %s' % pair, count)
+                                for pair, count in ranked[:TOP_EDGES]]
 
 
 def _collect_saved_sample(garbage, first):
@@ -353,7 +364,7 @@ def collect_once():
 
 
 def format_collect_lines(phase, round_id, state=None):
-    """Return the PYGC line and its PYSIG companion, or an empty tuple."""
+    """Return the PYGC/PYSIG/PYREF group, or an empty tuple."""
     state = collect_once() if state is None else state
     if not state:
         return ()
@@ -380,19 +391,21 @@ def format_collect_lines(phase, round_id, state=None):
     return (head, detail, held)
 
 
-# The diagnostic costs two collections and two full ``gc.get_objects()``
-# passes on top of the one collection the fix needs, so its reported
-# ``elapsed_ms`` is NOT the cost of ``gc_sweep``. Set this to False to leave
-# only the fix in place and measure that cost on its own.
-DIAGNOSTIC_COLLECT = True
-
-
 def log_collect(phase, round_id):
-    """Write the PYGC/PYSIG/PYREF group. Never raises into a caller."""
-    if not DIAGNOSTIC_COLLECT:
-        return
+    """Run diagnostics and return whether a result was produced. Never raises.
+
+    A logging failure does not require another collection: the diagnostic
+    already completed its sampling and release passes.
+    """
     try:
-        for line in format_collect_lines(phase, round_id):
+        lines = format_collect_lines(phase, round_id)
+    except Exception:
+        return False
+    if not lines:
+        return False
+    try:
+        for line in lines:
             sys.stdout.write(line + '\n')
     except Exception:
         pass
+    return True

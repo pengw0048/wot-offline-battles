@@ -1,6 +1,8 @@
 """GC-tracked object trends, without total-memory or leak attribution."""
 
+import contextlib
 import gc
+import io
 import sys
 from pathlib import Path
 import unittest
@@ -174,8 +176,9 @@ class ForcedCollectTest(unittest.TestCase):
         self.assertIn('window=', lines[2])
         self.assertIn('holds=', lines[2])
 
-    def test_the_edge_census_names_the_cycle_not_its_contents(self):
-        # "dict leaked" is not a diagnosis. "dict{...} -> list(len=1)" is.
+    def test_the_edge_census_reports_both_directions_of_the_fixture_cycle(self):
+        # These two shapes are evidence about the fixture's references, not
+        # proof that any pair of matching shapes belongs to the same cycle.
         gc.collect()
         self._leak_cycles(2000)
         state = python_heap.collect_once()
@@ -188,8 +191,7 @@ class ForcedCollectTest(unittest.TestCase):
         self.assertTrue(back, 'no list->dict edge closing the cycle: %r'
                         % (holds,))
 
-    def test_only_edges_inside_the_unreachable_set_are_reported(self):
-        # An edge to a live object says nothing about what leaked.
+    def test_only_edges_inside_the_sample_window_are_reported(self):
         outsider = {'reachable_marker': True}
         member = {'name': 'member'}
         holder = [member]
@@ -198,8 +200,8 @@ class ForcedCollectTest(unittest.TestCase):
         window, edges, ranked = python_heap.edge_census([member, holder])
         self.assertEqual(2, window)
         self.assertEqual(2, edges)
-        # Only the member<->holder pair; the edge to `outsider` is dropped
-        # because `outsider` is not in the unreachable set.
+        # The caller supplies a window. Omitted targets may still belong to
+        # the unreachable set, but their edges cannot be reported here.
         self.assertFalse(
             any('reachable_marker' in name for name, unused in ranked),
             repr(ranked))
@@ -210,16 +212,121 @@ class ForcedCollectTest(unittest.TestCase):
         self.assertEqual(python_heap.EDGE_SAMPLE, window)
         self.assertLessEqual(len(ranked), python_heap.TOP_EDGES)
 
-    def test_the_diagnostic_can_be_switched_off_to_measure_the_fix(self):
-        self.addCleanup(setattr, python_heap, 'DIAGNOSTIC_COLLECT',
-                        python_heap.DIAGNOSTIC_COLLECT)
-        python_heap.DIAGNOSTIC_COLLECT = False
-        collected = []
-        original = python_heap.gc.collect
-        python_heap.gc.collect = lambda *args: collected.append(1) or 0
-        self.addCleanup(setattr, python_heap.gc, 'collect', original)
-        python_heap.log_collect('round_end', 1)
-        self.assertEqual([], collected)
+    def test_logging_runs_the_diagnostic_and_reports_success(self):
+        self.addCleanup(setattr, python_heap, 'format_collect_lines',
+                        python_heap.format_collect_lines)
+        calls = []
+        python_heap.format_collect_lines = lambda *args: (
+            calls.append(args) or ('diagnostic result',))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertTrue(python_heap.log_collect('round_end', 1))
+        self.assertEqual([('round_end', 1)], calls)
+        self.assertEqual('diagnostic result\n', output.getvalue())
+
+    def test_completed_diagnostic_stays_successful_when_output_fails(self):
+        self.addCleanup(setattr, python_heap, 'format_collect_lines',
+                        python_heap.format_collect_lines)
+        python_heap.format_collect_lines = lambda *args: ('diagnostic result',)
+
+        class BrokenOutput(object):
+            def write(self, unused):
+                raise IOError('output unavailable')
+
+        with contextlib.redirect_stdout(BrokenOutput()):
+            self.assertTrue(python_heap.log_collect('round_end', 1))
+
+    def test_missing_diagnostic_result_reports_failure(self):
+        self.addCleanup(setattr, python_heap, 'format_collect_lines',
+                        python_heap.format_collect_lines)
+        python_heap.format_collect_lines = lambda *args: ()
+        self.assertFalse(python_heap.log_collect('round_end', 1))
+
+    def test_edge_census_keeps_self_edges_and_repeated_references(self):
+        record = {}
+        record['self'] = record
+        holder = []
+        holder.extend([holder, holder])
+        window, count, ranked = python_heap.edge_census([record, holder])
+        self.assertEqual(2, window)
+        self.assertEqual(3, count)
+        self.assertEqual(1, dict(ranked)['dict{self} -> dict{self}'])
+        self.assertEqual(2, dict(ranked)['list(len=2) -> list(len=2)'])
+
+    def test_edge_window_does_not_materialize_the_rest_of_an_iterator(self):
+        consumed = []
+
+        def source():
+            for index in range(3):
+                consumed.append(index)
+                yield {}
+            raise AssertionError('consumed beyond the requested sample')
+
+        window, unused_count, unused_ranked = python_heap.edge_census(
+            source(), sample=3)
+        self.assertEqual(3, window)
+        self.assertEqual([0, 1, 2], consumed)
+
+    def test_large_containers_have_a_reference_budget(self):
+        target = []
+        holder = [target] * 100000
+        unused_window, count, unused_ranked = python_heap.edge_census(
+            [holder, target])
+        self.assertEqual(32, count)
+
+    def test_dictionary_reference_budget_includes_keys_and_values(self):
+        keys = [(index,) for index in range(100)]
+        values = [[] for unused in keys]
+        record = dict(zip(keys, values))
+        unused_window, count, ranked = python_heap.edge_census(
+            [record] + keys + values)
+        self.assertEqual(32, count)
+        holds = dict(ranked)
+        self.assertEqual(16, holds['dict(len=<=128) -> tuple(len=1)'])
+        self.assertEqual(16, holds['dict(len=<=128) -> list(len=0)'])
+
+    def test_edge_sampling_does_not_invoke_native_or_subclass_traversal(self):
+        self.addCleanup(setattr, python_heap.gc, 'get_referents',
+                        python_heap.gc.get_referents)
+        calls = []
+        python_heap.gc.get_referents = lambda item: calls.append('native') or []
+
+        class Opaque(object):
+            pass
+
+        class CustomList(list):
+            def __iter__(self):
+                calls.append('subclass')
+                return iter(())
+
+        python_heap.edge_census([Opaque(), CustomList([[]])])
+        self.assertEqual([], calls)
+
+    def test_edge_iterator_failure_does_not_retain_sampled_cycles(self):
+        class Cycle(object):
+            pass
+
+        def broken_referents(item):
+            yield item
+            raise RuntimeError('edge inspection failed')
+
+        self.addCleanup(setattr, python_heap, '_edge_referents',
+                        python_heap._edge_referents)
+        python_heap._edge_referents = broken_referents
+        gc.collect()
+        was_enabled = gc.isenabled()
+        try:
+            gc.disable()
+            item = Cycle()
+            item.cycle = item
+            del item
+            self.assertIsNotNone(python_heap.collect_once())
+            self.assertFalse(any(type(item) is Cycle for item in gc.get_objects()))
+            self.assertFalse(gc.isenabled())
+            self.assertEqual(self._debug, gc.get_debug())
+        finally:
+            if was_enabled:
+                gc.enable()
 
     def test_a_function_signature_carries_its_source_location(self):
         def _closure_target():
