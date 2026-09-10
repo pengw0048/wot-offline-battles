@@ -430,11 +430,18 @@ def retention_census(items, own):
             frontier.append(item)
     if not frontier:
         return dominant, ()
+    own = set(own)
+    own.add(id(members))
     levels = []
     visited = set(id(item) for item in frontier)
     for unused_level in range(HOLD_DEPTH):
+        # The index, work queue and call-argument tuple all retain the objects
+        # being inspected. Name the tuple explicitly: CPython 2.7 reports the
+        # temporary tuple created by ``*frontier`` as a referrer too.
+        targets = tuple(frontier)
+        own.update((id(frontier), id(targets)))
         try:
-            referrers = gc.get_referrers(*frontier)
+            referrers = gc.get_referrers(*targets)
         except Exception:
             break
         tally = {}

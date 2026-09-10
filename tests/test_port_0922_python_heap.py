@@ -630,6 +630,24 @@ class CycleAndRetentionTest(unittest.TestCase):
         self.assertTrue(holders)
         self.assertNotIn('module', ' '.join(holders))
 
+    def test_retention_does_not_report_its_own_containers_as_holders(self):
+        captured = [{'aim_yaw': 0.0, 'alive': True} for unused in range(30)]
+        dominant, holders = python_heap.retention_census(
+            captured, set([id(captured), id(gc.__dict__)]))
+        self.assertEqual('dict{aim_yaw,alive}', dominant)
+        self.assertEqual([], holders)
+
+    def test_retention_reaches_a_real_owner_without_probe_container_levels(self):
+        owner = self.Registry()
+        owner.rows = [{'aim_yaw': 0.0, 'alive': True}
+                      for unused in range(4)]
+        captured = list(owner.rows)
+        unused_dominant, holders = python_heap.retention_census(
+            captured, set([id(captured), id(gc.__dict__)]))
+        self.assertEqual('list(len=4) x1', holders[0])
+        self.assertIn('Registry', ' '.join(holders))
+        self.assertNotIn('tuple(', ' '.join(holders))
+
     def test_both_walks_are_bounded(self):
         captured = self._garbage()
         seeds, unused_truncated, unused_cycles = python_heap.cycle_census(
