@@ -25,6 +25,42 @@ LAST_EFFORT_SECONDS = 2.0
 MOVING_SPEED_EPSILON = 0.5
 SHOT_CAMOUFLAGE_SECONDS = 0.75
 
+# The detection law itself lives in the cell app, which the client package does
+# not carry.  The published rule this build shipped under is the pre-1.0
+# discrete model documented on wiki.wargaming.net/en/Battle_Mechanics:
+#
+#   camoFactor = baseCamo * crew * camoAtShot
+#                + camoPattern + camoNet + environmentCamo   (capped at 1)
+#   spottingRange = viewRange - (viewRange - 50) * camoFactor
+#
+# Only the vehicle-and-crew term carries the shot factor.  The paint, the
+# camouflage net and the vegetation are summed after it, and firing leaves
+# them alone.
+CAMOUFLAGE_LIMIT = 1.0
+# Vegetation contributes 50 per cent with foliage and 25 per cent without, it
+# stacks additively, and the vegetation total is capped at 80 per cent.  The
+# exact client carries no per-asset leaf classification - speedtree/bushes.xml
+# is a flat taxonomy - so every baked volume is the foliage-bearing case.
+FOLIAGE_CAMOUFLAGE_PER_VOLUME = 0.50
+FOLIAGE_CAMOUFLAGE_LIMIT = 0.80
+# Soft cover this close to a vehicle is transparent to that vehicle, so its own
+# bush conceals it without blinding it.  When that vehicle fires, the same
+# cover keeps only FOLIAGE_FIRE_TRANSPARENCY_SHARE of its bonus for every
+# observer, and only the strongest such volume is counted at all.
+FOLIAGE_TRANSPARENCY_DISTANCE = 15.0
+FOLIAGE_FIRE_TRANSPARENCY_SHARE = 0.30
+
+# One owner for the spotting ray's geometry.  The hidden worker decides
+# spotting and the visible client samples the same pair for its own
+# presentation, so a client ray that is even slightly more permissive draws an
+# enemy the authority never spotted: no spotting credit, no Bot reaction, and
+# no warning for the target.  The vegetation query uses the same two heights.
+OBSERVER_EYE_HEIGHT = 2.0
+TARGET_CHECK_HEIGHT = 1.5
+# ``wg_collideSegment`` reports the first hit; one this close to the far end
+# is the target's own footprint rather than cover standing in front of it.
+SIGHT_END_TOLERANCE = 1.5
+
 
 def clamp(value, minimum, maximum):
 	return max(float(minimum), min(float(maximum), float(value)))
@@ -63,28 +99,38 @@ def base_camouflage(moving_base, still_base, crew_factor=0.57,
 
 def effective_camouflage(base_pair, moving=False, additive=0.0,
 		multiplier=1.0, shot_factor=1.0, fired_recently=False,
-		foliage_bonus=0.0):
-	"""#1513 ``utils.getInvisibility`` plus the shot and foliage terms.
+		foliage_bonus=0.0, paint_bonus=0.0):
+	"""#1513 ``utils.getInvisibility`` plus the shot and vegetation terms.
 
 	``additive`` and ``multiplier`` are the aspect the caller resolved from
 	``factors['invisibility']``: the camouflage net lives in the stationary
-	aspect only.
+	aspect only, and #1513 leaves the multiplier at 1.0 because
+	``CamouflageNet.updateVehicleAttrFactors`` is its only writer and it only
+	touches the additive entry.
+
+	``base_pair`` is ``computeBaseInvisibility``'s result, which already folds
+	the paint bonus in.  ``paint_bonus`` is that same term, taken back out so
+	the shot factor scales only the vehicle-and-crew part the published law
+	scales.  Firing must not discount the paint, the camouflage net or the
+	vegetation.
 	"""
 	if not isinstance(base_pair, (list, tuple)) or len(base_pair) < 2:
 		base_pair = (0.0, 0.0)
 	result = float(base_pair[0] if moving else base_pair[1])
-	result = (result + float(additive or 0.0)) * max(
-		0.0, float(multiplier or 0.0))
+	paint = clamp(paint_bonus, 0.0, max(0.0, result))
+	result -= paint
 	if fired_recently:
 		result *= clamp(shot_factor, 0.0, 1.0)
-	result += clamp(foliage_bonus, 0.0, 0.60)
-	return clamp(result, 0.0, 0.95)
+	result = (result + paint + float(additive or 0.0)) * max(
+		0.0, float(multiplier or 0.0))
+	result += clamp(foliage_bonus, 0.0, FOLIAGE_CAMOUFLAGE_LIMIT)
+	return clamp(result, 0.0, CAMOUFLAGE_LIMIT)
 
 
 def detection_distance(view_range, camouflage):
 	"""Apply #1513's 50 metre floor and 445 metre spotting ceiling."""
 	view_range = max(PROXIMITY_SPOT_DISTANCE, float(view_range or 0.0))
-	camouflage = clamp(camouflage, 0.0, 0.95)
+	camouflage = clamp(camouflage, 0.0, CAMOUFLAGE_LIMIT)
 	distance = view_range - (
 		view_range - PROXIMITY_SPOT_DISTANCE) * camouflage
 	return clamp(distance, PROXIMITY_SPOT_DISTANCE, MAX_SPOT_DISTANCE)

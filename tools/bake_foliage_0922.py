@@ -31,19 +31,23 @@ for path in (TOOL_ROOT, SCHEMA_ROOT, VENDOR_ROOT):
         sys.path.insert(0, path)
 
 from packed_xml import TYPE_ELEMENT, read_packed_xml
+from spotting import FOLIAGE_CAMOUFLAGE_PER_VOLUME
 from wot_space_bin_utils import CompiledSpace
 from bake_destructibles_0922 import native_wires
 import navigation_graph_schema
 
 
 FORMAT_NAME = 'offline-lan-0922-foliage'
-FORMAT_VERSION = 4
+# v5 carries the published 50 per cent vegetation value; a v4 catalog holds
+# the earlier 15 per cent and must not be loaded by a runtime expecting v5.
+FORMAT_VERSION = 5
 MANIFEST_FORMAT = FORMAT_NAME + '-manifest'
 GAME_VERSION = '0.9.22.0.1-cn-1513'
 DECODER_VERSION = '0.9.22.0.1'
 DECODER_REGION = 'RU'
 CELL_SIZE = 32.0
-CAMOUFLAGE_PER_VOLUME = 0.15
+# ``spotting`` owns the published concealment value; the bake only records it.
+CAMOUFLAGE_PER_VOLUME = FOLIAGE_CAMOUFLAGE_PER_VOLUME
 CTREE_VERSION = 106
 SUPPORTED_MAPS = navigation_graph_schema.SUPPORTED_MAPS
 DEFAULT_OUTPUT_ROOT = os.path.join(PORT_ROOT, 'foliage')

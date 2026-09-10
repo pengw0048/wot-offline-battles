@@ -1782,7 +1782,7 @@ class ListenerTest(unittest.TestCase):
                 "server_capabilities": [
                     "destructible_catalog_v5", "ram_contact_ledger_v2",
                     "human_ram_timeline_v1", "player_fire_intent_v6",
-                    "player_environment_v2", "effective_params_v1",
+                    "player_environment_v2", "effective_params_v2",
                     "ricochet_continuation_v1"],
             }
             reply.update(self.reply_overrides)
@@ -1917,7 +1917,7 @@ class ListenerTest(unittest.TestCase):
                 "PLAYER_ENVIRONMENT_CAPABILITY",
                 "RICOCHET_CONTINUATION_CAPABILITY"):
             self.assertIn(server0922[name], probe["capabilities"])
-        self.assertIn("effective_params_v1", probe["capabilities"])
+        self.assertIn("effective_params_v2", probe["capabilities"])
         for name in (
                 "DESTRUCTIBLE_CATALOG_V5_CAPABILITY",
                 "RAM_CONTACT_LEDGER_CAPABILITY",
@@ -1926,7 +1926,7 @@ class ListenerTest(unittest.TestCase):
                 "PLAYER_ENVIRONMENT_CAPABILITY",
                 "RICOCHET_CONTINUATION_CAPABILITY"):
             self.assertIn(server0922[name], probe["server_capabilities"])
-        self.assertIn("effective_params_v1", probe["server_capabilities"])
+        self.assertIn("effective_params_v2", probe["server_capabilities"])
 
 
 class ConnectionReportTest(unittest.TestCase):

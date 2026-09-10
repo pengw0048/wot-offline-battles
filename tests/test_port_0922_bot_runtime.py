@@ -272,7 +272,7 @@ def _effective_params_snapshot(mass=25000.0, base_moving=0.171,
         })
     crew_names = [member['instance'] for member in crew_members]
     return {
-        'version': 1,
+        'version': 2,
         'loadout': {
             'crew_level': 100.0, 'commander_level': 100.0,
             'effective_crew_level': 100.0, 'crew_multiplier': 1.0,
@@ -319,6 +319,7 @@ def _effective_params_snapshot(mass=25000.0, base_moving=0.171,
             'base_moving': float(base_moving),
             'base_still': float(base_still),
             'shot_factor': float(shot_factor),
+            'paint_bonus': 0.0,
         },
         'skills': {
             'sixth_sense': False, 'expert': False,
@@ -18832,8 +18833,10 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertNotIn('unused_roster_payload', target)
         # This is the expensive consumer which needs effective_params and the
         # current critical crew/fire state; the compact record remains valid.
+        # (base pair, shot factor, spotting profile, paint bonus): the paint
+        # travels apart so the shot factor cannot discount it.
         profile = runtime._spotting_profile(target)
-        self.assertEqual(3, len(profile))
+        self.assertEqual(4, len(profile))
 
     def test_human_observation_visits_each_enemy_target_once(self):
         runtime = self.module.BotRuntime(

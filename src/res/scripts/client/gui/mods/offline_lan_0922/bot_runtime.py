@@ -590,6 +590,21 @@ def _vision_range_pair(descriptor, crew_level=None):
 
 
 def _base_invisibility(descriptor, profile=None, camouflage_id=None):
+    return _base_invisibility_with_paint(
+        descriptor, profile, camouflage_id)[0]
+
+
+def _base_invisibility_with_paint(descriptor, profile=None,
+                                  camouflage_id=None):
+    """Return ``computeBaseInvisibility``'s pair and its paint term.
+
+    #1513 folds ``type.invisibilityDeltas['camouflageBonus']`` into both
+    entries and does not scale it by the crew factor, so differencing a
+    paintless call against the mounted one recovers the exact paint bonus
+    with the client's own calculator instead of a local formula.  The
+    published law adds the paint after the shot factor, so the caller needs
+    the two terms apart.
+    """
     if profile is None:
         profile = _bot_profile(descriptor)
     crew_factor = profile['camouflage_factor']
@@ -598,7 +613,15 @@ def _base_invisibility(descriptor, profile=None, camouflage_id=None):
         try:
             values = calculator(crew_factor, camouflage_id)
             if isinstance(values, (list, tuple)) and len(values) >= 2:
-                return (_number(values[0]), _number(values[1]))
+                pair = (_number(values[0]), _number(values[1]))
+                if camouflage_id is None:
+                    return pair, 0.0
+                paintless = calculator(crew_factor, None)
+                if (isinstance(paintless, (list, tuple)) and
+                        len(paintless) >= 2):
+                    return pair, max(
+                        0.0, pair[0] - _number(paintless[0]))
+                return pair, 0.0
         except Exception:
             pass
     vehicle_type = _value(descriptor, 'type', {}) or {}
@@ -608,7 +631,7 @@ def _base_invisibility(descriptor, profile=None, camouflage_id=None):
     misc = _value(descriptor, 'miscAttrs', {}) or {}
     return spotting.base_camouflage(
         values[0], values[1], crew_factor=crew_factor,
-        invisibility_factor=_value(misc, 'invisibilityFactor', 1.0))
+        invisibility_factor=_value(misc, 'invisibilityFactor', 1.0)), 0.0
 
 
 def _shot_invisibility_factor(descriptor):
@@ -625,18 +648,24 @@ def _invisibility_aspect(profile, moving, still_device_ready):
 
 
 def _detection_upper_bound(distance, view_range, base_pair, moving,
-                           shot_factor, fired_recently):
+                           shot_factor, fired_recently, additive=0.0,
+                           multiplier=1.0, paint_bonus=0.0):
     """Return detection with the best possible geometry for this pair.
 
-    Foliage camouflage is additive and clamped to a non-negative value, so
-    zero foliage is the minimum possible camouflage.  A clear line of sight is
-    likewise the maximum possible visibility.  If this upper bound is false,
-    neither the native collision ray nor the real foliage result can make the
-    target visible.
+    Vegetation camouflage is additive and clamped to a non-negative value, so
+    zero vegetation is the minimum possible camouflage.  A clear line of sight
+    is likewise the maximum possible visibility.  If this upper bound is
+    false, neither the native collision ray nor the real vegetation result can
+    make the target visible.
+
+    Every other term of the law is passed through rather than defaulted: a
+    multiplicative aspect below 1.0 would otherwise raise the assumed
+    camouflage above the real one and turn this bound into a false negative.
     """
     minimum_camouflage = spotting.effective_camouflage(
-        base_pair, moving=moving, shot_factor=shot_factor,
-        fired_recently=fired_recently, foliage_bonus=0.0)
+        base_pair, moving=moving, additive=additive, multiplier=multiplier,
+        shot_factor=shot_factor, fired_recently=fired_recently,
+        foliage_bonus=0.0, paint_bonus=paint_bonus)
     return spotting.is_detected(
         distance, view_range, minimum_camouflage, True)
 
@@ -4492,8 +4521,10 @@ class BotRuntime(object):
             descriptor = self._descriptors.get(int(target_id), {})
             profile = _bot_profile(
                 descriptor, self.bot_crew_level(target_id))
-            cached = (_base_invisibility(descriptor, profile),
-                      _shot_invisibility_factor(descriptor), profile)
+            base_pair, paint_bonus = _base_invisibility_with_paint(
+                descriptor, profile)
+            cached = (base_pair, _shot_invisibility_factor(descriptor),
+                      profile, paint_bonus)
         else:
             vehicle_profile = self._player_vehicle_profile(
                 target, tick_cache)
@@ -4508,7 +4539,8 @@ class BotRuntime(object):
             profile['invisibility_still'] = tuple(
                 dynamic['invisibility_still'])
             cached = ((dynamic['base_moving'], dynamic['base_still']),
-                      snapshot['camouflage']['shot_factor'], profile)
+                      snapshot['camouflage']['shot_factor'], profile,
+                      snapshot['camouflage']['paint_bonus'])
         self._spotting_profiles[key] = cached
         return cached
 
@@ -4658,7 +4690,7 @@ class BotRuntime(object):
         cached = cache.get(identity) if cache is not None else None
         if cached is not None and cached[0] == token:
             return cached[1]
-        base_pair, shot_factor, profile = profile_bundle
+        base_pair, shot_factor, profile, paint_bonus = profile_bundle
         still_seconds = self._target_still_seconds(
             identity, moving, now)
         additive, multiplier = _invisibility_aspect(
@@ -4666,7 +4698,7 @@ class BotRuntime(object):
                 still_seconds, profile['camouflage_net_delay']))
         result = (
             base_pair, shot_factor, profile, moving,
-            additive, multiplier)
+            additive, multiplier, paint_bonus)
         if cache is not None:
             # Keep only the latest exact target state. If a target changes
             # motion class twice in one slice, the second transition must run
@@ -4813,6 +4845,29 @@ class BotRuntime(object):
             cached is not None and cached[0] == cache_key and
             now < cached[1])
 
+    def _note_target_stillness(self, live_bots, live_humans, now):
+        """Sample every live target's stationary clock once per frame.
+
+        ``_target_still_seconds`` used to run only for a pair that survived
+        the visibility budget.  A target that moved while its pairs were
+        deferred therefore kept the stamp it had before it moved, and armed
+        its camouflage net the instant it stopped instead of waiting the
+        descriptor's ``activateWhenStillSec``.  Sampling here mirrors
+        ``_note_source_stillness`` and makes the clock independent of who
+        happened to look at it.
+        """
+        for state in live_bots:
+            self._target_still_seconds(
+                ('bot', int(state['id'])),
+                abs(_number(state.get('speed'), 0.0)) >
+                spotting.MOVING_SPEED_EPSILON, now)
+        for raw in live_humans:
+            self._target_still_seconds(
+                ('human', int(raw['id'])),
+                abs(_number(raw.get('speed'), 0.0)) >
+                spotting.MOVING_SPEED_EPSILON, now)
+        return True
+
     @timed('bot.visibility_schedule')
     def _prepare_visibility_frame(self, players, now, include_humans):
         """Select a bounded, fair stale-pair cohort before native calls."""
@@ -4827,6 +4882,7 @@ class BotRuntime(object):
                        if (isinstance(raw, dict) and
                            raw.get('id') is not None and
                            raw.get('alive', True))]
+        self._note_target_stillness(live_bots, live_humans, now)
         targets = []
         for state in live_bots:
             targets.append(('bot', int(state['id']),
@@ -5053,11 +5109,12 @@ class BotRuntime(object):
                           if callable(view_range_resolver) else
                           self._source_view_range(source, now, tick_cache))
             (base_pair, shot_factor, profile, moving,
-             additive, multiplier) = self._target_detection_projection(
+             additive, multiplier,
+             paint_bonus) = self._target_detection_projection(
                  target, target_id, now, tick_cache)
             if not _detection_upper_bound(
                     distance, view_range, base_pair, moving, shot_factor,
-                    fired_recently):
+                    fired_recently, additive, multiplier, paint_bonus):
                 value = False
             else:
                 if not self._visibility_probe_admitted(key):
@@ -5090,7 +5147,8 @@ class BotRuntime(object):
                     base_pair, moving=moving, additive=additive,
                     multiplier=multiplier, shot_factor=shot_factor,
                     fired_recently=fired_recently,
-                    foliage_bonus=foliage_bonus)
+                    foliage_bonus=foliage_bonus,
+                    paint_bonus=paint_bonus)
                 value = spotting.is_detected(
                     distance, view_range, camouflage, has_line_of_sight)
         self._visibility_cache[key] = (now, value, fire_seq)

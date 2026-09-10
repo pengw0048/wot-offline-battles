@@ -3,12 +3,13 @@
 
 import math
 
-
-FOLIAGE_CAMOUFLAGE_PER_VOLUME = 0.15
-FOLIAGE_CAMOUFLAGE_LIMIT = 0.60
-FIRE_TRANSPARENCY_DISTANCE = 15.0
-OBSERVER_EYE_HEIGHT = 2.0
-TARGET_CHECK_HEIGHT = 1.5
+# ``spotting`` owns the published concealment numbers and the ray geometry;
+# this module owns which volumes the ray collects them from.
+from gui.mods.offline_lan_0922.spotting import (
+	FOLIAGE_CAMOUFLAGE_LIMIT, FOLIAGE_CAMOUFLAGE_PER_VOLUME,
+	FOLIAGE_FIRE_TRANSPARENCY_SHARE, FOLIAGE_TRANSPARENCY_DISTANCE,
+	OBSERVER_EYE_HEIGHT, TARGET_CHECK_HEIGHT,
+)
 
 
 def _segment_cells(start, end, cell_size):
@@ -245,6 +246,71 @@ def _intersects_dynamic(instance, start, end):
 	return True
 
 
+def _instance_centre(instance):
+	"""Return one volume's horizontal centre, strength and circumradius."""
+	if isinstance(instance, dict):
+		centre = instance['center']
+		return (float(centre[0]), float(centre[2]),
+			float(instance['strength']), float(instance['radius']))
+	return (float(instance[0]), float(instance[2]),
+		float(instance[8]), float(instance[9]))
+
+
+def _horizontal_distance(instance, point):
+	"""Distance from a world point to the nearest part of one volume.
+
+	The published rule speaks of cover ``in a 15 m radius around your tank``,
+	and a baked cluster can be nine metres across, so the test has to measure
+	the volume itself rather than its centre: a scout parked twelve metres
+	behind a wide bush is inside that radius even though the centre is not.
+
+	A fallen tree is a full 3-D box whose horizontal projection is a hexagon
+	rather than a rectangle, so it falls back to its horizontal circumradius
+	bound.  That bound can only report a shorter distance than the truth, and
+	both callers use the radius to *remove* concealment - transparent to the
+	observer, discounted for a firer - so the approximation can only ever
+	credit a target with less cover, never with cover it did not have.
+	"""
+	centre_x, centre_z, unused_strength, radius = _instance_centre(instance)
+	dx = float(point[0]) - centre_x
+	dz = float(point[2]) - centre_z
+	centre_distance = math.sqrt(dx * dx + dz * dz)
+	if isinstance(instance, dict):
+		return max(0.0, centre_distance - radius)
+	first = float(instance[4]) * dx + float(instance[5]) * dz
+	second = float(instance[6]) * dx + float(instance[7]) * dz
+	clamped_first = max(-1.0, min(1.0, first))
+	clamped_second = max(-1.0, min(1.0, second))
+	if clamped_first == first and clamped_second == second:
+		return 0.0
+	determinant = (float(instance[4]) * float(instance[7]) -
+		float(instance[5]) * float(instance[6]))
+	if abs(determinant) <= 1.0e-12:
+		return max(0.0, centre_distance - radius)
+	nearest_x = (float(instance[7]) * clamped_first -
+		float(instance[5]) * clamped_second) / determinant
+	nearest_z = (float(instance[4]) * clamped_second -
+		float(instance[6]) * clamped_first) / determinant
+	return math.hypot(dx - nearest_x, dz - nearest_z)
+
+
+def _within_transparency_radius(instance, point):
+	"""Whether one volume lies inside the 15 m transparency radius."""
+	centre_x, centre_z, unused_strength, radius = _instance_centre(instance)
+	dx = float(point[0]) - centre_x
+	dz = float(point[2]) - centre_z
+	centre_distance = math.sqrt(dx * dx + dz * dz)
+	# The nearest part of a volume is never further than its centre and never
+	# nearer than the centre less its circumradius, so both bounds answer most
+	# candidates without the exact projection.
+	if centre_distance - radius > FOLIAGE_TRANSPARENCY_DISTANCE:
+		return False
+	if centre_distance <= FOLIAGE_TRANSPARENCY_DISTANCE:
+		return True
+	return _horizontal_distance(
+		instance, point) <= FOLIAGE_TRANSPARENCY_DISTANCE
+
+
 def _bounds_cells(bounds, cell_size):
 	minimum_cell_x = int(math.floor(bounds[0] / cell_size))
 	minimum_cell_z = int(math.floor(bounds[1] / cell_size))
@@ -349,7 +415,15 @@ class FoliageMap(object):
 		return True
 
 	def camouflage_bonus(self, observer, target, fired_recently=False):
-		"""Return additive camouflage for this observer-target pair."""
+		"""Return additive camouflage for this observer-target pair.
+
+		Cover within the transparency radius of the observer is transparent to
+		that observer, so the bush a scout sits in conceals the scout without
+		blinding it.  When the target has just fired, cover that close to the
+		target keeps only ``FOLIAGE_FIRE_TRANSPARENCY_SHARE`` of its bonus and
+		only the single strongest such volume is counted; cover further away
+		is unaffected and still stacks up to the vegetation cap.
+		"""
 		start = (float(observer[0]),
 			float(observer[1]) + OBSERVER_EYE_HEIGHT,
 			float(observer[2]))
@@ -364,30 +438,27 @@ class FoliageMap(object):
 					seen.add(instance_id)
 					candidate_ids.append(instance_id)
 		bonus = 0.0
+		strongest_at_target = 0.0
 		for instance_id in candidate_ids:
 			if instance_id < 0 or instance_id >= len(self.instances):
 				continue
 			if instance_id in self.inactive_instances:
 				continue
 			instance = self.instances[instance_id]
-			if fired_recently:
-				if isinstance(instance, dict):
-					center_x = instance['center'][0]
-					center_z = instance['center'][2]
-					radius = instance['radius']
-				else:
-					center_x = instance[0]
-					center_z = instance[2]
-					radius = instance[9]
-				dx = float(target[0]) - float(center_x)
-				dz = float(target[2]) - float(center_z)
-				if math.sqrt(dx * dx + dz * dz) <= (
-						FIRE_TRANSPARENCY_DISTANCE + float(radius)):
-					continue
-			if _intersects(instance, start, end):
-				bonus += float(
-					instance['strength'] if isinstance(instance, dict)
-					else instance[8])
-				if bonus >= FOLIAGE_CAMOUFLAGE_LIMIT:
-					return FOLIAGE_CAMOUFLAGE_LIMIT
+			# Most candidates in a crossed cell miss the segment, and the
+			# intersection is the cheaper of the two rejections, so it runs
+			# before the observer's transparency radius.
+			if not _intersects(instance, start, end):
+				continue
+			if _within_transparency_radius(instance, observer):
+				continue
+			strength = max(0.0, _instance_centre(instance)[2])
+			if fired_recently and _within_transparency_radius(
+					instance, target):
+				strongest_at_target = max(strongest_at_target, strength)
+				continue
+			bonus += strength
+			if bonus >= FOLIAGE_CAMOUFLAGE_LIMIT:
+				return FOLIAGE_CAMOUFLAGE_LIMIT
+		bonus += strongest_at_target * FOLIAGE_FIRE_TRANSPARENCY_SHARE
 		return min(FOLIAGE_CAMOUFLAGE_LIMIT, max(0.0, bonus))
