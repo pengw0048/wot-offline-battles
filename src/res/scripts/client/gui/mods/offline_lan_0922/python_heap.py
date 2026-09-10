@@ -46,6 +46,10 @@ TOP_EDGES = 8
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
 MAX_SIGNATURE_TEXT = 64
+# Keys examined before giving up on naming a dict.  Bounds the cost of
+# fingerprinting a pathologically wide mapping while still letting an ordinary
+# record - which is what leaked - identify itself.
+KEY_SCAN_LIMIT = 64
 # List and tuple lengths are reported as exact small values and then in
 # powers-of-two buckets, so one dominant shape is still visible.
 SMALL_LENGTH = 8
@@ -139,12 +143,27 @@ def _signature(item):
         # Exact types only: subclasses may override keys, length, or attribute
         # lookup and run application/native code while garbage is retained.
         if item_type is dict:
-            if len(item) > MAX_SIGNATURE_KEYS:
-                return 'dict(len=%s)' % _bucket(len(item))
-            keys = sorted(_label(key) for key in item if _is_text(key))
+            # Name the record even when it is wide.  Reports 20260910-045317
+            # and -061701 both had `dict(len=<=64)` as 84% of the sampled
+            # garbage: bailing out to a bare length above MAX_SIGNATURE_KEYS
+            # hid the identity of exactly the dicts that dominate.  The scan
+            # is bounded instead, so a pathological dict still costs nothing.
+            keys = []
+            scanned = 0
+            for key in item:
+                scanned += 1
+                if scanned > KEY_SCAN_LIMIT:
+                    break
+                if _is_text(key):
+                    keys.append(_label(key))
             if not keys:
-                return 'dict(len=%d)' % len(item)
-            return 'dict{%s}' % ','.join(keys)
+                return 'dict(len=%s)' % _bucket(len(item))
+            keys.sort()
+            shown = keys[:MAX_SIGNATURE_KEYS]
+            more = ''
+            if len(item) > len(shown):
+                more = ',+%d' % (len(item) - len(shown))
+            return 'dict{%s%s}' % (','.join(shown), more)
         if any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
             return '%s(len=%s)' % (kind, _bucket(len(item)))
         code = None

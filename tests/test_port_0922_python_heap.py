@@ -350,8 +350,27 @@ class ForcedCollectTest(unittest.TestCase):
         shape = python_heap._signature({'a\n' + 'x' * 100000: 1})
         self.assertLess(len(shape), 200)
         self.assertNotIn('\n', shape)
+        # A wide dict still names itself, because that is what identifies the
+        # leaked record: `dict(len=<=64)` was 84% of the sampled garbage in
+        # reports 20260910-045317 and -061701 and said nothing about what it
+        # was. Bounded to MAX_SIGNATURE_KEYS names plus a remainder count.
         large = python_heap._signature(dict((str(n), n) for n in range(100)))
-        self.assertEqual('dict(len=<=128)', large)
+        self.assertTrue(large.startswith('dict{'), large)
+        self.assertTrue(large.endswith(',+92}'), large)
+        names = large[len('dict{'):-len(',+92}')].split(',')
+        self.assertEqual(python_heap.MAX_SIGNATURE_KEYS, len(names))
+        self.assertLess(len(large), 200)
+        self.assertNotIn('\n', large)
+        # Only a mapping with no text key at all falls back to a bare length.
+        self.assertEqual(
+            'dict(len=<=64)',
+            python_heap._signature(dict((n, n) for n in range(40))))
+        # The scan is bounded, so a pathologically wide mapping is cheap.
+        huge = python_heap._signature(
+            dict(('k%05d' % n, n) for n in range(200000)))
+        self.assertTrue(huge.startswith('dict{'), huge)
+        self.assertTrue(huge.endswith(',+199992}'), huge)
+        self.assertLess(len(huge), 200)
 
     def test_sampling_failure_does_not_keep_cycles_in_exception_frames(self):
         class Cycle(object):
