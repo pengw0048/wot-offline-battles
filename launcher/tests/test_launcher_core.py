@@ -2588,3 +2588,20 @@ class WorkerResourceIsolationTest(unittest.TestCase):
             isolated_mods=False)
         self.assertNotIn(core.WORKER_RES_PATH_ENV_0922, stock)
 
+
+class ExitCodeDescriptionTest(unittest.TestCase):
+    def test_a_missing_runtime_dll_reads_as_one(self):
+        text = core.describe_exit_code(3221225781)
+        self.assertIn("0xC0000135", text)
+        self.assertIn("DirectX 9", text)
+
+    def test_an_abort_names_the_client_fatal_error(self):
+        self.assertIn("abort", core.describe_exit_code(3))
+
+    def test_an_ordinary_code_is_left_alone(self):
+        self.assertEqual("0", core.describe_exit_code(0))
+        self.assertEqual("7", core.describe_exit_code(7))
+
+    def test_an_unlisted_windows_status_is_still_named_as_one(self):
+        self.assertIn("Windows fatal status",
+                      core.describe_exit_code(0xC0000409))

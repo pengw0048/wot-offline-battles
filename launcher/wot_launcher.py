@@ -3102,7 +3102,7 @@ class LauncherWindow(object):
                 self._worker_exited_unexpectedly = True
                 self._log(
                     "The hidden simulation worker stopped with exit code %s." %
-                    exit_code)
+                    core.describe_exit_code(exit_code))
             self._log_worker_failure(game_root)
         self._stop_worker(room_owned=room_owned)
         return False
@@ -3275,13 +3275,15 @@ class LauncherWindow(object):
         crashed = (error_reports.ROLE_VISIBLE_CLIENT in
                    self._observed_crash_roles)
         if crashed:
-            self._log("The game stopped with exit code %s." % exit_code)
+            self._log("The game stopped with exit code %s." %
+                      core.describe_exit_code(exit_code))
         if paired_worker:
             if worker_exit is not None and not self._stop_requested:
                 if self._worker_exited_unexpectedly:
                     self._log(
                         "The hidden simulation worker stopped with exit code "
-                        "%s; the game was closed." % worker_exit)
+                        "%s; the game was closed." %
+                        core.describe_exit_code(worker_exit))
                     self._log_worker_failure(game_root)
                     if (self._server is not None and
                             not self._server_persistent):

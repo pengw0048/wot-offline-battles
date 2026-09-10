@@ -1207,6 +1207,36 @@ def _transactional_install(game_root, staged_root, members, layout):
     return actions, len(operations)
 
 
+# Exit codes a field report actually produced.  A raw decimal tells a player
+# nothing, and the two that matter are not even crashes of ours: 0xC0000135 is
+# Windows refusing to start the client because a runtime DLL is missing, and 3
+# is the client's own abort() after its fatal-error handler ran.
+_EXIT_CODE_NOTES = {
+    3: ("the client stopped itself (abort); its own fatal-error message is "
+        "in the game log of that session"),
+    0xC0000005: "access violation inside the client",
+    0xC0000135: ("a DLL the client needs was not found, so Windows never "
+                 "started it: install the DirectX 9 (June 2010) end-user "
+                 "runtime and the Visual C++ x86 redistributable, then "
+                 "verify the game folder is complete"),
+}
+
+
+def describe_exit_code(code):
+    """Render a process exit code with its meaning when one is known."""
+    try:
+        value = int(code)
+    except (TypeError, ValueError):
+        return str(code)
+    unsigned = value & 0xFFFFFFFF
+    note = _EXIT_CODE_NOTES.get(unsigned)
+    if note is not None:
+        return "%d (0x%08X, %s)" % (value, unsigned, note)
+    if unsigned >= 0xC0000000:
+        return "%d (0x%08X, a Windows fatal status)" % (value, unsigned)
+    return str(value)
+
+
 def worker_resource_root(game_root):
     """Return the launcher-owned resource root the hidden worker mounts."""
     return os.path.join(
