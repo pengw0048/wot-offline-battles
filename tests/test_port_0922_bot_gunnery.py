@@ -431,6 +431,145 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(1.0, gunnery.CAPABILITY_EXPONENT)
 
 
+class CapabilityOnsetTests(unittest.TestCase):
+    """An onset turns one probability into a difficulty ladder."""
+
+    def test_a_capability_without_an_onset_is_exactly_the_old_draw(self):
+        """Nothing the ladder did not name may move."""
+        for capability in gunnery.CAPABILITIES:
+            if gunnery.capability_onset(capability) > 0.0:
+                continue
+            for rating in (0.0, 0.05, 0.3, 0.5, 0.87, 1.0):
+                self.assertAlmostEqual(
+                    rating,
+                    gunnery.capability_probability(rating, capability),
+                    msg=(capability, rating))
+
+    def test_a_tactic_is_out_of_reach_below_its_onset(self):
+        for capability in gunnery.CAPABILITIES:
+            onset = gunnery.capability_onset(capability)
+            if onset <= 0.0:
+                continue
+            self.assertEqual(
+                0.0, gunnery.capability_probability(onset, capability))
+            for occasion in range(60):
+                self.assertFalse(gunnery.capability_allowed(
+                    onset, capability, 3, 11, occasion), capability)
+
+    def test_every_tactic_still_reaches_certainty_at_the_top(self):
+        for capability in gunnery.CAPABILITIES:
+            self.assertEqual(
+                1.0, gunnery.capability_probability(1.0, capability),
+                capability)
+            self.assertEqual(
+                0.0, gunnery.capability_probability(0.0, capability),
+                capability)
+
+    def test_a_stronger_bot_never_reaches_for_fewer_tactics(self):
+        previous = None
+        for index in range(21):
+            rating = index / 20.0
+            available = frozenset(
+                capability for capability in gunnery.CAPABILITIES
+                if gunnery.capability_probability(rating, capability) > 0.0)
+            if previous is not None:
+                self.assertTrue(previous <= available, rating)
+            previous = available
+
+    def test_the_ladder_really_has_more_than_one_rung(self):
+        """A rookie, a regular and a veteran must not be offered the same set."""
+        counts = []
+        for rating in gunnery.RATING_ANCHORS:
+            counts.append(len([
+                capability for capability in gunnery.TARGET_CAPABILITIES
+                if gunnery.capability_probability(
+                    rating + 1e-6, capability) > 0.0]))
+        self.assertEqual(sorted(counts), counts)
+        self.assertLess(counts[0], counts[-1])
+        self.assertEqual(len(gunnery.TARGET_CAPABILITIES), counts[-1])
+
+    def test_the_target_ladder_is_ordered_the_way_it_is_documented(self):
+        nearest = gunnery.capability_onset(
+            gunnery.CAPABILITY_TARGET_NEAREST)
+        priority = gunnery.capability_onset(
+            gunnery.CAPABILITY_TARGET_PRIORITY)
+        retaliation = gunnery.capability_onset(
+            gunnery.CAPABILITY_TARGET_RETALIATION)
+        human = gunnery.capability_onset(gunnery.CAPABILITY_TARGET_HUMAN)
+        self.assertEqual(0.0, nearest)
+        self.assertEqual(0.0, priority)
+        self.assertLess(priority, retaliation)
+        self.assertLess(retaliation, human)
+        self.assertLess(human, 1.0)
+        # An onset sits between two anchors, never on one. A launcher lineup
+        # pin resolves a tier name to that tier's exact anchor, so an onset
+        # on the anchor would promise a rung the labelled Bot never reaches.
+        self.assertLess(gunnery.RATING_ANCHORS[0], retaliation)
+        self.assertLess(retaliation, gunnery.RATING_ANCHORS[1])
+        self.assertLess(gunnery.RATING_ANCHORS[1], human)
+        self.assertLess(human, gunnery.RATING_ANCHORS[2])
+
+    def test_a_tier_label_never_promises_a_rung_the_bot_cannot_reach(self):
+        """A Bot the launcher calls veteran really does hunt the player."""
+        promises = {
+            gunnery.CAPABILITY_TARGET_NEAREST: gunnery.SKILL_ROOKIE,
+            gunnery.CAPABILITY_TARGET_PRIORITY: gunnery.SKILL_ROOKIE,
+            gunnery.CAPABILITY_TARGET_RETALIATION: gunnery.SKILL_REGULAR,
+            gunnery.CAPABILITY_TARGET_HUMAN: gunnery.SKILL_VETERAN,
+        }
+        for capability, promised in promises.items():
+            floor = gunnery.SKILL_TIERS.index(promised)
+            for index in range(2001):
+                rating = index / 2000.0
+                if rating <= 0.0:
+                    continue
+                labelled = gunnery.SKILL_TIERS.index(
+                    gunnery.skill_for_rating(rating))
+                reachable = gunnery.capability_probability(
+                    rating, capability) > 0.0
+                if labelled >= floor:
+                    self.assertTrue(
+                        reachable, (capability, rating))
+                else:
+                    self.assertFalse(
+                        reachable, (capability, rating))
+            # The pinned anchor itself is the case a launcher lineup
+            # creates.  The rookie anchor is rating 0, which is the honest
+            # floor of the whole spectrum and reaches nothing by design.
+            anchor = gunnery.rating_for_skill(promised)
+            if anchor > 0.0:
+                self.assertTrue(
+                    gunnery.capability_probability(anchor, capability) > 0.0,
+                    capability)
+
+    def test_the_target_capabilities_are_real_capabilities(self):
+        self.assertTrue(gunnery.TARGET_CAPABILITIES)
+        for capability in gunnery.TARGET_CAPABILITIES:
+            self.assertIn(capability, gunnery.CAPABILITIES)
+
+    def test_an_onset_capability_still_succeeds_at_its_own_rate(self):
+        capability = gunnery.CAPABILITY_TARGET_HUMAN
+        onset = gunnery.capability_onset(capability)
+        for rating in (0.75, 0.85, 0.95):
+            expected = (rating - onset) / (1.0 - onset)
+            hits = sum(
+                1 for index in range(4000)
+                if gunnery.capability_allowed(rating, capability, 1, index))
+            self.assertAlmostEqual(
+                expected, hits / 4000.0, delta=0.025, msg=rating)
+
+    def test_competence_never_costs_a_bot_an_onset_capability(self):
+        occasions = [(1, index) for index in range(600)]
+        counts = []
+        for index in range(11):
+            counts.append(sum(
+                1 for occasion in occasions
+                if gunnery.capability_allowed(
+                    index / 10.0, gunnery.CAPABILITY_TARGET_HUMAN,
+                    *occasion)))
+        self.assertEqual(sorted(counts), counts)
+
+
 class SkillVocabularyParityTests(unittest.TestCase):
     """One vocabulary, four owners: worker, wire, room panel and launcher."""
 
