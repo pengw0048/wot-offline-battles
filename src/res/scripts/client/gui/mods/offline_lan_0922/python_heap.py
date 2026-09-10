@@ -43,6 +43,33 @@ SIGNATURE_SAMPLE = 4000
 EDGE_SAMPLE = 2000
 MAX_EDGE_REFERENTS = 32
 TOP_EDGES = 8
+
+# Finding an actual cycle, not just one edge of one.  `PYREF` reports pairs,
+# which cannot close a loop; reports 20260910-045317/-061701/-065631 all show
+# the dominant edge with no returning edge, because the cycle root is a small
+# set of objects far from the head of gc.garbage.
+#
+# Two walks, because they fail in different directions.  The forward one finds
+# a loop among plausible cycle members - anything that is not a plain
+# container, so instances, bound methods, cells and frames.  The backward one
+# walks referrers up from the shape that dominates the garbage and names what
+# retains it, which is useful even when the cycle does not pass through it.
+CYCLE_INDEX_LIMIT = 200000
+CYCLE_SEEDS = 48
+CYCLE_MAX_DEPTH = 24
+CYCLE_NODE_BUDGET = 30000
+TOP_CYCLES = 3
+# One `gc.get_referrers` call scans every tracked object, so the depth here
+# multiplies a whole-heap pass. Measured on CPython 2.7 at 303k tracked
+# objects: 60 ms per level. The field worker carries about 1M, and Peng's VM
+# emulates x86 on ARM64, so budget seconds rather than milliseconds. Four
+# levels is enough to cross container -> owner -> registry -> holder, which is
+# where a local reproduction of the observed shape gave the whole answer;
+# deeper levels were module-level noise.
+HOLD_SEEDS = 12
+HOLD_DEPTH = 4
+TOP_HOLDERS = 6
+_PLAIN_CONTAINERS = (dict, list, tuple, set, frozenset)
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
 MAX_SIGNATURE_TEXT = 64
@@ -291,6 +318,152 @@ def edge_census(items, sample=EDGE_SAMPLE):
                                 for pair, count in ranked[:TOP_EDGES]]
 
 
+def _walk_referents(item):
+    """Referents for traversal, over every type a cycle can run through.
+
+    ``_edge_referents`` is deliberately exact-type: it bounds fan-out for the
+    edge histogram and yields nothing for an instance or a bound method, which
+    are exactly the objects a cycle needs.  ``gc.get_referents`` is a C-level
+    ``tp_traverse`` call - it runs no Python code, so it is as safe here - and
+    it is the only way the walk can cross an instance.
+    """
+    try:
+        return itertools.islice(gc.get_referents(item), MAX_EDGE_REFERENTS)
+    except Exception:
+        return iter(())
+
+
+def _is_plain(item):
+    item_type = type(item)
+    return any(item_type is builtin for builtin in _PLAIN_CONTAINERS)
+
+
+def cycle_census(items):
+    """Return actual cycle paths found inside an unreachable set.
+
+    Depth-first over referents restricted to the set; when a referent is
+    already on the current path the loop is closed and rendered as
+    ``A -> B -> C -> A``.  Seeds are the non-plain-container members, because
+    a cycle needs something that can hold a back-reference and those are far
+    fewer than the dicts they retain.
+    """
+    members = {}
+    for item in itertools.islice(items, CYCLE_INDEX_LIMIT):
+        members[id(item)] = item
+    seeds = [item for item in members.values() if not _is_plain(item)]
+    truncated = len(members) >= CYCLE_INDEX_LIMIT
+    if not seeds:
+        seeds = list(members.values())
+    stride = max(1, len(seeds) // CYCLE_SEEDS)
+    seeds = seeds[::stride][:CYCLE_SEEDS]
+    budget = [CYCLE_NODE_BUDGET]
+    found = []
+    for seed in seeds:
+        if budget[0] <= 0:
+            break
+        path = _find_cycle(seed, members, budget)
+        if path and path not in found:
+            found.append(path)
+            if len(found) >= TOP_CYCLES:
+                break
+    return len(seeds), truncated, found
+
+
+def _find_cycle(seed, members, budget):
+    """Iterative DFS for one loop reachable from ``seed`` within the set."""
+    stack = [(id(seed), iter(_walk_referents(seed)))]
+    on_path = [id(seed)]
+    marked = set(on_path)
+    seen = set(on_path)
+    while stack and budget[0] > 0:
+        node_id, cursor = stack[-1]
+        advanced = False
+        for target in cursor:
+            target_id = id(target)
+            if target_id not in members:
+                continue
+            budget[0] -= 1
+            if budget[0] <= 0:
+                return None
+            if target_id in marked:
+                start = on_path.index(target_id)
+                loop = [_signature(members[step])
+                        for step in on_path[start:]]
+                # Rotate to a canonical start so three reported cycles are
+                # three different loops, not three entry points into one.
+                pivot = loop.index(min(loop))
+                loop = loop[pivot:] + loop[:pivot]
+                return ' -> '.join(loop + [loop[0]])
+            if target_id in seen or len(stack) >= CYCLE_MAX_DEPTH:
+                continue
+            seen.add(target_id)
+            stack.append((target_id, iter(_walk_referents(target))))
+            on_path.append(target_id)
+            marked.add(target_id)
+            advanced = True
+            break
+        if not advanced:
+            stack.pop()
+            marked.discard(on_path.pop())
+    return None
+
+
+def retention_census(items, own):
+    """Walk referrers up from the dominant shape and name what retains it.
+
+    ``own`` is the set of ids this probe itself holds, so the walk never
+    reports its own bookkeeping as a retainer.
+    """
+    members = {}
+    for item in itertools.islice(items, CYCLE_INDEX_LIMIT):
+        members[id(item)] = item
+    counts = {}
+    for item in members.values():
+        name = _signature(item)
+        counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return '-', ()
+    dominant = max(counts.items(), key=lambda pair: pair[1])[0]
+    frontier = []
+    for item in members.values():
+        if len(frontier) >= HOLD_SEEDS:
+            break
+        if _signature(item) == dominant:
+            frontier.append(item)
+    if not frontier:
+        return dominant, ()
+    levels = []
+    visited = set(id(item) for item in frontier)
+    for unused_level in range(HOLD_DEPTH):
+        try:
+            referrers = gc.get_referrers(*frontier)
+        except Exception:
+            break
+        tally = {}
+        following = []
+        for holder in referrers:
+            holder_id = id(holder)
+            if (holder_id in own or holder_id in visited or
+                    type(holder) is types.FrameType or
+                    type(holder) is types.ModuleType):
+                continue
+            visited.add(holder_id)
+            name = _signature(holder)
+            tally[name] = tally.get(name, 0) + 1
+            if len(following) < HOLD_SEEDS:
+                following.append(holder)
+        del referrers
+        if not tally:
+            break
+        ranked = sorted(tally.items(), key=lambda pair: pair[1],
+                        reverse=True)[:TOP_HOLDERS]
+        levels.append(','.join('%s x%d' % pair for pair in ranked))
+        if not following:
+            break
+        frontier = following
+    return dominant, levels
+
+
 def _collect_saved_sample(garbage, first):
     """Keep temporary object references and exception frames out of pass two."""
     try:
@@ -298,8 +471,17 @@ def _collect_saved_sample(garbage, first):
         sample = garbage[first:first + SIGNATURE_SAMPLE]
         scanned, signatures = signature_census(sample)
         edge_window, edge_count, edges = edge_census(sample)
+        # The whole unreachable set, not the head slice: the cycle root is a
+        # handful of objects and the head is dominated by what it retains.
+        whole = garbage[first:]
+        seeds, truncated, cycles = cycle_census(whole)
+        own = set((id(garbage), id(sample), id(whole), id(signatures),
+                   id(edges), id(cycles), id(globals()), id(gc.__dict__)))
+        dominant, holders = retention_census(whole, own)
+        del whole
         return (unreachable, scanned, signatures, _by_type(sample),
-                edge_window, edge_count, edges)
+                edge_window, edge_count, edges,
+                seeds, truncated, cycles, dominant, holders)
     except Exception:
         return None
 
@@ -342,7 +524,8 @@ def collect_once():
         if sample is None:
             return None
         (unreachable, scanned, signatures, garbage_types,
-         edge_window, edge_count, edges) = sample
+         edge_window, edge_count, edges,
+         seeds, seeds_truncated, cycles, dominant, holders) = sample
         elapsed_ms = int((time.time() - started) * 1000.0)
         after = len(gc.get_objects())
         return {
@@ -358,6 +541,11 @@ def collect_once():
             'edge_window': edge_window,
             'edge_count': edge_count,
             'edges': edges,
+            'seeds': seeds,
+            'seeds_truncated': 1 if seeds_truncated else 0,
+            'cycles': cycles,
+            'dominant': dominant,
+            'holders': holders,
         }
     except Exception:
         return None
@@ -388,7 +576,21 @@ def format_collect_lines(phase, round_id, state=None):
                 phase, round_id, state.get('edge_window', 0),
                 state.get('edge_count', 0),
                 ' | '.join('%s x%d' % pair for pair in edges) or '-'))
-    return (head, detail, held)
+    cycles = state.get('cycles') or ()
+    loops = ('[Offline LAN 0.9.22] PYCYCLE phase=%s round=%s seeds=%d '
+             'truncated=%d found=%d %s' % (
+                 phase, round_id, state.get('seeds', 0),
+                 state.get('seeds_truncated', 0), len(cycles),
+                 ' || '.join(cycles) or 'none'))
+    holders = state.get('holders') or ()
+    chain = []
+    for index, level in enumerate(holders):
+        chain.append('L%d[%s]' % (index + 1, level))
+    holds = ('[Offline LAN 0.9.22] PYHOLD phase=%s round=%s dominant=%s '
+             'chain=%s' % (
+                 phase, round_id, state.get('dominant', '-'),
+                 ' <- '.join(chain) or 'none'))
+    return (head, detail, held, loops, holds)
 
 
 def log_collect(phase, round_id):
