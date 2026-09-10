@@ -24559,8 +24559,9 @@ class BattleRuntime(object):
             # Detached turrets are separate client-created entities holding a
             # compound each.  Retire them at the synchronous leaveArena
             # boundary, before the Hangar app can replace the battle space.
-            # ``destroy_all`` is harmless after a partial start and safe to
-            # call twice.
+            # Pending prerequisite loads are not engine-owned yet.  Keep
+            # their tombstones for the second quiesce in _cleanup; the battle
+            # space retirement there cancels any loads still pending.
             try:
                 self._detached_turrets.destroy_all()
             except Exception as error:

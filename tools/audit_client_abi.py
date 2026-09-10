@@ -1483,6 +1483,14 @@ EXPECTED_CODE_NAMES = {
         'Vehicle.drawEdge': ('appearance', 'highlighter', 'highlight'),
         'Vehicle.removeEdge': ('appearance', 'highlighter', 'highlight'),
     },
+    'scripts/client/DetachedTurret.pyc': {
+        'DetachedTurret.prerequisites': (
+            '_DetachedTurret__prepareModelAssembler',
+            '_DetachedTurret__vehDescr', 'prerequisites'),
+        'DetachedTurret.onEnterWorld': (
+            '_DetachedTurret__vehDescr', 'name', 'model', 'matrix',
+            '_DetachedTurret__detachConfirmationTimer', 'onEnterWorld'),
+    },
     'scripts/client/AvatarInputHandler/gun_marker_ctrl.pyc': {
         '_CrosshairShotResults._getAllCollisionDetails': (
             'collideSegmentExt',),
