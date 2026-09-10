@@ -46,6 +46,9 @@ TOP_EDGES = 8
 TOP_SIGNATURES = 10
 MAX_SIGNATURE_KEYS = 8
 MAX_SIGNATURE_TEXT = 64
+# Maximum dictionary entries visited for a key sample. Wider mappings report
+# a partial sample, whose members can vary with the runtime's dictionary order.
+KEY_SCAN_LIMIT = 64
 # List and tuple lengths are reported as exact small values and then in
 # powers-of-two buckets, so one dominant shape is still visible.
 SMALL_LENGTH = 8
@@ -139,12 +142,26 @@ def _signature(item):
         # Exact types only: subclasses may override keys, length, or attribute
         # lookup and run application/native code while garbage is retained.
         if item_type is dict:
-            if len(item) > MAX_SIGNATURE_KEYS:
-                return 'dict(len=%s)' % _bucket(len(item))
-            keys = sorted(_label(key) for key in item if _is_text(key))
+            # Include key names beyond the display limit while bounding the
+            # scan itself. A sorted partial sample is not a stable mapping
+            # identity: Python 2 dictionary order can change which keys fit.
+            length = len(item)
+            keys = []
+            scanned = 0
+            for key in itertools.islice(item, KEY_SCAN_LIMIT):
+                scanned += 1
+                if _is_text(key):
+                    keys.append(_label(key))
+            sampled = ('[sampled=%d/%d]' % (scanned, length)
+                       if scanned < length else '')
             if not keys:
-                return 'dict(len=%d)' % len(item)
-            return 'dict{%s}' % ','.join(keys)
+                return 'dict(len=%s)%s' % (_bucket(length), sampled)
+            keys.sort()
+            shown = keys[:MAX_SIGNATURE_KEYS]
+            more = ''
+            if length > len(shown):
+                more = ',+%d' % (length - len(shown))
+            return 'dict{%s%s}%s' % (','.join(shown), more, sampled)
         if any(item_type is builtin for builtin in (list, tuple, set, frozenset)):
             return '%s(len=%s)' % (kind, _bucket(len(item)))
         code = None
