@@ -2000,7 +2000,14 @@ remain the existing 0.15 per volume, 0.60 combined limit, 0.95 total concealment
 limit and complete removal of nearby foliage after firing. These are retained
 port settings, not claimed retail constants. [The official 7.5 update notes](https://worldoftanks.com/en/news/general-news/75-update-note/)
 confirm that bush density matters; they do not justify assigning every volume
-the same maximum coefficient. Foliage catalogs remain schema v4. Single-ray
+the same maximum coefficient. [WG's later Berlin map-development article](https://worldoftanks.eu/en/news/general-news/berlin-map-development/)
+distinguishes dense vegetation at 50 percent from sparse vegetation at 25
+percent; it is not evidence that every #1513 asset should receive 50 percent.
+The exact tree cache also reads a per-resource `density` with values from 0
+to 0.50, separately from falling-tree mass and other physics parameters.
+Its use as the final spotting addend has not been established by the reviewed
+Python consumers, so it is not substituted for that addend here.
+Foliage catalogs remain schema v4. Single-ray
 coverage, per-asset camouflage, native filtering and actual Windows spotting
 behavior remain outside the local contract evidence.
 
