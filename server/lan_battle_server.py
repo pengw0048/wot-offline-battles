@@ -47,6 +47,7 @@ from vehicle_overlay_store import (
     VehicleOverlayStoreError,
 )
 from gui.mods.offline_lan_0922 import tank_collision
+from gui.mods.offline_lan_0922 import turret_obstacle_schema
 from gui.mods.offline_lan_0922.battle_achievements import (
     ACHIEVEMENT_CONDITIONS, AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES,
     award_battle_achievements)
@@ -2297,6 +2298,7 @@ class BattleState:
         self.capture_contributors = {1: {}, 2: {}}
         self.capture_cursors = {1: 0, 2: 0}
         self.destructibles = {}
+        self.detached_turrets = OrderedDict()
         self.destructible_revision = 0
         self.projectiles = {}
         self.projectile_tombstones = {}
@@ -3462,6 +3464,7 @@ class BattleState:
         self.capture_contributors = {1: {}, 2: {}}
         self.capture_cursors = {1: 0, 2: 0}
         self.destructibles = {}
+        self.detached_turrets = OrderedDict()
         self.destructible_revision = 0
         self.projectiles = {}
         self.projectile_tombstones = {}
@@ -3682,6 +3685,7 @@ class BattleState:
                 "battle_result": self.battle_result,
                 "destructible_revision": self.destructible_revision,
                 "destructibles": list(self.destructibles.values()),
+                "detached_turrets": self._detached_turret_snapshot(),
             }
             start_message.update({
                 "authority_epoch": self.authority_epoch,
@@ -3963,6 +3967,7 @@ class BattleState:
                 "battle_result": self.battle_result,
                 "destructible_revision": self.destructible_revision,
                 "destructibles": list(self.destructibles.values()),
+                "detached_turrets": self._detached_turret_snapshot(),
             }
             message.update(self._authority_fields())
             return message
@@ -4363,6 +4368,7 @@ class BattleState:
                 "battle_result": self.battle_result,
                 "destructible_revision": self.destructible_revision,
                 "destructibles": list(self.destructibles.values()),
+                "detached_turrets": self._detached_turret_snapshot(),
             }
             message.update({
                 "authority_epoch": self.authority_epoch,
@@ -6371,6 +6377,46 @@ class BattleState:
         current["combat_base_revision"] = server_base
         current["combat_ack_seq"] = raw_seq
 
+    def _detached_turret_snapshot(self):
+        return copy.deepcopy(list(self.detached_turrets.values()))
+
+    def _admit_detached_turrets(self, message):
+        """Freeze each confirmed ammo-rack wreck once in the current round."""
+        try:
+            epoch = _exact_int(message.get("authority_epoch"),
+                               0, PROJECTILE_MAX_ID)
+        except ValueError:
+            return
+        rows = message.get("detached_turrets")
+        if (epoch != self.authority_epoch or
+                not isinstance(rows, (list, tuple))):
+            return
+        for raw in rows[:turret_obstacle_schema.MAX_ACTIVE_TURRETS]:
+            row = turret_obstacle_schema.normalize_proposal(raw)
+            if row is None:
+                continue
+            key = turret_obstacle_schema.row_key(row)
+            if (key in self.detached_turrets or
+                    len(self.detached_turrets) >=
+                    turret_obstacle_schema.MAX_ACTIVE_TURRETS):
+                continue
+            if row["actor_kind"] == "bot":
+                actor = self.bot_states.get(row["actor_id"])
+                confirmed = bool(
+                    actor is not None and actor.get("health", 1) <= 0 and
+                    not actor.get("alive", True) and
+                    actor.get("critical", {}).get("ammo_rack_death", False))
+            else:
+                actor = self.players.get(row["actor_id"])
+                confirmed = bool(
+                    actor is not None and actor.participating and
+                    actor.health <= 0 and not actor.alive and
+                    actor.critical.get("ammo_rack_death", False))
+            if not confirmed:
+                continue
+            row["created_time_ms"] = self._server_time_ms()
+            self.detached_turrets[key] = row
+
     def update_bot_states(self, player_id, message):
         received_raw_motion_time_us = self._motion_time_us()
         with self.lock:
@@ -6387,6 +6433,11 @@ class BattleState:
                 # A checkpoint encoded before the terminal result can still be
                 # waiting in the worker's reliable queue.  The result is
                 # canonical, so converge that tail packet as a quiet no-op.
+                # Its final ammo-rack death may still need its immutable
+                # detachment admitted after the combat result was frozen.
+                if (player_id == self.bot_authority_id and
+                        player_id == self.bot_manifest_authority_id):
+                    self._admit_detached_turrets(message)
                 return True
             if not self._combat_accepting():
                 return self._set_protocol_reject(
@@ -6738,6 +6789,7 @@ class BattleState:
                     "missing=%s" % sorted(set(identities) - set(next_states)))
             self._commit_human_ram_armors(human_ram_armors)
             self.bot_states = next_states
+            self._admit_detached_turrets(message)
             self.bot_unavailable_checkpoints = next_unavailable_checkpoints
             for bot_id in stun_clears:
                 self.pending_events.append({
@@ -13373,6 +13425,7 @@ class BattleState:
                 "projectile_revision": self.projectile_revision,
                 "projectiles": self._projectile_snapshot(),
                 "human_ram_probes": self._human_ram_probe_snapshot(),
+                "detached_turrets": self._detached_turret_snapshot(),
             })
             snapshot.update(self._authority_fields())
             # Freeze one exact wire image while holding the state lock. Bot,
@@ -13813,6 +13866,7 @@ class BattleState:
                     "battle_result": self.battle_result,
                     "destructible_revision": self.destructible_revision,
                     "destructibles": list(self.destructibles.values()),
+                    "detached_turrets": self._detached_turret_snapshot(),
                 })
                 outgoing.update(self._authority_fields())
             else:

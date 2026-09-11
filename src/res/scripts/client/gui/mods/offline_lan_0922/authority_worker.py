@@ -232,7 +232,8 @@ class AuthorityWorkerLANClient(LANClient):
                                  source_batch_horizon_us=None,
                                  human_ram_armors=None,
                                  edge_sample_time_us=None,
-                                 edge_revision=None):
+                                 edge_revision=None,
+                                 detached_turrets=None):
         """Queue BotRuntime's canonical publication as one frozen wire blob."""
         if not self.is_bot_authority():
             return False
@@ -260,11 +261,14 @@ class AuthorityWorkerLANClient(LANClient):
             return False
         if human_ram_armors is not None:
             message['human_ram_armors'] = human_ram_armors
+        if detached_turrets is not None:
+            self._attach_detached_turret_proposals(message, detached_turrets)
         try:
             coalesce_key = (
                 self.round_id, self.authority_epoch,
                 edge_sample_time_us, edge_revision,
-                _trusted_human_ram_edge(human_ram_armors))
+                _trusted_human_ram_edge(human_ram_armors),
+                message.get('detached_turrets'))
         except Exception:
             return False
         return self._send_preencoded_trusted(
