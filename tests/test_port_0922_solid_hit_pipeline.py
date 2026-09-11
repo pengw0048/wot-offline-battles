@@ -187,6 +187,7 @@ class SolidHitPipelineTests(unittest.TestCase):
         battle._worker_mode = True
         battle._projectile_current_positions = {}
         battle._destructibles = None
+        battle._detached_turret_obstacles = None
         battle._equipment_state = None
         return battle
 

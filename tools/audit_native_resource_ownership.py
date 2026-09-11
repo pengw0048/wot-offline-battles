@@ -48,10 +48,10 @@ APPROVED_ACQUISITIONS = (
     ('destructibles_authority.py', '_ensure_chunk', 'createEntity', 1),
     ('entities/bigworld_binding.py', 'BigWorldVehicleBinding.create_vehicle',
      'createEntity', 1),
-    # One client-side DetachedTurret per ammo-bay death, bounded by
-    # MAX_ACTIVE_TURRETS, rolled back in the same call on any failure and
-    # retired by destroy_all() at the leaveArena boundary.
-    ('entities/detached_turret.py', 'DetachedTurretPresentation.launch',
+    # One client-side DetachedTurret per accepted actor, bounded by
+    # MAX_ACTIVE_TURRETS. Failed/pending ids retain retirement ownership;
+    # canonical replay cannot allocate a replacement until they retire.
+    ('entities/detached_turret.py', 'DetachedTurretPresentation._launch_frozen',
      'createEntity', 1),
     ('entities/remote_vehicle.py',
      '_RemoteShotPresenter._projectile_mover', 'ProjectileMover', 1),
@@ -184,6 +184,33 @@ ORDERED_CONTRACTS = (
         'ProjectileMover ownership follows the stock space binding',
         (('call', 'CanonicalProjectileMover'), ('call', 'set_space_id'),
          ('assign', 'self._mover')),
+    ),
+    (
+        'entities/detached_turret.py',
+        'DetachedTurretPresentation.launch_canonical',
+        'canonical turret replay checks retained ids before native allocation',
+        (('call', 'self._retire_entities'), ('call', 'self.has_vehicle'),
+         ('call', 'self._launch_frozen')),
+    ),
+    (
+        'entities/detached_turret.py',
+        'DetachedTurretPresentation._launch_frozen',
+        'detached turret ids become pending owners after native allocation',
+        (('call', 'createEntity'), ('call', 'self._turrets.append')),
+    ),
+    (
+        'entities/detached_turret.py',
+        'DetachedTurretPresentation.destroy_all',
+        'closing a turret owner preserves pending ids through retirement',
+        (('assign', 'self._closed'), ('call', 'self._retiring.extend'),
+         ('assign', 'self._turrets'), ('call', 'self._retire_entities')),
+    ),
+    (
+        'entities/detached_turret.py',
+        'DetachedTurretPresentation._retire_entities',
+        'turret source identity is checked before owned entity destruction',
+        (('call', 'self._entity'), ('call', 'self._entity_matches'),
+         ('call', 'self._destroy_entity'), ('call', 'self._retiring.remove')),
     ),
     (
         'entities/remote_vehicle.py',
@@ -337,6 +364,12 @@ HANDLER_CONTRACTS = (
         'OfflineCompatibility._create_account_player',
         'partial Account creation clears entity/space ownership',
         (('call', '_discard_partial_account'),),
+    ),
+    (
+        'entities/detached_turret.py',
+        'DetachedTurretPresentation._launch_frozen',
+        'failed turret setup preserves its id before attempting retirement',
+        (('call', 'self._retiring.append'), ('call', 'self._retire_entities')),
     ),
     (
         'entities/remote_vehicle.py',
