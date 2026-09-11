@@ -6780,6 +6780,153 @@ class BattleRuntimeContractTests(unittest.TestCase):
                          (native_direction.x, native_direction.y,
                           native_direction.z))
 
+    def test_distant_moving_contact_candidates_do_not_replay_or_derive(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._bots = types.SimpleNamespace(states={})
+        battle._local_speed = 10.0
+        for actor_id in range(1, 30):
+            kind = 'player' if actor_id == 1 else 'bot'
+            engine_id = actor_id + 100
+            runtime.bigworld.entities[engine_id] = _Vehicle(
+                engine_id, _Descriptor(), _Vector(), (0, 0, 0),
+                {'health': 500})
+            battle._records['%s:%s' % (kind, actor_id)] = {
+                'engine_id': engine_id, 'network_id': actor_id,
+                'kind': kind, 'ready': True,
+                'state': {'id': actor_id, 'x': 200.0 + actor_id * 10,
+                          'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                          'speed': 10.0, 'team': 1 if actor_id < 15 else 2},
+                'presentation_time_us': 150000}
+        shape = tank_collision.chassis_shape(_Descriptor())
+        with mock.patch.object(
+                battle, '_ram_bot_state_at',
+                side_effect=AssertionError('far contact replayed history')), \
+                mock.patch.object(
+                    battle, '_player_effective_snapshot',
+                    side_effect=AssertionError('far contact projected crew')), \
+                mock.patch.object(
+                    vehicle_physics, 'derive_params',
+                    side_effect=AssertionError('far contact derived physics')):
+            for step in range(3):
+                # Both the observer and every candidate keep moving.
+                for record in battle._records.values():
+                    record['state']['z'] += 0.1
+                self.assertEqual(
+                    [], battle._contact_tanks((0.0, 0.0, step * 0.1), shape))
+
+    def test_contact_candidates_use_presented_pose_and_keep_active_episodes(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        shape = tank_collision.chassis_shape(_Descriptor())
+        for actor_id, canonical_z, presented_z in (
+                (11, 300.0, 1.0), (12, 1.0, 300.0), (13, 300.0, 300.0)):
+            runtime.bigworld.entities[actor_id] = _Vehicle(
+                actor_id, _Descriptor(), _Vector(), (0, 0, 0),
+                {'health': 500})
+            battle._records['bot:%s' % actor_id] = {
+                'engine_id': actor_id, 'network_id': actor_id,
+                'kind': 'bot', 'ready': True,
+                'state': {'id': actor_id, 'x': 0.0, 'y': 0.0,
+                          'z': canonical_z, 'yaw': 0.0, 'speed': 10.0,
+                          'team': 2},
+                'presented_pose': {'z': presented_z}}
+        battle._local_ram_episode_contacts = frozenset((13,))
+
+        bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape)
+
+        self.assertEqual([11, 13], sorted(body['network_id'] for body in bodies))
+        self.assertEqual(1.0, next(
+            body['z'] for body in bodies if body['network_id'] == 11))
+
+    def test_near_contact_mass_tracks_descriptor_and_wire_changes(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        descriptor = _Descriptor()
+        descriptor.physics['weight'] = 21000.0
+        remote = _Vehicle(11, descriptor, _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[11] = remote
+        state = {'id': 11, 'x': 0.0, 'y': 0.0, 'z': 1.0, 'yaw': 0.0,
+                 'speed': 10.0, 'team': 2}
+        battle._records['bot:11'] = {
+            'engine_id': 11, 'network_id': 11, 'kind': 'bot',
+            'ready': True, 'state': state}
+        shape = tank_collision.chassis_shape(descriptor)
+        with mock.patch.object(
+                vehicle_physics, 'derive_params',
+                side_effect=AssertionError('contact derived unused physics')):
+            self.assertEqual(21000.0, battle._contact_tanks(
+                (0.0, 0.0, 0.0), shape)[0]['mass'])
+            descriptor.physics['weight'] = 23000.0
+            self.assertEqual(23000.0, battle._contact_tanks(
+                (0.0, 0.0, 0.0), shape)[0]['mass'])
+            remote.typeDescriptor = _Descriptor()
+            remote.typeDescriptor.physics['weight'] = 26000.0
+            self.assertEqual(26000.0, battle._contact_tanks(
+                (0.0, 0.0, 0.0), shape)[0]['mass'])
+            state['mass'] = 29000.0
+            self.assertEqual(29000.0, battle._contact_tanks(
+                (0.0, 0.0, 0.0), shape)[0]['mass'])
+
+    def test_contact_pruning_preserves_mixed_roster_collision_results(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        own_shape = (1.5, 3.5, -0.8, 2.0)
+        bodies = []
+        for index, (kind, team, alive, shape) in enumerate((
+                ('bot', 1, True, own_shape),
+                ('bot', 2, True, (4.0, 12.0, -0.5, 3.0)),
+                ('bot', 2, False, own_shape),
+                ('player', 1, True, own_shape),
+                ('player', 2, True, own_shape),
+                ('player', 2, False, own_shape))):
+            engine_id = 100 + index
+            actor_id = index + 1
+            mass = 20000.0 + index * 1000.0
+            state = {
+                'id': actor_id, 'team': team, 'alive': alive,
+                'mass': mass, 'collision_shape': shape,
+                'x': float(index * 12), 'y': 0.0, 'z': float(index * 8),
+                'yaw': index * 0.45, 'speed': 8.0 if alive else 0.0}
+            if kind == 'player':
+                state['effective_params'] = _effective_params_snapshot()
+                state['effective_params']['physics']['mass'] = mass
+            runtime.bigworld.entities[engine_id] = _Vehicle(
+                engine_id, _Descriptor(), _Vector(), (0, 0, 0),
+                {'health': 500 if alive else 0})
+            battle._records['%s:%s' % (kind, actor_id)] = {
+                'engine_id': engine_id, 'network_id': actor_id,
+                'kind': kind, 'ready': True, 'state': state,
+                # Visibility must not remove a solid body.
+                'spot_visible': False}
+            bodies.append({
+                'id': 1000000 + engine_id, 'team': team, 'alive': alive,
+                'x': state['x'], 'y': state['y'], 'z': state['z'],
+                'yaw': state['yaw'], 'mass': mass, 'shape': shape,
+                'vx': math.sin(state['yaw']) * state['speed'],
+                'vz': math.cos(state['yaw']) * state['speed']})
+        # Cross all six bodies from different headings and support levels,
+        # including the long hull's rotated corners and just-clear contacts.
+        for frame in range(32):
+            for height in (-0.5, 0.0, 2.0, 20.0):
+                position = (frame * 2.0, height, frame * 1.3)
+                yaw = frame * 0.37
+                own = {
+                    'id': -1, 'alive': True, 'team': 1,
+                    'x': position[0], 'y': height, 'z': position[2],
+                    'yaw': yaw, 'shape': own_shape, 'mass': 25000.0,
+                    'vx': math.sin(yaw) * 10.0, 'vz': math.cos(yaw) * 10.0}
+                with self.subTest(frame=frame, height=height):
+                    filtered = battle._contact_tanks(position, own_shape)
+                    self.assertEqual(
+                        tank_collision.resolve_tank(own, bodies),
+                        tank_collision.resolve_tank(own, filtered))
+
     def test_local_tank_contact_uses_copied_separation_and_impulse(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -7671,6 +7818,39 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(37, battle._ram_bot_revision_at(11, 200000))
         self.assertIsNone(battle._ram_bot_revision_at(11, 50000))
         self.assertIsNone(battle._ram_bot_revision_at(11, 250000))
+
+    def test_ram_velocity_projection_matches_receipts_at_every_sample_edge(self):
+        battle = BattleRuntime(_runtime())
+        battle._bots = types.SimpleNamespace(states={})
+        for revision, stamp, x, y, z in (
+                (36, 100000, 0.0, 0.0, 0.0),
+                (39, 230000, 1.3, -0.65, 2.6),
+                (40, 300000, 1.3, 0.0, 4.0)):
+            battle._remember_ram_bot_snapshot({
+                'bot_state_revision': revision, 'bot_state_time_us': stamp,
+                'bots': [{'id': 11, 'x': x, 'y': y, 'z': z, 'yaw': 0.5,
+                          'pitch': 0.1, 'roll': -0.1, 'alive': True}]})
+        fields = ('ram_vx', 'ram_vy', 'ram_vz')
+        for stamp in (50000, 100000, 150000, 230000, 250000, 300000, 350000):
+            revision = battle._ram_bot_revision_at(11, stamp)
+            with self.subTest(stamp=stamp, revision=revision):
+                full = battle._ram_bot_state_at(11, revision, stamp)
+                velocity = battle._ram_bot_state_at(
+                    11, revision, stamp, velocity_only=True)
+                self.assertEqual(
+                    None if full is None else
+                    {field: full[field] for field in fields}, velocity)
+        # A repeated wire revision must invalidate either cached projection.
+        battle._remember_ram_bot_snapshot({
+            'bot_state_revision': 40, 'bot_state_time_us': 300000,
+            'bots': [{'id': 11, 'x': 1.3, 'y': 0.0, 'z': 5.4}]})
+        velocity = battle._ram_bot_state_at(
+            11, 40, 250000, velocity_only=True)
+        self.assertAlmostEqual(40.0, velocity['ram_vz'])
+        velocity['ram_vz'] = -999.0
+        self.assertAlmostEqual(40.0, battle._ram_bot_state_at(
+            11, 40, 250000, velocity_only=True)['ram_vz'])
+        self.assertIn('z', battle._ram_bot_state_at(11, 40, 250000))
 
     def test_ram_history_caches_repeated_receipt_decoration(self):
         class IterationForbiddenHistory(list):
