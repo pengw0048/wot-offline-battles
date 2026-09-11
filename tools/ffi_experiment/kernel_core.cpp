@@ -38,7 +38,7 @@ struct Kernel {
         if (states.kind != Value::Array || states.size() > 30)
             throw std::invalid_argument("kernel roster producer");
         for (const Value &v : states.data->array) {
-            int id = integer(v.get("state"), "id");
+            int id = integer(v.get("state"), sf::id);
             if (id <= 0 || bots.count(id))
                 throw std::invalid_argument("kernel actor identity");
             bots[id].reset(new Bot(v));
@@ -64,8 +64,8 @@ struct Kernel {
             routes.reset(new Routes(config.get("driver"), bots, orders));
             driver.reset(new Driver(config.get("driver"), *motion, *routes));
         }
-        if (config.has("contacts") && motion && engine)
-            contacts.reset(new TankContacts(config.get("contacts"), bots, *motion, *engine));
+        if (config.has(sf::contacts) && motion && engine)
+            contacts.reset(new TankContacts(config.get(sf::contacts), bots, *motion, *engine));
         if (config.has("simulation"))
             simulation.reset(new Simulation<Kernel>(*this, config.get("simulation")));
         if (simulation)
@@ -110,10 +110,10 @@ Value subshots(const std::vector<Subshot> &values) {
     for (const Subshot &s : values) {
         Value v = Value::object();
         v["shot_seq"] = Value(s.seq);
-        v["burst_group_seq"] = Value(s.group);
-        v["burst_index"] = Value(s.index);
-        v["burst_count"] = Value(s.count);
-        v["shell_index"] = Value(s.shell);
+        v[sf::burst_group_seq] = Value(s.group);
+        v[sf::burst_index] = Value(s.index);
+        v[sf::burst_count] = Value(s.count);
+        v[sf::shell_index] = Value(s.shell);
         v["final"] = Value(s.final);
         v["due_offset"] = Value(s.offset);
         out.append(v);
@@ -254,15 +254,15 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
         r.end();
         Value rows = Value::array();
         for (const Value &action : elements(actions)) {
-            int slot = integer(action, "slot");
+            int slot = integer(action, sf::slot);
             auto &equipment = at->second->equipment;
             if (slot < 0 || slot >= static_cast<int>(equipment.size()))
                 throw std::invalid_argument("kernel equipment slot");
             Equipment &e = equipment[slot];
             Value result;
             std::string method = action.get("method").text();
-            double now = field(action, "now");
-            const Value &critical = action.get("critical");
+            double now = field(action, sf::now);
+            const Value &critical = action.get(sf::critical);
             bool stunned = flag(action, "stunned");
             if (method == "ready")
                 result = Value(e.ready(now));
@@ -312,14 +312,14 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
         for (const Value &v : elements(inputs)) {
             std::string method = v.get("method").text();
             Value result;
-            double dt = field(v, "dt"), now = field(v, "now"),
+            double dt = field(v, sf::dt), now = field(v, sf::now),
                    equipment_now = field(v, "equipment_now");
             if (method == "set") {
                 const Value &patch = v.get("state");
                 if (patch.kind != Value::Object)
                     throw std::invalid_argument("kernel test patch");
-                for (const auto &item : patch.data->object)
-                    bot.state[item.first] = item.second;
+                patch.visit(
+                    [&](const std::string &name, const Value &value) { bot.state[name] = value; });
             } else if (method == "critical")
                 result =
                     Value(bot.advance_critical(dt, now, equipment_now, flag(v, "record", true),
@@ -355,7 +355,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
         std::map<int, Contacts> collected;
         for (const Value &v : elements(actions)) {
             std::string method = v.get("method").text();
-            double now = field(v, "now");
+            double now = field(v, sf::now);
             Value result;
             if (method == "begin")
                 p.begin();
@@ -383,10 +383,10 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                 Lanes &lanes = *k.lanes;
                 std::vector<int> order = k.order;
                 std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
-                    return std::make_pair(integer(k.bots.at(a)->state, "slot"),
-                                          integer(k.bots.at(a)->state, "team", 1)) <
-                           std::make_pair(integer(k.bots.at(b)->state, "slot"),
-                                          integer(k.bots.at(b)->state, "team", 1));
+                    return std::make_pair(integer(k.bots.at(a)->state, sf::slot),
+                                          integer(k.bots.at(a)->state, sf::team, 1)) <
+                           std::make_pair(integer(k.bots.at(b)->state, sf::slot),
+                                          integer(k.bots.at(b)->state, sf::team, 1));
                 });
                 std::map<LaneKey, int> selected;
                 for (const Value &row : elements(v.get("selected")))
@@ -405,8 +405,8 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                 std::vector<int> ordered = k.order;
                 std::stable_sort(ordered.begin(), ordered.end(), [&](int a, int b) {
                     const Value &x = k.bots.at(a)->state, &y = k.bots.at(b)->state;
-                    return std::make_pair(integer(x, "slot"), integer(x, "team", 1)) <
-                           std::make_pair(integer(y, "slot"), integer(y, "team", 1));
+                    return std::make_pair(integer(x, sf::slot), integer(x, sf::team, 1)) <
+                           std::make_pair(integer(y, sf::slot), integer(y, sf::team, 1));
                 });
                 std::set<int> due;
                 for (const Value &id : elements(v.get("due")))
@@ -431,7 +431,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                     Contacts contacts = p.contacts(bot.state, now, processed);
                     collected[id] = contacts;
                     result = Value::object();
-                    result["contacts"] = contacts.rows;
+                    result[sf::contacts] = contacts.rows;
                     Value lookup = Value::object();
                     for (const auto &t : contacts.lookup)
                         lookup[std::to_string(t.first)] = t.second;
@@ -458,7 +458,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
         for (const Value &v : elements(actions)) {
             std::string method = v.get("method").text();
             Value result;
-            double now = field(v, "now");
+            double now = field(v, sf::now);
             const Value &target = v.get("target");
             if (method == "set")
                 update(bot.state, v.get("state"));
@@ -479,8 +479,8 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
             } else if (method == "hash")
                 result = Value(static_cast<int64_t>(seed_hash(v.get("text").text())));
             else if (method == "dispersed")
-                result = dispersed(id, k.round, integer(v, "seq"), field(v, "yaw"),
-                                   field(v, "pitch"), field(v, "dispersion"), integer(v, "index"),
+                result = dispersed(id, k.round, integer(v, "seq"), field(v, sf::yaw),
+                                   field(v, sf::pitch), field(v, "dispersion"), integer(v, "index"),
                                    integer(v, "group", -1), v.get("base"));
             else
                 throw std::invalid_argument("kernel gunnery operation");
@@ -515,10 +515,10 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
             else if (method == "cancel")
                 result = Value(Launches::cancel(bot, factor));
             else if (method == "ack")
-                result = Value(k.launches.ack(integer(v, "id", id), integer(v, "seq")));
+                result = Value(k.launches.ack(integer(v, sf::id, id), integer(v, "seq")));
             else if (method == "advance") {
                 result = Value::array();
-                for (const Subshot &edge : bot.burst.advance(field(v, "dt"))) {
+                for (const Subshot &edge : bot.burst.advance(field(v, sf::dt))) {
                     int64_t at = std::min(
                         v.get("end").exact(),
                         time + std::max<int64_t>(
@@ -526,7 +526,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                     Value preview = v.get("preview");
                     if (flag(v, "sequence_preview") && preview.kind == Value::Object) {
                         preview = preview.copy();
-                        preview["fire_seq"] = Value(edge.seq);
+                        preview[sf::fire_seq] = Value(edge.seq);
                     }
                     bool accepted = k.launches.commit(
                         bot, k.round, factor, dispersion, edge, v.get("receipt"), preview, at,
@@ -565,19 +565,20 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
             else if (method == "finish")
                 m.finish();
             else {
-                int id = integer(v, "id");
+                int id = integer(v, sf::id);
                 Bot &bot = *k.bots.at(id);
                 if (method == "set") {
                     update(bot.state, v.get("state"));
                     if (v.has("turn_speed"))
                         bot.turn_speed = field(v, "turn_speed");
                 } else if (method == "step")
-                    m.step(bot, command, v.get("target"), field(v, "dt"), field(v, "now"),
+                    m.step(bot, command, v.get("target"), field(v, sf::dt), field(v, sf::now),
                            flag(v, "decision_due"), flag(v, "refresh"), flag(v, "siege_lock"),
-                           field(v, "siege_yaw", field(bot.state, "yaw")), flag(v, "baked_escape"));
+                           field(v, "siege_yaw", field(bot.state, sf::yaw)),
+                           flag(v, "baked_escape"));
                 else if (method == "vertical")
-                    result = Value(m.vertical(bot, field(v, "dt"), v.get("tick"),
-                                              field(v, "attempted", field(bot.state, "yaw"))));
+                    result = Value(m.vertical(bot, field(v, sf::dt), v.get("tick"),
+                                              field(v, "attempted", field(bot.state, sf::yaw))));
                 else if (method == "guard")
                     result =
                         Value(m.guard(bot, Motion::point(v.get("tick"), Motion::point(bot.state)),
@@ -585,7 +586,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                 else if (method == "slope")
                     result = Value(m.slope(bot, integer(v, "tier"), flag(v, "allow_ungrounded")));
                 else if (method == "landing")
-                    result = Value(m.landing(bot, field(v, "speed")));
+                    result = Value(m.landing(bot, field(v, sf::speed)));
                 else
                     throw std::invalid_argument("kernel motion operation");
             }
@@ -620,13 +621,13 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
         r.end();
         Value rows = Value::array();
         for (const Value &v : elements(actions)) {
-            int id = integer(v, "id");
+            int id = integer(v, sf::id);
             Bot &bot = *k.bots.at(id);
             std::string method = v.get("method").text();
             Value result;
             const Value &target = v.get("target");
-            double now = field(v, "now");
-            int shell = integer(v, "shell", integer(bot.state, "shell_index"));
+            double now = field(v, sf::now);
+            int shell = integer(v, "shell", integer(bot.state, sf::shell_index));
             if (method == "set")
                 update(bot.state, v.get("state"));
             else if (method == "cadenced") {
@@ -640,7 +641,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
             else if (method == "artillery")
                 result = aim.artillery(bot, target, shell, now);
             else if (method == "slew")
-                result = aim.slew(bot, v.get("command"), target, field(v, "dt"));
+                result = aim.slew(bot, v.get("command"), target, field(v, sf::dt));
             else if (method == "matches")
                 result = Value(aim.direct_matches(bot, target, v.get("solution")));
             else if (method == "preview")
@@ -679,12 +680,12 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
         r.end();
         Value rows = Value::array();
         for (const Value &v : elements(actions)) {
-            int id = integer(v, "id");
+            int id = integer(v, sf::id);
             std::string method = v.get("method").text();
             Value result, decision = v.get("decision").clone();
             if (method == "begin") {
                 if (k.routes->nav)
-                    k.routes->nav->begin(field(v, "dt"));
+                    k.routes->nav->begin(field(v, sf::dt));
             } else if (method == "end") {
                 if (k.routes->nav)
                     k.routes->nav->frame_open = false;
@@ -698,7 +699,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                         k.orders[static_cast<int>(row[0].exact())] = row[1];
                 } else if (method == "route")
                     result = Routes::value(k.routes->target(
-                        id, Routes::point(v.get("position")), Routes::point(v.get("goal")),
+                        id, Routes::point(v.get(sf::position)), Routes::point(v.get("goal")),
                         v.get("order"), decision, flag(v, "pending")));
                 else if (method == "binding") {
                     const Value &group = v.get("group");
@@ -706,9 +707,9 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                         k.routes->binding(id, group, Routes::point(v.get("goal")), v.get("order"));
                     result = tuple_value({Value(p.first), Value(p.second)});
                 } else if (method == "lane_goal") {
-                    auto p = k.routes->lane_goal(id, Routes::point(v.get("position")),
+                    auto p = k.routes->lane_goal(id, Routes::point(v.get(sf::position)),
                                                  Routes::point(v.get("goal")), v.get("order"),
-                                                 field(v, "now"), flag(v, "joining"));
+                                                 field(v, sf::now), flag(v, "joining"));
                     result = tuple_value({Routes::value(p.first),
                                           tuple_value({Value(static_cast<int>(p.second.first)),
                                                        Value(static_cast<int>(p.second.second))})});
@@ -718,8 +719,8 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                 } else if (method == "traffic") {
                     k.driver->probes.clear();
                     result = k.traffic.adjust(
-                        id, v.get("body"), v.get("command"), v.get("neighbours"), field(v, "now"),
-                        [&](double yaw) { return k.driver->clear(bot, yaw); });
+                        id, v.get("body"), v.get("command"), v.get(sf::neighbours),
+                        field(v, sf::now), [&](double yaw) { return k.driver->clear(bot, yaw); });
                 } else
                     throw std::invalid_argument("kernel driver operation");
             }
@@ -746,7 +747,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
             std::string method = v.get("method").text();
             Value result;
             if (method == "set")
-                update(k.bots.at(integer(v, "id"))->state, v.get("state"));
+                update(k.bots.at(integer(v, sf::id))->state, v.get("state"));
             else if (method == "ack")
                 result = Value(c.ack(integer(v, "player"), integer(v, "seq")));
             else if (method == "resolve") {
@@ -758,9 +759,9 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                     previous.insert(
                         {static_cast<int>(p[0].exact()), static_cast<int>(p[1].exact())});
                 auto out = c.resolve(TankBody(v.get("body")), others,
-                                     v.get("now").kind == Value::Null
+                                     v.get(sf::now).kind == Value::Null
                                          ? offline_nav::Optional<double>()
-                                         : offline_nav::Optional<double>(field(v, "now")),
+                                         : offline_nav::Optional<double>(field(v, sf::now)),
                                      previous, flag(v, "probe"));
                 result = Value::object();
                 result["correction"] = TankContacts::array(out.correction);
@@ -770,16 +771,16 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                 Value pairs = Value::array();
                 for (auto p : out.contacts)
                     pairs.append(tuple_value({Value(p.first), Value(p.second)}));
-                result["contacts"] = pairs;
+                result[sf::contacts] = pairs;
             } else if (method == "step") {
                 std::vector<int> ordered = k.order;
                 std::stable_sort(ordered.begin(), ordered.end(), [&](int a, int b) {
-                    return std::make_pair(integer(k.bots.at(a)->state, "slot"),
-                                          integer(k.bots.at(a)->state, "team", 1)) <
-                           std::make_pair(integer(k.bots.at(b)->state, "slot"),
-                                          integer(k.bots.at(b)->state, "team", 1));
+                    return std::make_pair(integer(k.bots.at(a)->state, sf::slot),
+                                          integer(k.bots.at(a)->state, sf::team, 1)) <
+                           std::make_pair(integer(k.bots.at(b)->state, sf::slot),
+                                          integer(k.bots.at(b)->state, sf::team, 1));
                 });
-                result = c.step(v.get("players"), ordered, field(v, "now"), field(v, "dt"));
+                result = c.step(v.get("players"), ordered, field(v, sf::now), field(v, sf::dt));
             } else if (method == "finish")
                 c.finish(k.driver->handle);
             else
@@ -799,7 +800,7 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
             row["result"] = result;
             row["states"] = states;
             row["cooldowns"] = cooldowns;
-            row["contacts"] = pairs;
+            row[sf::contacts] = pairs;
             row["leases"] = leases;
             rows.append(row);
         }

@@ -1,8 +1,9 @@
 #ifndef OFFLINE_EXPERIMENT_KERNEL_VALUE_H
 #define OFFLINE_EXPERIMENT_KERNEL_VALUE_H
 
-// Round/configuration and publication values. Hot pose and gun fields have
-// typed owners; this tree carries the irregular pinned descriptor/ledger data.
+// State records use fixed slots; configuration and irregular ledger data keep
+// mapping semantics. A present null is distinct from an absent state field.
+#include "kernel_fields.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -33,8 +34,16 @@ struct Value {
     explicit Value(double v) : kind(Real), integer(0), real(v) {}
     explicit Value(const std::string &v);
     explicit Value(const char *v) : Value(std::string(v)) {}
-    static Value array();
+    static Value array(size_t capacity = 0);
     static Value object();
+    static Value record();
+    Value as_record() const;
+    void assign_fields(const Value &source);
+    bool has(Field key) const;
+    const Value &get(Field key) const;
+    Value &operator[](Field key);
+    void erase(Field key);
+    template <typename Visitor> void visit(Visitor visitor) const;
     bool has(const std::string &key) const;
     const Value &get(const std::string &key) const;
     Value &operator[](const std::string &key);
@@ -56,37 +65,116 @@ struct Container {
     std::string string;
     std::vector<Value> array;
     std::unordered_map<std::string, Value> object;
+    std::vector<Value> slots;
+    std::vector<unsigned char> present;
+    size_t populated = 0;
 };
 inline Value::Value(const std::string &v)
-    : kind(String), integer(0), real(0), data(new Container()) {
+    : kind(String), integer(0), real(0), data(std::make_shared<Container>()) {
     data->string = v;
 }
-inline Value Value::array() {
+inline Value Value::array(size_t capacity) {
     Value v;
     v.kind = Array;
-    v.data.reset(new Container());
+    v.data = std::make_shared<Container>();
+    v.data->array.reserve(capacity);
     return v;
 }
 inline Value Value::object() {
     Value v;
     v.kind = Object;
-    v.data.reset(new Container());
+    v.data = std::make_shared<Container>();
     return v;
 }
+inline Value Value::record() {
+    Value v = object();
+    v.data->slots.resize(sf::count);
+    v.data->present.resize(sf::count, 0);
+    return v;
+}
+inline Value Value::as_record() const {
+    if (kind != Object)
+        throw std::invalid_argument("kernel state must be a mapping");
+    if (!data->slots.empty())
+        return *this;
+    Value v = record();
+    for (const auto &item : data->object)
+        v[item.first] = item.second;
+    return v;
+}
+inline void Value::assign_fields(const Value &source) {
+    if (kind != Object || source.kind != Object)
+        throw std::invalid_argument("kernel mapping update");
+    for (size_t i = 0; i < source.data->slots.size(); ++i)
+        if (source.data->present[i])
+            (*this)[Field{static_cast<int>(i), field_name(static_cast<int>(i))}] =
+                source.data->slots[i];
+    for (const auto &item : source.data->object)
+        (*this)[item.first] = item.second;
+}
+inline bool Value::has(Field key) const {
+    if (kind != Object)
+        return false;
+    if (key.slot >= 0 && !data->slots.empty())
+        return data->present[key.slot] != 0;
+    return key.slot >= 0 ? data->object.count(field_string(key.slot)) != 0
+                         : data->object.count(key.text()) != 0;
+}
+inline const Value &Value::get(Field key) const {
+    static const Value missing;
+    if (kind != Object)
+        return missing;
+    if (key.slot >= 0 && !data->slots.empty())
+        return data->present[key.slot] ? data->slots[key.slot] : missing;
+    auto i =
+        key.slot >= 0 ? data->object.find(field_string(key.slot)) : data->object.find(key.text());
+    return i == data->object.end() ? missing : i->second;
+}
+inline Value &Value::operator[](Field key) {
+    if (kind != Object)
+        throw std::invalid_argument("kernel value is not a mapping");
+    if (key.slot >= 0 && !data->slots.empty()) {
+        if (!data->present[key.slot]) {
+            data->present[key.slot] = 1;
+            ++data->populated;
+        }
+        return data->slots[key.slot];
+    }
+    return key.slot >= 0 ? data->object[field_string(key.slot)] : data->object[key.text()];
+}
+inline void Value::erase(Field key) {
+    if (kind != Object)
+        return;
+    if (key.slot >= 0 && !data->slots.empty()) {
+        if (data->present[key.slot]) {
+            data->present[key.slot] = 0;
+            --data->populated;
+            data->slots[key.slot] = Value();
+        }
+    } else
+        key.slot >= 0 ? data->object.erase(field_string(key.slot)) : data->object.erase(key.text());
+}
 inline bool Value::has(const std::string &key) const {
-    return kind == Object && data->object.count(key);
+    if (kind != Object)
+        return false;
+    int slot = data->slots.empty() ? -1 : field_slot(key);
+    return slot >= 0 ? data->present[slot] != 0 : data->object.count(key) != 0;
 }
 inline const Value &Value::get(const std::string &key) const {
     static const Value missing;
     if (kind != Object)
         return missing;
-    auto i = data->object.find(key);
-    return i == data->object.end() ? missing : i->second;
+    int slot = data->slots.empty() ? -1 : field_slot(key);
+    if (slot >= 0)
+        return data->present[slot] ? data->slots[slot] : missing;
+    auto at = data->object.find(key);
+    return at == data->object.end() ? missing : at->second;
 }
 inline Value &Value::operator[](const std::string &key) {
     if (kind != Object)
         throw std::invalid_argument("kernel value is not a mapping");
-    return data->object[key];
+    int slot = data->slots.empty() ? -1 : field_slot(key);
+    return slot >= 0 ? (*this)[Field{slot, key.c_str()}] : data->object[key];
 }
 inline const Value &Value::operator[](size_t i) const {
     if (kind != Array || i >= data->array.size())
@@ -99,12 +187,26 @@ inline Value &Value::operator[](size_t i) {
     return data->array[i];
 }
 inline void Value::erase(const std::string &key) {
-    if (kind == Object)
+    if (kind != Object)
+        return;
+    int slot = data->slots.empty() ? -1 : field_slot(key);
+    if (slot >= 0)
+        erase(Field{slot, key.c_str()});
+    else
         data->object.erase(key);
+}
+template <typename Visitor> inline void Value::visit(Visitor visitor) const {
+    if (kind != Object)
+        throw std::invalid_argument("kernel mapping visit");
+    for (size_t i = 0; i < data->slots.size(); ++i)
+        if (data->present[i])
+            visitor(field_name(static_cast<int>(i)), data->slots[i]);
+    for (const auto &item : data->object)
+        visitor(item.first, item.second);
 }
 inline size_t Value::size() const {
     return kind == Array    ? data->array.size()
-           : kind == Object ? data->object.size()
+           : kind == Object ? data->object.size() + data->populated
            : kind == String ? data->string.size()
                             : 0;
 }
@@ -149,7 +251,7 @@ inline std::string Value::text(const std::string &fallback) const {
 inline Value Value::copy() const {
     Value v = *this;
     if (data)
-        v.data.reset(new Container(*data));
+        v.data = std::make_shared<Container>(*data);
     return v;
 }
 inline Value Value::clone() const {
@@ -157,9 +259,13 @@ inline Value Value::clone() const {
     if (kind == Array)
         for (Value &item : v.data->array)
             item = item.clone();
-    else if (kind == Object)
+    else if (kind == Object) {
         for (auto &item : v.data->object)
             item.second = item.second.clone();
+        for (size_t i = 0; i < v.data->slots.size(); ++i)
+            if (v.data->present[i])
+                v.data->slots[i] = v.data->slots[i].clone();
+    }
     return v;
 }
 inline bool Value::operator==(const Value &o) const {
@@ -174,8 +280,15 @@ inline bool Value::operator==(const Value &o) const {
         return data->string == o.data->string;
     if (kind == Array)
         return data->array == o.data->array;
-    if (kind == Object)
-        return data->object == o.data->object;
+    if (kind == Object) {
+        if (size() != o.size())
+            return false;
+        bool same = true;
+        visit([&](const std::string &name, const Value &value) {
+            same = same && o.has(name) && value == o.get(name);
+        });
+        return same;
+    }
     return false;
 }
 inline void utf8(std::string &s, unsigned c) {
@@ -405,14 +518,14 @@ inline void write_json(std::ostream &out, const Value &v) {
     } else {
         out << '{';
         bool comma = false;
-        for (const auto &item : v.data->object) {
+        v.visit([&](const std::string &name, const Value &value) {
             if (comma)
                 out << ',';
-            write_string(out, item.first);
+            write_string(out, name);
             out << ':';
-            write_json(out, item.second);
+            write_json(out, value);
             comma = true;
-        }
+        });
         out << '}';
     }
 }
@@ -426,13 +539,25 @@ inline const std::vector<Value> &elements(const Value &v) {
         throw std::invalid_argument("kernel array required");
     return v.data->array;
 }
-inline double field(const Value &v, const char *name, double fallback = 0) {
+// Returned names borrow the immutable configuration tree, which their owner
+// retains for the lifetime of these bindings.
+inline std::vector<Field> bind_fields(const Value &names) {
+    std::vector<Field> result;
+    for (const Value &v : elements(names)) {
+        if (v.kind != Value::String)
+            throw std::invalid_argument("kernel field name required");
+        const std::string &name = v.data->string;
+        result.push_back(Field{field_slot(name), name.c_str(), name.size()});
+    }
+    return result;
+}
+template <typename Key> inline double field(const Value &v, Key name, double fallback = 0) {
     return v.get(name).number(fallback);
 }
-inline int integer(const Value &v, const char *name, int fallback = 0) {
+template <typename Key> inline int integer(const Value &v, Key name, int fallback = 0) {
     return static_cast<int>(v.get(name).exact(fallback));
 }
-inline bool flag(const Value &v, const char *name, bool fallback = false) {
+template <typename Key> inline bool flag(const Value &v, Key name, bool fallback = false) {
     return v.has(name) ? v.get(name).truth() : fallback;
 }
 inline double clamp(double x, double a, double b) { return std::max(a, std::min(b, x)); }

@@ -7,7 +7,7 @@ namespace offline_kernel {
 struct Codec {
     struct Column {
         std::string name;
-        int scale;
+        int scale, slot;
         bool bounded;
         double minimum, maximum;
     };
@@ -22,6 +22,7 @@ struct Codec {
         for (const Value &raw : elements(config.get("scalars"))) {
             Column c;
             c.name = raw[0].text();
+            c.slot = field_slot(c.name);
             c.scale = static_cast<int>(raw[1].exact());
             const Value &bounds = config.get("clamps").get(c.name);
             c.bounded = bounds.kind == Value::Array;
@@ -103,19 +104,20 @@ struct Codec {
     Value row(const Value &state) const {
         if (state.kind != Value::Object)
             throw std::invalid_argument("bot state must be a mapping");
-        const Value &critical = state.get("critical"), &equipment = state.get("equipment_states"),
-                    &ammo = state.get("ammo_remaining");
-        bool shot = state.has("shot_yaw");
-        if (shot != state.has("shot_pitch"))
+        const Value &critical = state.get(sf::critical),
+                    &equipment = state.get(sf::equipment_states),
+                    &ammo = state.get(sf::ammo_remaining);
+        bool shot = state.has(sf::shot_yaw);
+        if (shot != state.has(sf::shot_pitch))
             throw std::invalid_argument("bot shot angles must be an atomic pair");
         int flags = 0;
-        if (flag(state, "alive", true))
+        if (flag(state, sf::alive, true))
             flags |= 1;
-        if (flag(state, "world_pose", true))
+        if (flag(state, sf::world_pose, true))
             flags |= 2;
-        if (flag(state, "ammo_reload_pending"))
+        if (flag(state, sf::ammo_reload_pending))
             flags |= 4;
-        if (flag(state, "burst_active"))
+        if (flag(state, sf::burst_active))
             flags |= 8;
         if (critical.kind == Value::Object) {
             flags |= 128;
@@ -138,7 +140,7 @@ struct Codec {
             else if (count)
                 throw std::invalid_argument("bot state group is incomplete");
         }
-        double movement = field(state, "movement_dir"), rotation = field(state, "rotation_dir");
+        double movement = field(state, sf::movement_dir), rotation = field(state, sf::rotation_dir);
         if (movement > 0.01)
             flags |= 1024;
         else if (movement < -.01)
@@ -158,7 +160,7 @@ struct Codec {
                     out.append(Value(0));
                     continue;
                 }
-                double value = numeric(state.get(c.name));
+                double value = numeric(state.get(Field{c.slot, c.name.c_str(), c.name.size()}));
                 if (c.name == "shot_yaw") {
                     const double pi = 3.14159265358979323846;
                     value = std::fmod(value + pi, 2 * pi);
@@ -169,7 +171,9 @@ struct Codec {
                 out.append(Value(fixed(value, c.scale, c.bounded, c.minimum, c.maximum)));
                 continue;
             }
-            const Value v = state.has(c.name) ? state.get(c.name) : Value(0);
+            const Value v = state.has(Field{c.slot, c.name.c_str(), c.name.size()})
+                                ? state.get(Field{c.slot, c.name.c_str(), c.name.size()})
+                                : Value(0);
             out.append(Value(c.scale ? fixed(numeric(v), c.scale, c.bounded, c.minimum, c.maximum)
                                      : exact(v)));
         }
@@ -188,7 +192,7 @@ struct Codec {
                     throw std::invalid_argument("kernel device list");
                 for (const Value &v : values.data->array)
                     records.push_back(std::array<int64_t, 4>{
-                        {index(devices, v.get("name").text(), "unknown critical device"),
+                        {index(devices, v.get(sf::name).text(), "unknown critical device"),
                          fixed(field(v, "hp"), 1000), fixed(field(v, "max_hp", 1), 1000),
                          index(device_states, v.get("state").text("normal"),
                                "unknown critical device state")}});

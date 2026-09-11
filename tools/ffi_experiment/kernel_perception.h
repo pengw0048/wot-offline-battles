@@ -25,6 +25,7 @@ struct Perception {
         Value raw, config;
     };
     const Value config;
+    const std::vector<Field> human_fields, bot_fields, pose_fields;
     Factors factors;
     int handle = 0;
     Engine *engine = nullptr;
@@ -45,7 +46,9 @@ struct Perception {
     std::map<TeamKey, Observation> observations;
     std::map<std::array<int, 3>, Value> probe_targets;
     explicit Perception(const Value &v, std::map<int, std::unique_ptr<Bot>> &states)
-        : config(v), factors(v.get("factors")), bots(states) {
+        : config(v), human_fields(bind_fields(v.get("human_fields"))),
+          bot_fields(bind_fields(v.get("bot_fields"))),
+          pose_fields(bind_fields(v.get("pose_fields"))), factors(v.get("factors")), bots(states) {
         std::vector<double> packet = {300};
         for (const char *name :
              {"ttl", "shot_seconds", "proximity", "maximum", "memory", "designated", "budget"})
@@ -69,20 +72,20 @@ struct Perception {
         std::vector<double> packet = {static_cast<double>(op), static_cast<double>(handle)};
         call(packet);
     }
-    static int kind(const Value &v) { return v.get("kind").text() == "human" ? 1 : 0; }
-    static int id(const Value &v) { return integer(v, "network_id", integer(v, "id")); }
+    static int kind(const Value &v) { return v.get(sf::kind).text() == "human" ? 1 : 0; }
+    static int id(const Value &v) { return integer(v, sf::network_id, integer(v, sf::id)); }
     static ActorKey key(const Value &v) { return ActorKey{{kind(v), id(v)}}; }
     static TeamKey team_key(int team, const Value &target) {
         return TeamKey{{team, kind(target), id(target)}};
     }
     static int fire(const Value &v) {
-        return v.get("fire_seq").kind == Value::Null ? -1 : std::max(0, integer(v, "fire_seq"));
+        return v.get(sf::fire_seq).kind == Value::Null ? -1 : std::max(0, integer(v, sf::fire_seq));
     }
     void record(std::vector<double> &packet, const Value &state, int identity = -1) {
         Value p = target_position(state);
         packet.push_back(kind(state));
         packet.push_back(identity < 0 ? id(state) : identity);
-        packet.push_back(integer(state, "team"));
+        packet.push_back(integer(state, sf::team));
         for (const Value &v : elements(p))
             packet.push_back(v.number());
         packet.push_back(fire(state));
@@ -100,10 +103,10 @@ struct Perception {
         observations.clear();
         probe_targets.clear();
         for (const Value &raw : elements(players)) {
-            if (raw.kind != Value::Object || !raw.has("id"))
+            if (raw.kind != Value::Object || !raw.has(sf::id))
                 continue;
-            int identity = integer(raw, "id");
-            Actor actor{1, identity, raw, raw.get("_kernel")};
+            int identity = integer(raw, sf::id);
+            Actor actor{1, identity, raw, raw.get(sf::_kernel)};
             indices[ActorKey{{1, identity}}] = roster.size();
             roster.push_back(actor);
             human_critical.emplace(identity, CriticalConfig(actor.config.get("critical_config")));
@@ -118,8 +121,8 @@ struct Perception {
         for (const Actor &actor : roster) {
             packet.push_back(actor.kind);
             packet.push_back(actor.id);
-            packet.push_back(integer(actor.raw, "team"));
-            packet.push_back(flag(actor.raw, "alive", true));
+            packet.push_back(integer(actor.raw, sf::team));
+            packet.push_back(flag(actor.raw, sf::alive, true));
         }
         call(packet);
     }
@@ -129,12 +132,12 @@ struct Perception {
         int count = 0;
         for (int id : ordered) {
             const Value &state = bots.at(id)->state;
-            if (!flag(state, "alive", true))
+            if (!flag(state, sf::alive, true))
                 continue;
             auto selected = selected_targets.find(id);
             packet.push_back(0);
             packet.push_back(id);
-            packet.push_back(integer(state, "team"));
+            packet.push_back(integer(state, sf::team));
             packet.push_back(fire(state));
             packet.push_back(selected != selected_targets.end() ? selected->second[0] : -1);
             packet.push_back(selected != selected_targets.end() ? selected->second[1] : 0);
@@ -142,10 +145,10 @@ struct Perception {
             ++count;
         }
         for (const Actor &actor : roster)
-            if (actor.kind == 1 && flag(actor.raw, "alive", true)) {
+            if (actor.kind == 1 && flag(actor.raw, sf::alive, true)) {
                 packet.push_back(1);
                 packet.push_back(actor.id);
-                packet.push_back(integer(actor.raw, "team"));
+                packet.push_back(integer(actor.raw, sf::team));
                 packet.push_back(fire(actor.raw));
                 packet.push_back(-1);
                 packet.push_back(0);
@@ -157,7 +160,7 @@ struct Perception {
     }
     void note_still(const Value &source, double now) {
         ActorKey identity = key(source);
-        if (std::abs(field(source, "speed")) > field(config, "moving_epsilon"))
+        if (std::abs(field(source, sf::speed)) > field(config, "moving_epsilon"))
             source_still.erase(identity);
         else
             source_still.emplace(identity, now);
@@ -168,31 +171,31 @@ struct Perception {
         auto at = templates.find(cache_key);
         if (at != templates.end())
             return at->second;
-        Value result =
-            select_fields(actor.raw, config.get(actor.kind == 1 ? "human_fields" : "bot_fields"));
-        result["kind"] = Value(actor.kind == 1 ? "human" : "bot");
-        result["network_id"] = Value(actor.id);
-        result["id"] = Value(actor.kind == 1 ? integer(config, "human_base") + actor.id : actor.id);
-        result["position"] = position(actor.raw);
+        Value result = select_fields(actor.raw, actor.kind == 1 ? human_fields : bot_fields);
+        result[sf::kind] = Value(actor.kind == 1 ? "human" : "bot");
+        result[sf::network_id] = Value(actor.id);
+        result[sf::id] =
+            Value(actor.kind == 1 ? integer(config, "human_base") + actor.id : actor.id);
+        result[sf::position] = position(actor.raw);
         if (actor.kind == 1) {
-            result["class_tag"] = actor.config.get("class_tag");
+            result[sf::class_tag] = actor.config.get(sf::class_tag);
             result["armor"] = actor.config.get("armor");
         }
         templates[cache_key] = result;
         return result;
     }
     Value pose(const Value &target) const {
-        Value p = select_fields(target, config.get("pose_fields"));
-        p["position"] = position(target);
+        Value p = select_fields(target, pose_fields);
+        p[sf::position] = position(target);
         for (const char *name : {"x", "y", "z", "yaw", "speed"})
             if (!p.has(name))
                 p[name] = Value(0.0);
         return p;
     }
     Value dynamic(const Value &target) const {
-        const Value &snapshot = target.get("effective_params"),
+        const Value &snapshot = target.get(sf::effective_params),
                     &projection = snapshot.get("crew").get("dynamic_spotting");
-        std::set<std::string> knocked = names(target.get("critical").get("crew_ko"));
+        std::set<std::string> knocked = names(target.get(sf::critical).get("crew_ko"));
         const Value &roster = projection.get("crew");
         unsigned mask = 0;
         for (size_t i = 0; i < roster.size(); ++i)
@@ -201,7 +204,7 @@ struct Perception {
         if (!knocked.empty())
             throw std::invalid_argument("kernel human critical roster");
         std::string name =
-            std::to_string(mask) + ":" + (flag(target.get("critical"), "fire") ? "1" : "0");
+            std::to_string(mask) + ":" + (flag(target.get(sf::critical), "fire") ? "1" : "0");
         const Value &row = projection.get("states").get(name);
         if (row.kind != Value::Object)
             throw std::invalid_argument("kernel human dynamic spotting");
@@ -214,9 +217,10 @@ struct Perception {
             return at->second;
         Value result;
         if (identity[0] == 0)
-            result = bots.at(identity[1])->config.get("perception").get("profile");
+            result = bots.at(identity[1])->config.get("perception").get(sf::profile);
         else {
-            Value row = dynamic(target), p = target.get("effective_params").get("spotting").copy();
+            Value row = dynamic(target),
+                  p = target.get(sf::effective_params).get("spotting").copy();
             p["vision_factor"] = Value(field(p, "vision_factor") * field(row, "vision", 1));
             p["camouflage_factor"] =
                 Value(field(p, "camouflage_factor") * field(row, "camouflage", 1));
@@ -227,7 +231,7 @@ struct Perception {
             base.append(row.get("base_moving"));
             base.append(row.get("base_still"));
             result.append(base);
-            result.append(target.get("effective_params").get("camouflage").get("shot_factor"));
+            result.append(target.get(sf::effective_params).get("camouflage").get("shot_factor"));
             result.append(p);
         }
         profile_cache[identity] = result;
@@ -239,7 +243,7 @@ struct Perception {
         if (identity[0] == 0) {
             Bot &bot = *bots.at(identity[1]);
             const Value &v = bot.config.get("perception").get("vision");
-            double value = field(source, "view_range", 330);
+            double value = field(source, sf::view_range, 330);
             if (v.kind == Value::Array)
                 value = v[2].kind != Value::Null && since != source_still.end() &&
                                 now - since->second >= std::max(0.0, v[2].number())
@@ -248,7 +252,7 @@ struct Perception {
             return value * factors.vision(factors.stat(source, *bot.critical, "vision"));
         }
         const Actor &actor = roster[indices.at(identity)];
-        const Value &snapshot = source.get("effective_params"), &p = snapshot.get("spotting");
+        const Value &snapshot = source.get(sf::effective_params), &p = snapshot.get("spotting");
         Value row = dynamic(source);
         double damage =
             factors.vision(field(row, "vision", 1) *
@@ -264,7 +268,7 @@ struct Perception {
     }
     Value projection(const Value &target, double now) {
         ActorKey identity = key(target);
-        bool moving = std::abs(field(target, "speed")) > field(config, "moving_epsilon");
+        bool moving = std::abs(field(target, sf::speed)) > field(config, "moving_epsilon");
         auto cached = projection_cache.find(identity);
         if (cached != projection_cache.end() && cached->second.first == moving)
             return cached->second.second;
@@ -391,12 +395,12 @@ struct Perception {
         return packet[0];
     }
     static bool perk(const Value &snapshot, const Value &state, const std::string &wanted) {
-        std::set<std::string> knocked = names(state.get("critical").get("crew_ko"));
+        std::set<std::string> knocked = names(state.get(sf::critical).get("crew_ko"));
         for (const Value &member : elements(snapshot.get("crew").get("members"))) {
             if (knocked.count(member.get("instance").text()))
                 continue;
             for (const Value &skill : elements(member.get("skills")))
-                if (skill.get("name").text() == wanted && flag(skill, "active") &&
+                if (skill.get(sf::name).text() == wanted && flag(skill, "active") &&
                     flag(skill, "enabled") && field(skill, "level") >= 100)
                     return true;
         }
@@ -407,17 +411,17 @@ struct Perception {
         for (const Actor &a : roster)
             if (a.kind == 1) {
                 present.insert(a.id);
-                bool alive = flag(a.raw, "alive", true);
+                bool alive = flag(a.raw, sf::alive, true);
                 auto before = human_alive.find(a.id);
                 if (before != human_alive.end() && before->second && !alive) {
                     Value prior = Value::object();
                     auto at = human_last_critical.find(a.id);
-                    prior["critical"] =
+                    prior[sf::critical] =
                         at == human_last_critical.end() ? Value::object() : at->second;
-                    if (perk(a.raw.get("effective_params"), prior, "radioman_lasteffort"))
+                    if (perk(a.raw.get(sf::effective_params), prior, "radioman_lasteffort"))
                         human_vengeance[a.id] = now + field(config, "last_effort");
                 } else if (alive) {
-                    const Value &p = a.raw.get("critical");
+                    const Value &p = a.raw.get(sf::critical);
                     human_last_critical[a.id] =
                         p.kind == Value::Object ? p.copy() : Value::object();
                     human_vengeance.erase(a.id);
@@ -442,13 +446,14 @@ struct Perception {
                 ++at;
     }
     double designated(const Value &source, const Value &target) {
-        if (!perk(source.get("effective_params"), source, "gunner_rancorous"))
+        if (!perk(source.get(sf::effective_params), source, "gunner_rancorous"))
             return field(config, "memory");
         Value start = position(source), end = target_position(target);
         double dx = end[0].number() - start[0].number(), dz = end[2].number() - start[2].number();
         if (dx * dx + dz * dz <= .000001)
             return field(config, "designated");
-        double bearing = std::atan2(dx, dz), yaw = field(source, "aim_yaw", field(source, "yaw"));
+        double bearing = std::atan2(dx, dz),
+               yaw = field(source, sf::aim_yaw, field(source, sf::yaw));
         return std::abs(angle(bearing - yaw)) <= .08726646259971647 + 1e-9
                    ? field(config, "designated")
                    : field(config, "memory");
@@ -456,18 +461,18 @@ struct Perception {
     void append_humans(double now) {
         std::vector<Value> targets;
         for (size_t i = 0; i < roster.size(); ++i)
-            if (flag(roster[i].raw, "alive", true))
+            if (flag(roster[i].raw, sf::alive, true))
                 targets.push_back(target(i, false));
         for (const Actor &a : roster)
             if (a.kind == 1) {
                 Value source = a.raw.copy();
-                source["kind"] = Value("human");
-                source["network_id"] = Value(a.id);
-                source["id"] = Value(a.id);
-                int team = integer(source, "team");
+                source[sf::kind] = Value("human");
+                source[sf::network_id] = Value(a.id);
+                source[sf::id] = Value(a.id);
+                int team = integer(source, sf::team);
                 if ((team != 1 && team != 2) || a.id <= 0)
                     throw std::invalid_argument("kernel human observer identity");
-                bool alive = flag(source, "alive", true);
+                bool alive = flag(source, sf::alive, true);
                 std::set<ActorKey> direct;
                 if (alive)
                     note_still(source, now);
@@ -477,7 +482,7 @@ struct Perception {
                         direct = human_direct[a.id];
                 }
                 for (Value &t : targets) {
-                    if (integer(t, "team") == team)
+                    if (integer(t, sf::team) == team)
                         continue;
                     ActorKey identity = key(t);
                     TeamKey tk = team_key(team, t);
@@ -508,9 +513,8 @@ struct Perception {
             return result;
         const Value &live = roster[at->second].raw;
         if (flag(cached, "fresh_visible")) {
-            result["position"] = position(live);
-            for (const Value &v : elements(config.get("pose_fields"))) {
-                std::string name = v.text();
+            result[sf::position] = position(live);
+            for (Field name : pose_fields) {
                 if (live.has(name))
                     result[name] = live.get(name);
             }
@@ -531,9 +535,9 @@ struct Perception {
                 at = probe_targets.emplace(pk, refresh(v.second)).first;
             live[v.first] = at->second;
         }
-        int team = integer(source, "team");
+        int team = integer(source, sf::team);
         for (const Value &cached : elements(contacts.rows)) {
-            auto at = live.find(integer(cached, "id"));
+            auto at = live.find(integer(cached, sf::id));
             Value observed = at == live.end() ? cached : at->second;
             TeamKey tk = team_key(team, observed);
             bool fresh = flag(cached, "fresh_visible");
@@ -544,22 +548,22 @@ struct Perception {
                 update(observed, p);
             }
             Observation &entry = observations[tk];
-            entry.visible = entry.visible || flag(cached, "visible");
+            entry.visible = entry.visible || flag(cached, sf::visible);
             entry.target = observed;
             if (flag(cached, "direct_visible"))
-                entry.bots.insert(integer(source, "id"));
+                entry.bots.insert(integer(source, sf::id));
         }
     }
     Contacts contacts(const Value &source, double now, const std::set<int> &processed) {
         std::vector<double> packet = {304, static_cast<double>(handle)};
-        record(packet, source, integer(source, "id"));
+        record(packet, source, integer(source, sf::id));
         packet.push_back(now);
-        int team = integer(source, "team");
+        int team = integer(source, sf::team);
         for (const Actor &a : roster) {
             packet.push_back(a.kind == 0 && processed.count(a.id));
             packet.push_back(team_visible[TeamKey{{team, a.kind, a.id}}]);
-            packet.push_back(flag(a.raw, "alive", true));
-            packet.push_back(integer(a.raw, "team"));
+            packet.push_back(flag(a.raw, sf::alive, true));
+            packet.push_back(integer(a.raw, sf::team));
         }
         auto results = run(packet, source, now, processed);
         Contacts out;
@@ -579,18 +583,18 @@ struct Perception {
                     t.erase(name.text());
                 auto prior = remembered.find(key);
                 if (prior == remembered.end()) {
-                    t["position"] = point(0, 0, 0);
+                    t[sf::position] = point(0, 0, 0);
                     for (const char *name : {"x", "y", "z", "yaw", "speed"})
                         t[name] = Value(0.0);
                     visible = false;
                 } else
                     update(t, prior->second);
             }
-            t["visible"] = Value(visible);
+            t[sf::visible] = Value(visible);
             t["direct_visible"] = Value(direct);
             t["fresh_visible"] = Value(fresh);
             if (visible)
-                out.lookup[integer(t, "id")] = t;
+                out.lookup[integer(t, sf::id)] = t;
             out.rows.append(t);
         }
         return out;

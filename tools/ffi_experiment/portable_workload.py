@@ -228,6 +228,12 @@ def main():
                   snapshot=snapshot)
     if motion_component is not None:
         report['motion_vertical_coverage'] = motion_component.vertical_counts
+    if kernel_component is not None:
+        leaves = kernel_component.engine
+        report['kernel_callback_counts'] = dict(
+            engine_leaves_cpp_to_python=sum(count for kind, count in leaves.calls.items() if kind >= 750),
+            actor_reads=leaves.actor_calls, actor_decodes=leaves.actor_decodes,
+            leaves=leaves.calls)
     if stage_recorder is not None:
         report['stage_timings'] = stage_recorder.rows
     if world_recorder is not None:

@@ -14,14 +14,14 @@ struct Gun {
     double aiming_start = 1, aiming_elapsed = 0, motion_squared = 0, after_shot = 0,
            after_in_burst = 0, burst_interval = 0;
     void load(const Value &v) {
-        clip = integer(v, "clip");
-        clip_size = integer(v, "clip_size", 1);
+        clip = integer(v, sf::clip);
+        clip_size = integer(v, sf::clip_size, 1);
         shell_count = integer(v, "shell_count", 1);
-        burst_count = integer(v, "burst_count", 1);
+        burst_count = integer(v, sf::burst_count, 1);
         burst_remaining = integer(v, "_burst_remaining");
         elapsed = field(v, "elapsed");
         reload_factor = field(v, "reload_factor", 1);
-        reload_duration = field(v, "reload_duration");
+        reload_duration = field(v, sf::reload_duration);
         reload_full = field(v, "reload_full");
         reload_intra = field(v, "reload_intra");
         intra = v.get("reload_kind").text() == "intra";
@@ -37,7 +37,7 @@ struct Gun {
         motion_squared = field(v, "motion_dispersion_squared");
         after_shot = field(v, "after_shot");
         after_in_burst = field(v, "after_shot_in_burst");
-        burst_interval = field(v, "burst_interval");
+        burst_interval = field(v, sf::burst_interval);
         if (clip_size < 1 || shell_count < 1 || shell_count > 5 || clip < 0 || clip > clip_size ||
             reload_full <= 0 || reload_intra < 0 || fully_aimed <= 0)
             throw std::invalid_argument("kernel gun producer");
@@ -141,14 +141,14 @@ struct Gun {
     }
     Value snapshot() const {
         Value v = Value::object();
-        v["clip"] = Value(clip);
-        v["clip_size"] = Value(clip_size);
+        v[sf::clip] = Value(clip);
+        v[sf::clip_size] = Value(clip_size);
         v["shell_count"] = Value(shell_count);
-        v["burst_count"] = Value(burst_count);
+        v[sf::burst_count] = Value(burst_count);
         v["_burst_remaining"] = Value(burst_remaining);
         v["elapsed"] = Value(elapsed);
         v["reload_factor"] = Value(reload_factor);
-        v["reload_duration"] = Value(reload_duration);
+        v[sf::reload_duration] = Value(reload_duration);
         v["reload_full"] = Value(reload_full);
         v["reload_intra"] = Value(reload_intra);
         v["reload_kind"] = Value(intra ? "intra" : "full");
@@ -164,7 +164,7 @@ struct Gun {
         v["motion_dispersion_squared"] = Value(motion_squared);
         v["after_shot"] = Value(after_shot);
         v["after_shot_in_burst"] = Value(after_in_burst);
-        v["burst_interval"] = Value(burst_interval);
+        v[sf::burst_interval] = Value(burst_interval);
         return v;
     }
 };
@@ -287,7 +287,7 @@ struct Burst {
         group = integer(v, "group_seq");
         count = integer(v, "count");
         next = integer(v, "next_index");
-        shell = integer(v, "shell_index");
+        shell = integer(v, sf::shell_index);
         interval = field(v, "interval");
         left = field(v, "time_left");
     }
@@ -347,7 +347,7 @@ struct Burst {
         v["group_seq"] = Value(group);
         v["count"] = Value(count);
         v["next_index"] = Value(next);
-        v["shell_index"] = Value(shell);
+        v[sf::shell_index] = Value(shell);
         v["interval"] = Value(interval);
         v["time_left"] = Value(left);
         return v;

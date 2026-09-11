@@ -54,29 +54,29 @@ template <class Owner> struct Simulation {
     std::vector<int> ordered() const {
         std::vector<int> ids = k.order;
         std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) {
-            return std::make_pair(integer(k.bots.at(a)->state, "slot"),
-                                  integer(k.bots.at(a)->state, "team", 1)) <
-                   std::make_pair(integer(k.bots.at(b)->state, "slot"),
-                                  integer(k.bots.at(b)->state, "team", 1));
+            return std::make_pair(integer(k.bots.at(a)->state, sf::slot),
+                                  integer(k.bots.at(a)->state, sf::team, 1)) <
+                   std::make_pair(integer(k.bots.at(b)->state, sf::slot),
+                                  integer(k.bots.at(b)->state, sf::team, 1));
         });
         return ids;
     }
     int tier(const Value &s) const {
         if (camera.kind == Value::Null)
             return 0;
-        double dx = field(s, "x") - camera[0].number(), dz = field(s, "z") - camera[2].number(),
+        double dx = field(s, sf::x) - camera[0].number(), dz = field(s, sf::z) - camera[2].number(),
                d = dx * dx + dz * dz, near = field(config, "near"), far = field(config, "far");
         return d <= near * near ? 0 : d <= far * far ? 1 : 2;
     }
     static Value overlay(const Value &command, const Value &target, const Value &source) {
         Value result = command.copy();
-        if (result.get("target_id").kind == Value::Null)
+        if (result.get(sf::target_id).kind == Value::Null)
             return result;
-        if (target.kind == Value::Null || !flag(target, "alive", true)) {
+        if (target.kind == Value::Null || !flag(target, sf::alive, true)) {
             result["fire_allowed"] = Value(false);
             return result;
         }
-        Value p = target.get("position");
+        Value p = target.get(sf::position);
         result["aim_position"] = p;
         if (!flag(result, "stable_hull_face")) {
             if (result.get("hull_angle_degrees").kind == Value::Null)
@@ -100,7 +100,7 @@ template <class Owner> struct Simulation {
             decisions.erase(id);
     }
     std::pair<Value, bool> reposition(Bot &bot, const Contacts &contacts, double now) {
-        int id = integer(bot.state, "id");
+        int id = integer(bot.state, sf::id);
         auto at = repositions.find(id);
         if (at == repositions.end())
             return {Value(), false};
@@ -109,9 +109,9 @@ template <class Owner> struct Simulation {
             clear_reposition(id);
             return {Value(), true};
         }
-        auto target = contacts.lookup.find(integer(m, "target_id"));
-        if (target == contacts.lookup.end() || !flag(target->second, "alive", true) ||
-            (target->second.has("health") && field(target->second, "health") <= 0) ||
+        auto target = contacts.lookup.find(integer(m, sf::target_id));
+        if (target == contacts.lookup.end() || !flag(target->second, sf::alive, true) ||
+            (target->second.has(sf::health) && field(target->second, sf::health) <= 0) ||
             Lanes::distance(bot.state, tuple_target(m.get("destination"))) <=
                 field(config, "arrival")) {
             clear_reposition(id);
@@ -130,36 +130,37 @@ template <class Owner> struct Simulation {
     }
     static Value tuple_target(const Value &p) {
         Value t = Value::object();
-        t["position"] = p;
+        t[sf::position] = p;
         return t;
     }
     void mark_reposition(Bot &bot, const Value &command, const Value &target, const Value &launch,
                          const Value &verdict, double now) {
         Value &s = bot.state;
-        int id = integer(s, "id"), blocker = integer(verdict, "blocker_id");
+        int id = integer(s, sf::id), blocker = integer(verdict, "blocker_id");
         std::string kind = verdict.get("blocker_kind").text();
         if ((kind != "bot" && kind != "player") || blocker <= 0 ||
-            integer(verdict, "blocker_team") != integer(s, "team") ||
-            (kind == "bot" && blocker == id) || command.get("target_id").kind == Value::Null ||
+            integer(verdict, "blocker_team") != integer(s, sf::team) ||
+            (kind == "bot" && blocker == id) || command.get(sf::target_id).kind == Value::Null ||
             verdict.get("blocker_position").kind != Value::Array)
             return;
-        const Value &shape = s.get("collision_shape");
+        const Value &shape = s.get(sf::collision_shape);
         double radius = shape.kind == Value::Array
                             ? std::hypot(shape[0].number(), shape[1].number())
-                            : std::hypot(std::max(.3, field(s, "half_width", 1.7)),
-                                         std::max(.5, field(s, "half_length", 3.5))),
+                            : std::hypot(std::max(.3, field(s, sf::half_width, 1.7)),
+                                         std::max(.5, field(s, sf::half_length, 3.5))),
                other = field(verdict, "blocker_radius", radius);
         if (!std::isfinite(other) || other <= 0)
             other = radius;
         double clearance = radius + other + field(config, "contact_slop"),
-               side = (id + integer(launch, "fire_seq")) & 1 ? 1 : -1,
-               yaw = field(launch, "shot_yaw");
+               side = (id + integer(launch, sf::fire_seq)) & 1 ? 1 : -1,
+               yaw = field(launch, sf::shot_yaw);
         Value m = Value::object();
-        m["target_id"] = command.get("target_id");
-        m["target_kind"] = target.get("kind");
-        m["destination"] = vector3(field(s, "x") + std::cos(yaw) * clearance * side, field(s, "y"),
-                                   field(s, "z") - std::sin(yaw) * clearance * side);
-        m["shell_index"] = s.get("shell_index");
+        m[sf::target_id] = command.get(sf::target_id);
+        m[sf::target_kind] = target.get(sf::kind);
+        m["destination"] =
+            vector3(field(s, sf::x) + std::cos(yaw) * clearance * side, field(s, sf::y),
+                    field(s, sf::z) - std::sin(yaw) * clearance * side);
+        m[sf::shell_index] = s.get(sf::shell_index);
         m["fire_range"] = Value(std::max(0.0, field(command, "fire_range")));
         m["deadline"] = Value(now + field(config, "reposition_seconds"));
         repositions[id] = m;
@@ -171,52 +172,53 @@ template <class Owner> struct Simulation {
         traffic_buckets.clear();
         std::vector<int> insertions;
         for (const Value &raw : elements(supplied))
-            if (raw.has("id")) {
-                int id = integer(raw, "id");
+            if (raw.has(sf::id)) {
+                int id = integer(raw, sf::id);
                 Value b = raw.copy();
-                b["position"] = position(raw);
+                b[sf::position] = position(raw);
                 traffic_bodies[id] = b;
                 insertions.push_back(id);
             }
         for (const Value &raw : elements(players)) {
-            int id = integer(config, "human_base") + integer(raw, "id");
+            int id = integer(config, "human_base") + integer(raw, sf::id);
             Value b = Value::object();
-            double yaw = field(raw, "yaw"),
-                   speed = flag(raw, "alive", true) ? field(raw, "speed") : 0;
-            const Value &shape = raw.get("_kernel").get("collision").get("shape");
+            double yaw = field(raw, sf::yaw),
+                   speed = flag(raw, sf::alive, true) ? field(raw, sf::speed) : 0;
+            const Value &shape = raw.get(sf::_kernel).get("collision").get("shape");
             // The reference traffic snapshot reprojects the supplied human row
             // from x/y/z after its neighbour producer emitted position only.
-            b["id"] = Value(id);
-            b["position"] = vector3(0, 0, 0);
-            b["team"] = Value(integer(raw, "team"));
-            b["yaw"] = Value(yaw);
-            b["alive"] = Value(flag(raw, "alive", true));
+            b[sf::id] = Value(id);
+            b[sf::position] = vector3(0, 0, 0);
+            b[sf::team] = Value(integer(raw, sf::team));
+            b[sf::yaw] = Value(yaw);
+            b[sf::alive] = Value(flag(raw, sf::alive, true));
             b["shape"] = shape;
-            b["half_width"] = shape[0];
-            b["half_length"] = shape[1];
-            b["velocity"] = vector3(std::sin(yaw) * speed, 0, std::cos(yaw) * speed);
+            b[sf::half_width] = shape[0];
+            b[sf::half_length] = shape[1];
+            b[sf::velocity] = vector3(std::sin(yaw) * speed, 0, std::cos(yaw) * speed);
             traffic_bodies[id] = b;
             insertions.push_back(id);
         }
         for (int id : k.order) {
             const Value &s = k.bots.at(id)->state;
             Value b = Value::object();
-            double yaw = field(s, "yaw"), speed = flag(s, "alive", true) ? field(s, "speed") : 0;
-            b["id"] = Value(id);
-            b["position"] = position(s);
-            b["yaw"] = Value(yaw);
-            b["team"] = Value(integer(s, "team"));
-            b["alive"] = Value(flag(s, "alive", true));
-            b["shape"] = s.get("collision_shape");
-            b["half_length"] = Value(field(s, "half_length", 3.5));
-            b["half_width"] = Value(field(s, "half_width", 1.7));
-            b["velocity"] = vector3(std::sin(yaw) * speed + field(s, "push_x"), 0,
-                                    std::cos(yaw) * speed + field(s, "push_z"));
+            double yaw = field(s, sf::yaw),
+                   speed = flag(s, sf::alive, true) ? field(s, sf::speed) : 0;
+            b[sf::id] = Value(id);
+            b[sf::position] = position(s);
+            b[sf::yaw] = Value(yaw);
+            b[sf::team] = Value(integer(s, sf::team));
+            b[sf::alive] = Value(flag(s, sf::alive, true));
+            b["shape"] = s.get(sf::collision_shape);
+            b[sf::half_length] = Value(field(s, sf::half_length, 3.5));
+            b[sf::half_width] = Value(field(s, sf::half_width, 1.7));
+            b[sf::velocity] = vector3(std::sin(yaw) * speed + field(s, sf::push_x), 0,
+                                      std::cos(yaw) * speed + field(s, sf::push_z));
             traffic_bodies[id] = b;
             insertions.push_back(id);
         }
         for (int id : integer_dict_order(insertions, flag(config, "py2"))) {
-            Value p = traffic_bodies.at(id).get("position");
+            Value p = traffic_bodies.at(id).get(sf::position);
             traffic_buckets[{static_cast<int>(std::floor(p[0].number() / 24)),
                              static_cast<int>(std::floor(p[2].number() / 24))}]
                 .push_back(id);
@@ -224,8 +226,8 @@ template <class Owner> struct Simulation {
     }
     Value neighbours(const Value &state) {
         Value rows = Value::array();
-        int id = integer(state, "id"), x = static_cast<int>(std::floor(field(state, "x") / 24)),
-            z = static_cast<int>(std::floor(field(state, "z") / 24));
+        int id = integer(state, sf::id), x = static_cast<int>(std::floor(field(state, sf::x) / 24)),
+            z = static_cast<int>(std::floor(field(state, sf::z) / 24));
         for (int dz = -1; dz <= 1; ++dz)
             for (int dx = -1; dx <= 1; ++dx) {
                 auto at = traffic_buckets.find({x + dx, z + dz});
@@ -241,21 +243,21 @@ template <class Owner> struct Simulation {
             return;
         Value key = Value::array();
         auto add = [&](int id, const Value &s, double length, double width) {
-            key.append(
-                tuple_value({Value(id), Value(rounded(field(s, "x"), 2)),
-                             Value(rounded(field(s, "z"), 2)), Value(rounded(field(s, "yaw"), 3)),
-                             Value(rounded(length, 2)), Value(rounded(width, 2))}));
+            key.append(tuple_value({Value(id), Value(rounded(field(s, sf::x), 2)),
+                                    Value(rounded(field(s, sf::z), 2)),
+                                    Value(rounded(field(s, sf::yaw), 3)), Value(rounded(length, 2)),
+                                    Value(rounded(width, 2))}));
         };
         for (int id : k.order) {
             const Value &s = k.bots.at(id)->state;
-            if (!flag(s, "alive", true))
-                add(id, s, field(s, "half_length", 3.5), field(s, "half_width", 1.7));
+            if (!flag(s, sf::alive, true))
+                add(id, s, field(s, sf::half_length, 3.5), field(s, sf::half_width, 1.7));
         }
         for (const Value &s : elements(players))
-            if (!flag(s, "alive", true)) {
-                const Value &shape = s.get("_kernel").get("collision").get("shape");
+            if (!flag(s, sf::alive, true)) {
+                const Value &shape = s.get(sf::_kernel).get("collision").get("shape");
                 if (shape.kind == Value::Array)
-                    add(integer(config, "human_base") + integer(s, "id"), s, shape[1].number(),
+                    add(integer(config, "human_base") + integer(s, sf::id), s, shape[1].number(),
                         shape[0].number());
             }
         std::sort(key.data->array.begin(), key.data->array.end(),
@@ -299,8 +301,8 @@ template <class Owner> struct Simulation {
         if (bot == k.bots.end())
             return false;
         const Value &s = bot->second->state;
-        TeamKey key = Perception::team_key(integer(job.source, "team"), job.target);
-        return flag(s, "alive", true) && integer(s, "team") == integer(job.source, "team") &&
+        TeamKey key = Perception::team_key(integer(job.source, sf::team), job.target);
+        return flag(s, sf::alive, true) && integer(s, sf::team) == integer(job.source, sf::team) &&
                k.perception->remembered.count(key) && k.perception->remaining(key, now) > 0;
     }
     Value cover(double now, bool refresh, bool collect, bool observation,
@@ -322,7 +324,7 @@ template <class Owner> struct Simulation {
                 job.allies = Value::array();
                 for (int id : k.order) {
                     const Value &s = k.bots.at(id)->state;
-                    if (flag(s, "alive") && integer(s, "team") == integer(job.source, "team"))
+                    if (flag(s, sf::alive) && integer(s, sf::team) == integer(job.source, sf::team))
                         job.allies.append(position(s));
                 }
                 cover_queue.push_back(job);
@@ -336,7 +338,7 @@ template <class Owner> struct Simulation {
                 job.source = k.bots.at(job.id)->state;
                 job.target = job.target.copy();
                 offline_kernel::update(job.target, k.perception->remembered.at(Perception::team_key(
-                                                       integer(job.source, "team"), job.target)));
+                                                       integer(job.source, sf::team), job.target)));
                 std::vector<double> args;
                 Aim::point(args, job.route);
                 args.push_back(job.allies.size());
@@ -346,8 +348,8 @@ template <class Owner> struct Simulation {
                 if (reply[0]) {
                     Value row = Value::object();
                     row["bot_id"] = Value(job.id);
-                    row["target_id"] = Value(Perception::id(job.target));
-                    row["target_kind"] = Value(job.target.get("kind").text("human"));
+                    row[sf::target_id] = Value(Perception::id(job.target));
+                    row[sf::target_kind] = Value(job.target.get(sf::kind).text("human"));
                     row["candidates"] = engine_token(static_cast<int>(reply[1]));
                     cover_results.append(row);
                 }
@@ -357,15 +359,15 @@ template <class Owner> struct Simulation {
     }
     void siege_set(Bot &bot, int next, double duration = 0, double total = 0) {
         Value &s = bot.state;
-        int id = integer(s, "id"), before = integer(s, "siege_state");
+        int id = integer(s, sf::id), before = integer(s, sf::siege_state);
         if (next != 1 && next != 3)
             duration = total = 0;
-        s["siege_state"] = Value(next);
-        s["_siege_time_left"] = Value(std::max(0.0, duration));
-        s["_siege_transition_total"] = Value(std::max(0.0, total));
-        s["siege_time_left_ms"] =
+        s[sf::siege_state] = Value(next);
+        s[sf::_siege_time_left] = Value(std::max(0.0, duration));
+        s[sf::_siege_transition_total] = Value(std::max(0.0, total));
+        s[sf::siege_time_left_ms] =
             Value(duration > 0 ? static_cast<int>(std::ceil(duration * 1000 - 1e-9)) : 0);
-        s["siege_transition_total_ms"] =
+        s[sf::siege_transition_total_ms] =
             Value(total > 0 ? static_cast<int>(std::ceil(total * 1000 - 1e-9)) : 0);
         const Value &modes = bot.config.get("siege_modes");
         if (!modes.truth() || (before == 2) == (next == 2))
@@ -402,8 +404,8 @@ template <class Owner> struct Simulation {
         for (const char *key : {"aim", "motion", "perception"}) {
             bot.config[key] = mode.get(key);
         }
-        offline_kernel::update(bot.config, mode.get("health"));
-        bot.critical.reset(new CriticalConfig(mode.get("critical")));
+        offline_kernel::update(bot.config, mode.get(sf::health));
+        bot.critical.reset(new CriticalConfig(mode.get(sf::critical)));
         offline_kernel::update(s, mode.get("state"));
         k.motion->profiles[id] = Motion::params(mode.get("motion").get("physics"));
         k.motion->flow.caches.erase(id);
@@ -429,34 +431,34 @@ template <class Owner> struct Simulation {
             siege_set(bot, 0);
             return;
         }
-        int current = integer(s, "siege_state");
+        int current = integer(s, sf::siege_state);
         if (current != 1 && current != 3) {
-            s["_siege_time_left"] = Value(0.0);
-            s["siege_time_left_ms"] = Value(0);
-            s["_siege_transition_total"] = Value(0.0);
-            s["siege_transition_total_ms"] = Value(0);
+            s[sf::_siege_time_left] = Value(0.0);
+            s[sf::siege_time_left_ms] = Value(0);
+            s[sf::_siege_transition_total] = Value(0.0);
+            s[sf::siege_transition_total_ms] = Value(0);
             return;
         }
-        double left = std::max(0.0, field(s, "_siege_time_left") - dt);
+        double left = std::max(0.0, field(s, sf::_siege_time_left) - dt);
         if (left > 1e-9) {
-            s["_siege_time_left"] = Value(left);
-            s["siege_time_left_ms"] = Value(static_cast<int>(std::ceil(left * 1000 - 1e-9)));
+            s[sf::_siege_time_left] = Value(left);
+            s[sf::siege_time_left_ms] = Value(static_cast<int>(std::ceil(left * 1000 - 1e-9)));
             return;
         }
         int final = current == 1 ? 2 : 0;
         siege_set(bot, final);
-        s["_siege_intent"] = Value(final == 2);
-        s["_siege_intent_elapsed"] = Value(0.0);
+        s[sf::_siege_intent] = Value(final == 2);
+        s[sf::_siege_intent_elapsed] = Value(0.0);
     }
     bool siege_intent(Bot &bot, Value &command, const Value &target, double dt) {
         Value &s = bot.state;
         if (!bot.config.get("siege_modes").truth())
             return false;
         if (bot.burst.active) {
-            s["_siege_intent_elapsed"] = Value(0.0);
+            s[sf::_siege_intent_elapsed] = Value(0.0);
             return false;
         }
-        int current = integer(s, "siege_state");
+        int current = integer(s, sf::siege_state);
         bool switching = current == 1 || current == 3;
         if (switching)
             command["fire_allowed"] = Value(false);
@@ -464,34 +466,34 @@ template <class Owner> struct Simulation {
         if (goal.kind == Value::Null)
             goal = position(s);
         bool desired =
-            target.kind == Value::Object && flag(target, "alive", true) &&
+            target.kind == Value::Object && flag(target, sf::alive, true) &&
             !(flag(command, "movement_intent", std::abs(field(command, "throttle")) > .05) &&
               Lanes::distance(s, tuple_target(goal)) > field(config, "siege_long"));
-        if (s.get("_siege_intent").kind == Value::Null || flag(s, "_siege_intent") != desired) {
-            s["_siege_intent"] = Value(desired);
-            s["_siege_intent_elapsed"] = Value(0.0);
+        if (s.get(sf::_siege_intent).kind == Value::Null || flag(s, sf::_siege_intent) != desired) {
+            s[sf::_siege_intent] = Value(desired);
+            s[sf::_siege_intent_elapsed] = Value(0.0);
             return switching;
         }
         if ((current == 1 && desired) || (current == 3 && !desired)) {
-            s["_siege_intent_elapsed"] = Value(0.0);
+            s[sf::_siege_intent_elapsed] = Value(0.0);
             return true;
         }
-        double elapsed = field(s, "_siege_intent_elapsed") + dt;
-        s["_siege_intent_elapsed"] = Value(elapsed);
+        double elapsed = field(s, sf::_siege_intent_elapsed) + dt;
+        s[sf::_siege_intent_elapsed] = Value(elapsed);
         if ((desired && current == 2) || (!desired && current == 0) ||
             elapsed + 1e-9 <
                 field(config, desired ? "siege_enable_debounce" : "siege_disable_debounce"))
             return false;
-        std::set<std::string> destroyed = names(s.get("critical").get("destroyed"));
+        std::set<std::string> destroyed = names(s.get(sf::critical).get("destroyed"));
         if (destroyed.count("engineHealth")) {
-            s["_siege_intent_elapsed"] = Value(0.0);
+            s[sf::_siege_intent_elapsed] = Value(0.0);
             return false;
         }
         bool yellow = false;
-        const Value &devices = s.get("critical").get("devices");
+        const Value &devices = s.get(sf::critical).get("devices");
         if (devices.kind == Value::Array)
             for (const Value &v : elements(devices))
-                if (v.get("name").text() == "engineHealth")
+                if (v.get(sf::name).text() == "engineHealth")
                     yellow = v.get("state").text() == "critical" ||
                              bot.critical->condition(field(v, "hp"), "engineHealth") == 1;
         const Value &params = bot.config.get("siege_params");
@@ -499,11 +501,11 @@ template <class Owner> struct Simulation {
                left = total;
         int next = desired ? 1 : 3;
         if (switching) {
-            double previous_total = field(s, "_siege_transition_total");
+            double previous_total = field(s, sf::_siege_transition_total);
             if (previous_total <= 0)
                 throw std::invalid_argument("Siege transition total missing");
             double remaining =
-                std::min(std::max(0.0, field(s, "_siege_time_left")), previous_total);
+                std::min(std::max(0.0, field(s, sf::_siege_time_left)), previous_total);
             left = clamp((previous_total - remaining) / previous_total, 0, 1) * total;
             if (left <= 1e-9) {
                 next = desired ? 2 : 0;
@@ -512,20 +514,20 @@ template <class Owner> struct Simulation {
         }
         siege_set(bot, next, left, total);
         command["fire_allowed"] = Value(false);
-        s["_siege_intent_elapsed"] = Value(0.0);
+        s[sf::_siege_intent_elapsed] = Value(0.0);
         return true;
     }
     void siege_lock() {
         for (const auto &v : k.motion->locked) {
             Bot &bot = *k.bots.at(v.first);
             Value &s = bot.state;
-            s["x"] = v.second[0];
-            s["z"] = v.second[1];
-            s["yaw"] = v.second[2];
+            s[sf::x] = v.second[0];
+            s[sf::z] = v.second[1];
+            s[sf::yaw] = v.second[2];
             for (const char *key : {"speed", "push_x", "push_z"})
                 s[key] = Value(0.0);
-            s["movement_dir"] = Value(0);
-            s["rotation_dir"] = Value(0);
+            s[sf::movement_dir] = Value(0);
+            s[sf::rotation_dir] = Value(0);
             bot.turn_speed = 0;
         }
     }
@@ -538,8 +540,8 @@ template <class Owner> struct Simulation {
             int64_t time = std::min(end, start + static_cast<int64_t>(std::max(
                                                      0.0, rounded(edge.offset * 1000000, 0))));
             Value &s = bot.state;
-            int siege = integer(s, "siege_state");
-            if (!flag(s, "alive") || flag(s, "_drowning") || flag(s, "_overturned") ||
+            int siege = integer(s, sf::siege_state);
+            if (!flag(s, sf::alive) || flag(s, sf::_drowning) || flag(s, sf::_overturned) ||
                 destroyed.count("gunHealth") || siege == 1 || siege == 3 ||
                 !bot.ammo.can_fire(true)) {
                 Launches::cancel(bot, reload);
@@ -561,7 +563,7 @@ template <class Owner> struct Simulation {
         for (int id : ids) {
             Bot &bot = *k.bots.at(id);
             publish_burst(bot);
-            bot.state["equipment_states"] = bot.equipment_wire(equipment_now);
+            bot.state[sf::equipment_states] = bot.equipment_wire(equipment_now);
             rows.append(k.codec.row(bot.state));
             Value scalar = Value::array();
             for (const Value &name : elements(config.get("edge_fields"))) {
@@ -575,14 +577,14 @@ template <class Owner> struct Simulation {
             for (const char *key : {"shot_yaw", "shot_pitch"})
                 shot.append(tuple_value({Value(bot.state.has(key)), bot.state.get(key)}));
             bot_edges.append(
-                tuple_value({scalar, bot.state.get("ammo_remaining"), equipment, shot}));
+                tuple_value({scalar, bot.state.get(sf::ammo_remaining), equipment, shot}));
         }
         Value launches = Value::array(), rams = Value::array();
         for (const Value &v : elements(k.launches.pending))
-            launches.append(tuple_value({v.get("id"), v.get("fire_seq")}));
+            launches.append(tuple_value({v.get(sf::id), v.get(sf::fire_seq)}));
         for (const Value &v : elements(pending_ram))
             rams.append(tuple_value(
-                {v.get("bot_id"), v.get("target_kind"), v.get("target_id"), v.get("ram_seq")}));
+                {v.get("bot_id"), v.get(sf::target_kind), v.get(sf::target_id), v.get("ram_seq")}));
         signature = tuple_value({bot_edges, launches, rams});
         if (signature != edge_signature) {
             edge_signature = signature;
@@ -645,12 +647,12 @@ template <class Owner> struct Simulation {
             if (refresh && (!valid || now >= at->second.deadline))
                 due.insert(id);
             const Value &order = k.orders.at(id);
-            std::string kind = order.get("target_kind").text();
-            if ((kind == "bot" || kind == "human") && order.get("target_id").kind != Value::Null)
-                selected[id] = ActorKey{{kind == "human" ? 1 : 0, integer(order, "target_id")}};
+            std::string kind = order.get(sf::target_kind).text();
+            if ((kind == "bot" || kind == "human") && order.get(sf::target_id).kind != Value::Null)
+                selected[id] = ActorKey{{kind == "human" ? 1 : 0, integer(order, sf::target_id)}};
             else if (at != decisions.end()) {
                 auto t =
-                    at->second.contacts.lookup.find(integer(at->second.command, "target_id", -1));
+                    at->second.contacts.lookup.find(integer(at->second.command, sf::target_id, -1));
                 if (t != at->second.contacts.lookup.end())
                     selected[id] = Perception::key(t->second);
             }
@@ -670,14 +672,14 @@ template <class Owner> struct Simulation {
                     bot.clear_reposition = false;
                 }
             };
-            if (!flag(s, "alive")) {
+            if (!flag(s, sf::alive)) {
                 cancel();
                 continue;
             }
             p.note_still(s, now);
             integrated.insert(id);
             bot.advance_critical(dt, now, equipment_now);
-            if (!flag(s, "alive")) {
+            if (!flag(s, sf::alive)) {
                 cancel();
                 continue;
             }
@@ -687,17 +689,18 @@ template <class Owner> struct Simulation {
                 depth = result[0] ? result[1] : -1;
             }
             bot.advance_drowning(dt, depth);
-            if (!flag(s, "alive")) {
+            if (!flag(s, sf::alive)) {
                 cancel();
                 continue;
             }
             bot.advance_overturn(dt);
-            if (!flag(s, "alive")) {
+            if (!flag(s, sf::alive)) {
                 cancel();
                 continue;
             }
-            double siege_yaw = field(s, "yaw");
-            bool siege_locked = integer(s, "siege_state") == 1 || integer(s, "siege_state") == 3;
+            double siege_yaw = field(s, sf::yaw);
+            bool siege_locked =
+                integer(s, sf::siege_state) == 1 || integer(s, sf::siege_state) == 3;
             siege_advance(bot, dt);
             Value position_now = position(s);
             ticks[id] = position_now;
@@ -716,16 +719,16 @@ template <class Owner> struct Simulation {
             } else if (!refresh) {
                 command = Value::object();
                 command["bot_id"] = Value(id);
-                command["target_id"] = Value();
+                command[sf::target_id] = Value();
                 for (const char *key : {"aim_position", "face_position", "move_position"})
                     command[key] = position_now;
                 command["fire_range"] = Value(0.0);
                 command["combat_mode"] = Value("physical_hold");
                 command["fire_allowed"] = Value(false);
-                command["shell_index"] = Value(integer(s, "shell_index"));
+                command[sf::shell_index] = Value(integer(s, sf::shell_index));
                 command["throttle"] = Value(0.0);
                 command["turn"] = Value(0.0);
-                command["target_yaw"] = s.get("yaw");
+                command["target_yaw"] = s.get(sf::yaw);
                 command["recovery_mode"] = Value("physical_hold");
                 command["movement_intent"] = Value(false);
             } else {
@@ -736,19 +739,19 @@ template <class Owner> struct Simulation {
                 for (const char *key : {"id", "slot", "yaw", "speed", "health", "max_health",
                                         "half_length", "half_width"})
                     state[key] = s.get(key);
-                state["position"] = position_now;
-                state["dt"] = Value(decision_time);
-                state["now"] = Value(now);
-                state["neighbours"] = neighbours(s);
-                state["contacts"] = contacts.rows;
-                state["velocity"] = vector3(std::sin(field(s, "yaw")) * field(s, "speed"), 0,
-                                            std::cos(field(s, "yaw")) * field(s, "speed"));
+                state[sf::position] = position_now;
+                state[sf::dt] = Value(decision_time);
+                state[sf::now] = Value(now);
+                state[sf::neighbours] = neighbours(s);
+                state[sf::contacts] = contacts.rows;
+                state[sf::velocity] = vector3(std::sin(field(s, sf::yaw)) * field(s, sf::speed), 0,
+                                              std::cos(field(s, sf::yaw)) * field(s, sf::speed));
                 double horizon = field(config, "decision_seconds") *
                                  config.get("decision_tiers")[tier(s)].number();
-                state["decision_horizon"] = Value(horizon);
+                state[sf::decision_horizon] = Value(horizon);
                 std::string expected = k.orders.at(id).get("combat_mode").text("route");
-                state["stopping_distance"] =
-                    std::abs(field(s, "speed")) > .35 && expected != "route" &&
+                state[sf::stopping_distance] =
+                    std::abs(field(s, sf::speed)) > .35 && expected != "route" &&
                             expected != "advance"
                         ? Value(k.driver->stopping(
                               bot, cached == decisions.end() ? Value() : cached->second.command))
@@ -757,11 +760,11 @@ template <class Owner> struct Simulation {
                 Value order = override_order.first;
                 if (order.kind == Value::Null) {
                     order = k.orders.at(id).copy();
-                    if (order.get("target_kind").text() == "human" &&
-                        order.get("target_id").kind != Value::Null)
-                        order["target_id"] =
-                            Value(integer(config, "human_base") + integer(order, "target_id"));
-                    auto target = contacts.lookup.find(integer(order, "target_id", -1));
+                    if (order.get(sf::target_kind).text() == "human" &&
+                        order.get(sf::target_id).kind != Value::Null)
+                        order[sf::target_id] =
+                            Value(integer(config, "human_base") + integer(order, sf::target_id));
+                    auto target = contacts.lookup.find(integer(order, sf::target_id, -1));
                     order =
                         overlay(order, target == contacts.lookup.end() ? Value() : target->second,
                                 position_now);
@@ -770,7 +773,7 @@ template <class Owner> struct Simulation {
                 command = k.driver->drive(bot, state, order,
                                           aim.intents.count(id) || aim.reproofs.count(id));
                 command =
-                    k.traffic.adjust(id, traffic_bodies.at(id), command, state.get("neighbours"),
+                    k.traffic.adjust(id, traffic_bodies.at(id), command, state.get(sf::neighbours),
                                      now, [&](double yaw) { return k.driver->clear(bot, yaw); });
                 if (override_order.second)
                     command["fire_allowed"] = Value(false);
@@ -783,29 +786,29 @@ template <class Owner> struct Simulation {
             if (refresh_lane && !observation)
                 for (const Value &t : elements(contacts.rows))
                     if (flag(t, "fresh_visible"))
-                        p.team_visible[Perception::team_key(integer(s, "team"), t)] = true;
+                        p.team_visible[Perception::team_key(integer(s, sf::team), t)] = true;
             if (observation)
                 p.collect(s, contacts, processed);
             Value target;
-            auto chosen = contacts.lookup.find(integer(command, "target_id", -1));
+            auto chosen = contacts.lookup.find(integer(command, sf::target_id, -1));
             if (chosen != contacts.lookup.end())
                 target = p.refresh(chosen->second);
             if (target.kind != Value::Null)
                 priorities[Lanes::key(s, target)] = flag(command, "fire_allowed") ? 0 : 1;
             command = overlay(command, target, position_now);
-            s["target_kind"] = target.get("kind");
-            s["target_id"] = target.get("network_id");
+            s[sf::target_kind] = target.get(sf::kind);
+            s[sf::target_id] = target.get(sf::network_id);
             siege_locked = siege_intent(bot, command, target, dt) || siege_locked;
             double reload = aim.factors.stat(s, *bot.critical, "reload");
             if (!bot.burst.active) {
                 bot.gun.rescale(reload);
                 bot.gun.tick(dt);
                 int completed = bot.gun.complete(reload, bot.ammo.planned());
-                bot.ammo.stage(bot.gun.shell(integer(command, "shell_index")), completed >= 0,
+                bot.ammo.stage(bot.gun.shell(integer(command, sf::shell_index)), completed >= 0,
                                completed == 0);
             }
             publish_ammo(bot);
-            bool spg = s.get("profile").get("class_tag").text() == "SPG";
+            bool spg = s.get(sf::profile).get(sf::class_tag).text() == "SPG";
             Value intent, reproof;
             if (spg) {
                 if (!flag(command, "fire_allowed"))
@@ -835,25 +838,25 @@ template <class Owner> struct Simulation {
                                       bot.burst.active || intent.kind != Value::Null ||
                                           reproof.kind != Value::Null);
             command["_ballistic_solution"] = local.first;
-            double old_turret = field(s, "turret_yaw");
+            double old_turret = field(s, sf::turret_yaw);
             aim.slew(bot, command, target, dt);
-            double turret = std::abs(angle_delta(field(s, "turret_yaw") - old_turret)) /
+            double turret = std::abs(angle_delta(field(s, sf::turret_yaw) - old_turret)) /
                             std::max(dt, 1e-9),
                    dispersion = aim.factors.stat(s, *bot.critical, "dispersion");
-            bot.gun.bloom_tick(dt, std::abs(field(s, "speed")), std::abs(bot.turn_speed), turret,
+            bot.gun.bloom_tick(dt, std::abs(field(s, sf::speed)), std::abs(bot.turn_speed), turret,
                                dispersion, aim.factors.stat(s, *bot.critical, "aim_time"));
-            s["clip_size"] = Value(bot.gun.clip_size);
+            s[sf::clip_size] = Value(bot.gun.clip_size);
             publish_reload(bot, reload);
-            std::set<std::string> destroyed = names(s.get("critical").get("destroyed"));
+            std::set<std::string> destroyed = names(s.get(sf::critical).get("destroyed"));
             burst(bot, target, local.first, dt, sample, end, reload, dispersion, destroyed);
             double distance = target.kind == Value::Null ? 0 : Lanes::distance(s, target),
                    range = std::max(0.0, field(command, "fire_range"));
             bool in_range = target.kind != Value::Null && distance > 1 &&
                             local.first.kind != Value::Null && (range <= 0 || distance < range);
             if (publish && local.second && flag(command, "fire_allowed") && in_range &&
-                !flag(s, "_drowning") && !flag(s, "_overturned") && !destroyed.count("gunHealth") &&
-                flag(s, "gun_aligned") && !bot.burst.active && bot.gun.ready(reload) &&
-                bot.ammo.can_fire() &&
+                !flag(s, sf::_drowning) && !flag(s, sf::_overturned) &&
+                !destroyed.count("gunHealth") && flag(s, sf::gun_aligned) && !bot.burst.active &&
+                bot.gun.ready(reload) && bot.ammo.can_fire() &&
                 (intent.kind != Value::Null || reproof.kind != Value::Null ||
                  lanes.clear(s, target, now, false, &final_budget).truth()) &&
                 k.gunners.at(id).ready(s, target, now, bot.gun)) {
@@ -888,7 +891,7 @@ template <class Owner> struct Simulation {
                                                               "crossfire_withdraw"},
                                                fire_modes = {"engage", "advance_contact",
                                                              "jiggle_forward", "jiggle_back"};
-            if (collect_cover && target.kind != Value::Null && flag(target, "visible") &&
+            if (collect_cover && target.kind != Value::Null && flag(target, sf::visible) &&
                 flag(config, "has_cover") &&
                 (cover_modes.count(mode) ||
                  (flag(command, "fire_allowed") && fire_modes.count(mode))))
@@ -912,10 +915,10 @@ template <class Owner> struct Simulation {
         std::vector<int> slope;
         for (int id : ids) {
             Bot &bot = *k.bots.at(id);
-            if (flag(bot.state, "alive", true) && integrated.count(id)) {
-                bool was = flag(bot.state, "airborne");
+            if (flag(bot.state, sf::alive, true) && integrated.count(id)) {
+                bool was = flag(bot.state, sf::airborne);
                 blocked[id] = motion.vertical(bot, dt, ticks.at(id), motion.attempted[id]);
-                ballistic[id] = was || flag(bot.state, "airborne");
+                ballistic[id] = was || flag(bot.state, sf::airborne);
                 settled[id] = position(bot.state);
                 slope.push_back(id);
             }
@@ -929,11 +932,11 @@ template <class Owner> struct Simulation {
             publish = true;
         for (int id : slope) {
             Bot &bot = *k.bots.at(id);
-            Value trace = bot.state.get("_motion_stall_pending");
+            Value trace = bot.state.get(sf::_motion_stall_pending);
             if (trace.kind == Value::Object)
                 trace["after_contacts"] = position(bot.state);
             bool rollback = false;
-            if (!blocked[id] && !ballistic[id] && !flag(bot.state, "airborne"))
+            if (!blocked[id] && !ballistic[id] && !flag(bot.state, sf::airborne))
                 rollback =
                     motion.guard(bot, Routes::point(ticks.at(id)), safe[id], motion.attempted[id]);
             diagnostic.finish(bot, blocked[id], rollback, settled.at(id), k.contacts->active);
@@ -965,7 +968,7 @@ template <class Owner> struct Simulation {
                 next_observation = now + field(config, "observation_seconds");
                 Value row = Value::object();
                 row["type"] = Value("bot_observation");
-                row["contacts"] = lanes.pack(now);
+                row[sf::contacts] = lanes.pack(now);
                 row["affordances"] = affordances;
                 outgoing.append(row);
             }
@@ -1029,8 +1032,7 @@ template <class Owner> struct Simulation {
                 out.insert(integer(value, "_engine_token"));
                 return;
             }
-            for (const auto &v : value.data->object)
-                references(v.second, out);
+            value.visit([&](const std::string &, const Value &item) { references(item, out); });
         } else if (value.kind == Value::Array)
             for (const Value &v : elements(value))
                 references(v, out);
@@ -1039,7 +1041,7 @@ template <class Owner> struct Simulation {
         std::set<int> refs;
         references(outgoing, refs);
         for (int id : k.order)
-            references(k.bots.at(id)->state.get("shot_proof_key"), refs);
+            references(k.bots.at(id)->state.get(sf::shot_proof_key), refs);
         for (const auto &v : k.aim->cache)
             references(v.second.solution, refs);
         for (const auto &v : k.aim->intents)
@@ -1050,7 +1052,7 @@ template <class Owner> struct Simulation {
         references(cover_results, refs);
         for (const CoverJob &job : cover_queue) {
             references(job.target, refs);
-            references(job.source.get("shot_proof_key"), refs);
+            references(job.source.get(sf::shot_proof_key), refs);
         }
         Value result = Value::array();
         for (int id : refs)
@@ -1086,7 +1088,7 @@ template <class Owner> struct Simulation {
             }
             k.orders.swap(accepted);
         }
-        double dt = std::max(0.0, field(input, "dt")), now = field(input, "now");
+        double dt = std::max(0.0, field(input, sf::dt)), now = field(input, sf::now);
         if (input.has("camera"))
             camera = input.get("camera");
         control_steps = 0;
@@ -1117,7 +1119,7 @@ template <class Owner> struct Simulation {
                     ++control_steps;
                     maximum_step = std::max(maximum_step, step);
                     Value rows =
-                        slice(step, now - elapsed, input.get("players"), input.get("neighbours"),
+                        slice(step, now - elapsed, input.get("players"), input.get(sf::neighbours),
                               refresh, refresh || elapsed <= 1e-12);
                     for (const Value &row : elements(rows))
                         outgoing.append(row);
@@ -1127,8 +1129,8 @@ template <class Owner> struct Simulation {
                 if (flag(config, "has_destructible"))
                     for (int id : ordered()) {
                         const Value &s = k.bots.at(id)->state;
-                        if (flag(s, "alive") && field(s, "health") > 0 &&
-                            std::abs(field(s, "speed")) >= field(config, "destructible_speed"))
+                        if (flag(s, sf::alive) && field(s, sf::health) > 0 &&
+                            std::abs(field(s, sf::speed)) >= field(config, "destructible_speed"))
                             k.engine->query(771, s, Value::object());
                     }
             }

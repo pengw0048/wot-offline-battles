@@ -68,12 +68,12 @@ struct Driver {
     bool clear(Bot &bot, double yaw, offline_nav::Optional<double> distance = {}) {
         Value &s = bot.state;
         auto p = Routes::point(s);
-        int id = integer(s, "id");
+        int id = integer(s, sf::id);
         if (routes.nav) {
             int value = offline_navigation_local_query(
                 integer(config, "navigation"), id, 1, p.x, p.y, p.z, yaw,
-                field(s, "half_length", 3.5), field(s, "half_width", 1.7),
-                field(s, "_water_depth", -1) > .9, flag(config, "bake_admitted"), distance.has,
+                field(s, sf::half_length, 3.5), field(s, sf::half_width, 1.7),
+                field(s, sf::_water_depth, -1) > .9, flag(config, "bake_admitted"), distance.has,
                 distance.value);
             if (value != 2)
                 return value != 0;
@@ -89,7 +89,7 @@ struct Driver {
                               p.y,
                               p.z,
                               yaw,
-                              field(s, "speed"),
+                              field(s, sf::speed),
                               static_cast<double>(distance.has),
                               distance.value,
                               static_cast<double>(distance.has)};
@@ -112,8 +112,8 @@ struct Driver {
         else {
             auto p = Routes::point(active->state);
             packet[0] = !routes.nav || routes.nav->grid->pose(
-                                           p, packet[1], field(active->state, "half_length", 3.5),
-                                           field(active->state, "half_width", 1.7));
+                                           p, packet[1], field(active->state, sf::half_length, 3.5),
+                                           field(active->state, sf::half_width, 1.7));
         }
         return 0;
     }
@@ -121,8 +121,8 @@ struct Driver {
         return static_cast<Driver *>(owner)->event(packet, count);
     }
     Value drive(Bot &bot, Value &state, const Value &order, bool gun_pending) {
-        int id = integer(bot.state, "id");
-        auto current = Routes::point(state.get("position"));
+        int id = integer(bot.state, sf::id);
+        auto current = Routes::point(state.get(sf::position));
         const Value &raw_aim = order.get("aim_position"), &raw_move = order.get("move_position"),
                     &raw_face = order.get("face_position");
         auto aim = raw_aim.kind == Value::Null ? Routes::point(raw_move, current)
@@ -131,42 +131,45 @@ struct Driver {
              face = raw_face.kind == Value::Null ? move : Routes::point(raw_face, current);
         auto target = routes.target(id, current, move, order, state, gun_pending);
         std::string mode = order.get("combat_mode").text("route");
-        bool stop = flag(state, "navigation_stop_at_target", mode != "route" && mode != "advance"),
+        bool stop =
+                 flag(state, sf::navigation_stop_at_target, mode != "route" && mode != "advance"),
              movement = order.get("throttle_override").kind == Value::Null ||
                         field(order, "throttle_override") > 0;
         double requested_x = move.x - current.x, requested_z = move.z - current.z,
                dx = target.x - current.x, dz = target.z - current.z;
         bool wait = movement && requested_x * requested_x + requested_z * requested_z > 225 &&
                     dx * dx + dz * dz <= 1.5 * 1.5;
-        double throttle = 0, turn = 0, yaw = field(state, "yaw");
+        double throttle = 0, turn = 0, yaw = field(state, sf::yaw);
         std::string recovery = "nav_wait";
         if (!wait) {
             std::vector<double> packet = {208, static_cast<double>(handle), static_cast<double>(id),
-                                          static_cast<double>(integer(state, "slot"))};
+                                          static_cast<double>(integer(state, sf::slot))};
             point(packet, current);
             packet.insert(packet.end(),
-                          {field(state, "yaw"), field(state, "speed"), field(state, "dt")});
+                          {field(state, sf::yaw), field(state, sf::speed), field(state, sf::dt)});
             point(packet, target);
-            const Value &neighbours = state.get("neighbours");
-            packet.insert(packet.end(),
-                          {field(state, "half_length", 3.5), field(state, "half_width", 1.7),
-                           static_cast<double>(movement),
-                           static_cast<double>(state.get("stopping_distance").kind != Value::Null),
-                           field(state, "stopping_distance"), static_cast<double>(stop),
-                           field(state, "decision_horizon"), 1, rounded(target.x, 2),
-                           rounded(target.z, 2), static_cast<double>(neighbours.size())});
+            const Value &neighbours = state.get(sf::neighbours);
+            packet.insert(
+                packet.end(),
+                {field(state, sf::half_length, 3.5), field(state, sf::half_width, 1.7),
+                 static_cast<double>(movement),
+                 static_cast<double>(state.get(sf::stopping_distance).kind != Value::Null),
+                 field(state, sf::stopping_distance), static_cast<double>(stop),
+                 field(state, sf::decision_horizon), 1, rounded(target.x, 2), rounded(target.z, 2),
+                 static_cast<double>(neighbours.size())});
             for (const Value &peer : elements(neighbours)) {
-                point(packet, Routes::point(peer.get("position")));
+                point(packet, Routes::point(peer.get(sf::position)));
                 packet.insert(packet.end(),
-                              {field(peer, "yaw"),
-                               field(peer, "half_length", field(state, "half_length", 3.5)),
-                               field(peer, "half_width", field(state, "half_width", 1.7)),
-                               static_cast<double>(peer.get("id").kind != Value::Null),
-                               field(peer, "id"), static_cast<double>(flag(peer, "alive", true))});
+                              {field(peer, sf::yaw),
+                               field(peer, sf::half_length, field(state, sf::half_length, 3.5)),
+                               field(peer, sf::half_width, field(state, sf::half_width, 1.7)),
+                               static_cast<double>(peer.get(sf::id).kind != Value::Null),
+                               field(peer, sf::id),
+                               static_cast<double>(flag(peer, sf::alive, true))});
             }
             packet.insert(packet.end(),
                           {static_cast<double>(integer(config, "navigation")),
-                           static_cast<double>(field(bot.state, "_water_depth", -1) > .9),
+                           static_cast<double>(field(bot.state, sf::_water_depth, -1) > .9),
                            static_cast<double>(flag(config, "bake_admitted"))});
             size_t offset = packet.size();
             packet.resize(offset + 7, 0);
@@ -195,18 +198,18 @@ struct Driver {
         if ((recovery == "arrived" || recovery == "nav_wait") &&
             face_x * face_x + face_z * face_z > .01) {
             yaw = std::atan2(face_x, face_z);
-            turn = clamp(gun_wrap(yaw - field(state, "yaw")) / .58, -1, 1);
+            turn = clamp(gun_wrap(yaw - field(state, sf::yaw)) / .58, -1, 1);
         }
         Value result = Value::object();
         result["bot_id"] = Value(id);
-        result["target_id"] = order.get("target_id");
+        result[sf::target_id] = order.get(sf::target_id);
         result["aim_position"] = Routes::value(aim);
         result["face_position"] = Routes::value(face);
         result["fire_range"] = Value(field(order, "fire_range"));
         result["move_position"] = Routes::value(target);
         result["combat_mode"] = Value(mode);
         result["fire_allowed"] = Value(flag(order, "fire_allowed"));
-        result["shell_index"] = Value(integer(order, "shell_index"));
+        result[sf::shell_index] = Value(integer(order, sf::shell_index));
         result["throttle"] = Value(throttle);
         result["turn"] = Value(turn);
         result["target_yaw"] = Value(yaw);
@@ -216,14 +219,14 @@ struct Driver {
             result["hull_angle_degrees"] = Value(field(order, "hull_angle_degrees"));
         if (order.get("throttle_override").kind != Value::Null &&
             (recovery == "drive" || recovery == "arrived") &&
-            std::abs(gun_wrap(yaw - field(state, "yaw"))) < .65)
+            std::abs(gun_wrap(yaw - field(state, sf::yaw))) < .65)
             result["throttle"] = Value(clamp(field(order, "throttle_override"), -1, 1));
         return result;
     }
     double stopping(Bot &bot, const Value &command) {
-        int id = integer(bot.state, "id");
-        double speed = std::abs(field(bot.state, "speed")),
-               pitch = field(bot.state, "last_drive_pitch");
+        int id = integer(bot.state, sf::id);
+        double speed = std::abs(field(bot.state, sf::speed)),
+               pitch = field(bot.state, sf::last_drive_pitch);
         bool steering = std::abs(field(command, "turn")) > .01;
         auto at = coast.find(id);
         if (at != coast.end() && at->second.speed == speed && at->second.pitch == pitch &&

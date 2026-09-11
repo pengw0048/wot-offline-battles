@@ -443,6 +443,7 @@ class KernelBackend(object):
     def close(self):
         for name, original in self.originals.items():
             setattr(self.runtime, name, original)
+        self.engine.actor_cache.clear()
         self.kernel.close()
         for part in reversed(self.parts):
             part.close()

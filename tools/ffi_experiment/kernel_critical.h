@@ -14,13 +14,13 @@ struct CriticalConfig {
     explicit CriticalConfig(const Value &v) : roster(v.get("roster")) {
         for (const Value &raw : elements(v.get("devices"))) {
             Device d;
-            d.maximum = field(raw, "maximum");
-            d.cap = field(raw, "cap");
-            d.seconds = field(raw, "seconds");
-            d.has_maximum = raw.get("maximum").kind != Value::Null;
-            d.has_cap = raw.get("cap").kind != Value::Null;
-            d.no_fire_repair = flag(raw, "no_fire_repair");
-            devices[raw.get("name").text()] = d;
+            d.maximum = field(raw, sf::maximum);
+            d.cap = field(raw, sf::cap);
+            d.seconds = field(raw, sf::seconds);
+            d.has_maximum = raw.get(sf::maximum).kind != Value::Null;
+            d.has_cap = raw.get(sf::cap).kind != Value::Null;
+            d.no_fire_repair = flag(raw, sf::no_fire_repair);
+            devices[raw.get(sf::name).text()] = d;
         }
         fire_duration = field(v, "fire_duration");
         fire_fraction = field(v, "fire_fraction");
@@ -46,7 +46,7 @@ struct Critical {
         const Value &records = payload.get("devices");
         if (records.kind != Value::Null)
             for (const Value &v : elements(records)) {
-                std::string name = v.get("name").text();
+                std::string name = v.get(sf::name).text();
                 if (name.empty())
                     throw std::invalid_argument("kernel critical device");
                 hp[name] = std::max(0.0, field(v, "hp"));
@@ -87,7 +87,7 @@ struct Critical {
                             : yellow.count(name)  ? 1
                                                   : config.condition(health, name);
             Value v = Value::object();
-            v["name"] = Value(name);
+            v[sf::name] = Value(name);
             v["hp"] = Value(clamp(rounded(health, 3), 0, maximum));
             v["max_hp"] = Value(maximum);
             v["state"] = Value(condition == 2   ? "destroyed"
@@ -218,7 +218,7 @@ inline Value critical_signature(const Value &p) {
     if (devices.kind != Value::Null)
         for (const Value &v : elements(devices)) {
             Value row = Value::array();
-            row.append(v.get("name"));
+            row.append(v.get(sf::name));
             row.append(Value(rounded(field(v, "hp"), 3)));
             row.append(Value(rounded(field(v, "max_hp", 1), 3)));
             row.append(Value(v.get("state").text()));
@@ -243,12 +243,12 @@ inline Value critical_signature(const Value &p) {
 }
 inline Value combat_signature(const Value &state) {
     Value v = Value::array();
-    v.append(Value(std::max(0, integer(state, "health"))));
-    v.append(Value(flag(state, "alive")));
-    v.append(critical_signature(state.get("critical")));
-    v.append(Value(rounded(field(state, "combat_fire_elapsed"), 6)));
-    v.append(Value(rounded(field(state, "combat_fire_timer"), 6)));
-    v.append(Value(std::max(0, integer(state, "stun_end_server_time_ms"))));
+    v.append(Value(std::max(0, integer(state, sf::health))));
+    v.append(Value(flag(state, sf::alive)));
+    v.append(critical_signature(state.get(sf::critical)));
+    v.append(Value(rounded(field(state, sf::combat_fire_elapsed), 6)));
+    v.append(Value(rounded(field(state, sf::combat_fire_timer), 6)));
+    v.append(Value(std::max(0, integer(state, sf::stun_end_server_time_ms))));
     return v;
 }
 } // namespace offline_kernel

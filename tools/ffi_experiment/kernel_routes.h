@@ -53,8 +53,8 @@ struct Routes {
     static Value value(Point p) { return vector3(p.x, p.y, p.z); }
     static Point point(const Value &v, Point fallback = Point()) {
         if (v.kind == Value::Object)
-            return Point(field(v, "x", fallback.x), field(v, "y", fallback.y),
-                         field(v, "z", fallback.z));
+            return Point(field(v, sf::x, fallback.x), field(v, sf::y, fallback.y),
+                         field(v, sf::z, fallback.z));
         return v.kind == Value::Array && v.size() == 3
                    ? Point(v[0].number(), v[1].number(), v[2].number())
                    : fallback;
@@ -103,16 +103,16 @@ struct Routes {
         return out;
     }
     static bool group_matches(const Value &s, const Value &group) {
-        return s.get("_route_lane_group") == group;
+        return s.get(sf::_route_lane_group) == group;
     }
     std::vector<Value *> cohort(int id, const Value &group, const Value &gate) {
         std::vector<Value *> out;
         for (const auto &v : bots) {
             Value &s = v.second->state;
-            if (!flag(s, "alive", true) || integer(s, "team") != group[0].exact())
+            if (!flag(s, sf::alive, true) || integer(s, sf::team) != group[0].exact())
                 continue;
             Value route_id, peer_gate;
-            const Value &prior = s.get("_route_lane_gate");
+            const Value &prior = s.get(sf::_route_lane_gate);
             if (group_matches(s, group) && prior.kind == Value::Array && prior.size() == 2) {
                 route_id = group[1];
                 peer_gate = prior;
@@ -120,18 +120,19 @@ struct Routes {
                 auto order = orders.find(v.first);
                 if (order != orders.end()) {
                     route_id = order->second.get("route_id");
-                    if (order->second.get("route_index").kind != Value::Null &&
-                        order->second.has("route_join"))
-                        peer_gate = tuple_value({Value(integer(order->second, "route_index")),
-                                                 Value(flag(order->second, "route_join"))});
+                    if (order->second.get(sf::route_index).kind != Value::Null &&
+                        order->second.has(sf::route_join))
+                        peer_gate = tuple_value({Value(integer(order->second, sf::route_index)),
+                                                 Value(flag(order->second, sf::route_join))});
                 } else if (!orders.empty())
                     continue;
             }
             if (route_id.kind == Value::Null && orders.empty()) {
-                route_id = s.get("route").get("id");
-                if (s.get("route_index").kind != Value::Null &&
-                    s.get("route_join").kind != Value::Null)
-                    peer_gate = tuple_value({s.get("route_index"), Value(flag(s, "route_join"))});
+                route_id = s.get(sf::route).get(sf::id);
+                if (s.get(sf::route_index).kind != Value::Null &&
+                    s.get(sf::route_join).kind != Value::Null)
+                    peer_gate =
+                        tuple_value({s.get(sf::route_index), Value(flag(s, sf::route_join))});
                 else if (v.first == id)
                     peer_gate = gate;
             }
@@ -143,20 +144,20 @@ struct Routes {
         if (std::find(out.begin(), out.end(), own) == out.end())
             out.push_back(own);
         std::sort(out.begin(), out.end(), [](const Value *a, const Value *b) {
-            return std::make_pair(integer(*a, "slot"), integer(*a, "id")) <
-                   std::make_pair(integer(*b, "slot"), integer(*b, "id"));
+            return std::make_pair(integer(*a, sf::slot), integer(*a, sf::id)) <
+                   std::make_pair(integer(*b, sf::slot), integer(*b, sf::id));
         });
         return out;
     }
     static Pair waypoint(const Value &v) {
-        return v.kind == Value::Object ? Pair(field(v, "x"), field(v, "z"))
+        return v.kind == Value::Object ? Pair(field(v, sf::x), field(v, sf::z))
                                        : Pair(v[0].number(), v[1].number());
     }
     static Pair forward(const Value &s, Point goal, const Value &order) {
-        const Value &route = s.get("route"), &points = route.get("waypoints");
-        int index = integer(order, "route_index");
-        if (route.get("id").kind != Value::Null &&
-            route.get("id").text() == order.get("route_id").text("direct") && points.size() > 1) {
+        const Value &route = s.get(sf::route), &points = route.get("waypoints");
+        int index = integer(order, sf::route_index);
+        if (route.get(sf::id).kind != Value::Null &&
+            route.get(sf::id).text() == order.get("route_id").text("direct") && points.size() > 1) {
             int a = index > 0 && index < static_cast<int>(points.size()) ? index - 1 : 0, b = a + 1;
             Pair first = waypoint(points[a]), second = waypoint(points[b]);
             double dx = second.first - first.first, dz = second.second - first.second,
@@ -164,9 +165,9 @@ struct Routes {
             if (length >= .25)
                 return {dx / length, dz / length};
         }
-        Point anchor = point(order.get("route_anchor"), point(s));
+        Point anchor = point(order.get(sf::route_anchor), point(s));
         double dx = goal.x - anchor.x, dz = goal.z - anchor.z, length = std::hypot(dx, dz);
-        return length < .25 ? Pair(std::sin(field(s, "yaw")), std::cos(field(s, "yaw")))
+        return length < .25 ? Pair(std::sin(field(s, sf::yaw)), std::cos(field(s, sf::yaw)))
                             : Pair(dx / length, dz / length);
     }
     static void clear_lane(Value &s) {
@@ -179,32 +180,32 @@ struct Routes {
         Value gate;
         auto at = orders.find(id);
         if (at != orders.end() && at->second.get("route_id").text() == group[1].text() &&
-            at->second.get("route_index").kind != Value::Null && at->second.has("route_join"))
-            gate = tuple_value(
-                {Value(integer(at->second, "route_index")), Value(flag(at->second, "route_join"))});
+            at->second.get(sf::route_index).kind != Value::Null && at->second.has(sf::route_join))
+            gate = tuple_value({Value(integer(at->second, sf::route_index)),
+                                Value(flag(at->second, sf::route_join))});
         else
             gate = tuple_value(
-                {Value(integer(order, "route_index")), Value(flag(order, "route_join"))});
+                {Value(integer(order, sf::route_index)), Value(flag(order, sf::route_join))});
         if (group_matches(s, group)) {
-            if (gate[1].truth() && s.get("_route_lane_gate") != gate) {
-                s["_route_lane_gate"] = gate;
+            if (gate[1].truth() && s.get(sf::_route_lane_gate) != gate) {
+                s[sf::_route_lane_gate] = gate;
                 Pair f = forward(s, goal, order);
-                s["_route_lane_forward"] = tuple_value({Value(f.first), Value(f.second)});
+                s[sf::_route_lane_forward] = tuple_value({Value(f.first), Value(f.second)});
                 clear_lane(s);
             }
-            return {field(s, "_route_lane_desired"), field(s, "_route_lane_row_desired")};
+            return {field(s, sf::_route_lane_desired), field(s, sf::_route_lane_row_desired)};
         }
         std::vector<Value *> peers = cohort(id, group, gate);
         for (Value *peer : peers)
             if (!group_matches(*peer, group) || peer->get("_route_lane_gate") != gate ||
                 peer->get("_route_lane_origin").kind == Value::Null)
-                (*peer)["_route_lane_origin"] = position(*peer);
+                (*peer)[sf::_route_lane_origin] = position(*peer);
         Pair f = forward(s, goal, order);
         auto rank = [&](Value *peer, bool lateral) {
             const Value &p = peer->get("_route_lane_origin");
             return std::make_tuple(p[0].number() * (lateral ? -f.second : f.first) +
                                        p[2].number() * (lateral ? f.first : f.second),
-                                   integer(*peer, "slot"), integer(*peer, "id"));
+                                   integer(*peer, sf::slot), integer(*peer, sf::id));
         };
         std::vector<Value *> ordered = peers;
         std::sort(ordered.begin(), ordered.end(),
@@ -220,18 +221,18 @@ struct Routes {
                       [&](Value *a, Value *b) { return rank(a, false) < rank(b, false); });
             auto pattern = row_layout(values.size());
             for (size_t i = 0; i < values.size(); ++i)
-                assigned[integer(*values[i], "id")] = Pair(lane.first, pattern[i]);
+                assigned[integer(*values[i], sf::id)] = Pair(lane.first, pattern[i]);
         }
         std::set<Pair> occupied;
         for (Value *peer : peers)
             if (group_matches(*peer, group) && peer->get("_route_lane_gate") == gate)
-                occupied.insert(
-                    {field(*peer, "_route_lane_desired"), field(*peer, "_route_lane_row_desired")});
+                occupied.insert({field(*peer, sf::_route_lane_desired),
+                                 field(*peer, sf::_route_lane_row_desired)});
         if (!occupied.empty())
             for (Value *peer : ordered) {
                 if (group_matches(*peer, group))
                     continue;
-                int peer_id = integer(*peer, "id");
+                int peer_id = integer(*peer, sf::id);
                 Pair expected = assigned[peer_id];
                 std::vector<Pair> available;
                 for (double lane : {-10, -5, 0, 5, 10}) {
@@ -268,27 +269,27 @@ struct Routes {
         for (Value *peer : peers) {
             if (group_matches(*peer, group))
                 continue;
-            Pair choice = assigned[integer(*peer, "id")];
-            (*peer)["_route_lane_group"] = group;
-            (*peer)["_route_lane_gate"] = gate;
-            (*peer)["_route_lane_desired"] = Value(choice.first);
-            (*peer)["_route_lane_row_desired"] = Value(choice.second);
-            (*peer)["_route_lane_forward"] = tuple_value({Value(f.first), Value(f.second)});
+            Pair choice = assigned[integer(*peer, sf::id)];
+            (*peer)[sf::_route_lane_group] = group;
+            (*peer)[sf::_route_lane_gate] = gate;
+            (*peer)[sf::_route_lane_desired] = Value(choice.first);
+            (*peer)[sf::_route_lane_row_desired] = Value(choice.second);
+            (*peer)[sf::_route_lane_forward] = tuple_value({Value(f.first), Value(f.second)});
             clear_lane(*peer);
         }
-        return {field(s, "_route_lane_desired"), field(s, "_route_lane_row_desired")};
+        return {field(s, sf::_route_lane_desired), field(s, sf::_route_lane_row_desired)};
     }
     static offline_nav::Optional<Pair> leg(const Value &s, Point current, Point goal,
                                            const Value &order, bool joining) {
         if (joining) {
-            const Value &v = s.get("_route_lane_forward");
+            const Value &v = s.get(sf::_route_lane_forward);
             if (v.size() == 2) {
                 double length = std::hypot(v[0].number(), v[1].number());
                 if (length >= .25)
                     return Pair(v[0].number() / length, v[1].number() / length);
             }
         }
-        Point anchor = point(order.get("route_anchor"), current);
+        Point anchor = point(order.get(sf::route_anchor), current);
         double dx = goal.x - anchor.x, dz = goal.z - anchor.z, length = std::hypot(dx, dz);
         if (length < .25) {
             dx = goal.x - current.x;
@@ -303,8 +304,8 @@ struct Routes {
             return false;
         auto &b = nav->grid->bounds;
         double sine = std::abs(std::sin(yaw)), cosine = std::abs(std::cos(yaw)),
-               length = std::max(.5, field(s, "half_length", 3.5)),
-               width = std::max(.3, field(s, "half_width", 1.7)),
+               length = std::max(.5, field(s, sf::half_length, 3.5)),
+               width = std::max(.3, field(s, sf::half_width, 1.7)),
                x = cosine * width + sine * length, z = sine * width + cosine * length;
         return b[0] + x - p.x <= 1e-6 && p.x + x - b[2] <= 1e-6 && b[1] + z - p.z <= 1e-6 &&
                p.z + z - b[3] <= 1e-6;
@@ -331,21 +332,21 @@ struct Routes {
                                      double now, bool joining) {
         Value &s = bots.at(id)->state;
         Value group =
-            tuple_value({Value(integer(s, "team")), Value(order.get("route_id").text("direct"))});
+            tuple_value({Value(integer(s, sf::team)), Value(order.get("route_id").text("direct"))});
         Pair desired = binding(id, group, goal, order);
-        Value segment =
-            tuple_value({group[0], group[1], Value(integer(order, "route_index")), Value(joining)});
-        if (s.get("_route_lane_segment") != segment) {
-            s["_route_lane_segment"] = segment;
-            s["_route_lane_offset"] = Value(desired.first);
-            s["_route_lane_row"] = Value(joining ? desired.second : 0);
-            s.erase("_route_lane_goal");
+        Value segment = tuple_value(
+            {group[0], group[1], Value(integer(order, sf::route_index)), Value(joining)});
+        if (s.get(sf::_route_lane_segment) != segment) {
+            s[sf::_route_lane_segment] = segment;
+            s[sf::_route_lane_offset] = Value(desired.first);
+            s[sf::_route_lane_row] = Value(joining ? desired.second : 0);
+            s.erase(sf::_route_lane_goal);
         }
         auto f = leg(s, current, goal, order, joining);
         auto fallback = [&]() {
-            s["_route_lane_offset"] = Value(0.0);
-            s["_route_lane_row"] = Value(0.0);
-            s["_route_lane_goal"] = value(goal);
+            s[sf::_route_lane_offset] = Value(0.0);
+            s[sf::_route_lane_row] = Value(0.0);
+            s[sf::_route_lane_goal] = value(goal);
             return std::make_pair(goal, Pair(0, 0));
         };
         if (!f.has)
@@ -354,14 +355,14 @@ struct Routes {
         if (nav) {
             auto at = nav->states.find(id);
             if (at != nav->states.end() && at->second.status == 2 &&
-                s.get("_route_lane_goal").kind != Value::Null && at->second.planned_goal.has)
-                reject = offline_nav::distance(point(s.get("_route_lane_goal")),
+                s.get(sf::_route_lane_goal).kind != Value::Null && at->second.planned_goal.has)
+                reject = offline_nav::distance(point(s.get(sf::_route_lane_goal)),
                                                at->second.planned_goal.value) < .25;
         }
         bool first = true;
         std::set<Pair> seen;
-        for (double row : rows(field(s, "_route_lane_row")))
-            for (double lane : lanes(field(s, "_route_lane_offset"))) {
+        for (double row : rows(field(s, sf::_route_lane_row)))
+            for (double lane : lanes(field(s, sf::_route_lane_offset))) {
                 Pair identity(rounded(lane, 6), rounded(row, 6));
                 if (!seen.insert(identity).second)
                     continue;
@@ -373,9 +374,9 @@ struct Routes {
                 auto candidate = safe_goal(s, goal, f.value, lane, row, now);
                 if (!candidate.has)
                     continue;
-                s["_route_lane_offset"] = Value(lane);
-                s["_route_lane_row"] = Value(row);
-                s["_route_lane_goal"] = value(candidate.value);
+                s[sf::_route_lane_offset] = Value(lane);
+                s[sf::_route_lane_row] = Value(row);
+                s[sf::_route_lane_goal] = value(candidate.value);
                 return {candidate.value, Pair(rounded(lane * 1000, 0), rounded(row * 1000, 0))};
             }
         return fallback();
@@ -387,19 +388,19 @@ struct Routes {
         if (!nav || std::hypot(dx, dz) < .25)
             return selected;
         Value group =
-            tuple_value({Value(integer(s, "team")), Value(order.get("route_id").text("direct"))});
+            tuple_value({Value(integer(s, sf::team)), Value(order.get("route_id").text("direct"))});
         Pair desired = binding(id, group, goal, order);
-        Value segment = tuple_value({group[0], group[1], Value(integer(order, "route_index"))});
-        if (s.get("_route_lane_segment") != segment) {
-            s["_route_lane_segment"] = segment;
-            s["_route_lane_offset"] = Value(desired.first);
+        Value segment = tuple_value({group[0], group[1], Value(integer(order, sf::route_index))});
+        if (s.get(sf::_route_lane_segment) != segment) {
+            s[sf::_route_lane_segment] = segment;
+            s[sf::_route_lane_offset] = Value(desired.first);
         }
         auto at = nav->states.find(id);
         if (at != nav->states.end() && at->second.shallow.has) {
-            s["_route_lane_offset"] = Value(0.0);
+            s[sf::_route_lane_offset] = Value(0.0);
             return selected;
         }
-        Point anchor = point(order.get("route_anchor"), current);
+        Point anchor = point(order.get(sf::route_anchor), current);
         double route_dx = goal.x - anchor.x, route_dz = goal.z - anchor.z,
                length = std::hypot(route_dx, route_dz);
         if (length < .25) {
@@ -409,7 +410,7 @@ struct Routes {
         }
         if (length < .25)
             return selected;
-        for (double offset : lanes(field(s, "_route_lane_offset"))) {
+        for (double offset : lanes(field(s, sf::_route_lane_offset))) {
             if (std::abs(offset) < 1e-9)
                 break;
             Point candidate(selected.x - route_dz / length * offset, selected.y,
@@ -422,10 +423,10 @@ struct Routes {
                 g.point_hazard(candidate, 7) || g.hazard(current, candidate, 7) ||
                 !g.dry(current, candidate, now) || !within(s, candidate, std::atan2(cx, cz)))
                 continue;
-            s["_route_lane_offset"] = Value(offset);
+            s[sf::_route_lane_offset] = Value(offset);
             return candidate;
         }
-        s["_route_lane_offset"] = Value(0.0);
+        s[sf::_route_lane_offset] = Value(0.0);
         return selected;
     }
     offline_nav::Optional<Point> radio_goal(int id, Point current, Point goal, const Value &order) {
@@ -434,7 +435,7 @@ struct Routes {
             return {};
         Value key = tuple_value({order.get("team_command_id"), area});
         Value &s = bots.at(id)->state;
-        const Value &cached = s.get("_radio_ground_goal");
+        const Value &cached = s.get(sf::_radio_ground_goal);
         if (cached.kind == Value::Array && cached.size() == 2 && cached[0] == key)
             return cached[1].kind == Value::Null ? offline_nav::Optional<Point>()
                                                  : offline_nav::Optional<Point>(point(cached[1]));
@@ -460,7 +461,7 @@ struct Routes {
                     score = next;
                 }
             }
-        s["_radio_ground_goal"] = tuple_value({key, best.has ? value(best.value) : Value()});
+        s[sf::_radio_ground_goal] = tuple_value({key, best.has ? value(best.value) : Value()});
         return best;
     }
     Point target(int id, Point current, Point goal, const Value &order, Value &decision,
@@ -468,19 +469,19 @@ struct Routes {
         std::string mode = order.get("combat_mode").text("route");
         bool stop = mode != "route" && mode != "advance";
         if (!nav) {
-            decision["navigation_stop_at_target"] = Value(stop);
+            decision[sf::navigation_stop_at_target] = Value(stop);
             return goal;
         }
         if (order.get("move_area_bounds").kind != Value::Null) {
             auto grounded = radio_goal(id, current, goal, order);
             if (!grounded.has) {
-                decision["navigation_stop_at_target"] = Value(true);
+                decision[sf::navigation_stop_at_target] = Value(true);
                 return current;
             }
             goal = grounded.value;
         }
-        double now = field(decision, "now");
-        int route = integer(order, "route_index");
+        double now = field(decision, sf::now);
+        int route = integer(order, sf::route_index);
         Value path;
         offline_nav::Optional<Point> anchor;
         if (mode == "base_defense")
@@ -489,8 +490,8 @@ struct Routes {
                  Value(order.get("defense_base_id").truth() ? order.get("defense_base_id").text()
                                                             : "own_base")});
         else if (mode == "route" || mode == "advance" || mode == "hold") {
-            if (flag(order, "route_join") && order.get("route_anchor").kind != Value::Null)
-                anchor = point(order.get("route_anchor"));
+            if (flag(order, sf::route_join) && order.get(sf::route_anchor).kind != Value::Null)
+                anchor = point(order.get(sf::route_anchor));
             Pair lane(0, 0);
             if ((mode == "route" || mode == "advance") && anchor.has) {
                 auto selected = lane_goal(id, current, goal, order, now, true);
@@ -499,14 +500,14 @@ struct Routes {
             }
             if (anchor.has)
                 path = tuple_value(
-                    {Value("route_join"), Value(id), Value(integer(bots.at(id)->state, "team")),
+                    {Value("route_join"), Value(id), Value(integer(bots.at(id)->state, sf::team)),
                      Value(order.get("route_id").text("direct")), Value(route),
                      Value(static_cast<int>(lane.first)), Value(static_cast<int>(lane.second))});
             else
-                path = tuple_value({Value("route"), Value(integer(bots.at(id)->state, "team")),
+                path = tuple_value({Value("route"), Value(integer(bots.at(id)->state, sf::team)),
                                     Value(order.get("route_id").text("direct")), Value(route)});
         } else
-            path = tuple_value({Value("local"), Value(id), Value(mode), order.get("target_id")});
+            path = tuple_value({Value("local"), Value(id), Value(mode), order.get(sf::target_id)});
         offline_nav::Identity key;
         key.repr = python_key(path);
         key.kind = path[0].text();
@@ -525,10 +526,10 @@ struct Routes {
             selected = nav->next_target(
                 id, current, goal, key, now, anchor, offline_nav::Path(),
                 std::max(std::max(1.0, nav->grid->data->cell) * 2,
-                         std::abs(field(decision, "speed")) * field(config, "lookahead", 1.5)),
+                         std::abs(field(decision, sf::speed)) * field(config, "lookahead", 1.5)),
                 movement);
         auto at = nav->states.find(id);
-        decision["navigation_stop_at_target"] =
+        decision[sf::navigation_stop_at_target] =
             Value(stop && ((direct && selected == goal) ||
                            (!direct && at != nav->states.end() && at->second.terminal)));
         return (mode == "route" || mode == "advance") && !anchor.has

@@ -37,7 +37,7 @@ struct Equipment {
     bool ready(double now) const { return uses != 0 && now >= ready_at; }
     Value effect(const Value &critical, const Value &selected = Value(), bool requested = false,
                  bool stunned = false) const {
-        std::string kind = contract.get("kind").text(), selection = selected.text("None");
+        std::string kind = contract.get(sf::kind).text(), selection = selected.text("None");
         Value result = Value::object();
         if (kind == "extinguisher") {
             if (!flag(critical, "fire"))
@@ -50,7 +50,7 @@ struct Equipment {
             const Value &devices = critical.get("devices");
             if (devices.kind != Value::Null)
                 for (const Value &v : elements(devices)) {
-                    std::string name = v.get("name").text(), state = v.get("state").text();
+                    std::string name = v.get(sf::name).text(), state = v.get("state").text();
                     if (!name.empty() && (state == "critical" || state == "destroyed"))
                         damaged.insert(name);
                 }
@@ -122,7 +122,7 @@ struct Equipment {
         return activate(now, critical);
     }
     Value poll_bot(double now, const Value &critical, bool stunned) {
-        std::string kind = contract.get("kind").text();
+        std::string kind = contract.get(sf::kind).text();
         if (kind == "extinguisher")
             return poll_auto(now, critical);
         if (kind != "repairkit" && kind != "medkit") {
@@ -178,7 +178,7 @@ inline Value equipment_passives(const std::vector<Equipment> &equipment) {
     double fire = 1, repair = 0, medkit = 0, crew = 0, power = 1, turret = 1, hp = 0;
     for (const Equipment &e : equipment) {
         const Value &c = e.contract;
-        std::string kind = c.get("kind").text();
+        std::string kind = c.get(sf::kind).text();
         if (kind == "extinguisher")
             fire *= std::max(0.0, field(c, "fireStartingChanceFactor", 1));
         else if (kind == "repairkit")

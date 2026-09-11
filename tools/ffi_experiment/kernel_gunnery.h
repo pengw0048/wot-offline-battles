@@ -119,7 +119,7 @@ inline uint32_t seed_hash(const std::string &text) {
     return h[0] & 0x7fffffffU;
 }
 inline Value vector3(double a, double b, double c) {
-    Value v = Value::array();
+    Value v = Value::array(3);
     v.append(Value(a));
     v.append(Value(b));
     v.append(Value(c));
@@ -152,26 +152,26 @@ inline Value rotate_z(const Value &v, double angle) {
                    v[2].number());
 }
 inline Value world_barrel(const Value &s) {
-    double yaw = field(s, "yaw"), pitch = field(s, "pitch"), roll = field(s, "roll");
+    double yaw = field(s, sf::yaw), pitch = field(s, sf::pitch), roll = field(s, sf::roll);
     if (std::abs(pitch) <= 1e-12 && std::abs(roll) <= 1e-12)
-        return barrel(s.has("turret_yaw") ? gun_wrap(yaw + field(s, "turret_yaw"))
-                                          : field(s, "aim_yaw", yaw),
-                      field(s, "gun_pitch"));
-    double turret =
-        s.has("turret_yaw") ? field(s, "turret_yaw") : gun_wrap(field(s, "aim_yaw", yaw) - yaw);
-    return rotate_y(rotate_x(rotate_z(barrel(turret, field(s, "gun_pitch")), roll), pitch), yaw);
+        return barrel(s.has(sf::turret_yaw) ? gun_wrap(yaw + field(s, sf::turret_yaw))
+                                            : field(s, sf::aim_yaw, yaw),
+                      field(s, sf::gun_pitch));
+    double turret = s.has(sf::turret_yaw) ? field(s, sf::turret_yaw)
+                                          : gun_wrap(field(s, sf::aim_yaw, yaw) - yaw);
+    return rotate_y(rotate_x(rotate_z(barrel(turret, field(s, sf::gun_pitch)), roll), pitch), yaw);
 }
 inline Value dispersal_base(const Value &s) {
-    return std::abs(field(s, "pitch")) <= 1e-12 && std::abs(field(s, "roll")) <= 1e-12
+    return std::abs(field(s, sf::pitch)) <= 1e-12 && std::abs(field(s, sf::roll)) <= 1e-12
                ? Value()
                : world_barrel(s);
 }
 inline Value velocity(const Value &v) {
-    const Value &raw = v.get("velocity");
+    const Value &raw = v.get(sf::velocity);
     return raw.kind == Value::Array && raw.size() >= 3
                ? vector3(raw[0].number(), raw[1].number(), raw[2].number())
-               : vector3(std::sin(field(v, "yaw")) * field(v, "speed"), 0,
-                         std::cos(field(v, "yaw")) * field(v, "speed"));
+               : vector3(std::sin(field(v, sf::yaw)) * field(v, sf::speed), 0,
+                         std::cos(field(v, sf::yaw)) * field(v, sf::speed));
 }
 inline Value dispersed(int id, int round, int seq, double yaw, double pitch, double dispersion,
                        int burst = 0, int group = -1, const Value &base = Value()) {
@@ -232,27 +232,27 @@ struct Gunnery {
     explicit Gunnery(const Value &v) : config(v) {}
     static Value target_key(const Value &v) {
         Value key = Value::array();
-        key.append(Value(v.get("kind").text("bot")));
-        key.append(Value(integer(v, "network_id", integer(v, "id"))));
+        key.append(Value(v.get(sf::kind).text("bot")));
+        key.append(Value(integer(v, sf::network_id, integer(v, sf::id))));
         return key;
     }
     Value hold(const Value &state, const Value &target, double now) {
         if (target.kind != Value::Object)
             return Value();
         Value key = target_key(target);
-        int seq = integer(state, "fire_seq");
+        int seq = integer(state, sf::fire_seq);
         if (record.kind == Value::Null || record.get("key") != key) {
             record = Value::object();
             record["key"] = key;
             record["since"] = Value(now);
             record["laid_since"] = Value(now);
-            record["fire_seq"] = Value(seq);
+            record[sf::fire_seq] = Value(seq);
             record["fired"] = Value(false);
             record["epoch"] = Value();
             record["error"] = Value();
         }
-        if (integer(record, "fire_seq") != seq) {
-            record["fire_seq"] = Value(seq);
+        if (integer(record, sf::fire_seq) != seq) {
+            record[sf::fire_seq] = Value(seq);
             record["laid_since"] = Value(now);
             record["fired"] = Value(true);
         }
@@ -271,7 +271,7 @@ struct Gunnery {
             record.get("error").kind == Value::Null) {
             const Value &key = record.get("key");
             std::string seed = "bot-gunner-v1|" + std::to_string(round) + "|" +
-                               std::to_string(integer(state, "id")) + "|('" + key[0].text() +
+                               std::to_string(integer(state, sf::id)) + "|('" + key[0].text() +
                                "', " + std::to_string(key[1].exact()) + ")|" +
                                std::to_string(epoch);
             Random rng(seed_hash(seed));
@@ -290,10 +290,10 @@ struct Gunnery {
     Value aimed(const Value &state, const Value &target, double now, int round, const Gun &gun) {
         if (target.kind != Value::Object)
             return target;
-        Value e = error(state, target, now, round), p = target.get("position");
+        Value e = error(state, target, now, round), p = target.get(sf::position);
         if (p.kind != Value::Array || p.size() != 3)
-            p = vector3(field(target, "x"), field(target, "y"), field(target, "z"));
-        double dx = p[0].number() - field(state, "x"), dz = p[2].number() - field(state, "z"),
+            p = vector3(field(target, sf::x), field(target, sf::y), field(target, sf::z));
+        double dx = p[0].number() - field(state, sf::x), dz = p[2].number() - field(state, sf::z),
                horizontal = std::sqrt(dx * dx + dz * dz);
         if (horizontal <= 1)
             return target;
@@ -305,10 +305,10 @@ struct Gunnery {
                    magnitude * std::sin(field(e, "azimuth")) * field(config, "vertical_share", .45),
                scale = field(e, "lead_scale");
         Value result = target.copy(), v = velocity(target);
-        result["position"] =
+        result[sf::position] =
             vector3(p[0].number() + dz / horizontal * lateral, p[1].number() + vertical,
                     p[2].number() - dx / horizontal * lateral);
-        result["velocity"] =
+        result[sf::velocity] =
             vector3(v[0].number() * scale, v[1].number() * scale, v[2].number() * scale);
         return result;
     }

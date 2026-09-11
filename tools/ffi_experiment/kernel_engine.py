@@ -32,6 +32,23 @@ def _make_actor_decoder():
 
 
 _DECODE_ACTOR = _make_actor_decoder()
+_ACTOR_WIDTH = 3 + len(ENGINE_FIELDS) + 8
+_ACTOR_ARGS = 1 + 2 * _ACTOR_WIDTH
+_SOURCE_FIELDS = dict((name, 4 + index) for index, name in enumerate(ENGINE_FIELDS))
+_SOURCE_XYZ = tuple(_SOURCE_FIELDS[name] for name in ('x', 'y', 'z'))
+
+
+def _source_position(query):
+    # BotRuntime._position reads x/y/z, even when a target position is present.
+    return tuple(query[index] for index in _SOURCE_XYZ)
+
+
+def _source_required(query, name):
+    index = _SOURCE_FIELDS[name]
+    if not int(query[3]) & (1 << (index - 4)):
+        raise KeyError(name)
+    return query[index]
+
 
 
 class EngineLeaves(object):
@@ -51,6 +68,8 @@ class EngineLeaves(object):
         self.next_token = 1
         self.owned = False
         self.actor_cache = {}
+        self.actor_calls = 0
+        self.actor_decodes = 0
 
     @classmethod
     def freeze(cls, value):
@@ -102,17 +121,22 @@ class EngineLeaves(object):
                 self.token_keys.pop(self.freeze(value))
 
     def actor(self, query, at):
-        kind, identity, mask = (int(value) for value in query[at:at + 3])
-        end = at + 3 + len(ENGINE_FIELDS) + 8
+        self.actor_calls += 1
+        kind, identity, mask = int(query[at]), int(query[at + 1]), int(query[at + 2])
+        end = at + _ACTOR_WIDTH
         if identity == 0 and mask == 0:
             return dict(kind='human' if kind else 'bot', network_id=0, position=(0.0, 0.0, 0.0)), end
         raw = query[at:end]
         signature = raw.tostring() if hasattr(raw, 'tostring') else raw.tobytes()
-        cache_key = (kind, identity)
+        # Owned updates clear this cache at their frame boundary. Different
+        # projections of one actor can then reuse their exact numeric snapshot
+        # without evicting each other. Standalone leaf audits stay bounded.
+        cache_key = signature if self.owned else (kind, identity)
         cached = self.actor_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return dict(cached[1]), end
         value = dict((self.players if kind else self.bots).get(identity, {}))
+        self.actor_decodes += 1
         _DECODE_ACTOR(query, at, mask, value)
         value['kind'] = 'human' if kind else 'bot'
         value['network_id'] = identity
@@ -123,7 +147,8 @@ class EngineLeaves(object):
             else:
                 value.pop(name, None)
             at += 4
-        value.setdefault('position', self.module._position(value))
+        if 'position' not in value:
+            value['position'] = self.module._position(value)
         self.actor_cache[cache_key] = (signature, value)
         return dict(value), at
 
@@ -135,9 +160,35 @@ class EngineLeaves(object):
         if self.owned:
             self.runtime._sample_time_us = int(query[254])
             self.runtime._equipment_now = query[255]
-        source, at = self.actor(query, 1)
-        target, at = self.actor(query, at)
+        at = _ACTOR_ARGS
         self.calls[kind] = self.calls.get(kind, 0) + 1
+        # Primitive leaves do not consume vehicle mappings. Keep fresh copies
+        # for callbacks that do: they may retain or mutate their arguments.
+        if kind == 760:
+            return self.motion(query, at)
+        if kind == 769:
+            try:
+                value = float(self.runtime._water_depth_probe(_source_position(query)))
+                if math.isnan(value) or math.isinf(value):
+                    value = -1
+            except Exception:
+                value = -1
+            query[0], query[1] = value >= 0, value
+            return 0
+        if kind == 771:
+            self.runtime.destructible_body_scan(
+                int(_source_required(query, 'id')), _source_position(query),
+                _source_required(query, 'yaw'), _source_required(query, 'speed'))
+            return 0
+        if kind == 766:
+            try:
+                self.runtime.artillery_launch_cancel(dict(id=int(_source_required(query, 'id'))))
+            except Exception:
+                pass
+            query[0] = 0
+            return 0
+        source, unused = self.actor(query, 1)
+        target = self.actor(query, 1 + _ACTOR_WIDTH)[0] if kind != 761 else None
         if kind in (751, 752):
             callback = (self.runtime.firing_lane_probe if kind == 751
                         else self.runtime.incoming_lane_probe)
@@ -150,8 +201,6 @@ class EngineLeaves(object):
             query[0] = bool(result) if kind == 751 else result is not None
             query[1] = bool(result)
             return 0
-        if kind == 760:
-            return self.motion(query, source, at)
         if 761 <= kind <= 766:
             return self.aim(query, source, target, at)
         if kind == 767:
@@ -165,16 +214,6 @@ class EngineLeaves(object):
             query[0] = bool(value.get('line_of_sight', False)) if isinstance(value, dict) else bool(value)
             query[1] = float(value.get('foliage_bonus', 0)) if isinstance(value, dict) else 0
             return 0
-        if kind == 769:
-            try:
-                value = self.runtime._water_depth_probe(self.module._position(source))
-                value = float(value)
-                if math.isnan(value) or math.isinf(value):
-                    value = -1
-            except Exception:
-                value = -1
-            query[0], query[1] = value >= 0, value
-            return 0
         if kind == 770:
             route = tuple(query[at:at + 3])
             count = int(query[at + 3])
@@ -186,9 +225,6 @@ class EngineLeaves(object):
             except Exception:
                 candidates = []
             query[0], query[1] = bool(candidates), self.token(candidates) if candidates else 0
-            return 0
-        if kind == 771:
-            self.runtime.destructible_body_scan(source['id'], self.module._position(source), source['yaw'], source['speed'])
             return 0
         if kind == 768:
             bodies = []
@@ -218,15 +254,19 @@ class EngineLeaves(object):
 
     def descriptor(self, source):
         identity = source.get('network_id', source.get('id'))
+        return self.descriptor_at(identity, int(source.get('siege_state', 0)))
+
+    def descriptor_at(self, identity, siege_state):
         pair = self.runtime._descriptor_pairs.get(identity) if self.owned else None
-        return (self.module.siege_mechanics.active_descriptor(pair, int(source.get('siege_state', 0)))
+        return (self.module.siege_mechanics.active_descriptor(pair, siege_state)
                 if pair is not None else self.runtime._descriptors.get(identity))
 
-    def motion(self, query, source, at):
+    def motion(self, query, at):
         runtime, module = self.runtime, self.module
         values = query[at:at + 128]
         kind, bot_id = int(values[0]), int(values[1])
-        descriptor = self.descriptor(source)
+        if kind in (610, 611, 615):
+            descriptor = self.descriptor_at(int(query[2]), int(query[_SOURCE_FIELDS['siege_state']]))
         self.calls[kind] = self.calls.get(kind, 0) + 1
         if kind == 610:
             try:
@@ -246,6 +286,7 @@ class EngineLeaves(object):
             result = runtime._physics_ground_probe(values[2], values[3], values[4])
             reply = [result is not None, float(result) if result is not None else 0]
         elif kind == 615:
+            source = self.actor(query, 1)[0]
             # The engine resolver reads these exact callback-visible fields.
             # Its borrowed mirror exists only during this synchronous leaf.
             before = runtime.states.get(bot_id)
@@ -365,11 +406,6 @@ class EngineLeaves(object):
                 reply = [int(clear), 1, int(identity == 'player'),
                          int(verdict['blocker_id']), int(verdict['blocker_team'])] + list(position) + [float(verdict.get('blocker_radius', 0))]
             except (TypeError, KeyError, ValueError, OverflowError):
-                pass
-        else:
-            try:
-                runtime.artillery_launch_cancel(dict(id=source['id']))
-            except Exception:
                 pass
         query[:len(reply)] = array('d', reply)
         return 0
