@@ -7268,6 +7268,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'spot_visible': False}
             bodies.append({
                 'id': 1000000 + engine_id, 'team': team, 'alive': alive,
+                # A Bot wreck is shoved by the authority worker and keeps a
+                # real inverse mass; a dead human hull nobody integrates
+                # stays world geometry.
+                'immovable': not alive and kind != 'bot',
                 'x': state['x'], 'y': state['y'], 'z': state['z'],
                 'yaw': state['yaw'], 'mass': mass, 'shape': shape,
                 'vx': math.sin(state['yaw']) * state['speed'],
@@ -7305,7 +7309,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': {'x': 0.0, 'y': 0.0, 'z': 6.5, 'yaw': 0.0,
                       'speed': 0.0, 'alive': True,
                       'effective_params': _effective_params_snapshot()}}}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 5.0
         battle._motion_is_clear = mock.Mock(return_value=True)
         battle._baked_pose_safe = mock.Mock(return_value=True)
@@ -7329,7 +7333,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = _Client()
         battle._avatar = runtime.bigworld.avatar
         battle._arena_bounds = (-300.0, -300.0, 300.0, 300.0)
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_pitch = 0.23
         battle._local_roll = -0.17
         battle._contact_tanks = mock.Mock(return_value=[])
@@ -7396,7 +7400,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
                           'yaw': math.pi, 'alive': True}],
             }))
         battle._last_snapshot = {'bot_state_revision': 38}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 10.0
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._local_position = (0.0, 0.0, 0.0)
@@ -7477,7 +7481,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
                           'yaw': math.pi, 'alive': True}],
             }))
         battle._last_snapshot = {'bot_state_revision': 38}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 10.0
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._local_position = (99.0, 0.0, 99.0)
@@ -8418,7 +8422,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': state,
         }}
         battle._bots = types.SimpleNamespace(states={11: state})
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 0.0
         battle._local_push_x = 0.0
         battle._local_push_z = 0.0
@@ -8458,14 +8462,21 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 battle._local_push_x, battle._local_push_z))
         self.assertEqual(dead_results[0], dead_results[1])
 
-    def test_local_push_decay_is_equal_across_render_rates(self):
+    def test_local_push_bleeds_at_the_track_budget_at_every_render_rate(self):
+        """An outside shove is spent against this hull's own track laws.
+
+        The old 0.90-per-60-Hz exponential took about 6.3 m/s2 at 1 m/s in
+        every direction and never quite reached zero. Dry friction removes a
+        fixed budget per second on each hull axis and stops the hull dead, and
+        it stays identical at 20, 30 and 60 FPS.
+        """
         def run_for_one_second(frame_rate):
             runtime = _runtime()
             battle = BattleRuntime(runtime)
             battle._local_effective_params = _effective_params_snapshot()
             battle._avatar = runtime.bigworld.avatar
             battle._records = {}
-            battle._local_physics = {'mass': 25000.0}
+            battle._local_physics = _effective_params_snapshot()['physics']
             battle._local_speed = 0.0
             battle._local_push_x = 10.0
             battle._local_push_z = -4.0
@@ -8485,13 +8496,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         results = dict((frame_rate, run_for_one_second(frame_rate))
                        for frame_rate in (20, 30, 60))
-        expected = 10.0 * 0.90 ** 60
+        # yaw 0 puts the hull's forward axis on +z and its right axis on +x,
+        # and a stopped hull with no throttle is held on both.
+        longitudinal, lateral = vehicle_physics.contact_push_decel(
+            _effective_params_snapshot()['physics'], False)
 
-        self.assertAlmostEqual(9.0, results[60][0], places=12)
+        self.assertAlmostEqual(
+            10.0 - lateral / 60.0, results[60][0], places=12)
         for unused_frame_rate, (unused_first, final_push) in results.items():
-            self.assertAlmostEqual(expected, final_push, places=12)
+            # 4 m/s along the tracks is fully absorbed inside the second;
+            # 10 m/s across them keeps exactly what the budget could not take.
+            self.assertAlmostEqual(10.0 - lateral, final_push, places=12)
         self.assertAlmostEqual(results[20][1], results[30][1], places=12)
         self.assertAlmostEqual(results[30][1], results[60][1], places=12)
+        self.assertGreater(longitudinal, 4.0)
 
     def test_local_tank_contact_cannot_push_hull_through_world_geometry(self):
         runtime = _runtime()
@@ -8509,7 +8527,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': {'x': 0.0, 'y': 0.0, 'z': 6.5, 'yaw': 0.0,
                       'speed': 0.0, 'alive': True,
                       'effective_params': _effective_params_snapshot()}}}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 5.0
         battle._motion_is_clear = mock.Mock(return_value=False)
         battle._baked_pose_safe = mock.Mock(return_value=True)

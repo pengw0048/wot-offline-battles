@@ -1215,3 +1215,52 @@ class SnapshotSyncTests(unittest.TestCase):
                                                  'players': [player(2, alive=False)]}))
         self.assertEqual([], self.sync.snapshot({'round_id': 1, 'server_tick': 3,
                                                  'players': []}))
+
+    def test_a_shoved_wreck_keeps_receiving_and_presenting_poses(self):
+        """A destroyed hull another tank pushes must not freeze in place."""
+        self.sync.manifest({'round_id': 1, 'bots': [player(7)]})
+        self.sync.snapshot({'round_id': 1, 'server_tick': 1,
+                            'bots': [player(7, 0.0)]})
+        self.now[0] = 0.1
+        self.sync.advance(self.now[0])
+        self.assertEqual(
+            ['destroy'],
+            [event['type'] for event in self.sync.snapshot({
+                'round_id': 1, 'server_tick': 2,
+                'bots': [player(7, 0.0, alive=False)]})])
+
+        self.now[0] = 0.2
+        self.assertEqual([], self.sync.advance(self.now[0]))
+        self.sync.snapshot({'round_id': 1, 'server_tick': 3,
+                            'bots': [player(7, 3.0, alive=False)]})
+
+        self.now[0] = 0.25
+        events = self.sync.advance(self.now[0])
+        self.assertEqual(['update'], [event['type'] for event in events])
+        self.assertEqual('bot:7', events[0]['entity'])
+        self.assertGreater(events[0]['pose']['x'], 0.0)
+        self.assertLess(events[0]['pose']['x'], 3.0)
+
+    def test_a_settled_wreck_costs_nothing_per_rendered_frame(self):
+        self.sync.manifest({'round_id': 1, 'bots': [player(7)]})
+        self.sync.snapshot({'round_id': 1, 'server_tick': 1,
+                            'bots': [player(7, 0.0)]})
+        self.sync.snapshot({'round_id': 1, 'server_tick': 2,
+                            'bots': [player(7, 0.0, alive=False)]})
+        self.sync.snapshot({'round_id': 1, 'server_tick': 3,
+                            'bots': [player(7, 3.0, alive=False)]})
+
+        moment = 0.2
+        settled = None
+        for unused_frame in range(400):
+            moment += 1.0 / 60.0
+            self.now[0] = moment
+            events = self.sync.advance(moment)
+            if not events:
+                settled = moment
+                break
+        self.assertIsNotNone(settled)
+        self.assertEqual(
+            3.0, self.sync._entities['bot:7']['current']['x'])
+        self.now[0] = moment + 1.0
+        self.assertEqual([], self.sync.advance(self.now[0]))

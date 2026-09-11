@@ -629,7 +629,7 @@ class TankCollisionTests(unittest.TestCase):
         self.assertNotIn('message["damage_to_bot"])), 500)', server_source)
         self.assertNotIn('message["damage_to_target"])), 500)', server_source)
 
-    def test_wreck_blocks_the_mover_without_moving_or_dealing_ram_damage(self):
+    def test_wreck_separates_like_a_hull_and_never_deals_ram_damage(self):
         mover = _tank(1, 0.0, 0.0, mass=25000.0, vx=10.0)
         wreck = _tank(2, 0.8, 0.0, mass=10000.0)
         wreck['alive'] = False
@@ -643,10 +643,48 @@ class TankCollisionTests(unittest.TestCase):
         self.assertLess(against_wreck['correction'][0], 0.0)
         self.assertLess(against_wreck['delta_velocity'][0], 0.0)
         self.assertEqual((), against_wreck['ram_events'])
-        # An immovable wreck takes the whole separation, so the mover is
-        # pushed out farther than the lighter living hull pushes it.
-        self.assertLess(
+        # A wreck is a hull on tracks, not world geometry: the mover takes
+        # exactly the inverse-mass share it takes against the same live hull,
+        # and the wreck's own pass owns the rest.
+        self.assertAlmostEqual(
             against_wreck['correction'][0], against_live['correction'][0])
+        self.assertAlmostEqual(
+            against_wreck['delta_velocity'][0],
+            against_live['delta_velocity'][0])
+
+    def test_immovable_hull_still_takes_the_whole_separation(self):
+        """A body no process integrates has to stay world geometry."""
+        mover = _tank(1, 0.0, 0.0, mass=25000.0, vx=10.0)
+        wall = _tank(2, 0.8, 0.0, mass=10000.0)
+        wall['alive'] = False
+        wall['immovable'] = True
+        wreck = _tank(2, 0.8, 0.0, mass=10000.0)
+        wreck['alive'] = False
+
+        against_wall = tank_collision.resolve_tank(
+            mover, (wall,), now=10.0)
+        against_wreck = tank_collision.resolve_tank(
+            mover, (wreck,), now=10.0)
+
+        self.assertLess(
+            against_wall['correction'][0], against_wreck['correction'][0])
+        self.assertEqual((), against_wall['ram_events'])
+
+    def test_a_shoved_wreck_carries_its_contact_velocity(self):
+        """A wreck already sliding away is not still being closed on."""
+        mover = _tank(1, 0.0, 0.0, mass=25000.0, vx=10.0)
+        settled = _tank(2, 0.8, 0.0, mass=10000.0, vx=10.0)
+        settled['alive'] = False
+        stopped = _tank(2, 0.8, 0.0, mass=10000.0)
+        stopped['alive'] = False
+
+        moving_together = tank_collision.resolve_tank(
+            mover, (settled,), now=10.0)
+        closing = tank_collision.resolve_tank(
+            mover, (stopped,), now=10.0)
+
+        self.assertEqual(0.0, moving_together['delta_velocity'][0])
+        self.assertLess(closing['delta_velocity'][0], 0.0)
 
 
 class StraddledSupportTests(unittest.TestCase):
