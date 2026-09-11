@@ -31,6 +31,8 @@ def main():
     parser.add_argument('--include-astar-control', action='store_true',
                         help='also measure native A* without the extra components')
     parser.add_argument('--stage-timing', action='store_true')
+    parser.add_argument('--profile-module',
+                        help='also compare a host --profile build with observation off and on')
     parser.add_argument('--components', default='')
     parser.add_argument('--control-components', default='',
                         help='also run a native variant with this component subset')
@@ -42,12 +44,16 @@ def main():
         parser.error('--control-module/--control-runner require --control-components')
     if args.include_astar_control and not args.components:
         parser.error('--include-astar-control requires --components')
+    if args.profile_module and not args.components:
+        parser.error('--profile-module requires --components')
     args.output.mkdir(parents=True, exist_ok=False)
     backends = ['python', 'native'] + (['native-step'] if args.include_step else [])
     if args.include_astar_control:
         backends.append('native-astar')
     if args.control_components:
         backends.append('native-control')
+    if args.profile_module:
+        backends.extend(('native-profile-off', 'native-profile-on'))
     reference = None
     waiting = []
     records = []
@@ -60,14 +66,19 @@ def main():
                       else HERE / 'portable_workload.py')
             module = (args.control_module if backend == 'native-control' and args.control_module
                       else args.module)
+            if backend.startswith('native-profile-'):
+                module = args.profile_module
             command = [args.python, str(runner),
                        '--fixture', args.fixture, '--backend',
-                       'native' if backend in ('native-astar', 'native-control') else backend,
+                       'native' if backend in ('native-astar', 'native-control',
+                                               'native-profile-off', 'native-profile-on') else backend,
                        '--module', module, '--map', args.map,
                        '--scenario', args.scenario, '--seconds', str(args.seconds),
                        '--fps', str(args.fps), '--output', str(output)]
             if args.stage_timing:
                 command.append('--stage-timing')
+            if backend == 'native-profile-on':
+                command.append('--boundary-profile')
             if backend == 'native-control':
                 command.extend(('--components', args.control_components))
             elif backend not in ('python', 'native-astar') and args.components:
@@ -117,6 +128,22 @@ def main():
                   limitations=['Linux host CPU timings, not #1513 Windows frame pacing',
                                'Synthetic 29-Bot scene and deterministic native-query fakes',
                                'Projectile launches acknowledged; terminals are not simulated'])
+    if args.profile_module:
+        zones = ('native_core', 'python_callbacks', 'callback_bridge', 'python_outer')
+        observed = [row['boundary_profile'] for row in records if row['backend'] == 'native-profile-on']
+        means = {zone: statistics.mean(row[zone] for row in observed) for zone in zones}
+        total = sum(means.values())
+        plain = summaries['native']['median_cpu_seconds']
+        off = summaries['native-profile-off']['median_cpu_seconds']
+        on = summaries['native-profile-on']['median_cpu_seconds']
+        result['boundary_attribution'] = dict(
+            mean_cpu_seconds=means,
+            percent={zone: 100 * value / total for zone, value in means.items()},
+            observer_enabled_delta_percent=100 * (on / off - 1),
+            observer_compiled_delta_percent=100 * (off / plain - 1),
+            note='Observed ownership zones include clock overhead; they are not irreducible costs. '
+                 'Python zones include builtins and native-query fakes. Callback rows are inclusive '
+                 'and can overlap when callbacks nest; only zones form a partition.')
     (args.output / 'summary.json').write_text(json.dumps(result, indent=2, sort_keys=True))
     print(json.dumps(summaries, indent=2, sort_keys=True), flush=True)
 

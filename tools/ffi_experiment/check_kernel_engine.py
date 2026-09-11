@@ -127,6 +127,32 @@ class EngineTests(unittest.TestCase):
         self.leaves(packet(766, {}))
         self.assertEqual(len(calls), 2)
 
+    def test_aim_reads_only_borrowed_request(self):
+        class BorrowedPacket(object):
+            # The provider owns 32,768 doubles, but this native request lends
+            # only its 256-double packet. The remaining capacity is unrelated.
+            def __init__(self, values):
+                self.values = values
+            def __getitem__(self, key):
+                if isinstance(key, slice):
+                    if key.stop is None or key.stop > len(self.values):
+                        raise AssertionError('Read beyond borrowed request')
+                elif key >= len(self.values):
+                    raise AssertionError('Read beyond borrowed request')
+                return self.values[key]
+            def __setitem__(self, key, value):
+                self.values[key] = value
+
+        calls = []
+        def origin(*args):
+            calls.append(args)
+            return (4, 5, 6)
+        self.runtime.direct_launch_origin_probe = origin
+        query = BorrowedPacket(packet(761, self.state, args=(2, 3, .4, .5, .6)))
+        self.leaves(query)
+        self.assertEqual(list(query[:4]), [1, 4, 5, 6])
+        self.assertEqual(calls[0][2:], (2, 3, .4, .5, .6))
+
 
 if __name__ == '__main__':
     unittest.main()

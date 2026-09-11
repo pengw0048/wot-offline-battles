@@ -345,7 +345,10 @@ class EngineLeaves(object):
 
     def aim(self, query, source, target, at):
         kind, runtime = int(query[0]), self.runtime
-        args = query[at:]
+        # Engine::query lends 256 doubles within a larger reusable buffer.
+        # The widest aim request is the 17-value artillery-friendly receipt;
+        # copying the unused 32K capacity costs gigabytes per workload loop.
+        args = query[at:at + 17]
         descriptor = self.descriptor(source)
         reply = [0]
         if kind == 761:
