@@ -8,6 +8,7 @@ import random
 import sys
 import types
 import unittest
+from unittest import mock
 
 import bot_state_rows
 
@@ -13419,6 +13420,175 @@ class BotRuntimeTests(unittest.TestCase):
             'move_position': (0.0, 0.0, 0.0),
             'recovery_mode': 'arrived', 'movement_intent': False,
         }
+
+    def test_landed_turret_blocks_stationary_bot_turn_until_pose_is_clear(self):
+        command = self._stationary_command()
+        command.update(turn=1.0, target_yaw=1.0)
+        clear = mock.Mock(return_value=False)
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused: _FixedAdapter(command),
+            direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph(),
+            turret_motion_probe=clear)
+        runtime.battle_start(self.start)
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0, grounded_once=True)
+        runtime.update(0.04, 1.0)
+        self.assertEqual(0.0, state['yaw'])
+        self.assertEqual(0.0, runtime._turn_speeds[11])
+        before, after, descriptor = next(
+            call.args for call in clear.call_args_list
+            if call.args[1]['yaw'] > call.args[0]['yaw'])
+        self.assertGreater(after['yaw'], before['yaw'])
+        self.assertIs(runtime._descriptors[11], descriptor)
+        clear.return_value = True
+        runtime.update(0.04, 1.04)
+        self.assertGreater(state['yaw'], 0.0)
+
+    def test_landed_turret_blocks_bot_residual_push_with_real_descriptor(self):
+        clear = mock.Mock(return_value=False)
+        self.runtime._turret_motion_probe = clear
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=1.0, y=2.0, z=3.0, yaw=0.4, pitch=0.2, roll=-0.1,
+                     speed=0.0, push_x=2.0, push_z=-1.0)
+        response = {'delta_velocity': (0.0, 0.0), 'correction': (0.0, 0.0)}
+        self.runtime._apply_tank_contact_response(state, response, 0.1)
+        self.assertEqual((1.0, 2.0, 3.0), (state['x'], state['y'], state['z']))
+        self.assertEqual((0.0, 0.0), (state['push_x'], state['push_z']))
+        before, after, descriptor = clear.call_args.args
+        self.assertAlmostEqual(1.2, after['x'])
+        self.assertAlmostEqual(2.9, after['z'])
+        self.assertEqual((0.4, 0.2, -0.1), (before['yaw'], before['pitch'], before['roll']))
+        self.assertIs(self.runtime._descriptors[11], descriptor)
+        clear.return_value = True
+        self.runtime._apply_tank_contact_response(
+            state, {'delta_velocity': (0.0, 0.0), 'correction': (-0.1, 0.0)}, 0.1)
+        self.assertAlmostEqual(0.9, state['x'])
+
+    def test_landed_turret_footprints_update_navigation_and_retire_shortcuts(self):
+        self.runtime.battle_start(self.start)
+        navigator = self.runtime.navigator
+        grid = navigator.grid
+        start, goal = (0.0, 0.0, 0.0), (8.0, 0.0, 0.0)
+        hulls = []
+        self.runtime._turret_hulls_provider = lambda: tuple(hulls)
+        self.runtime._publish_static_hulls(())
+        self.assertTrue(grid.dry_segment_clear(start, goal, 1.0))
+        hulls.extend(((-45, 4.0, 0.0, 0.0, 2.0, 1.5),
+                      (-46, 4.0, 4.0, 0.0, 2.0, 0.3)))
+        self.runtime._publish_static_hulls(())
+        revision = grid.static_hull_revision
+        self.assertFalse(grid.dry_segment_clear(start, goal, 1.0))
+        self.assertTrue(grid.path_crosses_static_hull((start, goal)))
+        self.assertEqual(2, len(grid._static_hull_key))
+        self.runtime._publish_static_hulls(())
+        self.assertEqual(revision, grid.static_hull_revision)
+        hulls[:] = []
+        self.runtime._publish_static_hulls(())
+        self.assertTrue(grid.dry_segment_clear(start, goal, 1.0))
+
+    def test_landed_turret_rejects_vertical_pose_before_bot_landing_damage(self):
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=0.5, z=0.0, yaw=0.0, pitch=0.1, roll=-0.2,
+                     speed=0.0, grounded_once=True, airborne=True,
+                     vertical_speed=-15.0)
+        clear = mock.Mock(return_value=False)
+        self.runtime._turret_motion_probe = clear
+        self.runtime._suspension_params_for = mock.Mock(return_value=None)
+        self.runtime._terrain_support = mock.Mock(return_value=(0.0, 0.0))
+        self.runtime._apply_bot_fall_damage = mock.Mock(return_value=25)
+        before = self.runtime._snapshot_bot_suspension_state(state)
+
+        self.assertTrue(self.runtime._update_vertical_motion(state, 0.1))
+
+        self.assertEqual(0.5, state['y'])
+        self.assertEqual(before, self.runtime._snapshot_bot_suspension_state(state))
+        self.runtime._apply_bot_fall_damage.assert_not_called()
+        self.assertEqual(0.0, clear.call_args.args[1]['y'])
+        self.assertIsNone(self.runtime._turret_pending_landing_impacts)
+        clear.return_value = True
+
+        self.assertFalse(self.runtime._update_vertical_motion(state, 0.1))
+
+        self.assertEqual(0.0, state['y'])
+        self.assertFalse(state['airborne'])
+        self.runtime._apply_bot_fall_damage.assert_called_once()
+
+    def test_landed_turret_rejects_suspension_and_late_slope_attitude(self):
+        self.runtime.battle_start(self.start)
+        state = self.runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, pitch=0.1, roll=-0.2,
+                     terrain_pitch=0.1, speed=0.0, grounded_once=True,
+                     _spring_ground_memory=[1.0])
+        clear = mock.Mock(return_value=False)
+        self.runtime._turret_motion_probe = clear
+
+        def integrate(current, *unused):
+            current.update(y=0.3, pitch=0.4, roll=-0.5,
+                           terrain_pitch=0.4, _spring_ground_memory=[2.0])
+            return False
+
+        self.runtime._integrate_vertical_motion = integrate
+        before = self.runtime._snapshot_bot_suspension_state(state)
+        self.assertTrue(self.runtime._update_vertical_motion(state, 0.04))
+        self.assertEqual(0.0, state['y'])
+        self.assertEqual(before, self.runtime._snapshot_bot_suspension_state(state))
+        self.assertEqual((0.3, 0.4, -0.5), tuple(
+            clear.call_args.args[1][key] for key in ('y', 'pitch', 'roll')))
+        self.assertEqual((0.1, 0.4), tuple(
+            pose['chassis']['pitch'] for pose in clear.call_args.args[:2]))
+        self.runtime._suspension_params[11] = None
+        state.pop('pose_sample', None)
+        with mock.patch.object(self.module, 'slope_pose', return_value=(0.3, -0.4)):
+            self.assertFalse(self.runtime._update_slope_pose(state))
+            self.assertEqual((0.1, -0.2), (state['pitch'], state['roll']))
+            self.assertEqual((0.1, 0.3), tuple(
+                pose['chassis']['pitch'] for pose in clear.call_args.args[:2]))
+            clear.return_value = True
+            self.assertTrue(self.runtime._update_slope_pose(state))
+        self.assertEqual((0.3, -0.4), (state['pitch'], state['roll']))
+
+    def test_landed_turret_blocks_hydraulic_hull_aiming_pose(self):
+        state = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                 'pitch': 0.3, 'terrain_pitch': 0.1,
+                 'suspension_pitch': 0.2, 'roll': -0.1}
+        descriptor = _combat_descriptor()
+        clear = mock.Mock(return_value=False)
+        self.assertEqual(0.2, self.runtime._update_hydraulic_suspension(
+            state, descriptor, 0.0, 0.0, 0.1, clear))
+        self.assertEqual((0.3, 0.2), (state['pitch'], state['suspension_pitch']))
+        before, after, used = clear.call_args.args
+        self.assertEqual((0.3, 0.1), (before['pitch'], after['pitch']))
+        self.assertEqual((0.1, 0.1),
+                         (before['chassis']['pitch'], after['chassis']['pitch']))
+        self.assertIs(descriptor, used)
+        clear.return_value = True
+        self.assertEqual(0.0, self.runtime._update_hydraulic_suspension(
+            state, descriptor, 0.0, 0.0, 0.1, clear))
+        self.assertEqual((0.1, 0.0), (state['pitch'], state['suspension_pitch']))
+
+    def test_landed_turret_bot_pose_keeps_chassis_separate_from_hydraulic_hull(self):
+        state = {'id': 11, 'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.4,
+                 'pitch': 0.3, 'suspension_pitch': 0.2, 'roll': -0.1}
+        clear = mock.Mock(return_value=True)
+        self.runtime._turret_motion_probe = clear
+        self.assertTrue(self.runtime._turret_pose_is_clear(
+            state, (4.0, 5.0, 6.0), 0.7, (7.0, 8.0, 9.0), 0.8))
+        before, after, unused_descriptor = clear.call_args.args
+        self.assertEqual((0.3, 0.3), (before['pitch'], after['pitch']))
+        self.assertAlmostEqual(0.1, before['chassis']['pitch'])
+        self.assertAlmostEqual(0.1, after['chassis']['pitch'])
+        for pose, expected in ((before, (4.0, 5.0, 6.0, 0.7)),
+                               (after, (7.0, 8.0, 9.0, 0.8))):
+            self.assertEqual(expected, tuple(pose[key] for key in ('x', 'y', 'z', 'yaw')))
+            self.assertEqual(expected, tuple(pose['chassis'][key]
+                                            for key in ('x', 'y', 'z', 'yaw')))
+            self.assertEqual(-0.1, pose['chassis']['roll'])
 
     def test_tank_separation_is_probed_at_the_distance_it_moves(self):
         """Static geometry beyond the hull must not veto a small unjam.

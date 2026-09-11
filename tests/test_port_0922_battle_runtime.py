@@ -5968,15 +5968,38 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
                 'x': 12.0, 'y': 3.0, 'z': -30.0, 'yaw': 0.4,
                 'pitch': 0.0, 'roll': 0.0, 'turret_yaw': 0.2}
 
+    def _canonical_turret_battle(self, drawn=True):
+        battle, record, vehicle = self._ammo_bay_death_battle(drawn=drawn)
+        record.update(kind='bot', network_id=11)
+        battle._start_message = {'round_id': 7}
+        battle._clock = lambda: 10.0
+        battle._projectile_server_time_ms = 1000
+        battle._projectile_server_local_time = 10.0
+        battle._turret_obstacle_in_view = mock.Mock(return_value=drawn)
+        battle._detached_turret_obstacles = mock.Mock()
+        battle._detached_turret_obstacles.add.return_value = True
+        battle._detached_turrets = mock.Mock()
+        battle._detached_turrets.has_vehicle.return_value = False
+        battle._detached_turrets.prepare_canonical.return_value = {'plan': True}
+        return battle, record, vehicle
+
+    @staticmethod
+    def _canonical_turret_row(actor_kind='bot', actor_id=11):
+        from gui.mods.offline_lan_0922 import turret_detachment
+        flight = turret_detachment.resolve_flight(
+            (12.0, 3.0, -30.0), (1.0, 10.5, 0.0),
+            lambda start, end: (end[0], 0.0, end[2]) if end[1] <= 0 else None)
+        return battle_runtime_module.turret_obstacle_schema.normalize_record({
+            'actor_kind': actor_kind, 'actor_id': actor_id,
+            'flight': flight, 'attitude': [0.4, 0.0, 0.0],
+            'spin': [1.2, 1.4, 1.6], 'created_time_ms': 1000})
+
     def test_late_ammo_bay_cause_detaches_once_without_repeating_death(self):
         for local in (False, True):
             with self.subTest(local=local):
-                battle, record, vehicle = self._ammo_bay_death_battle()
+                battle, record, vehicle = self._canonical_turret_battle()
                 record['local'] = local
-                turrets = mock.Mock()
-                turrets.prepare.return_value = {'plan': True}
-                turrets.launch.return_value = True
-                battle._detached_turrets = turrets
+                turrets = battle._detached_turrets
                 vehicle.onHealthChanged = mock.Mock(wraps=vehicle.onHealthChanged)
                 battle._apply_health(record, {'health': 0, 'alive': False})
                 health_calls = vehicle.onHealthChanged.call_count
@@ -5991,191 +6014,270 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
                 vehicle.confirmTurretDetachment = mock.Mock(side_effect=lambda:
                     order.append(('refresh', vehicle.health,
                                   vehicle._Vehicle__turretDetachmentConfirmed)))
-                turrets.launch.side_effect = lambda *args: order.append(
-                    ('launch', vehicle.health,
-                     vehicle._Vehicle__turretDetachmentConfirmed)) or True
                 state = self._ammo_bay_death_state()
                 battle._apply_health(record, state)
                 battle._apply_health(record, state, force_cause=True)
                 self.assertEqual(_TURRET_DETACHED, vehicle.health)
                 self.assertEqual([
-                    ('launch', _TURRET_DETACHED, True),
                     ('damage', (_TURRET_DETACHED, False, False)),
                     ('refresh', _TURRET_DETACHED, True)], order)
-                turrets.launch.assert_called_once()
+                turrets.prepare_canonical.assert_not_called()
+                turrets.launch_canonical.assert_not_called()
                 vehicle.confirmTurretDetachment.assert_called_once()
                 appearance.onVehicleHealthChanged.assert_not_called()
                 self.assertEqual(health_calls, vehicle.onHealthChanged.call_count)
                 self.assertEqual(kill_calls, battle._binding.arena_vehicle_killed.call_count)
 
-    def test_late_ammo_bay_failed_launch_is_not_retried_by_snapshots(self):
-        battle, record, vehicle = self._ammo_bay_death_battle()
-        battle._apply_health(record, {'health': 0, 'alive': False})
-        vehicle.appearance.damageState = mock.Mock()
-        vehicle.appearance.waterSensor = mock.Mock(isUnderWater=False)
-        vehicle.confirmTurretDetachment = mock.Mock()
-        turrets = mock.Mock()
-        turrets.prepare.return_value = {'plan': True}
-        turrets.launch.return_value = False
-        battle._detached_turrets = turrets
-        battle._apply_health(record, self._ammo_bay_death_state())
-        battle._apply_health(record, self._ammo_bay_death_state())
-        self.assertEqual(_TURRET_DETACHED, vehicle.health)
-        self.assertTrue(vehicle._Vehicle__turretDetachmentConfirmed)
-        turrets.launch.assert_called_once()
-        vehicle.confirmTurretDetachment.assert_called_once()
-
-    def test_ammo_bay_death_detaches_the_turret_in_the_stock_order(self):
-        """Create the flying entity, then one refresh, already turretless.
-
-        #1513 selects the ``exploded`` wreck and the missing turret purely
-        from ``health`` and the private confirmation flag, and
-        ``CompoundAppearance.__requestModelsRefresh`` reads
-        ``isTurretDetached`` when ``onHealthChanged`` runs.  Confirming after
-        that callback would request a second assembler for the same model
-        state and let a turreted background load land last.
-
-        Both are therefore written before the flying entity is even planned:
-        the launch geometry is the descriptor plus the replicated pose, so
-        nothing has to be read off the compound the refresh replaces.
-        """
-        battle, record, vehicle = self._ammo_bay_death_battle()
+    def test_ammo_bay_death_detaches_before_stock_health_then_waits_for_echo(self):
+        battle, record, vehicle = self._canonical_turret_battle()
         order = []
-        turrets = mock.Mock()
-        turrets.prepare.side_effect = lambda entity, pose: order.append(
-            ('prepare', entity.health,
-             entity._Vehicle__turretDetachmentConfirmed)) or {'plan': True}
-        turrets.launch.side_effect = lambda *args: order.append(
-            ('launch', vehicle.health,
-             vehicle._Vehicle__turretDetachmentConfirmed)) or True
-        battle._detached_turrets = turrets
+        turrets = battle._detached_turrets
         vehicle.onHealthChanged = lambda health, attacker, reason: order.append(
             ('health', health, vehicle._Vehicle__turretDetachmentConfirmed))
-
         battle._apply_health(record, self._ammo_bay_death_state())
-
-        self.assertEqual(
-            order,
-            [('prepare', _TURRET_DETACHED, True),
-             ('launch', _TURRET_DETACHED, True),
-             ('health', _TURRET_DETACHED, True)])
-        self.assertEqual(vehicle.health, _TURRET_DETACHED)
+        battle._advance_detached_turrets(10.0)
+        self.assertEqual([('health', _TURRET_DETACHED, True)], order)
         self.assertTrue(vehicle.isTurretMarkedForDetachment)
         self.assertFalse(vehicle.isTurretDetachmentConfirmationNeeded)
-        self.assertEqual(
-            turrets.launch.call_args[0][0], {'plan': True})
+        turrets.prepare_canonical.assert_not_called()
+        turrets.launch_canonical.assert_not_called()
+        row = self._canonical_turret_row()
+        self.assertTrue(battle._reconcile_detached_turret_snapshot({
+            'round_id': 7, 'detached_turrets': [row]}))
+        battle._advance_detached_turrets(10.1)
+        turrets.prepare_canonical.assert_called_once_with(vehicle, row)
+        plan, accepted, now, elapsed = turrets.launch_canonical.call_args[0]
+        self.assertEqual({'plan': True}, plan)
+        self.assertEqual(row, accepted)
+        self.assertEqual(10.1, now)
+        self.assertAlmostEqual(0.1, elapsed, places=2)
 
-    def test_a_failed_turret_launch_still_detaches_the_wreck(self):
-        for failure in (False, RuntimeError('collision query failed')):
-            with self.subTest(failure=failure):
-                battle, record, vehicle = self._ammo_bay_death_battle()
-                turrets = mock.Mock()
-                turrets.prepare.return_value = {'plan': True}
-                if isinstance(failure, Exception):
-                    turrets.launch.side_effect = failure
-                else:
-                    turrets.launch.return_value = failure
-                battle._detached_turrets = turrets
-                observed = []
-                vehicle.onHealthChanged = lambda health, attacker, reason: \
-                    observed.append((health,
-                                     vehicle._Vehicle__turretDetachmentConfirmed))
-
-                battle._apply_health(record, self._ammo_bay_death_state())
-
-                # The hull is turretless on every peer either way: retail
-                # carries the detachment in ALL_CLIENTS health, and the room's
-                # collision authority has already dropped the turret and gun
-                # hit testers.  A wreck that kept its turret only here would
-                # present armour nothing else in the room has.
-                self.assertEqual(vehicle.health, _TURRET_DETACHED)
-                self.assertTrue(vehicle._Vehicle__turretDetachmentConfirmed)
-                self.assertEqual(observed, [(_TURRET_DETACHED, True)])
+    def test_turret_echo_waits_for_native_source_detachment_before_create(self):
+        battle, record, vehicle = self._canonical_turret_battle()
+        row = self._canonical_turret_row()
+        battle._reconcile_detached_turret_snapshot({
+            'round_id': 7, 'detached_turrets': [row]})
+        battle._advance_detached_turrets(10.0)
+        battle._detached_turret_obstacles.add.assert_called_once()
+        battle._detached_turrets.prepare_canonical.assert_not_called()
+        self.assertFalse(vehicle.isTurretDetached)
+        battle._apply_health(record, self._ammo_bay_death_state())
+        battle._advance_detached_turrets(10.1)
+        self.assertTrue(vehicle.isTurretDetached)
+        battle._detached_turrets.prepare_canonical.assert_called_once()
+        battle._detached_turrets.launch_canonical.assert_called_once()
 
     def test_a_replayed_terminal_snapshot_keeps_the_turret_detached(self):
-        """-13 must not be demoted to -5 and refresh the compound again."""
-        battle, record, vehicle = self._ammo_bay_death_battle()
-        turrets = mock.Mock()
-        turrets.prepare.return_value = {'plan': True}
-        battle._detached_turrets = turrets
+        battle, record, vehicle = self._canonical_turret_battle()
         state = self._ammo_bay_death_state()
-
         battle._apply_health(record, state)
-        self.assertEqual(vehicle.health, _TURRET_DETACHED)
         vehicle.onHealthChanged = mock.Mock()
-
         battle._apply_health(record, dict(state), force_cause=True)
-
         self.assertEqual(vehicle.health, _TURRET_DETACHED)
         vehicle.onHealthChanged.assert_not_called()
-        self.assertEqual(turrets.prepare.call_count, 1)
-        self.assertEqual(turrets.launch.call_count, 1)
+        battle._detached_turrets.prepare_canonical.assert_not_called()
+        battle._detached_turrets.launch_canonical.assert_not_called()
 
-    def test_an_undrawable_turret_still_leaves_a_turretless_wreck(self):
-        """A missing exploded model costs the flight, never the detachment."""
-        battle, record, vehicle = self._ammo_bay_death_battle()
-        turrets = mock.Mock()
-        turrets.prepare.return_value = None
-        battle._detached_turrets = turrets
+    def test_failed_canonical_visual_retries_without_repeating_vehicle_death(self):
+        for failure in (None, RuntimeError('no turret ring')):
+            with self.subTest(failure=failure):
+                battle, record, vehicle = self._canonical_turret_battle()
+                battle._apply_health(record, self._ammo_bay_death_state())
+                vehicle.onHealthChanged = mock.Mock()
+                turrets = battle._detached_turrets
+                turrets.prepare_canonical.side_effect = [failure, {'plan': True}]
+                row = self._canonical_turret_row()
+                battle._reconcile_detached_turret_snapshot({
+                    'round_id': 7, 'detached_turrets': [row]})
+                battle._advance_detached_turrets(10.0)
+                battle._advance_detached_turrets(10.1)
+                turrets.launch_canonical.assert_not_called()
+                battle._advance_detached_turrets(10.3)
+                self.assertEqual(2, turrets.prepare_canonical.call_count)
+                turrets.launch_canonical.assert_called_once()
+                self.assertTrue(vehicle.isTurretDetached)
+                vehicle.onHealthChanged.assert_not_called()
 
+    def test_unseen_or_late_entity_replays_canonical_turret_when_available(self):
+        battle, record, vehicle = self._canonical_turret_battle(drawn=False)
+        row = self._canonical_turret_row()
+        battle._records = {}
+        battle._reconcile_detached_turret_snapshot({
+            'round_id': 7, 'detached_turrets': [row]})
+        battle._advance_detached_turrets(10.0)
+        turrets = battle._detached_turrets
+        turrets.prepare_canonical.assert_not_called()
+        battle._records['bot:11'] = record
+        record['ready'] = False
+        battle._advance_detached_turrets(10.3)
+        battle._detached_turret_obstacles.add.assert_not_called()
+        record['ready'] = True
+        battle._advance_detached_turrets(10.6)
+        battle._detached_turret_obstacles.add.assert_called_once()
+        turrets.prepare_canonical.assert_not_called()
+        battle._turret_obstacle_in_view.return_value = True
+        battle._advance_detached_turrets(10.9)
+        turrets.prepare_canonical.assert_not_called()
         battle._apply_health(record, self._ammo_bay_death_state())
+        turrets.launch_canonical.side_effect = lambda *args: setattr(
+            turrets.has_vehicle, 'return_value', True) or True
+        battle._advance_detached_turrets(14.0)
+        battle._advance_detached_turrets(14.3)
+        turrets.launch_canonical.assert_called_once()
+        self.assertEqual(4.0, turrets.launch_canonical.call_args[0][3])
+        self.assertEqual(row, battle._detached_turret_rows['bot:11'])
 
-        self.assertEqual(vehicle.health, _TURRET_DETACHED)
-        self.assertTrue(vehicle.isTurretDetached)
-        turrets.launch.assert_not_called()
-
-    def test_a_failed_prepare_still_marks_the_turret_detached(self):
-        battle, record, vehicle = self._ammo_bay_death_battle()
-        turrets = mock.Mock()
-        turrets.prepare.side_effect = RuntimeError('no turret ring')
-        battle._detached_turrets = turrets
-
-        battle._apply_health(record, self._ammo_bay_death_state())
-
-        self.assertEqual(vehicle.health, _TURRET_DETACHED)
-        turrets.launch.assert_not_called()
-
-    def test_an_unseen_ammo_bay_death_throws_no_turret(self):
-        """Retail has no DetachedTurret in AOI for a target never spotted.
-
-        Its ``health`` is still ALL_CLIENTS, so the wreck itself is turretless
-        for everyone; only the flying entity is missing.
-        """
-        battle, record, vehicle = self._ammo_bay_death_battle(drawn=False)
-        turrets = mock.Mock()
-        battle._detached_turrets = turrets
-
-        battle._apply_health(record, self._ammo_bay_death_state())
-
-        self.assertEqual(vehicle.health, _TURRET_DETACHED)
-        turrets.prepare.assert_not_called()
-        turrets.launch.assert_not_called()
-
-    def test_the_worker_detaches_without_resolving_a_visual_arc(self):
-        battle, record, vehicle = self._ammo_bay_death_battle()
+    def test_the_worker_resolves_one_frozen_proposal_without_local_visuals(self):
+        battle, record, vehicle = self._canonical_turret_battle()
         battle._worker_mode = True
-        battle._turret_detachment_pose = mock.Mock(
-            side_effect=AssertionError('worker must not plan a visual arc'))
-        battle._collide_detached_turret = mock.Mock(
-            side_effect=AssertionError('worker must not query a visual arc'))
-
-        battle._apply_health(record, self._ammo_bay_death_state())
-        battle._apply_health(record, self._ammo_bay_death_state())
-
-        self.assertEqual(vehicle.health, _TURRET_DETACHED)
+        row = self._canonical_turret_row()
+        plan = {key: row[key] for key in ('flight', 'attitude', 'spin')}
+        with mock.patch.object(battle_runtime_module, 'freeze_obstacle_plan',
+                               return_value=plan) as freeze:
+            battle._apply_health(record, self._ammo_bay_death_state())
+            battle._apply_health(record, self._ammo_bay_death_state())
+            freeze.assert_called_once()
         self.assertTrue(vehicle.isTurretDetached)
-        battle._turret_detachment_pose.assert_not_called()
-        battle._collide_detached_turret.assert_not_called()
+        proposal = battle._detached_turret_proposals['bot:11']
+        self.assertNotIn('created_time_ms', proposal)
+        self.assertEqual(row['flight'], proposal['flight'])
+        battle._advance_detached_turrets(10.0)
+        battle._detached_turret_obstacles.add.assert_not_called()
+        battle._reconcile_detached_turret_snapshot({
+            'round_id': 7, 'detached_turrets': [row]})
+        battle._advance_detached_turrets(10.1)
+        self.assertEqual({}, battle._detached_turret_proposals)
+        battle._detached_turret_obstacles.add.assert_called_once()
+        battle._detached_turrets.prepare_canonical.assert_not_called()
+        battle._detached_turrets.launch_canonical.assert_not_called()
+
+    def test_worker_flight_failure_keeps_death_and_retries_one_proposal(self):
+        battle, record, vehicle = self._canonical_turret_battle()
+        battle._worker_mode = True
+        now = [10.0]
+        battle._clock = lambda: now[0]
+        row = self._canonical_turret_row()
+        plan = {key: row[key] for key in ('flight', 'attitude', 'spin')}
+        record['state'].update(self._ammo_bay_death_state())
+        vehicle.onHealthChanged = mock.Mock(wraps=vehicle.onHealthChanged)
+        with mock.patch.object(
+                battle_runtime_module, 'freeze_obstacle_plan',
+                side_effect=[RuntimeError('world query unavailable'), plan]) as freeze:
+            battle._apply_health(record, self._ammo_bay_death_state())
+            self.assertTrue(vehicle.isTurretDetached)
+            self.assertEqual({}, battle._detached_turret_proposals)
+            now[0] = 10.1
+            battle._advance_detached_turrets(now[0])
+            freeze.assert_called_once()
+            now[0] = 10.3
+            battle._advance_detached_turrets(now[0])
+            self.assertEqual(2, freeze.call_count)
+        self.assertEqual({'bot:11'}, set(battle._detached_turret_proposals))
+        vehicle.onHealthChanged.assert_not_called()
+        self.assertFalse(vehicle.isCrewActive)
+
+    def test_turret_snapshots_keep_first_record_and_ignore_bad_or_foreign_rows(self):
+        battle, unused_record, unused_vehicle = self._canonical_turret_battle()
+        row = self._canonical_turret_row()
+        foreign = self._canonical_turret_row(actor_id=12)
+        self.assertFalse(battle._reconcile_detached_turret_snapshot({
+            'round_id': 8, 'detached_turrets': [foreign]}))
+        self.assertTrue(battle._reconcile_detached_turret_snapshot({
+            'round_id': 7, 'detached_turrets': [None, {}, row]}))
+        rewritten = copy.deepcopy(row)
+        rewritten['flight']['rest'][0] = 999
+        rewritten['created_time_ms'] = 2000
+        for fields in ({}, {'detached_turrets': []},
+                       {'detached_turrets': [rewritten]}):
+            self.assertFalse(battle._reconcile_detached_turret_snapshot(
+                dict(fields, round_id=7)))
+            self.assertEqual({'bot:11': row}, battle._detached_turret_rows)
+
+    def test_live_turret_proposals_travel_with_real_worker_checkpoint_edges(self):
+        import test_port_0922_lan_client_projectiles as wire_fixtures
+        battle, unused_record, unused_vehicle = self._canonical_turret_battle()
+        battle._worker_mode = True
+        battle._battle_live = True
+        client = wire_fixtures.ProjectileWireTests().active_worker_client()
+        battle.client = client
+        row = self._canonical_turret_row()
+        proposal = dict(row)
+        proposal.pop('created_time_ms')
+        battle._detached_turret_proposals['bot:11'] = proposal
+        battle._advance_detached_turrets(10.0)
+        self.assertEqual([], client._outbound_queue)
+        self.assertTrue(battle._send_bot_message({
+            'type': 'bot_state', 'rows': [[11]],
+            'edge_sample_time_us': 1, 'edge_revision': 1}))
+        payload = wire_fixtures.wire_copy(client._outbound_queue[0][1])
+        self.assertEqual([[11]], payload['rows'])
+        self.assertEqual([proposal], payload['detached_turrets'])
+        self.assertEqual(client.authority_epoch, payload['authority_epoch'])
+
+    def test_final_turret_proposal_uses_real_worker_tail_transport_after_battle(self):
+        import test_port_0922_lan_client_projectiles as wire_fixtures
+        import test_port_0922_server_projectiles as server_fixtures
+        battle, unused_record, unused_vehicle = self._canonical_turret_battle()
+        battle._worker_mode = True
+        battle._battle_live = False
+        battle._battle_result = {'winner': 1}
+        client = wire_fixtures.ProjectileWireTests().active_worker_client()
+        battle.client = client
+        battle._start_message = {'round_id': client.round_id}
+        row = self._canonical_turret_row('player', 2)
+        proposal = dict(row)
+        proposal.pop('created_time_ms')
+        battle._detached_turret_proposals['player:2'] = proposal
+        battle._advance_detached_turrets(10.0)
+        self.assertEqual(1, len(client._outbound_queue))
+        payload = wire_fixtures.wire_copy(client._outbound_queue[0][1])
+        self.assertEqual('bot_state', payload['type'])
+        self.assertEqual([], payload['rows'])
+        self.assertEqual([proposal], payload['detached_turrets'])
+        state = server_fixtures._state(players=4)
+        state.round_id = client.round_id
+        state.authority_epoch = client.authority_epoch
+        state.bot_manifest_authority_id = state.bot_authority_id
+        state.players[2].health = 0
+        state.players[2].alive = False
+        state.players[2].critical['ammo_rack_death'] = True
+        state.battle_result = {'winner': 1}
+        self.assertTrue(state.update_bot_states(state.bot_authority_id, payload))
+        accepted = state._detached_turret_snapshot()
+        self.assertEqual(1, len(accepted))
+        battle._advance_detached_turrets(10.1)
+        self.assertEqual(1, len(client._outbound_queue))
+        battle._advance_detached_turrets(10.3)
+        self.assertEqual(2, len(client._outbound_queue))
+        battle._reconcile_detached_turret_snapshot({
+            'round_id': client.round_id, 'detached_turrets': accepted})
+        battle._advance_detached_turrets(10.6)
+        self.assertEqual(2, len(client._outbound_queue))
+        self.assertEqual({}, battle._detached_turret_proposals)
+
+    def test_turret_cleanup_discards_round_records_and_both_native_owners(self):
+        battle, unused_record, unused_vehicle = self._canonical_turret_battle()
+        row = self._canonical_turret_row()
+        battle._detached_turret_rows['bot:11'] = row
+        battle._detached_turret_proposals['bot:12'] = dict(row, actor_id=12)
+        battle._detached_turret_geometry.add('bot:11')
+        battle._detached_turret_retry['visual:bot:11'] = 10.25
+        obstacles = battle._detached_turret_obstacles
+        turrets = battle._detached_turrets
+        battle._quiesce_native_presentations()
+        battle._quiesce_native_presentations()
+        self.assertEqual({}, battle._detached_turret_rows)
+        self.assertEqual({}, battle._detached_turret_proposals)
+        self.assertEqual(set(), battle._detached_turret_geometry)
+        self.assertEqual({}, battle._detached_turret_retry)
+        self.assertEqual(2, obstacles.clear.call_count)
+        self.assertEqual(2, turrets.destroy_all.call_count)
 
     def test_a_plain_death_never_touches_the_detachment_flag(self):
-        battle, record, vehicle = self._ammo_bay_death_battle()
-        turrets = mock.Mock()
-        battle._detached_turrets = turrets
-
+        battle, record, vehicle = self._canonical_turret_battle()
         battle._apply_health(record, {'health': 0, 'alive': False})
-
         self.assertEqual(vehicle.health, 0)
-        turrets.prepare.assert_not_called()
+        battle._detached_turrets.prepare_canonical.assert_not_called()
         self.assertFalse(vehicle._Vehicle__turretDetachmentConfirmed)
 
     def test_native_remove_paths_clear_outline_before_entity_destruction(self):
@@ -16665,6 +16767,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._fail = mock.Mock()
         return battle
 
+    def test_detached_turret_lifecycle_continues_after_battle_result(self):
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                runtime = _runtime()
+                runtime.bigworld.now = 1.0
+                battle = self._live_frame_battle(runtime)
+                battle._worker_mode = worker
+                battle._battle_live = False
+                battle._battle_result = {'winner': 1}
+                battle._advance_detached_turrets = mock.Mock()
+                battle._frame()
+                battle._advance_detached_turrets.assert_called_once_with(1.0)
+                battle._fail.assert_not_called()
+
     def test_a_failing_spotting_pull_is_retried_not_retired(self):
         """Spotting is pulled every frame, so one failure must not blind the round."""
         runtime = _runtime()
@@ -19323,6 +19439,141 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._motion_is_clear.assert_called_once()
         self.assertFalse(
             battle._motion_is_clear.call_args.kwargs['allow_crush_drive'])
+
+    def test_landed_turret_blocks_player_translation_before_world_queries(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_pitch, battle._local_roll = 0.2, -0.1
+        battle._turret_server_time_ms = lambda: 1250.0
+        block = mock.Mock(return_value=True)
+        battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
+        entity = types.SimpleNamespace(typeDescriptor=_Descriptor())
+        for speed, travel, hull in ((4.0, 0.4, None), (-4.0, 0.4, None),
+                                    (4.0, -0.55, 0.4)):
+            with self.subTest(speed=speed, travel=travel, hull=hull), mock.patch(
+                    'gui.mods.offline_lan_0922.battle_runtime.'
+                    'world_collision.check_horizontal_collision') as world:
+                block.reset_mock()
+                self.assertFalse(battle._motion_is_clear(
+                    entity, (1.0, 2.0, 3.0), travel, speed, 0.1,
+                    hull_yaw=hull))
+                before, after, descriptor, clock = block.call_args.args
+                self.assertEqual((0.2, -0.1), (before['pitch'], before['roll']))
+                self.assertEqual(travel if hull is None else hull, before['yaw'])
+                self.assertAlmostEqual(1.0 + math.sin(travel) * speed * 0.1, after['x'])
+                self.assertAlmostEqual(3.0 + math.cos(travel) * speed * 0.1, after['z'])
+                self.assertIs(entity.typeDescriptor, descriptor)
+                self.assertEqual(1250.0, clock)
+                self.assertEqual('detached_turret', battle._local_motion_kinds)
+                world.assert_not_called()
+
+    def test_landed_turret_blocks_player_rotation_and_allows_clear_escape(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_pitch, battle._local_roll = 0.2, -0.1
+        battle._turret_server_time_ms = lambda: 1300.0
+        block = mock.Mock(return_value=True)
+        battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
+        entity = types.SimpleNamespace(typeDescriptor=_Descriptor())
+        battle._destructible_pose_sweep = mock.Mock()
+        self.assertFalse(battle._pose_sweep_is_clear(
+            entity, (1.0, 2.0, 3.0), 0.0, (1.0, 2.0, 3.0), 0.2, 0.0, 0.1))
+        before, after, descriptor, clock = block.call_args.args
+        self.assertEqual((0.0, 0.2), (before['yaw'], after['yaw']))
+        battle._destructible_pose_sweep.assert_not_called()
+        block.return_value = False
+        self.assertTrue(battle._turret_motion_is_clear(before, after, descriptor))
+        battle._detached_turret_obstacles = None
+        self.assertTrue(battle._turret_motion_is_clear(before, after, descriptor))
+
+    def test_landed_turret_preempts_bot_cached_world_clear_receipt(self):
+        battle = BattleRuntime(_runtime())
+        battle._turret_server_time_ms = lambda: 1500.0
+        block = mock.Mock(return_value=True)
+        battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
+        reusable = mock.Mock(return_value=True)
+        battle._bots = types.SimpleNamespace(states={11: {
+            'movement_dir': 1, 'airborne': False, 'terrain_pitch': 0.1,
+            'pitch': 0.2, 'roll': -0.1,
+        }}, motion_world_corridor_reusable=reusable)
+        battle._destructibles = mock.Mock()
+        battle._destructibles._catalog_hull_contact.return_value = False
+        descriptor = _Descriptor()
+        for speed, motion in ((4.0, None), (-4.0, None), (4.0, -0.55)):
+            with self.subTest(speed=speed, motion=motion):
+                self.assertEqual('hard', battle._resolve_bot_motion(
+                    11, (1.0, 2.0, 3.0), 0.4, speed, descriptor, 0.1, 5.0,
+                    motion_yaw=motion))
+                before, after, used, clock = block.call_args.args
+                angle = motion if motion is not None else 0.4
+                distance = abs(speed) * 0.1 if motion is not None else speed * 0.1
+                self.assertAlmostEqual(1.0 + math.sin(angle) * distance, after['x'])
+                self.assertAlmostEqual(3.0 + math.cos(angle) * distance, after['z'])
+                self.assertEqual((0.4, 0.2, -0.1), (before['yaw'], before['pitch'], before['roll']))
+                self.assertEqual(0.1, before['chassis']['pitch'])
+                self.assertEqual(0.1, after['chassis']['pitch'])
+                self.assertEqual((before['x'], before['z']),
+                                 (before['chassis']['x'], before['chassis']['z']))
+                self.assertEqual((after['x'], after['z']),
+                                 (after['chassis']['x'], after['chassis']['z']))
+                self.assertIs(descriptor, used)
+                self.assertEqual(1500.0, clock)
+        reusable.assert_not_called()
+        battle._destructibles._catalog_motion_blocked.assert_not_called()
+
+    def test_landed_turret_rejects_final_player_suspension_pose_and_landing(self):
+        for changed in ('y', 'pitch', 'roll'):
+            with self.subTest(changed=changed):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle.client = _Client()
+                battle._avatar = runtime.bigworld.avatar
+                entity = _Vehicle(
+                    10, _Descriptor(), _Vector(2, 3, 4), (0, 0, 0),
+                    {'health': 500})
+                runtime.bigworld.entities[10] = entity
+                battle._server = types.SimpleNamespace(vehicle_id=10)
+                battle._sender = types.SimpleNamespace(
+                    forward=0.0, turn=0.0, handbrake=False,
+                    send_current=mock.Mock(return_value=True))
+                battle._local_position = (2.0, 3.0, 4.0)
+                battle._local_descriptor = entity.typeDescriptor
+                battle._attach_local_presentation()
+                battle._pending_landing_impacts = [9.0]
+                battle._turret_server_time_ms = lambda: 1500.0
+                block = mock.Mock(side_effect=lambda before, after, *unused:
+                                  abs(after[changed] - before[changed]) > 0.01)
+                battle._detached_turret_obstacles = types.SimpleNamespace(
+                    sweep_blocks=block)
+                battle._smoothed_drive_pitch = mock.Mock(return_value=0.0)
+                battle._motion_is_clear = mock.Mock(return_value=True)
+                battle._ground_pitch = mock.Mock(return_value=0.0)
+                battle._apply_slope_slide = mock.Mock(
+                    side_effect=lambda position, *unused: position)
+                battle._resolve_local_tank_contacts = mock.Mock(
+                    side_effect=lambda unused_entity, position, *unused: position)
+
+                def settle(unused_entity, position, unused_yaw, unused_dt):
+                    battle._local_pitch = 0.3
+                    battle._local_roll = -0.2
+                    battle._local_spring_ground_memory = [5.0]
+                    battle._pending_landing_impacts.append(15.0)
+                    return (position[0], position[1] - 0.5, position[2])
+
+                battle._update_vertical_motion = settle
+                before = battle._local_suspension_state_snapshot()
+                with mock.patch(
+                        'gui.mods.offline_lan_0922.battle_runtime.'
+                        'vehicle_physics.longitudinal_step', return_value=0.0), \
+                        mock.patch(
+                            'gui.mods.offline_lan_0922.battle_runtime.'
+                            'vehicle_physics.traverse_step', return_value=0.0):
+                    battle._drive_local_step(0.1)
+
+                self.assertEqual((2.0, 3.0, 4.0), battle._local_position)
+                self.assertEqual(before, battle._local_suspension_state_snapshot())
+                self.assertEqual('detached_turret', battle._local_motion_kinds)
+                self.assertEqual('hard', battle._local_motion_status)
+                self.assertEqual((2.5, 0.3, -0.2), tuple(
+                    block.call_args.args[1][key] for key in ('y', 'pitch', 'roll')))
 
     def test_bot_braking_opposite_motion_does_not_enable_cap_crush(self):
         runtime = _runtime()
@@ -30367,6 +30618,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             bots._probe_started = lambda: None
             bots._probe_finished = lambda index, started: None
             bots._physics_ground_probe = lambda x, z, hint: 2.0
+            bots._turret_motion_probe = None
             bots.set_camera_position((0.0, 0.0, 0.0))
             for step in range(20):
                 state['x'] += 0.5

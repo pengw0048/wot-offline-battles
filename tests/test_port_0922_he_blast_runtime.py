@@ -359,6 +359,25 @@ class HEBlastSurfaceRuntimeTests(unittest.TestCase):
             scene_start, (5.0005, 1.0, 0.0), burst))
         self.assertEqual(calls, len(bigworld.calls))
 
+    def test_landed_turret_blocks_he_rays_at_the_projectile_clock(self):
+        battle, unused_world = _runtime()
+        battle._detached_turret_obstacles = mock.Mock()
+        probe = battle._detached_turret_obstacles.block_distance
+        probe.return_value = 1.0
+        scene_start = _Vector((5.0, 1.0, 0.0))
+        burst = _Vector((5.002, 1.0, 0.0))
+        self.assertFalse(battle._projectile_he_world_visible(
+            scene_start, (8.0, 1.0, 0.0), burst, server_time_ms=1200))
+        self.assertEqual(1200, probe.call_args.args[2])
+        probe.return_value = None
+        self.assertTrue(battle._projectile_he_world_visible(
+            scene_start, (8.0, 1.0, 0.0), burst, server_time_ms=900))
+        self.assertEqual(900, probe.call_args.args[2])
+        probe.return_value = 3.0
+        self.assertTrue(battle._projectile_he_world_visible(
+            scene_start, (8.0, 1.0, 0.0), burst, server_time_ms=1200))
+
+
 
 class HEBlastEffectRuntimeTests(unittest.TestCase):
 

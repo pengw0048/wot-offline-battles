@@ -2412,7 +2412,7 @@ The ABI audit pins the negative constants and marker consumer; regression
 tests fail against the old zero-only presentation for local, remote and late
 ammo-rack deaths.
 
-Turret detachment is now presented, with its flight authored locally. Every
+Turret detachment uses one worker-authored flight accepted by the LAN server. Every
 half of the presentation is stock. `SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED`
 (-13) is `AMMO_BAY_DESTROYED` (-5) with one further bit cleared, so a
 detached wreck is also ammo-bay destroyed; `vehicle_damage_state` maps -13 to
@@ -2451,28 +2451,42 @@ here:
   building facade and from reporting a ground material for a vertical
   surface. That is containment for a missing normal, not an invented
   restitution coefficient, and it is bounded to three deflections.
-- **The seed freezes the launch impulse.** `critical.ammo_rack_death`
+- **The worker freezes the whole flight.** `critical.ammo_rack_death`
   rides the combat event and `F_AMMO_RACK_DEATH` rides the positional Bot
-  row, so `stable_seed(round_id, engine_id)` selects the same impulse on
-  each peer. The launch ring is `chassis.hullPosition +
-  hull.turretPositions[0]` over the latest admitted terminal pose available
-  on that client, matching the point `Vehicle.getComponents` builds.
-  This avoids reading a compound already replaced by a death callback.
-  Health-only events contain no frozen pose: snapshot arrival times and
-  local broken-skin state can still produce different cosmetic rest poses.
-- **The thrown turret remains presentation only.** Its flying and landed
-  entity blocks neither shots nor vehicles. Retail's `DetachedTurret` is a
-  cell-physics body with `receiveShot`, `receiveExplosion` and
-  `onDamageVehicle`, but the hidden worker owns no such body. Visible clients
-  can omit a turret for an unseen vehicle, a full model budget or a failed
-  asynchronous load, and no later AOI admission restores that omitted
-  presentation. Installing an independent worker obstacle would therefore
-  create invisible bullet blockers. Authoritative landed geometry requires a
-  canonical rest pose and recoverable presentation before it can be enabled.
-  The visual entity retains `ProjectileAwareEntities` membership for stock
-  cleanup, and the existing `_offlineNativeRemote` draw gate excludes it from
-  local dynamic collision. `isCollidingWithWorld` remains false to prevent
-  the stock drag effect from reading the never-fed filter's native velocity.
+  row. The worker derives the impulse from round and actor identity, resolves
+  the launch ring from `chassis.hullPosition + hull.turretPositions[0]` and
+  the admitted terminal pose, then proposes the frozen flight, attitude and
+  spin. The server accepts a record only for a confirmed ammo-rack wreck
+  from the current worker and authority epoch, stamps its creation time and
+  keeps the first record immutable. Snapshots and late joins replay that
+  cumulative ledger; malformed rows do not reject a valid motion checkpoint.
+  Final deaths can still publish their records after the battle result.
+- **Landed turrets are static obstacles.** After the accepted landing time,
+  shells query the separate descriptor turret and gun hit testers in the
+  accepted rest frame. The nearest turret caps scenery queries before they
+  can destroy props beyond it, and also occludes HE blast rays. Historic
+  projectile chords test the landing time at the actual hit fraction.
+  Vehicle translation, rotation, suspension and contact displacement sweep
+  the actual chassis and hull boxes against the separate turret/gun boxes.
+  Navigation receives those two component footprints and invalidates old
+  routes when they land. Initial overlap can retreat through its shallowest
+  contact face instead of trapping a tank that the turret landed on. Final
+  rest height supports every rotated turret/gun corner. There is no substitute
+  geometry when a descriptor or hit tester is missing, and a flight with no
+  ground contact creates no obstacle. This implements static blocking only;
+  the retail cell body can additionally be pushed, roll and damage tanks.
+  The stock visual remains outside local dynamic collision so it cannot
+  compete with these shared queries. `isCollidingWithWorld` remains false
+  to avoid reading the never-fed filter's native velocity for drag effects.
+
+The server admits at most twelve detached turrets per round, matching the
+32-bit client's resident model budget. Every accepted record can be displayed
+when the camera enters range, even if that client never saw the original
+explosion. Preparation waits for the source Vehicle's normal started and
+detached lifecycle, and creation uses the accepted elapsed flight/rest pose
+without local collision queries. A failed asynchronous attempt retains its
+identity until safe native retirement; retries have a bounded cadence and
+never allocate a second unresolved entity for the same actor.
 
 The handshake order is load-bearing. `SynchronousDetachment._onDirectTick`
 runs synchronously inside `createEntity` and, while
@@ -2481,8 +2495,8 @@ runs synchronously inside `createEntity` and, while
 own never-fed `WGVehicleFilter`. The runtime therefore writes -13 and
 pre-sets `_Vehicle__turretDetachmentConfirmed` -- whose only writer in #1513
 is `confirmTurretDetachment`, which is that flag plus a models refresh --
-before creating the turret and calling `onHealthChanged`. That collapses
-retail's two refreshes into the one `onHealthChanged` already performs, so a
+before calling `onHealthChanged`; the accepted turret is created afterward.
+That collapses retail's two refreshes into the one `onHealthChanged` already performs, so a
 turretless assembler cannot
 lose a background-load race against a turreted one for the same `exploded`
 model state, and it keeps that native call from happening at all. Only
@@ -2499,10 +2513,10 @@ This port's own component enumeration is now the same triple, and every
 consumer of it -- armour collision, HE blast probes, damage-sticker encoding
 and the interior-module geometry -- skips an unattached part. Without that,
 an ammo-bay wreck kept a full-armour turret and gun hanging in the air above
-a hull that no longer had either. A missing exploded model, a full turret
-budget, an undrawn target or a failed `createEntity` therefore costs the
-*flight*, never the detachment: retail has no `DetachedTurret` in AOI for a
-vehicle never spotted, but its wreck is turretless for everyone regardless.
+a hull that no longer had either. A missing exploded model or a full accepted
+record budget prevents a new flight proposal, while transient visual creation
+failures remain retryable. None of these conditions restores armour to the
+source wreck.
 
 Live interior probes use the same LAN body and chassis matrices as exterior
 armour queries. Stock `getComponents` includes transforms through the native
@@ -2531,25 +2545,25 @@ a reproducible adapter defect, not native Windows flight acceptance.
 
 A late ammo-bay cause can arrive after the ordinary death edge. It now admits
 one detachment from the wreck's admitted terminal pose, even though the health
-signature is already terminal. A per-record launch attempt fence and the
-native detached-health flag suppress repeated snapshot launches. Detachment
+signature is already terminal. The immutable actor record and native
+detached-health flag suppress duplicate throws and repeated wreck refreshes. Detachment
 updates `appearance.damageState` with the special health, crew state and water
 state even if the flying entity cannot be created, then calls
 `Vehicle.confirmTurretDetachment` for its single
 model refresh. Exact #1513 `CompoundAppearance.onVehicleHealthChanged` also
 calls the input-handler death hook and `processVehicleDeath`; the late path
 must not call it or replay `Vehicle.onHealthChanged`, kill credit or death
-feedback. Failed creation leaves the turretless wreck without a flight and
-does not retry on every snapshot. The original reported match did not log
+feedback. A failed visual creation leaves the wreck detached and retries
+through the presentation owner. The original reported match did not log
 terminal-cause ordering, so this repairs a reproduced ordering gap without
 claiming that match's root cause is established.
 
-The cosmetic arc uses the same per-column broken-skin filter as the motion
-probes, so a turret does not rest on a fence skin the room already accepted as
-broken. The hidden worker only writes the detachment fact; it neither resolves
-this visual arc nor registers thrown-turret collision geometry. Regressions
-cover detached turret/gun exclusion from armour, blast, sticker and interior
-queries, late-cause idempotence, presentation failure and worker arc isolation.
+The worker's arc uses the same per-column broken-skin filter as motion
+probes, so a turret does not rest on an already destroyed fence skin. The
+worker keeps descriptor collision geometry without loading a visual compound.
+Regressions cover attachment exclusion, canonical replay, final-death delivery,
+late visibility, asynchronous retirement, separate component hit tests,
+continuous motion blocking and human/Bot projectile parity.
 
 The ABI audit pins all of it against `scripts.pkg`: the 22 `DetachedTurret`
 signatures, `Vehicle.confirmTurretDetachment`, both special health constants,

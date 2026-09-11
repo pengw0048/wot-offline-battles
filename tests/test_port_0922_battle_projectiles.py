@@ -1167,6 +1167,65 @@ class BattleProjectileTests(unittest.TestCase):
                     self.assertEqual(25.0, data['piercing_loss'])
                     self.assertEqual(1.0, data['penetration_factor'])
 
+    def test_landed_turret_stops_human_and_bot_shots_before_props(self):
+        for shooter_kind in ('player', 'bot'):
+            with self.subTest(shooter=shooter_kind):
+                battle, unused_world, unused_target, state = (
+                    self._vehicle_chord_battle(shooter_kind, 'bot'))
+                battle._projectile_server_time_ms = 2000
+                battle._projectile_server_local_time = 1.0
+                obstacle = mock.Mock()
+                obstacle.block_distance.return_value = 5.0
+                battle._detached_turret_obstacles = obstacle
+                reached = []
+
+                def scene(unused_world, unused_space, start, end,
+                          unused_direction, unused_shot, diagnostic=None):
+                    for prop_distance in (4.0, 7.0):
+                        if (end - start).length >= prop_distance:
+                            reached.append(prop_distance)
+                    return {'world_distance': 999999.0,
+                            'piercing_loss': 25.0,
+                            'stop_distance': None, 'continue_from': None}
+
+                battle._destructibles = types.SimpleNamespace(
+                    shot_world_distance=mock.Mock(side_effect=scene))
+                terminal = battle._projectile_chord(
+                    state, (0.0, 1.0, 0.0), (12.0, 1.0, 0.0), 0.0, 0.1)
+                data = battle._projectile_terminal_data[state['key']]
+                self.assertEqual('impact', terminal['reason'])
+                self.assertAlmostEqual(5.0 / 12.0, terminal['fraction'])
+                self.assertIsNone(data['target_key'])
+                self.assertEqual('detached_turret', data['stop_reason'])
+                self.assertEqual([4.0], reached)
+                self.assertEqual(1100, obstacle.block_distance.call_args.args[2])
+                self.assertEqual({'start_time_ms': 1000},
+                                 obstacle.block_distance.call_args.kwargs)
+
+    def test_a_landed_turret_behind_the_target_cannot_steal_its_hit(self):
+        battle, unused_world, target_key, state = self._vehicle_chord_battle(
+            'player', 'bot')
+        battle._detached_turret_obstacles = mock.Mock()
+        battle._detached_turret_obstacles.block_distance.return_value = 11.0
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (12.0, 1.0, 0.0), 0.0, 0.1)
+        self.assertEqual('impact', terminal['reason'])
+        self.assertEqual(target_key,
+                         battle._projectile_terminal_data[state['key']]['target_key'])
+
+    def test_scenery_before_a_landed_turret_keeps_its_terminal(self):
+        battle, bigworld, unused_target, state = self._vehicle_chord_battle(
+            'player', 'bot')
+        bigworld.wall_x = 3.0
+        battle._detached_turret_obstacles = mock.Mock()
+        battle._detached_turret_obstacles.block_distance.return_value = 5.0
+        terminal = battle._projectile_chord(
+            state, (0.0, 1.0, 0.0), (12.0, 1.0, 0.0), 0.0, 0.1)
+        self.assertAlmostEqual(3.0 / 12.0, terminal['fraction'])
+        data = battle._projectile_terminal_data[state['key']]
+        self.assertIsNone(data['target_key'])
+        self.assertNotEqual('detached_turret', data['stop_reason'])
+
     def test_all_shooter_target_pairs_respect_a_wall_20_cm_before_hit(self):
         for shooter_kind in ('player', 'bot'):
             for target_kind in ('player', 'bot'):

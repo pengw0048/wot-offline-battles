@@ -16,6 +16,7 @@ from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import siege_mechanics
 from gui.mods.offline_lan_0922 import spotting
+from gui.mods.offline_lan_0922 import turret_obstacle_schema
 
 
 PROTOCOL_VERSION = 5
@@ -1560,6 +1561,8 @@ class LANClient(object):
         self.server_capabilities = []
         self._schema_negotiated = False
         self.last_snapshot = None
+        self._detached_turret_round_id = None
+        self._detached_turrets = {}
         self.last_error = None
         self.rtt_ms = None
         self.minimum_rtt_ms = None
@@ -1625,6 +1628,8 @@ class LANClient(object):
             self.server_capabilities = []
             self._schema_negotiated = False
             self.authority_epoch = None
+            self._detached_turret_round_id = None
+            self._detached_turrets = {}
             self.server_time_ms = None
             self.rtt_ms = None
             self.minimum_rtt_ms = None
@@ -3115,9 +3120,44 @@ class LANClient(object):
                 player_collision_profiles or ())[:64]
         return self._send(message)
 
+    def _attach_detached_turret_proposals(self, message, rows):
+        proposals = []
+        if isinstance(rows, (list, tuple)):
+            for raw in rows[:turret_obstacle_schema.MAX_ACTIVE_TURRETS]:
+                row = turret_obstacle_schema.normalize_proposal(raw)
+                if row is not None:
+                    proposals.append(row)
+        message['detached_turrets'] = proposals
+        message['authority_epoch'] = self.authority_epoch
+
+    def _adopt_detached_turrets(self, message):
+        """Retain immutable server records until the accepted round changes."""
+        round_id = message.get('round_id')
+        if self._detached_turret_round_id != round_id:
+            self._detached_turret_round_id = round_id
+            self._detached_turrets = {}
+        rows = message.get('detached_turrets')
+        if isinstance(rows, (list, tuple)):
+            for raw in rows[:turret_obstacle_schema.MAX_ACTIVE_TURRETS]:
+                row = turret_obstacle_schema.normalize_record(raw)
+                if row is None:
+                    continue
+                key = turret_obstacle_schema.row_key(row)
+                if (key not in self._detached_turrets and
+                        len(self._detached_turrets) <
+                        turret_obstacle_schema.MAX_ACTIVE_TURRETS):
+                    self._detached_turrets[key] = row
+        if 'detached_turrets' not in message and not self._detached_turrets:
+            return message
+        message = dict(message)
+        message['detached_turrets'] = [
+            turret_obstacle_schema.normalize_record(self._detached_turrets[key])
+            for key in sorted(self._detached_turrets)]
+        return message
+
     def send_bot_state(self, rows, sample_time_us=None,
                        source_batch_horizon_us=None,
-                       human_ram_armors=None):
+                       human_ram_armors=None, detached_turrets=None):
         if not self.is_bot_authority():
             return False
         rows = list(rows or ())[:30]
@@ -3145,13 +3185,16 @@ class LANClient(object):
             if human_ram_armors is None:
                 return False
             message['human_ram_armors'] = human_ram_armors
+        if detached_turrets is not None:
+            self._attach_detached_turret_proposals(message, detached_turrets)
         return self._send(message)
 
     def send_projected_bot_state(self, rows, sample_time_us=None,
                                  source_batch_horizon_us=None,
                                  human_ram_armors=None,
                                  edge_sample_time_us=None,
-                                 edge_revision=None):
+                                 edge_revision=None,
+                                 detached_turrets=None):
         """Send BotRuntime's already-projected canonical publication once."""
         del edge_sample_time_us, edge_revision
         if not self.is_bot_authority():
@@ -3181,6 +3224,8 @@ class LANClient(object):
             if human_ram_armors is None:
                 return False
             message['human_ram_armors'] = human_ram_armors
+        if detached_turrets is not None:
+            self._attach_detached_turret_proposals(message, detached_turrets)
         return self._send(message)
 
     def send_team_command(self, command, target_kind=None, target_id=None,
@@ -3456,18 +3501,27 @@ class LANClient(object):
                 return
             if len(self._pending) >= MAX_PENDING_MESSAGES:
                 latest_manifests = {}
+                latest_turrets = {}
                 for index, value in enumerate(self._pending):
                     lineage = self._snapshot_lineage(value)
                     if (lineage is not None and
                             'bot_manifest' in value):
                         latest_manifests[lineage] = index
+                    if lineage is not None and value.get('detached_turrets'):
+                        latest_turrets[lineage] = index
                 incoming_lineage = self._snapshot_lineage(message)
                 if (incoming_lineage is not None and
                         'bot_manifest' in message):
                     # The incoming full snapshot supersedes an older barrier
                     # for this exact lineage.
                     latest_manifests.pop(incoming_lineage, None)
+                turret_index = latest_turrets.get(incoming_lineage)
+                if (turret_index is not None and
+                        self._pending[turret_index].get('detached_turrets') ==
+                        message.get('detached_turrets')):
+                    latest_turrets.pop(incoming_lineage, None)
                 protected_snapshots = set(latest_manifests.values())
+                protected_snapshots.update(latest_turrets.values())
                 snapshot_index = next((
                     index for index, value in enumerate(self._pending)
                     if (index not in protected_snapshots and
@@ -3795,9 +3849,12 @@ class LANClient(object):
         for message in messages:
             if message.get('type') == 'snapshot':
                 if (latest_snapshot is not None and
-                        'bot_manifest' in latest_snapshot and
-                        'bot_manifest' not in message):
-                    # A manifest-bearing snapshot is a static-lineage
+                        (('bot_manifest' in latest_snapshot and
+                          'bot_manifest' not in message) or
+                         (latest_snapshot.get('detached_turrets') and
+                          latest_snapshot.get('detached_turrets') !=
+                          message.get('detached_turrets')))):
+                    # A manifest or newly accepted turret is a static-lineage
                     # barrier, not a replaceable motion sample.  During native
                     # space loading several server ticks can accumulate in one
                     # poll; consuming only the last lean snapshot would leave
@@ -5082,6 +5139,10 @@ class LANClient(object):
                 'code': _safe_text(message.get('code'), '', 32),
             })
             return
+        if kind in ('battle_start', 'snapshot', 'events'):
+            message = self._adopt_detached_turrets(message)
+            if kind == 'snapshot':
+                self.last_snapshot = message
         self._notify(kind, message)
 
     def _notify(self, kind, message):

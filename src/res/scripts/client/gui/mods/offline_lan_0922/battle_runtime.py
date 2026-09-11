@@ -30,8 +30,9 @@ from gui.mods.offline_lan_0922.bot_runtime import (
 from gui.mods.offline_lan_0922.entities.avatar_server import AvatarServerBridge
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
-from gui.mods.offline_lan_0922.entities.detached_turret import \
-    DetachedTurretPresentation
+from gui.mods.offline_lan_0922.entities.detached_turret import (
+    DetachedTurretObstacles, DetachedTurretPresentation, freeze_obstacle_plan)
+from gui.mods.offline_lan_0922 import turret_obstacle_schema
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory, present_shot_impulse, set_draw_visibility
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
@@ -1603,6 +1604,12 @@ class BattleRuntime(object):
         self._server = None
         self._remote_factory = None
         self._detached_turrets = None
+        self._detached_turret_obstacles = None
+        self._detached_turret_rows = {}
+        self._detached_turret_proposals = {}
+        self._detached_turret_geometry = set()
+        self._detached_turret_retry = {}
+        self._next_turret_publish = 0.0
         self._descriptor_cache = {}
         self._prepared_vehicle_names = []
         self._unusable_vehicles_reported = set()
@@ -1958,6 +1965,11 @@ class BattleRuntime(object):
         vehicle_physics.apply_tuning(self._config.get('physics_tuning'))
         combat_rules.apply_he_tuning(self._config.get('he_tuning'))
         self._start_message = dict(message or {})
+        self._detached_turret_rows = {}
+        self._detached_turret_proposals = {}
+        self._detached_turret_geometry = set()
+        self._detached_turret_retry = {}
+        self._next_turret_publish = 0.0
         self.client = lan_client
         self._damage_info_failure_reported = False
         self._optional_failures_reported = set()
@@ -3095,6 +3107,8 @@ class BattleRuntime(object):
             def turret_log(what, error):
                 self._warn_optional_failure(what, error, disable=False)
 
+            self._detached_turret_obstacles = DetachedTurretObstacles(
+                self._runtime.math, log=turret_log)
             if not self._worker_mode:
                 # The hidden worker never draws a wreck and its address space
                 # is already the tightest resource in this port, so it never
@@ -3325,12 +3339,16 @@ class BattleRuntime(object):
             initial_manifest = dict(self._start_message)
             initial_manifest['bots'] = []
             self._sync.manifest(initial_manifest)
+            self._observe_projectile_message(self._start_message)
+            self._reconcile_detached_turret_snapshot(self._start_message)
             latest_snapshot = getattr(self.client, 'last_snapshot', None)
             if (isinstance(latest_snapshot, dict) and
                     latest_snapshot.get('round_id') ==
                     self._start_message.get('round_id')):
                 self._last_snapshot = dict(latest_snapshot)
             if self._last_snapshot is not None:
+                self._observe_projectile_message(self._last_snapshot)
+                self._reconcile_detached_turret_snapshot(self._last_snapshot)
                 self._restore_local_equipment_snapshot(
                     self._last_snapshot, present=True)
                 self._sync.snapshot(self._last_snapshot)
@@ -3360,6 +3378,8 @@ class BattleRuntime(object):
                 cover_probe=self._sample_bot_cover,
                 motion_resolver=self._resolve_bot_motion,
                 motion_report=self._report_bot_destructible_contact,
+                turret_motion_probe=self._turret_motion_is_clear,
+                turret_hulls_provider=self._turret_navigation_hulls,
                 world_receipt_probe=self._direction_world_receipt,
                 water_depth_probe=self._water_depth,
                 ram_contact_probe=self._bot_ram_contact_armor,
@@ -6177,13 +6197,24 @@ class BattleRuntime(object):
                             desired_pitch, float(self._local_pitch),
                             gun_minimum, gun_maximum,
                             params['minimum'], params['maximum']))
-            self._local_siege_aim_pitch = hull_aiming.slew(
+            correction = hull_aiming.slew(
                 self._local_siege_aim_pitch, desired, speed, elapsed)
         except (AttributeError, TypeError, ValueError, OverflowError):
             # A malformed or stale descriptor degrades to the flat copied
             # pose. It must not terminate a round or call unsafe native state.
-            self._local_siege_aim_pitch = 0.0
+            correction = 0.0
             active = False
+        if (correction != self._local_siege_aim_pitch and
+                getattr(self, '_detached_turret_obstacles', None) is not None):
+            before = self._local_turret_pose(
+                self._local_position, self._local_yaw,
+                self._local_pitch, self._local_roll)
+            after = self._local_turret_pose(
+                self._local_position, self._local_yaw,
+                self._local_pitch, self._local_roll, aim_pitch=correction)
+            if not self._turret_motion_is_clear(before, after, descriptor):
+                correction = self._local_siege_aim_pitch
+        self._local_siege_aim_pitch = correction
         matrix.setRotateYPR((0.0, self._local_siege_aim_pitch, 0.0))
         return active
 
@@ -8140,6 +8171,7 @@ class BattleRuntime(object):
             self._observe_destructibles_disabled(self._last_snapshot)
             self._observe_projectile_message(self._last_snapshot)
             self._reconcile_projectile_snapshot(self._last_snapshot)
+            self._reconcile_detached_turret_snapshot(self._last_snapshot)
             if 'rules' in self._last_snapshot:
                 self._apply_rules(self._last_snapshot.get('rules'))
             if self._last_snapshot.get('battle_result') is not None:
@@ -13976,7 +14008,19 @@ class BattleRuntime(object):
                     }
                     nearest_collision_pose = segment_collision_pose
 
-        scene_end_tuple = lerp3(start, end, nearest_fraction)
+        cap_distance = chord_length * nearest_fraction
+        turret_distance = None
+        obstacles = self._detached_turret_obstacles
+        if obstacles is not None:
+            turret_distance = obstacles.block_distance(
+                self._vector(start), self._vector(end),
+                self._turret_server_time_ms(absolute_end),
+                start_time_ms=self._turret_server_time_ms(absolute_start))
+        scene_fraction = nearest_fraction
+        if turret_distance is not None and turret_distance <= cap_distance:
+            scene_fraction = max(0.0, turret_distance / chord_length)
+        # A prop beyond a landed turret must not receive a destructive query.
+        scene_end_tuple = lerp3(start, end, scene_fraction)
         if self._projectile_destructible_context is not None:
             raise RuntimeError('nested projectile destructible context')
         self._projectile_destructible_context = projectile_id
@@ -13993,8 +14037,13 @@ class BattleRuntime(object):
         meta['penetration_factor'] = scene.get(
             'penetration_factor', meta.get('penetration_factor'))
         world_distance = scene['world_distance']
-        cap_distance = chord_length * nearest_fraction
-        world_blocks = (
+        turret_blocks = (turret_distance is not None and
+                         turret_distance <= cap_distance and
+                         turret_distance <= world_distance)
+        if turret_blocks:
+            world_distance = turret_distance
+            scene['stop_reason'] = 'detached_turret'
+        world_blocks = turret_blocks or (
             world_distance < 99999.0 and
             (nearest_key is None or
              bool(scene.get('stopped_by_destructible')) or
@@ -14303,13 +14352,23 @@ class BattleRuntime(object):
             pass
         return burst
 
-    def _projectile_he_world_visible(self, scene_start, point, burst):
+    def _projectile_he_world_visible(self, scene_start, point, burst,
+                                     server_time_ms=None):
         """Test scenery without destroying props while searching blast rays."""
         endpoint = self._vector(point)
         if (endpoint - burst).length <= _SHOT_OCCLUSION_EPSILON:
             # This is the already established direct contact itself.
             return True
         distance = float((endpoint - scene_start).length)
+        obstacles = self._detached_turret_obstacles
+        if obstacles is not None:
+            if server_time_ms is None:
+                server_time_ms = self._turret_server_time_ms()
+            hit_distance = obstacles.block_distance(
+                scene_start, endpoint, server_time_ms)
+            if (hit_distance is not None and
+                    hit_distance + _SHOT_OCCLUSION_EPSILON < distance):
+                return False
         collision_filter = None
         make_filter = getattr(
             self._destructibles, 'horizontal_collision_filter', None)
@@ -14403,10 +14462,14 @@ class BattleRuntime(object):
         # Reuse the victim's one damage roll for selection and application.
         # A blocked weak spot does not hide another reachable candidate.
         candidates.sort(key=lambda item: (-item['damage'], item['distance']))
+        clock_kwargs = {}
+        if isinstance(state, dict) and 'cursor_time' in state:
+            clock_kwargs['server_time_ms'] = self._turret_server_time_ms(
+                state['cursor_time'])
         for contact in candidates:
             try:
                 if self._projectile_he_world_visible(
-                        scene_start, contact['point'], burst):
+                        scene_start, contact['point'], burst, **clock_kwargs):
                     return contact
             except Exception as error:
                 self._report_projectile_terminal_failure(
@@ -16025,13 +16088,11 @@ class BattleRuntime(object):
                     'Expert damaged-device presentation',
                     self._tick_expert_target, (now,),
                     self._disable_expert_presentation)
-                # A turret thrown just before the round ended keeps flying
-                # through AFTERBATTLE, so this is deliberately not gated on
-                # ``_battle_live``.  It is retried every frame: one bad pose
-                # write must not retire the whole presentation.
-                self._run_optional_feature(
-                    'detached turret presentation',
-                    self._advance_detached_turrets, (now,), disable=False)
+            # Final deaths can arrive during AFTERBATTLE. Keep publishing
+            # their proposals and advancing the accepted flight there too.
+            self._run_optional_feature(
+                'detached turret lifecycle',
+                self._advance_detached_turrets, (now,), disable=False)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['critical'] = max(0.0, next_boundary - boundary)
@@ -17776,10 +17837,74 @@ class BattleRuntime(object):
             '_pending': saw_pending,
         }
 
+    def _turret_motion_is_clear(self, start_pose, end_pose, descriptor):
+        """Use the room's published turret geometry for every moving hull."""
+        obstacles = getattr(self, '_detached_turret_obstacles', None)
+        if obstacles is None:
+            return True
+        return not obstacles.sweep_blocks(
+            start_pose, end_pose, descriptor, self._turret_server_time_ms())
+
+    def _turret_navigation_hulls(self):
+        obstacles = getattr(self, '_detached_turret_obstacles', None)
+        if obstacles is None:
+            return ()
+        return obstacles.navigation_hulls(self._turret_server_time_ms())
+
+    def _local_turret_pose(self, position, yaw, pitch, roll, aim_pitch=None):
+        """Freeze the same separate body/chassis frames as local armour.
+
+        The selected hydraulic body is native body * inverse(native ground)
+        * copied aim * copied base. Build the candidate with fresh providers
+        so a rejected motion never mutates the live native pose. Sampling its
+        complete matrix preserves hydraulic height and combined rotations.
+        """
+        pose = {
+            'x': position[0], 'y': position[1], 'z': position[2],
+            'yaw': yaw, 'pitch': pitch, 'roll': roll,
+        }
+        body = self._local_siege_body_matrix
+        obstacles = getattr(self, '_detached_turret_obstacles', None)
+        if (obstacles is None or
+                body is None or
+                getattr(self._local_pose_matrix, 'a', None) is not body or
+                obstacles.active() == 0):
+            return pose
+        base = self._runtime.math.Matrix()
+        base.setRotateYPR((yaw, pitch, roll))
+        base.translation = self._vector(position)
+        aim = self._runtime.math.Matrix()
+        aim.setRotateYPR((0.0, self._local_siege_aim_pitch
+                          if aim_pitch is None else aim_pitch, 0.0))
+        matrix = self._runtime.math.Matrix(self._matrix_product(
+            body.a, self._matrix_product(aim, base)))
+        point = _xyz(matrix.translation)
+        pose['hull'] = {
+            'x': point[0], 'y': point[1], 'z': point[2],
+            'yaw': float(matrix.yaw), 'pitch': float(matrix.pitch),
+            'roll': float(matrix.roll),
+        }
+        return pose
+
+    def _turret_pose_is_clear(
+            self, start, start_yaw, end, end_yaw, descriptor,
+            pitch=0.0, roll=0.0):
+        if getattr(self, '_detached_turret_obstacles', None) is None:
+            return True
+        before = self._local_turret_pose(start, start_yaw, pitch, roll)
+        after = self._local_turret_pose(end, end_yaw, pitch, roll)
+        return self._turret_motion_is_clear(before, after, descriptor)
+
     def _pose_sweep_is_clear(
             self, entity, start_position, start_yaw, end_position, end_yaw,
             speed, dt):
         """Submit one visible rotating-hull proposal before applying its pose."""
+        if not self._turret_pose_is_clear(
+                start_position, start_yaw, end_position, end_yaw,
+                entity.typeDescriptor, self._local_pitch, self._local_roll):
+            self._local_motion_kinds = 'detached_turret'
+            self._local_motion_status = 'hard'
+            return False
         now = self._clock()
         rotation_speed_cap = self._destructible_rotation_speed_cap(
             self._local_physics,
@@ -17892,6 +18017,12 @@ class BattleRuntime(object):
                 float(position[2]) +
                 math.cos(float(world_motion_yaw)) *
                 abs(float(speed)) * float(dt))
+        if not self._turret_pose_is_clear(
+                position, world_hull_yaw, contact_end, world_hull_yaw,
+                entity.typeDescriptor, self._local_pitch, self._local_roll):
+            self._local_motion_kinds = 'detached_turret'
+            self._local_motion_status = 'hard'
+            return False
         if self._destructibles is not None:
             proposal_now = self._clock()
             proposer = getattr(
@@ -18063,6 +18194,17 @@ class BattleRuntime(object):
         travel_yaw = (
             float(motion_yaw) if motion_yaw is not None else
             float(yaw) if speed >= 0.0 else float(yaw) + math.pi)
+        contact_end = (
+            float(position[0]) + math.sin(travel_yaw) * abs(speed) * dt,
+            float(position[1]),
+            float(position[2]) + math.cos(travel_yaw) * abs(speed) * dt)
+        if not self._turret_motion_is_clear(
+                BotRuntime._turret_state_pose(
+                    bot_state, position, yaw),
+                BotRuntime._turret_state_pose(
+                    bot_state, contact_end, yaw), descriptor):
+            self._bot_motion_kinds[int(bot_id)] = 'detached_turret'
+            return 'hard'
         destructible_motion = (
             {} if motion_yaw is None else
             {'motion_yaw': float(motion_yaw)})
@@ -20409,6 +20551,12 @@ class BattleRuntime(object):
         position = self._local_position
         tick_pose = position
         yaw = self._local_yaw
+        turret_tick_pose = None
+        turret_suspension_snapshot = None
+        if getattr(self, '_detached_turret_obstacles', None) is not None:
+            turret_tick_pose = self._local_turret_pose(
+                position, yaw, self._local_pitch, self._local_roll)
+            turret_suspension_snapshot = self._local_suspension_state_snapshot()
         contact_path = None
         reader = getattr(self._destructibles, 'take_ground_skip_count', None)
         if callable(reader):
@@ -20640,6 +20788,25 @@ class BattleRuntime(object):
             if not ram_resolved:
                 position = self._resolve_local_tank_contacts(
                     entity, position, yaw, dt)
+        if turret_tick_pose is not None:
+            realised_pose = self._local_turret_pose(
+                position, yaw, self._local_pitch, self._local_roll)
+            if not self._turret_motion_is_clear(
+                    turret_tick_pose, realised_pose, entity.typeDescriptor):
+                # Suspension and slope sampling can change the complete hull
+                # after the horizontal query. Reject that pose and its pending
+                # landing observation before publishing either one.
+                self._restore_local_suspension_state(
+                    turret_suspension_snapshot)
+                position, yaw = tick_pose, turret_tick_pose['yaw']
+                self._local_speed = 0.0
+                self._local_turn_speed = 0.0
+                self._local_drive_turn = 0.0
+                self._local_push_x = 0.0
+                self._local_push_z = 0.0
+                self._local_motion_kinds = 'detached_turret'
+                self._local_motion_status = 'hard'
+                contact_path = 'detached_turret'
         self._report_local_contact_tick(
             contact_path, previous_speed, slope_pitch,
             position[1] - tick_pose[1])
@@ -21553,6 +21720,12 @@ class BattleRuntime(object):
             if human_ram_armors is None and self._worker_mode:
                 human_ram_armors = self._human_ram_armor_results()
             state_kwargs = {}
+            if self._worker_mode:
+                turrets = dict(self._detached_turret_rows)
+                turrets.update(self._detached_turret_proposals)
+                if turrets:
+                    state_kwargs['detached_turrets'] = [
+                        turrets[key] for key in sorted(turrets)]
             if 'sample_time_us' in message:
                 state_kwargs['sample_time_us'] = message.get('sample_time_us')
                 state_kwargs['source_batch_horizon_us'] = message.get(
@@ -23858,8 +24031,8 @@ class BattleRuntime(object):
         Use the latest admitted pose instead of a compound that may already
         have been replaced by the death callback.  A health-only combat event
         carries no pose of its own, so fall back to the record and finally to
-        the entity itself.  The arc is cosmetic: different snapshot arrival
-        times can still leave peers with different admitted poses.
+        the entity itself. Only the worker freezes this pose into the
+        server-accepted flight used by all peers.
         """
         for source in (state, record.get('state')):
             if not isinstance(source, dict):
@@ -23921,42 +24094,82 @@ class BattleRuntime(object):
             return 0.0
 
     def _apply_turret_detachment(self, record, entity, state=None):
-        """Detach one wreck's turret everywhere the room can observe it.
-
-        The detachment itself is not optional and not presentation: retail
-        encodes it in the vehicle's own ALL_CLIENTS health, so the hull is
-        turretless -- and its turret and gun hit testers are gone -- on every
-        peer.  The flying entity remains cosmetic and is AOI-gated; the
-        hidden worker must not resolve an arc or create an obstacle for a
-        turret that a visible client may never draw.
-        """
-        if bool(getattr(entity, 'isTurretDetached', False)):
-            return False
-        # Creation can synchronously enter stock SynchronousDetachment, and a
-        # marked-but-unconfirmed wreck would assemble its turret back on.
-        # Install the whole terminal identity before anything else runs.
+        """Remove attached armour immediately; only the worker plans debris."""
+        changed = not bool(getattr(entity, 'isTurretDetached', False))
         self._mark_turret_detached(entity)
         if self._worker_mode:
-            return True
-        seed = self._turret_detachment_seed(record['engine_id'])
+            self._queue_detached_turret(record, entity, state)
+        return changed
+
+    def _queue_detached_turret(self, record, entity, state=None):
+        identity = {'actor_kind': record.get('kind'),
+                    'actor_id': record.get('network_id')}
+        if (identity['actor_kind'] not in ('bot', 'player') or
+                not identity['actor_id']):
+            return False
+        key = turret_obstacle_schema.row_key(identity)
+        if (key in self._detached_turret_rows or
+                key in self._detached_turret_proposals or
+                len(self._detached_turret_rows) +
+                len(self._detached_turret_proposals) >=
+                turret_obstacle_schema.MAX_ACTIVE_TURRETS):
+            return False
         now = self._clock()
+        retry_key = 'proposal:' + key
+        if now < self._detached_turret_retry.get(retry_key, 0.0):
+            return False
+        self._detached_turret_retry[retry_key] = now + 0.25
         pose = self._turret_detachment_pose(record, state, entity)
-        plan = None
-        if (pose is not None and self._detached_turrets is not None and
-                not record.get('_ammo_turret_attempted') and
-                self._turret_detachment_drawn(record)):
-            # The launch geometry is descriptor plus replicated pose, so
-            # unlike the retired compound-node read it does not have to be
-            # frozen before the health write.
-            plan = self._run_optional_feature(
-                'ammo-bay turret detachment', self._detached_turrets.prepare,
-                (entity, pose), disable=False)
-        if plan:
-            record['_ammo_turret_attempted'] = True
-            self._run_optional_feature(
-                'ammo-bay turret detachment', self._detached_turrets.launch,
-                (plan, seed, now), disable=False)
+        if pose is None:
+            return False
+        seed = bot_planner.stable_seed(
+            'turret-obstacle-v1',
+            (self._start_message or {}).get('round_id'), key)
+        plan = self._run_optional_feature(
+            'detached turret flight', freeze_obstacle_plan,
+            (entity, pose, seed, self._collide_detached_turret), disable=False)
+        if not isinstance(plan, dict):
+            return False
+        row = dict(identity, **plan)
+        row = turret_obstacle_schema.normalize_proposal(row)
+        if row is None:
+            return False
+        self._detached_turret_proposals[key] = row
         return True
+
+    def _reconcile_detached_turret_snapshot(self, message):
+        if (not isinstance(message, dict) or
+                message.get('round_id') !=
+                (self._start_message or {}).get('round_id')):
+            return False
+        rows = message.get('detached_turrets')
+        if not isinstance(rows, (list, tuple)):
+            return False
+        changed = False
+        for raw in rows[:turret_obstacle_schema.MAX_ACTIVE_TURRETS]:
+            row = turret_obstacle_schema.normalize_record(raw)
+            if row is None:
+                continue
+            key = turret_obstacle_schema.row_key(row)
+            if key in self._detached_turret_rows:
+                continue
+            if len(self._detached_turret_rows) >= \
+                    turret_obstacle_schema.MAX_ACTIVE_TURRETS:
+                break
+            self._detached_turret_rows[key] = row
+            self._detached_turret_proposals.pop(key, None)
+            changed = True
+        return changed
+
+    def _turret_server_time_ms(self, now=None):
+        """Use the projectile clock, including historical chord timestamps."""
+        if (self._projectile_server_time_ms is None or
+                self._projectile_server_local_time is None):
+            return -1
+        if now is None:
+            now = self._clock()
+        return max(0, int(self._projectile_server_time_ms + 1000.0 *
+                          (float(now) - self._projectile_server_local_time)))
 
     def _detach_late_ammo_turret(self, record, entity, state=None):
         """Complete a late terminal cause without repeating vehicle death."""
@@ -23966,28 +24179,80 @@ class BattleRuntime(object):
             self._refresh_detached_wreck(entity)
         return True
 
-    def _turret_detachment_drawn(self, record):
-        """Whether this target is drawn, so retail would have a turret at all.
-
-        Retail's ``DetachedTurret`` is a cell entity, so an unspotted enemy
-        simply never has one in AOI.  Our replicas never leave AOI, so reuse
-        the same team-knowledge gate the retail dead marker uses. An unseen
-        death still removes the wreck's turret without creating a flight.
-        """
-        if record.get('local'):
-            return True
-        if not record.get('presentation'):
+    def _turret_obstacle_in_view(self, row):
+        origin = self._presentation_origin()
+        if origin is None:
             return False
-        return bool(record.get(
-            'dead_marker_known', self._combat_target_is_spotted(record)))
-
-    def _turret_detachment_seed(self, engine_id):
-        """Derive the arc seed from state every client already replicates."""
-        return bot_planner.stable_seed(
-            'turret-detach-v1',
-            (self._start_message or {}).get('round_id'), int(engine_id))
+        return (_distance_2d(origin, row['flight']['rest']) <=
+                spotting.VEHICLE_AOI_RADIUS or self._spg_aiming_view_active())
 
     def _advance_detached_turrets(self, now):
+        if self._worker_mode:
+            # Dead SnapshotSync records stop receiving health callbacks. Retry
+            # only a previously requested plan; never replay the death edge.
+            for retry_key, due in tuple(self._detached_turret_retry.items()):
+                if not retry_key.startswith('proposal:') or now < due:
+                    continue
+                key = retry_key[len('proposal:'):]
+                if (key in self._detached_turret_rows or
+                        key in self._detached_turret_proposals):
+                    continue
+                record = self._records.get(key)
+                if record is None or not record.get('ready'):
+                    continue
+                entity = self._server_entity(record['engine_id'])
+                if entity is not None and bool(getattr(
+                        entity, 'isTurretDetached', False)):
+                    self._queue_detached_turret(record, entity)
+        if (self._worker_mode and self._battle_result is not None and
+                self._detached_turret_proposals and
+                now >= self._next_turret_publish):
+            self._next_turret_publish = now + 0.25
+            # The final checkpoint owner has stopped. This terminal tail has
+            # no motion edge and the server accepts only its turret records.
+            turrets = dict(self._detached_turret_rows)
+            turrets.update(self._detached_turret_proposals)
+            self.client.send_bot_state([], detached_turrets=[
+                turrets[key] for key in sorted(turrets)])
+        server_ms = self._turret_server_time_ms(now)
+        if server_ms < 0:
+            return 0
+        for key, row in self._detached_turret_rows.items():
+            record = self._records.get(key)
+            if record is None or not record.get('ready'):
+                continue
+            entity = self._server_entity(record['engine_id'])
+            if entity is None:
+                continue
+            if not row['flight']['landed']:
+                self._detached_turret_geometry.add(key)
+            if key not in self._detached_turret_geometry:
+                descriptor = getattr(entity, 'typeDescriptor', None)
+                if (self._detached_turret_obstacles is not None and
+                        self._run_optional_feature(
+                            'detached turret geometry',
+                            self._detached_turret_obstacles.add,
+                            (key, row, descriptor), disable=False)):
+                    self._detached_turret_geometry.add(key)
+            if (self._worker_mode or self._detached_turrets is None or
+                    not bool(getattr(entity, 'isTurretDetached', False)) or
+                    not self._turret_obstacle_in_view(row) or
+                    self._detached_turrets.has_vehicle(record['engine_id'])):
+                continue
+            retry_key = 'visual:' + key
+            if now < self._detached_turret_retry.get(retry_key, 0.0):
+                continue
+            self._detached_turret_retry[retry_key] = now + 0.25
+            plan = self._run_optional_feature(
+                'detached turret prepare',
+                self._detached_turrets.prepare_canonical,
+                (entity, row), disable=False)
+            if isinstance(plan, dict):
+                elapsed = max(0.0, (server_ms - row['created_time_ms']) / 1000.0)
+                self._run_optional_feature(
+                    'detached turret create',
+                    self._detached_turrets.launch_canonical,
+                    (plan, row, now, elapsed), disable=False)
         if self._detached_turrets is None:
             return 0
         return self._detached_turrets.advance(now)
@@ -24022,13 +24287,11 @@ class BattleRuntime(object):
             # #1513's marker and damage-state consumers require raw special
             # health. LAN HP stays nonnegative.  ``health`` is ALL_CLIENTS in
             # retail, so an ammo-bay detonation detaches the turret on every
-            # peer -- the hidden worker included.  That is not presentation:
+            # peer -- the hidden worker included. This is durable state:
             # ``Vehicle.getComponents`` publishes ``not isTurretDetached`` as
             # the turret and gun attachment bit and ``__collideSegment`` skips
-            # an unattached component, so this value is what stops an empty
-            # turret ring from blocking shells above a turretless hull.  Only
-            # the flying ``DetachedTurret`` entity is AOI-gated in retail, and
-            # it stays gated below.
+            # an unattached component. The separate landed obstacle uses
+            # the server-accepted flight, never this hull's old turret pose.
             native_health = int(
                 self._runtime.constants.SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED)
         # Blind non-lethal hits stay private, but death is public authority:
@@ -24819,6 +25082,12 @@ class BattleRuntime(object):
             except Exception as error:
                 if cleanup_error is None:
                     cleanup_error = error
+        if self._detached_turret_obstacles is not None:
+            self._detached_turret_obstacles.clear()
+        self._detached_turret_rows.clear()
+        self._detached_turret_proposals.clear()
+        self._detached_turret_geometry.clear()
+        self._detached_turret_retry.clear()
         if self._detached_turrets is not None:
             # Detached turrets are separate client-created entities holding a
             # compound each.  Retire them at the synchronous leaveArena
@@ -25025,6 +25294,12 @@ class BattleRuntime(object):
         self._server = None
         self._remote_factory = None
         self._detached_turrets = None
+        self._detached_turret_obstacles = None
+        self._detached_turret_rows = {}
+        self._detached_turret_proposals = {}
+        self._detached_turret_geometry = set()
+        self._detached_turret_retry = {}
+        self._next_turret_publish = 0.0
         self._sender = None
         self._sync = None
         self._bots = None
