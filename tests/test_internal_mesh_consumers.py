@@ -61,7 +61,7 @@ class MeshConsumerTests(unittest.TestCase):
                 component = Pose(yaw=turret_yaw, translation=(0.,1.6,.66))
                 inverse = Pose(component); inverse.invert()
                 vehicle = types.SimpleNamespace(matrix=body,
-                    getComponents=lambda: ((self.descriptor.turret, inverse),))
+                    getComponents=lambda: ((self.descriptor.turret, inverse, True),))
                 world_start = body.applyPoint(component.applyPoint(_Vector(start)))
                 world_end = body.applyPoint(component.applyPoint(_Vector(end)))
                 with mock.patch.dict(sys.modules, {'Math': self.math}):
@@ -104,7 +104,7 @@ class MeshConsumerTests(unittest.TestCase):
         for target_id in (1, 999):
             vehicle = types.SimpleNamespace(id=target_id, health=500,
                 typeDescriptor=self.descriptor, position=_Vector(), matrix=Pose(),
-                getComponents=lambda: ((self.descriptor.hull, Pose()),))
+                getComponents=lambda: ((self.descriptor.hull, Pose(), True),))
             armour = types.SimpleNamespace(extra=None, armor=100., vehicleDamageFactor=1.)
             with mock.patch.dict(sys.modules, {'Math':self.math, 'BigWorld':bigworld}), \
                     mock.patch('random.uniform', side_effect=lambda low, high:low), \

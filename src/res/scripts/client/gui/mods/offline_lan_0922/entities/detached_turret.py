@@ -17,32 +17,38 @@ switches to ``turret_touchdown_*`` / ``flamingOnGround`` when
 ``onStaticCollision`` reports the landing, and ``VehicleStickers`` reattaches
 the vehicle's own marks and damage decals.
 
-Two deliberate differences from retail, both because the hidden worker owns
-projectiles and knows nothing about this object:
+The vehicle's detachment flag removes the turret and gun from the source
+wreck's collision on every peer, including the hidden worker.  The flying
+entity remains presentation only: clients can omit it for an unseen vehicle,
+a full model budget, or a failed asynchronous model load.  A worker obstacle
+would therefore block shots at a turret that some clients never draw.
 
-* the flying turret is not shootable and does not block a shot.  It keeps its
-  stock ``ProjectileAwareEntities`` membership so ``onLeaveWorld`` stays
-  intact, and is excluded from dynamic collision through the same
-  ``_offlineNativeRemote`` draw gate the port already uses for a LAN remote
-  the client must not collide against.
+Two deliberate differences from retail remain:
+
+* the flying and landed turret is not shootable and does not block a shot.
+  It keeps its stock ``ProjectileAwareEntities`` membership so
+  ``onLeaveWorld`` stays intact, and is excluded from dynamic collision
+  through the port's existing ``_offlineNativeRemote`` draw gate.
 * ``isCollidingWithWorld`` stays false for its whole life.  It is the only
   gate that makes ``__checkIsBeingPulled`` read native ``Entity.velocity``
   off the unfed ``WGTurretFilter``, and the property drives nothing but the
-  drag/pull effect this version does not produce.
+  drag/pull effect this version does not produce.  Retail's turret is also a
+  cell-physics body that a tank can push and be crushed by; this port does
+  not reproduce that body.
 """
 
 import sys
 
+from gui.mods.offline_lan_0922 import shot_geometry
 from gui.mods.offline_lan_0922 import turret_detachment
 
 
 # One detached turret owns a turret plus gun compound for the rest of the
 # round.  The client is 32-bit and has run out of address space on a single
 # large texture reservation before, so bound how many can be resident at
-# once; beyond the cap the vehicle keeps its burn-off wreck and turret.
+# once; beyond the cap the wreck still detaches, but its flying turret is omitted.
 MAX_ACTIVE_TURRETS = 12
 
-_TURRET_PART_NAME = 'turret'
 _ENTITY_TYPE = 'DetachedTurret'
 
 
@@ -70,57 +76,41 @@ class DetachedTurretPresentation(object):
     def active(self):
         return len(self._turrets)
 
-    def prepare(self, entity):
+    def prepare(self, entity, pose):
         """Freeze the launch pose and geometry before the death callbacks.
 
         Returns ``None`` whenever this exact target cannot carry the stock
-        detachment.  A missing exploded model or turret node is not an error
-        to escalate: the vehicle keeps the plain wreck it has today.  Call
-        this before writing the special health value, because
-        ``onHealthChanged`` replaces the compound this pose is read from.
+        detachment.  A missing exploded model is not an error to escalate:
+        the vehicle still becomes a turretless wreck without a flying entity.
+
+        ``pose`` is the latest admitted terminal state available on this
+        client.  The descriptor places the launch ring without relying on a
+        compound that a health callback may already have replaced.
         """
         if self._closed or len(self._turrets) >= self._max_active:
-            return None
-        descriptor = getattr(entity, 'typeDescriptor', None)
-        appearance = getattr(entity, 'appearance', None)
-        if descriptor is None or appearance is None:
             return None
         if not getattr(entity, 'isStarted', False):
             # An unspotted remote never started its visual, so retail would
             # not have it in AOI and stock's own detach handshake would spend
             # its whole search window waiting for it.
             return None
-        turret = getattr(descriptor, 'turret', None)
-        gun = getattr(descriptor, 'gun', None)
-        compound = getattr(appearance, 'compoundModel', None)
-        node = getattr(compound, 'node', None)
-        if turret is None or gun is None or not callable(node):
+        plan = detachment_plan(entity, pose)
+        if plan is None:
             return None
-        if (self._exploded_model(turret) is None or
-                self._exploded_model(gun) is None):
+        descriptor = plan['descriptor']
+        if (self._exploded_model(getattr(descriptor, 'turret', None)) is None or
+                self._exploded_model(getattr(descriptor, 'gun', None)) is None):
             return None
         compact_descr = getattr(descriptor, 'makeCompactDescr', None)
         if not callable(compact_descr):
             return None
         try:
-            pose = self._math.Matrix(node(_TURRET_PART_NAME))
-            translation = pose.translation
-            launch = (
-                float(translation.x), float(translation.y),
-                float(translation.z))
-            attitude = (float(pose.yaw), float(pose.pitch), float(pose.roll))
-            descr_string = compact_descr()
+            plan['compact_descr'] = compact_descr()
         except Exception as error:
-            self._note('launch pose unavailable', error)
+            self._note('vehicle compact descriptor unavailable', error)
             return None
-        return {
-            'entity_id': int(getattr(entity, 'id', 0)),
-            'compact_descr': descr_string,
-            'launch': launch,
-            'attitude': attitude,
-            'clearance': _turret_clearance(turret),
-            'space_id': int(getattr(self._avatar, 'spaceID', 0)),
-        }
+        plan['space_id'] = int(getattr(self._avatar, 'spaceID', 0))
+        return plan
 
     @staticmethod
     def _exploded_model(component):
@@ -365,3 +355,78 @@ def _turret_clearance(turret):
         return max(0.0, -float(minimum[1]))
     except (IndexError, TypeError, ValueError):
         return 0.0
+
+
+def turret_mount_offset(descriptor):
+    """Return the turret ring in the vehicle's own root space.
+
+    Exact #1513 builds the same point in ``Vehicle.getComponents``:
+    ``chassis.hullPosition`` places the hull under the model matrix and
+    ``hull.turretPositions[0]`` places the ring inside the hull.  Reading it
+    from the descriptor rather than from ``compoundModel.node('turret')``
+    makes the launch point a pure function of the admitted state available
+    on this client, independent of its interpolated render compound.
+    """
+    chassis = getattr(descriptor, 'chassis', None)
+    hull = getattr(descriptor, 'hull', None)
+    hull_position = _xyz(getattr(chassis, 'hullPosition', None))
+    positions = getattr(hull, 'turretPositions', None)
+    if hull_position is None or not positions:
+        return None
+    try:
+        ring = _xyz(positions[0])
+    except (IndexError, KeyError, TypeError):
+        return None
+    if ring is None:
+        return None
+    return tuple(hull_position[axis] + ring[axis] for axis in range(3))
+
+
+def _xyz(value):
+    """Read one #1513 ``Vector3`` as a plain tuple, or ``None``."""
+    if value is None:
+        return None
+    try:
+        return (float(value.x), float(value.y), float(value.z))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        return (float(value[0]), float(value[1]), float(value[2]))
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+
+
+def detachment_plan(entity, pose):
+    """Freeze one detachment's launch geometry from authoritative state.
+
+    ``pose`` carries the terminal ``x``/``y``/``z``/``yaw``/``pitch``/``roll``
+    and, when the room published one, ``turret_yaw``.  Returns ``None`` when
+    the descriptor cannot describe a turret ring; the caller keeps whatever
+    wreck it already has rather than inventing a launch point.
+    """
+    descriptor = getattr(entity, 'typeDescriptor', None)
+    turret = getattr(descriptor, 'turret', None)
+    if descriptor is None or turret is None or not isinstance(pose, dict):
+        return None
+    mount = turret_mount_offset(descriptor)
+    if mount is None:
+        return None
+    try:
+        yaw = float(pose.get('yaw', 0.0) or 0.0)
+        pitch = float(pose.get('pitch', 0.0) or 0.0)
+        roll = float(pose.get('roll', 0.0) or 0.0)
+        offset = shot_geometry.transform_vehicle_vector(
+            mount, yaw, pitch, roll)
+        launch = (float(pose['x']) + offset[0],
+                  float(pose['y']) + offset[1],
+                  float(pose['z']) + offset[2])
+        turret_yaw = float(pose.get('turret_yaw', 0.0) or 0.0)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return {
+        'entity_id': int(getattr(entity, 'id', 0)),
+        'descriptor': descriptor,
+        'launch': launch,
+        'attitude': (yaw + turret_yaw, pitch, roll),
+        'clearance': _turret_clearance(turret),
+    }

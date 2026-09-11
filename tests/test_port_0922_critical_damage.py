@@ -628,7 +628,7 @@ class CriticalDamageTests(unittest.TestCase):
         descriptor = _descriptor()
         target = types.SimpleNamespace(
             matrix=object(), getComponents=lambda: (
-                (descriptor.hull, _IdentityMatrix(None)),))
+                (descriptor.hull, _IdentityMatrix(None), True),))
         layout = {'valid': True, 'targets': (
             {'parent': 'hull', 'entity': 'engine'},
             {'parent': 'hull', 'entity': 'fuelTank'})}
@@ -678,7 +678,7 @@ class CriticalDamageTests(unittest.TestCase):
         descriptor = _descriptor()
         target = types.SimpleNamespace(
             matrix=object(), getComponents=lambda: (
-                (descriptor.hull, _IdentityMatrix(None)),))
+                (descriptor.hull, _IdentityMatrix(None), True),))
 
         def sphere(entity, center):
             return {
@@ -715,7 +715,7 @@ class CriticalDamageTests(unittest.TestCase):
         descriptor = _descriptor()
         target = types.SimpleNamespace(
             matrix=object(), getComponents=lambda: (
-                (descriptor.hull, _TranslateXMatrix(-10.0)),))
+                (descriptor.hull, _TranslateXMatrix(-10.0), True),))
         layout = {'valid': True, 'targets': ({
             'parent': 'hull', 'entity': 'engine',
             'primitives': ({
@@ -740,7 +740,7 @@ class CriticalDamageTests(unittest.TestCase):
         descriptor = _descriptor()
         target = types.SimpleNamespace(
             matrix=object(), getComponents=lambda: (
-                (descriptor.hull, _IdentityMatrix(None)),))
+                (descriptor.hull, _IdentityMatrix(None), True),))
 
         def box(entity, minimum, maximum):
             center = tuple((minimum[index] + maximum[index]) * 0.5

@@ -1155,19 +1155,31 @@ class _ProjectileCollisionTarget(object):
     """Read-only target view shared by armour and critical-hit geometry."""
 
     def __init__(self, source, descriptor, matrix, position, appearance,
-                 math_module):
+                 math_module, chassis_matrix=None):
         self._source = source
         self.typeDescriptor = descriptor
         self.matrix = matrix
         self.position = position
         self.appearance = appearance
         self._math = math_module
+        self._chassis_matrix = chassis_matrix
 
     def __getattr__(self, name):
         return getattr(self._source, name)
 
     def getComponents(self):
-        return _pose_components(self, self._math)
+        if self.matrix is None:
+            return ()
+        components = _pose_components(self, self._math)
+        if self._chassis_matrix is not None:
+            # Interior consumers enter through inverse(body). The chassis
+            # alone belongs to the separate hydraulic ground frame, just as
+            # the exterior armour query does.
+            to_chassis = self._math.Matrix(self._chassis_matrix)
+            to_chassis.invert()
+            to_chassis.preMultiply(self.matrix)
+            components[0][1].preMultiply(to_chassis)
+        return components
 
 
 def _field(value, name, default=None):
@@ -3080,15 +3092,16 @@ class BattleRuntime(object):
                 self._runtime.model_assembler, self._avatar.spaceID,
                 **factory_kwargs)
             self._remote_factory.prepare_descriptor(descriptor)
+            def turret_log(what, error):
+                self._warn_optional_failure(what, error, disable=False)
+
             if not self._worker_mode:
                 # The hidden worker never draws a wreck and its address space
                 # is already the tightest resource in this port, so it never
                 # loads a detached turret compound.
                 self._detached_turrets = DetachedTurretPresentation(
                     self._runtime.bigworld, self._runtime.math, self._avatar,
-                    self._collide_detached_turret,
-                    log=lambda what, error: self._warn_optional_failure(
-                        what, error, disable=False))
+                    self._collide_detached_turret, log=turret_log)
             builder = EntityPropertyBuilder(
                 BigWorldVehicleBinding.PROPERTY_NAMES)
             self._sender = _LANInputSender(self)
@@ -4891,12 +4904,13 @@ class BattleRuntime(object):
         """Segment query used to walk a detached turret's arc to the ground.
 
         Flag 128 is the same terrain-and-static mask every motion probe in
-        this port uses.  No broken-skin filter is prepared here: a detached
-        turret is presentation only, so a fence it clips through is not a
-        physical result anyone else observes.
+        this port uses, and the same per-column broken-skin filter.  The
+        cosmetic arc must not rest on a fence skin the room has already
+        accepted as broken.
         """
-        collision = self._runtime.bigworld.wg_collideSegment(
-            self._avatar.spaceID, self._vector(start), self._vector(end), 128)
+        ground_filter = self._ground_filter(float(start[0]), float(start[2]))
+        collision = self._collide_down(
+            self._vector(start), self._vector(end), ground_filter)
         if collision is None:
             return None
         point = collision[0]
@@ -13624,6 +13638,30 @@ class BattleRuntime(object):
             return (tuple(item.collision for item in evidence), evidence)
         return (tuple(target.collideSegmentExt(start, end) or ()), ())
 
+    def _projectile_live_critical_target(self, record, target):
+        """Pair live interior components with the exterior collision owner.
+
+        Stock getComponents contains model-to-native-filter transforms. LAN
+        native vehicles use a separately driven body/chassis, so borrowing
+        stock components would put interior modules back at the filter pose.
+        Historical targets already own their component frame and bypass this.
+        """
+        if not (record.get('local') or record.get('native_remote')):
+            return target
+        body = chassis = None
+        if record.get('local'):
+            if self._local_matrix is not None:
+                body, chassis = self._local_body_pose(), self._local_matrix
+        else:
+            body, chassis = self._projectile_vehicle_matrices(record, target)
+        matrix = self._runtime.math.Matrix
+        return _ProjectileCollisionTarget(
+            target, target.typeDescriptor,
+            matrix(body) if body is not None else None,
+            target.position, getattr(target, 'appearance', None),
+            self._runtime.math,
+            matrix(chassis) if chassis is not None else None)
+
     @timed('projectile.chord')
     def _projectile_chord(self, state, start, end,
                           absolute_start, absolute_end):
@@ -14400,6 +14438,9 @@ class BattleRuntime(object):
                 target, collision_pose)
             if critical_target is None:
                 return None
+        else:
+            critical_target = self._projectile_live_critical_target(
+                record, target)
         collisions, trace_start, trace_end = self._vehicle_trace(
             shot, query[0], query[1], collisions)
         if not combat_rules.is_he(shot):
@@ -14672,6 +14713,9 @@ class BattleRuntime(object):
                                 meta, state, 'he_splash_pose', key,
                                 'historic_component_matrix_unavailable')
                             continue
+                if pose is None:
+                    critical_target = self._projectile_live_critical_target(
+                        record, target)
                 # One victim roll is shared by all candidate directions.
                 rolled_damage = combat_rules.damage(shot, 2, 0.0)
                 contact = self._projectile_he_blast_contact(
@@ -23763,13 +23807,34 @@ class BattleRuntime(object):
             return int(special.TURRET_DETACHED)
         return int(special.AMMO_BAY_DESTROYED)
 
-    def _detach_late_ammo_turret(self, record, entity):
-        """Complete a late terminal cause without repeating vehicle death."""
-        if (self._detached_turrets is None or
-                record.get('_ammo_turret_attempted') or
-                bool(getattr(entity, 'isTurretMarkedForDetachment', False)) or
-                not self._turret_detachment_drawn(record)):
-            return False
+    def _mark_turret_detached(self, entity):
+        """Write the exact #1513 turret-detached fact on one wreck.
+
+        ``Vehicle.isTurretDetached`` is ``IS_TURRET_DETACHED(health)`` and the
+        private confirmation flag, and it is the only input to the turret and
+        gun attachment bits ``getComponents`` publishes.  Writing the pair is
+        therefore the whole fact on every peer: the visible wreck reassembles
+        without its turret, and every descriptor hit tester below it stops
+        answering for a part this hull no longer carries.  Idempotent, so a
+        replayed terminal event cannot refresh a compound twice.
+        """
+        if bool(getattr(entity, 'isTurretDetached', False)):
+            return int(getattr(entity, 'health', 0))
+        detached = int(
+            self._runtime.constants.SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED)
+        entity.health = detached
+        entity._Vehicle__turretDetachmentConfirmed = True
+        return detached
+
+    def _refresh_detached_wreck(self, entity):
+        """Rebuild one visible wreck compound without its turret, once.
+
+        Exact #1513 ``onVehicleHealthChanged`` also invokes inputHandler death
+        and ``processVehicleDeath``.  Update only its damage-state data, then
+        use ``confirmTurretDetachment``'s single turretless model refresh.
+        The hidden worker never reaches this: it keeps its live collision
+        compound and must not load a second one.
+        """
         appearance = getattr(entity, 'appearance', None)
         damage_state = getattr(appearance, 'damageState', None)
         update_damage = getattr(damage_state, 'update', None)
@@ -23777,34 +23842,128 @@ class BattleRuntime(object):
         water = getattr(appearance, 'waterSensor', None)
         if not callable(update_damage) or not callable(confirm) or water is None:
             return False
-        plan = self._run_optional_feature(
-            'ammo-bay turret detachment', self._detached_turrets.prepare,
-            (entity,), disable=False)
-        if not plan:
-            return False
-        # Creation can synchronously enter stock SynchronousDetachment.
-        # Install the terminal identity before that call and admit one launch.
-        record['_ammo_turret_attempted'] = True
-        previous_health = entity.health
-        entity.health = int(
-            self._runtime.constants.SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED)
-        entity._Vehicle__turretDetachmentConfirmed = True
-        launched = self._run_optional_feature(
-            'ammo-bay turret detachment', self._detached_turrets.launch,
-            (plan, self._turret_detachment_seed(record['engine_id']),
-             self._clock()), disable=False)
-        if not launched:
-            entity._Vehicle__turretDetachmentConfirmed = False
-            entity.health = previous_health
-            return False
-        # Exact #1513 onVehicleHealthChanged also invokes inputHandler death
-        # and processVehicleDeath. Update only its damage-state data, then use
-        # confirmTurretDetachment's single turretless model refresh instead.
+
         def refresh():
-            update_damage(entity.health, entity.isCrewActive, water.isUnderWater)
+            update_damage(entity.health, entity.isCrewActive,
+                          water.isUnderWater)
             confirm()
+
         self._run_optional_feature(
             'late ammo-bay wreck refresh', refresh, (), disable=False)
+        return True
+
+    def _turret_detachment_pose(self, record, state, entity):
+        """Return the authoritative terminal pose one detachment starts from.
+
+        Use the latest admitted pose instead of a compound that may already
+        have been replaced by the death callback.  A health-only combat event
+        carries no pose of its own, so fall back to the record and finally to
+        the entity itself.  The arc is cosmetic: different snapshot arrival
+        times can still leave peers with different admitted poses.
+        """
+        for source in (state, record.get('state')):
+            if not isinstance(source, dict):
+                continue
+            if not all(name in source for name in ('x', 'y', 'z')):
+                continue
+            yaw = _number(source.get('yaw'))
+            return {
+                'x': _number(source.get('x')),
+                'y': _number(source.get('y')),
+                'z': _number(source.get('z')),
+                'yaw': yaw,
+                'pitch': _number(source.get('pitch')),
+                'roll': _number(source.get('roll')),
+                'turret_yaw': _number(
+                    source.get('turret_yaw'),
+                    _angle_delta(yaw, _number(source.get('aim_yaw'), yaw))),
+            }
+        if record.get('local') and self._local_position is not None:
+            # Prefer admitted state even for the local player so the launch
+            # ring follows the terminal record when that record has a pose.
+            return {
+                'x': float(self._local_position[0]),
+                'y': float(self._local_position[1]),
+                'z': float(self._local_position[2]),
+                'yaw': float(self._local_yaw),
+                'pitch': float(self._local_pitch),
+                'roll': float(self._local_roll),
+                'turret_yaw': self._entity_turret_yaw(entity),
+            }
+        return self._entity_detachment_pose(entity)
+
+    def _entity_detachment_pose(self, entity):
+        """Read one terminal pose off the entity as the last resort."""
+        position = getattr(entity, 'position', None)
+        matrix = getattr(entity, 'matrix', None)
+        if position is None or matrix is None:
+            return None
+        try:
+            return {
+                'x': float(position.x), 'y': float(position.y),
+                'z': float(position.z),
+                'yaw': _number(getattr(matrix, 'yaw', 0.0)),
+                'pitch': _number(getattr(matrix, 'pitch', 0.0)),
+                'roll': _number(getattr(matrix, 'roll', 0.0)),
+                'turret_yaw': self._entity_turret_yaw(entity),
+            }
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _entity_turret_yaw(self, entity):
+        appearance = getattr(entity, 'appearance', None)
+        turret_matrix = getattr(appearance, 'turretMatrix', None)
+        if turret_matrix is None:
+            return 0.0
+        try:
+            return _number(self._runtime.math.Matrix(turret_matrix).yaw)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
+    def _apply_turret_detachment(self, record, entity, state=None):
+        """Detach one wreck's turret everywhere the room can observe it.
+
+        The detachment itself is not optional and not presentation: retail
+        encodes it in the vehicle's own ALL_CLIENTS health, so the hull is
+        turretless -- and its turret and gun hit testers are gone -- on every
+        peer.  The flying entity remains cosmetic and is AOI-gated; the
+        hidden worker must not resolve an arc or create an obstacle for a
+        turret that a visible client may never draw.
+        """
+        if bool(getattr(entity, 'isTurretDetached', False)):
+            return False
+        # Creation can synchronously enter stock SynchronousDetachment, and a
+        # marked-but-unconfirmed wreck would assemble its turret back on.
+        # Install the whole terminal identity before anything else runs.
+        self._mark_turret_detached(entity)
+        if self._worker_mode:
+            return True
+        seed = self._turret_detachment_seed(record['engine_id'])
+        now = self._clock()
+        pose = self._turret_detachment_pose(record, state, entity)
+        plan = None
+        if (pose is not None and self._detached_turrets is not None and
+                not record.get('_ammo_turret_attempted') and
+                self._turret_detachment_drawn(record)):
+            # The launch geometry is descriptor plus replicated pose, so
+            # unlike the retired compound-node read it does not have to be
+            # frozen before the health write.
+            plan = self._run_optional_feature(
+                'ammo-bay turret detachment', self._detached_turrets.prepare,
+                (entity, pose), disable=False)
+        if plan:
+            record['_ammo_turret_attempted'] = True
+            self._run_optional_feature(
+                'ammo-bay turret detachment', self._detached_turrets.launch,
+                (plan, seed, now), disable=False)
+        return True
+
+    def _detach_late_ammo_turret(self, record, entity, state=None):
+        """Complete a late terminal cause without repeating vehicle death."""
+        if not self._apply_turret_detachment(record, entity, state):
+            return False
+        if not self._worker_mode:
+            self._refresh_detached_wreck(entity)
         return True
 
     def _turret_detachment_drawn(self, record):
@@ -23812,8 +23971,8 @@ class BattleRuntime(object):
 
         Retail's ``DetachedTurret`` is a cell entity, so an unspotted enemy
         simply never has one in AOI.  Our replicas never leave AOI, so reuse
-        the same team-knowledge gate the retail dead marker uses: an unseen
-        death keeps exactly the wreck it has today.
+        the same team-knowledge gate the retail dead marker uses. An unseen
+        death still removes the wreck's turret without creating a flight.
         """
         if record.get('local'):
             return True
@@ -23859,12 +24018,19 @@ class BattleRuntime(object):
         ammo_rack_death = bool(
             health <= 0 and critical.get('ammo_rack_death', False))
         native_health = display_health if dead and display_health > 0 else health
-        if ammo_rack_death and not self._worker_mode:
+        if ammo_rack_death:
             # #1513's marker and damage-state consumers require raw special
-            # health. LAN HP stays nonnegative. Do not mark TURRET_DETACHED:
-            # that requires a real DetachedTurret entity and its handshake.
+            # health. LAN HP stays nonnegative.  ``health`` is ALL_CLIENTS in
+            # retail, so an ammo-bay detonation detaches the turret on every
+            # peer -- the hidden worker included.  That is not presentation:
+            # ``Vehicle.getComponents`` publishes ``not isTurretDetached`` as
+            # the turret and gun attachment bit and ``__collideSegment`` skips
+            # an unattached component, so this value is what stops an empty
+            # turret ring from blocking shells above a turretless hull.  Only
+            # the flying ``DetachedTurret`` entity is AOI-gated in retail, and
+            # it stays gated below.
             native_health = int(
-                self._runtime.constants.SPECIAL_VEHICLE_HEALTH.AMMO_BAY_DESTROYED)
+                self._runtime.constants.SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED)
         # Blind non-lethal hits stay private, but death is public authority:
         # native shutdown, the wreck, the kill and statistics form one edge.
         suppress_combat_presentation = bool(
@@ -23884,15 +24050,15 @@ class BattleRuntime(object):
             # Replayed combat events and late snapshots may repeat a terminal
             # state. Keep the durable signature current without replaying
             # native death callbacks, effects, markers or kill notifications.
-            if ammo_rack_death and not self._worker_mode:
+            if ammo_rack_death:
                 entity = self._server_entity(engine_id)
                 if entity is None:
                     return
                 previous_native_health = entity.health
-                self._detach_late_ammo_turret(record, entity)
+                self._detach_late_ammo_turret(record, entity, state)
                 native_health = self._ammo_bay_special_health(entity)
-                if previous_native_health != native_health:
-                    entity.health = native_health
+                if (previous_native_health != native_health and
+                        not self._worker_mode):
                     # A terminal snapshot may arrive before the critical
                     # cause. Correct the bar without replaying native death,
                     # kill credit, postmortem activation or the explosion.
@@ -23959,22 +24125,13 @@ class BattleRuntime(object):
                         critical=death_payload,
                         attribute_attacker=death_cause not in (
                             'drowning', 'world_collision', 'overturn'))
-        turret_plan = None
-        if (ammo_rack_death and dead and not previous_dead and
-                not crew_knockout and not self._worker_mode and
-                self._detached_turrets is not None and
-                self._turret_detachment_drawn(record)):
-            # Freeze the launch pose while the live compound is still the one
-            # drawn.  ``onHealthChanged`` below replaces it.
-            turret_plan = self._run_optional_feature(
-                'ammo-bay turret detachment',
-                self._detached_turrets.prepare, (entity,), disable=False)
-            if turret_plan:
-                native_health = int(
-                    self._runtime.constants.SPECIAL_VEHICLE_HEALTH
-                    .TURRET_DETACHED)
         if self._worker_mode:
             entity.health = native_health
+            if ammo_rack_death:
+                # The worker draws nothing and must never load a second
+                # compound, but it owns every hit tester in the room.  Publish
+                # the same attachment fact its collision reads.
+                self._apply_turret_detachment(record, entity, state)
             notifier = getattr(entity, 'set_health', None)
             if callable(notifier):
                 notifier(previous)
@@ -23993,32 +24150,20 @@ class BattleRuntime(object):
                 retain_wreck()
             return
         entity.health = native_health
-        if turret_plan:
-            # ``Vehicle.confirmTurretDetachment`` is exactly this flag plus a
-            # models refresh, and it is the only writer of it in #1513.
-            # Setting it before the health callback collapses retail's two
-            # refreshes into the one ``onHealthChanged`` already performs, so
-            # a turretless assembler cannot lose a race against a turreted
+        if ammo_rack_death:
+            # ``Vehicle.confirmTurretDetachment`` is exactly the confirmation
+            # flag plus a models refresh, and it is the only writer of it in
+            # #1513.  Setting it before the health callback collapses retail's
+            # two refreshes into the one ``onHealthChanged`` already performs,
+            # so a turretless assembler cannot lose a race against a turreted
             # one for the same 'exploded' model state.  It also makes
-            # ``SynchronousDetachment`` finish inside ``createEntity``
-            # without seeding the turret's filter from the vehicle's own,
-            # never-fed ``WGVehicleFilter``.
-            entity._Vehicle__turretDetachmentConfirmed = True
-            record['_ammo_turret_attempted'] = True
-            launched = self._run_optional_feature(
-                'ammo-bay turret detachment',
-                self._detached_turrets.launch,
-                (turret_plan, self._turret_detachment_seed(engine_id),
-                 self._clock()),
-                disable=False)
-            if not launched:
-                # No wreck assembler has been requested yet. Restore the
-                # burn-off state before the single native health callback.
-                entity._Vehicle__turretDetachmentConfirmed = False
-                native_health = int(
-                    self._runtime.constants.SPECIAL_VEHICLE_HEALTH
-                    .AMMO_BAY_DESTROYED)
-                entity.health = native_health
+            # ``SynchronousDetachment`` finish inside ``createEntity`` without
+            # seeding the turret's filter from the vehicle's own, never-fed
+            # ``WGVehicleFilter``.  A failed launch is not rolled back: the
+            # hull is turretless on every peer either way, and a wreck that
+            # kept its turret only here would present armour the room's
+            # collision no longer has.
+            self._apply_turret_detachment(record, entity, state)
         health_changed = getattr(entity, 'onHealthChanged', None)
         if (not suppress_combat_presentation and
                 callable(health_changed)):

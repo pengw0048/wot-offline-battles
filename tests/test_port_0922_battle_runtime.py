@@ -918,6 +918,11 @@ class _Vehicle(object):
     def isTurretDetachmentConfirmationNeeded(self):
         return not self._Vehicle__turretDetachmentConfirmed
 
+    @property
+    def isTurretDetached(self):
+        return (self.isTurretMarkedForDetachment and
+                self._Vehicle__turretDetachmentConfirmed)
+
     def show(self, visible):
         self.shows.append(bool(visible))
         # Exact #1513 ``Vehicle.show`` reaches the appearance only once
@@ -5947,14 +5952,21 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         record = {
             'engine_id': vehicle_id, 'local': False, 'ready': True,
             'presentation': True, 'native_remote': True,
-            'state': {'team': 2, 'health': 500, 'alive': True}}
+            'state': {'team': 2, 'health': 500, 'alive': True,
+                      'x': 12.0, 'y': 3.0, 'z': -30.0, 'yaw': 0.4,
+                      'pitch': 0.0, 'roll': 0.0, 'turret_yaw': 0.2}}
         battle._records = {'bot:11': record}
         return battle, record, vehicle
 
     @staticmethod
     def _ammo_bay_death_state():
+        # Both production callers hand _apply_health the record's own full
+        # state, so the terminal pose the detachment arc starts from travels
+        # with the health transition.
         return {'health': 0, 'alive': False,
-                'critical': {'ammo_rack_death': True}}
+                'critical': {'ammo_rack_death': True},
+                'x': 12.0, 'y': 3.0, 'z': -30.0, 'yaw': 0.4,
+                'pitch': 0.0, 'roll': 0.0, 'turret_yaw': 0.2}
 
     def test_late_ammo_bay_cause_detaches_once_without_repeating_death(self):
         for local in (False, True):
@@ -6008,10 +6020,10 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         battle._detached_turrets = turrets
         battle._apply_health(record, self._ammo_bay_death_state())
         battle._apply_health(record, self._ammo_bay_death_state())
-        self.assertEqual(_AMMO_BAY_DESTROYED, vehicle.health)
-        self.assertFalse(vehicle._Vehicle__turretDetachmentConfirmed)
+        self.assertEqual(_TURRET_DETACHED, vehicle.health)
+        self.assertTrue(vehicle._Vehicle__turretDetachmentConfirmed)
         turrets.launch.assert_called_once()
-        vehicle.confirmTurretDetachment.assert_not_called()
+        vehicle.confirmTurretDetachment.assert_called_once()
 
     def test_ammo_bay_death_detaches_the_turret_in_the_stock_order(self):
         """Create the flying entity, then one refresh, already turretless.
@@ -6022,11 +6034,15 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         ``isTurretDetached`` when ``onHealthChanged`` runs.  Confirming after
         that callback would request a second assembler for the same model
         state and let a turreted background load land last.
+
+        Both are therefore written before the flying entity is even planned:
+        the launch geometry is the descriptor plus the replicated pose, so
+        nothing has to be read off the compound the refresh replaces.
         """
         battle, record, vehicle = self._ammo_bay_death_battle()
         order = []
         turrets = mock.Mock()
-        turrets.prepare.side_effect = lambda entity: order.append(
+        turrets.prepare.side_effect = lambda entity, pose: order.append(
             ('prepare', entity.health,
              entity._Vehicle__turretDetachmentConfirmed)) or {'plan': True}
         turrets.launch.side_effect = lambda *args: order.append(
@@ -6040,7 +6056,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
 
         self.assertEqual(
             order,
-            [('prepare', 500, False),
+            [('prepare', _TURRET_DETACHED, True),
              ('launch', _TURRET_DETACHED, True),
              ('health', _TURRET_DETACHED, True)])
         self.assertEqual(vehicle.health, _TURRET_DETACHED)
@@ -6049,7 +6065,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual(
             turrets.launch.call_args[0][0], {'plan': True})
 
-    def test_failed_turret_launch_preserves_the_burn_off_wreck(self):
+    def test_a_failed_turret_launch_still_detaches_the_wreck(self):
         for failure in (False, RuntimeError('collision query failed')):
             with self.subTest(failure=failure):
                 battle, record, vehicle = self._ammo_bay_death_battle()
@@ -6067,9 +6083,14 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
 
                 battle._apply_health(record, self._ammo_bay_death_state())
 
-                self.assertEqual(vehicle.health, _AMMO_BAY_DESTROYED)
-                self.assertFalse(vehicle._Vehicle__turretDetachmentConfirmed)
-                self.assertEqual(observed, [(_AMMO_BAY_DESTROYED, False)])
+                # The hull is turretless on every peer either way: retail
+                # carries the detachment in ALL_CLIENTS health, and the room's
+                # collision authority has already dropped the turret and gun
+                # hit testers.  A wreck that kept its turret only here would
+                # present armour nothing else in the room has.
+                self.assertEqual(vehicle.health, _TURRET_DETACHED)
+                self.assertTrue(vehicle._Vehicle__turretDetachmentConfirmed)
+                self.assertEqual(observed, [(_TURRET_DETACHED, True)])
 
     def test_a_replayed_terminal_snapshot_keeps_the_turret_detached(self):
         """-13 must not be demoted to -5 and refresh the compound again."""
@@ -6090,8 +6111,8 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual(turrets.prepare.call_count, 1)
         self.assertEqual(turrets.launch.call_count, 1)
 
-    def test_an_unpreparable_turret_keeps_the_burn_off_wreck(self):
-        """A missing exploded model is not an error; the wreck stays as it was."""
+    def test_an_undrawable_turret_still_leaves_a_turretless_wreck(self):
+        """A missing exploded model costs the flight, never the detachment."""
         battle, record, vehicle = self._ammo_bay_death_battle()
         turrets = mock.Mock()
         turrets.prepare.return_value = None
@@ -6099,33 +6120,52 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
 
         battle._apply_health(record, self._ammo_bay_death_state())
 
-        self.assertEqual(vehicle.health, _AMMO_BAY_DESTROYED)
-        self.assertFalse(vehicle.isTurretMarkedForDetachment)
-        self.assertFalse(vehicle._Vehicle__turretDetachmentConfirmed)
+        self.assertEqual(vehicle.health, _TURRET_DETACHED)
+        self.assertTrue(vehicle.isTurretDetached)
         turrets.launch.assert_not_called()
 
-    def test_a_failed_prepare_never_marks_the_turret_detached(self):
+    def test_a_failed_prepare_still_marks_the_turret_detached(self):
         battle, record, vehicle = self._ammo_bay_death_battle()
         turrets = mock.Mock()
-        turrets.prepare.side_effect = RuntimeError('no turret node')
+        turrets.prepare.side_effect = RuntimeError('no turret ring')
         battle._detached_turrets = turrets
 
         battle._apply_health(record, self._ammo_bay_death_state())
 
-        self.assertEqual(vehicle.health, _AMMO_BAY_DESTROYED)
+        self.assertEqual(vehicle.health, _TURRET_DETACHED)
         turrets.launch.assert_not_called()
 
     def test_an_unseen_ammo_bay_death_throws_no_turret(self):
-        """Retail has no DetachedTurret in AOI for a target never spotted."""
+        """Retail has no DetachedTurret in AOI for a target never spotted.
+
+        Its ``health`` is still ALL_CLIENTS, so the wreck itself is turretless
+        for everyone; only the flying entity is missing.
+        """
         battle, record, vehicle = self._ammo_bay_death_battle(drawn=False)
         turrets = mock.Mock()
         battle._detached_turrets = turrets
 
         battle._apply_health(record, self._ammo_bay_death_state())
 
-        self.assertEqual(vehicle.health, _AMMO_BAY_DESTROYED)
+        self.assertEqual(vehicle.health, _TURRET_DETACHED)
         turrets.prepare.assert_not_called()
         turrets.launch.assert_not_called()
+
+    def test_the_worker_detaches_without_resolving_a_visual_arc(self):
+        battle, record, vehicle = self._ammo_bay_death_battle()
+        battle._worker_mode = True
+        battle._turret_detachment_pose = mock.Mock(
+            side_effect=AssertionError('worker must not plan a visual arc'))
+        battle._collide_detached_turret = mock.Mock(
+            side_effect=AssertionError('worker must not query a visual arc'))
+
+        battle._apply_health(record, self._ammo_bay_death_state())
+        battle._apply_health(record, self._ammo_bay_death_state())
+
+        self.assertEqual(vehicle.health, _TURRET_DETACHED)
+        self.assertTrue(vehicle.isTurretDetached)
+        battle._turret_detachment_pose.assert_not_called()
+        battle._collide_detached_turret.assert_not_called()
 
     def test_a_plain_death_never_touches_the_detachment_flag(self):
         battle, record, vehicle = self._ammo_bay_death_battle()
@@ -28597,17 +28637,19 @@ class BattleRuntimeContractTests(unittest.TestCase):
                     battle._apply_health(record, state, attacker_id=11,
                                          force_cause=True)
 
-                self.assertEqual(-5, entity.health)
-                entity.onHealthChanged.assert_called_once_with(-5, 11, 0)
+                self.assertEqual(_TURRET_DETACHED, entity.health)
+                entity.onHealthChanged.assert_called_once_with(
+                    _TURRET_DETACHED, 11, 0)
                 self.assertEqual(0, state['health'])
                 self.assertEqual(0, state['display_health'])
                 battle._binding.arena_vehicle_killed.assert_called_once()
                 if local:
                     battle._avatar.updateVehicleHealth.assert_called_once_with(
-                        10, -5, 0, False, False)
+                        10, _TURRET_DETACHED, 0, False, False)
                 else:
                     battle._avatar.guiSessionProvider.setVehicleHealth.\
-                        assert_called_once_with(False, 10, -5, 11, 0)
+                        assert_called_once_with(
+                            False, 10, _TURRET_DETACHED, 11, 0)
 
     def test_late_ammo_rack_cause_corrects_marker_without_replaying_death(self):
         runtime = _runtime()
@@ -28627,15 +28669,21 @@ class BattleRuntimeContractTests(unittest.TestCase):
             state['critical'] = {'ammo_rack_death': True}
             battle._apply_health(record, state, attacker_id=11)
             battle._apply_health(record, state, attacker_id=11)
-        self.assertEqual(-5, entity.health)
+        self.assertEqual(_TURRET_DETACHED, entity.health)
         entity.onHealthChanged.assert_called_once_with(0, 11, 0)
         battle._binding.arena_vehicle_killed.assert_called_once()
         self.assertEqual([
             mock.call(False, 10, 0, 11, 0),
-            mock.call(False, 10, -5, 11, 0)],
+            mock.call(False, 10, _TURRET_DETACHED, 11, 0)],
             battle._avatar.guiSessionProvider.setVehicleHealth.call_args_list)
 
-    def test_worker_keeps_numeric_health_when_ammo_rack_detonates(self):
+    def test_worker_detaches_the_turret_without_any_marker_work(self):
+        """The worker owns collision, so it must know the turret is gone.
+
+        Its ``getComponents`` reports ``not isTurretDetached`` as the turret
+        and gun attachment bit, and the whole room's armour queries run
+        through it.  Marker and GUI work stays a visible-client concern.
+        """
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._worker_mode = True
@@ -28649,7 +28697,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         with mock.patch.object(critical_damage, 'apply_death', return_value=None):
             battle._apply_health(record, state)
             battle._apply_health(record, state)
-        self.assertEqual(0, entity.health)
+        self.assertEqual(_TURRET_DETACHED, entity.health)
+        self.assertTrue(entity.isTurretDetached)
         self.assertFalse(entity.isCrewActive)
         battle._avatar.guiSessionProvider.setVehicleHealth.assert_not_called()
 
