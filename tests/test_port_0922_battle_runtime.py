@@ -28718,15 +28718,14 @@ class BattleRuntimeContractTests(unittest.TestCase):
                           selected='engineHealth',
                           requested_active=None), call)
 
-    def test_manual_extinguisher_does_not_send_extra_zero_as_a_target(self):
+    def test_stock_manual_extinguisher_activation_reaches_server_without_target(self):
+        import test_port_0922_effective_params as fixtures
+
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
-        send_intent = mock.Mock(return_value=1)
-        battle.client = types.SimpleNamespace(
-            player_id=1, send_equipment_intent=send_intent)
         descriptor = _Descriptor()
-        descriptor.extras = {0: types.SimpleNamespace(name='fire')}
+        descriptor.extras = {1: types.SimpleNamespace(name='engineHealth')}
         entity = _Vehicle(10, descriptor, _Vector(), (0, 0, 0),
                           {'health': 500})
         runtime.bigworld.entities[10] = entity
@@ -28735,16 +28734,52 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'engine_id': 10, 'state': {'health': 500, 'alive': True},
             'kind': 'player', 'network_id': 1, 'local': True}}
         extinguisher = types.SimpleNamespace(
-            id=(11, 42), compactDescr=402, name='handExtinguishers',
-            tags=(), reuseCount=0, cooldownSeconds=0.0,
+            id=(15, 0), compactDescr=251, name='handExtinguishers',
+            tags=(), reuseCount=1, cooldownSeconds=90.0,
             autoactivate=False)
         battle._equipment_state = [equipment_mechanics.EquipmentState(
             equipment_mechanics.project_equipment(extinguisher))]
 
-        self.assertTrue(battle._activate_equipment(42))
-        send_intent.assert_called_once_with(
-            42, activation_code=42, selected=None,
-            requested_active=None)
+        params = fixtures.effective_params()
+        params['equipment'] = [battle._equipment_state[0].contract]
+        state = fixtures.BattleState()
+        player, error = state.add_player(
+            fixtures._Connection(), ('127.0.0.1', 2000),
+            fixtures._hello(params))
+        self.assertIsNone(error)
+        self.assertTrue(state._install_player_equipments(player))
+        state.phase = 'battle'
+        state.tick = 10000
+        player.participating = True
+        player.critical['fire'] = True
+        client = fixtures.LANClient(
+            '127.0.0.1', 28782, 'Player', 'ussr:R11_MS-1',
+            max_health=90, effective_params=params,
+            vehicle_compact_descr='dGVzdA==')
+        client.player_id = player.player_id
+        client.ready = True
+        client.phase = 'battle'
+        client.round_id = state.round_id
+        messages = []
+        client._send = lambda message: messages.append(
+            json.loads(json.dumps(message))) or True
+        battle.client = client
+
+        # #1513 _ExtinguisherItem.getActivationCode returns 65536 + id[1].
+        # The high word means "activate", not the vehicle's extra index 1.
+        self.assertTrue(battle.change_vehicle_setting(
+            runtime.constants.VEHICLE_SETTING.ACTIVATE_EQUIPMENT, 65536))
+        self.assertEqual(1, len(messages))
+        self.assertEqual(0, messages[0]['equipment_id'])
+        self.assertEqual(65536, messages[0]['activation_code'])
+        self.assertIsNone(messages[0]['selected'])
+        self.assertIsNone(messages[0]['requested_active'])
+        self.assertTrue(state.submit_equipment_intent(
+            player.player_id, messages[0]))
+        self.assertTrue(player.equipment_intent_result['accepted'])
+        self.assertFalse(player.critical['fire'])
+        self.assertEqual({'251': 1}, state._statistics_row(
+            'player', player.player_id)['equipment_used'])
 
     def test_multiple_ap_destructibles_accumulate_before_vehicle(self):
         runtime = _runtime()

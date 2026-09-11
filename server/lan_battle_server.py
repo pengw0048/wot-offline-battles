@@ -11624,6 +11624,12 @@ class BattleState:
                     return self._finish_equipment_intent(
                         player, intent_seq, False,
                         "invalid_activation_code")
+            elif kind == "extinguisher":
+                # #1513 _ExtinguisherItem uses 65536 + equipment ID.
+                if extra_index != 1:
+                    return self._finish_equipment_intent(
+                        player, intent_seq, False,
+                        "invalid_activation_code")
             elif not repair_all and extra_index != 0:
                 return self._finish_equipment_intent(
                     player, intent_seq, False, "invalid_activation_code")
