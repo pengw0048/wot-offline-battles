@@ -18,30 +18,40 @@ struct Reader {
     int integer(){double v=next();if(v!=std::floor(v)||std::abs(v)>1000000000)throw std::invalid_argument("world integer");return static_cast<int>(v);}
     void end(){if(i!=n)throw std::invalid_argument("world width");}
 };
-struct V {double x,y,z;V(double a=0,double b=0,double c=0):x(a),y(b),z(c){}};
+using V = offline_world::Point;
+double source_power(double base, double exponent) {
+    // CPython 2 BINARY_POWER calls libm even for exponent 2. GCC otherwise
+    // folds pow(x, 2) to multiplication, which changes some ray heights by
+    // one ULP. Preserve the source operation at every world power expression.
+    double (*volatile power)(double, double) = std::pow;
+    return power(base, exponent);
+}
 V vec(Reader &r){double x=r.next(),y=r.next(),z=r.next();return V(x,y,z);}
 double distance(V a,V b){double x=a.x-b.x,y=a.y-b.y,z=a.z-b.z;return std::sqrt(x*x+y*y+z*z);}
 struct Optional {bool has;double value;Optional():has(false),value(0){} Optional(double v):has(true),value(v){}};
 struct Plane {double x,y,z,gx,gz;};
 struct Answer {int status,id;V point,normal;};
 struct Query {int kind,id;V a,b;};
-struct Input {V pos;double yaw,speed,hw,back,front,dt,motion,pitch,roll;bool airborne,has_motion;};
+using Input = offline_world::Input;
 struct Lane {double x1,z1,x2,z2,length,px,pz,ps,pc,direction,look;};
 struct Hit {double length;V a,b;Answer hit;};
+Answer checked_answer(const double *packet) {
+    for(int i=0;i<8;++i)if(!std::isfinite(packet[i]))throw std::invalid_argument("world engine answer");
+    if(packet[0]!=std::floor(packet[0])||packet[0]<0||packet[0]>2||packet[7]!=std::floor(packet[7])||std::abs(packet[7])>1000000000)
+        throw std::invalid_argument("world engine answer type");
+    return Answer{static_cast<int>(packet[0]),static_cast<int>(packet[7]),V(packet[1],packet[2],packet[3]),V(packet[4],packet[5],packet[6])};
+}
 struct Job {
     Input in;std::vector<Answer> answers;std::vector<Query> expected;
-    size_t cursor;bool validate,synchronous;
-    Job():cursor(0),validate(false),synchronous(false){}
+    size_t cursor;bool validate,synchronous,batch_independent;
+    Job():cursor(0),validate(false),synchronous(false),batch_independent(false){}
     Answer query(int kind,V a,V b,int id=0){
         Query q={kind,id,a,b};
         if(synchronous){
             double packet[16]={static_cast<double>(kind),a.x,a.y,a.z,b.x,b.y,b.z,static_cast<double>(id)};
             if(offline_query(packet,16))throw std::runtime_error("world engine query failed");
-            for(int i=0;i<8;++i)if(!std::isfinite(packet[i]))throw std::invalid_argument("world engine answer");
-            if(packet[0]!=std::floor(packet[0])||packet[0]<0||packet[0]>2||packet[7]!=std::floor(packet[7])||std::abs(packet[7])>1000000000)
-                throw std::invalid_argument("world engine answer type");
             ++cursor;
-            return Answer{static_cast<int>(packet[0]),static_cast<int>(packet[7]),V(packet[1],packet[2],packet[3]),V(packet[4],packet[5],packet[6])};
+            return checked_answer(packet);
         }
         if(cursor==answers.size())throw q;
         if(validate){
@@ -50,6 +60,25 @@ struct Job {
                 throw std::invalid_argument("world query geometry/order differs");
         }
         return answers[cursor++];
+    }
+    std::array<Answer, 2> pair(int kind, const std::pair<V,V> &first, const std::pair<V,V> &second) {
+        if (!synchronous || !batch_independent) {
+            Answer a = query(kind, first.first, first.second);
+            Answer b = query(kind, second.first, second.second);
+            return {{a, b}};
+        }
+        double packet[33] = {5};
+        size_t at = 1;
+        for (const auto &ray : {first, second}) {
+            packet[at] = kind;
+            packet[at+1] = ray.first.x; packet[at+2] = ray.first.y; packet[at+3] = ray.first.z;
+            packet[at+4] = ray.second.x; packet[at+5] = ray.second.y; packet[at+6] = ray.second.z;
+            at += 16;
+        }
+        if (offline_query(packet,33)) throw std::runtime_error("world engine pair failed");
+        Answer a = checked_answer(packet), b = checked_answer(packet+8);
+        cursor += 2;
+        return {{a, b}};
     }
 };
 std::map<int,Job> jobs,traces;int next_job=1,next_trace=1;
@@ -65,14 +94,28 @@ V endpoint(V a,V b,const Input &in){
     if(df>0)fraction=std::min(fraction,(in.front-a.z)/df);else if(df<0)fraction=std::min(fraction,(-in.back-a.z)/df);
     fraction=std::max(0.0,std::min(1.0,fraction));return V(a.x+dr*fraction,0,a.z+df*fraction);
 }
+bool ground_request(const Input &in,double x,double z,double look,Plane p,std::pair<V,V> &ray){
+    double down=std::max(5.0,look*1.75+1.0),sy=std::min(in.pos.y+12.0,p.y+(x-p.x)*p.gx+(z-p.z)*p.gz);
+    if(sy<=in.pos.y-down)return false;
+    ray=std::make_pair(V(x,sy,z),V(x,in.pos.y-down,z));return true;
+}
 Optional ground(Job &j,double x,double z,double look,Plane p){
-    double down=std::max(5.0,look*1.75+1.0),sy=std::min(j.in.pos.y+12.0,p.y+(x-p.x)*p.gx+(z-p.z)*p.gz);
-    if(sy<=j.in.pos.y-down)return Optional();
-    Answer a=j.query(2,V(x,sy,z),V(x,j.in.pos.y-down,z));return a.status?Optional(a.point.y):Optional();
+    std::pair<V,V> ray;
+    if(!ground_request(j.in,x,z,look,p,ray))return Optional();
+    Answer a=j.query(2,ray.first,ray.second);return a.status?Optional(a.point.y):Optional();
 }
 Optional ahead(Job &j,const Lane &l,V local_start,V local_end,V py,double c,double s,Plane p){
     double fx=j.in.pos.x+c*local_end.x+s*local_end.z,fz=j.in.pos.z-s*local_end.x+c*local_end.z;
-    Optional a=ground(j,l.x1,l.z1,l.length,p),b=ground(j,fx,fz,l.length,p);
+    std::pair<V,V> left,right;Optional a,b;
+    bool has_left=ground_request(j.in,l.x1,l.z1,l.length,p,left),has_right=ground_request(j.in,fx,fz,l.length,p,right);
+    if(has_left&&has_right){
+        auto hits=j.pair(2,left,right);
+        if(hits[0].status)a=Optional(hits[0].point.y);
+        if(hits[1].status)b=Optional(hits[1].point.y);
+    }else{
+        if(has_left){Answer hit=j.query(2,left.first,left.second);if(hit.status)a=Optional(hit.point.y);}
+        if(has_right){Answer hit=j.query(2,right.first,right.second);if(hit.status)b=Optional(hit.point.y);}
+    }
     bool descending=(local_end.x-local_start.x)*py.x+(local_end.z-local_start.z)*py.z<-1e-9;
     if(descending&&a.has&&b.has){
         double support=j.in.pos.y+local_start.x*py.x+local_start.z*py.z;
@@ -81,7 +124,7 @@ Optional ahead(Job &j,const Lane &l,V local_start,V local_end,V py,double c,doub
         if(!middle.has||middle.value>(a.value+b.value)*0.5+1e-3)return Optional();
     }
     double ix=fx-l.x1,iz=fz-l.z1,dx=l.x2-l.x1,dz=l.z2-l.z1;
-    double inside=std::sqrt(std::pow(ix,2)+std::pow(iz,2)),full=std::sqrt(std::pow(dx,2)+std::pow(dz,2));
+    double inside=std::sqrt(source_power(ix,2)+source_power(iz,2)),full=std::sqrt(source_power(dx,2)+source_power(dz,2));
     if(a.has&&b.has&&inside>1e-6)return Optional(a.value+(b.value-a.value)*full/inside);
     if(a.has&&b.has)return Optional(std::min(a.value,b.value));
     return a.has?a:b;
@@ -92,8 +135,8 @@ std::pair<V,V> ray(const Input &in,const Lane &l,V a,V b,V py,double height,Opti
     return std::make_pair(V(l.x1,sy,l.z1),V(l.x2,ey,l.z2));
 }
 bool surface(const Answer &a,double gradient){
-    double length=std::pow(a.normal.x*a.normal.x+a.normal.y*a.normal.y+a.normal.z*a.normal.z,0.5);
-    return length>0&&a.normal.y/length>=1.0/std::pow(1.0+std::pow(gradient,2),0.5);
+    double length=source_power(a.normal.x*a.normal.x+a.normal.y*a.normal.y+a.normal.z*a.normal.z,0.5);
+    return length>0&&a.normal.y/length>=1.0/source_power(1.0+source_power(gradient,2),0.5);
 }
 bool drivable(const std::vector<double> &h,double segment){
     if(h.size()<2||std::abs(h.back()-h.front())<=0.15)return false;
@@ -178,8 +221,12 @@ int sweep(Job &j){
             }
             hits.push_back(Hit{d,lower.first,lower.second,hit});
         }
-        for(double h:std::array<double,2>{{1.1,1.6}}){
-            auto r=ray(in,l,a,b,py,h,top);Answer upper=j.query(3,r.first,r.second);
+        // Both ordinary upper rays are issued before any hit is resolved.
+        // The slope branch above can stop after its first ray and stays scalar.
+        std::array<std::pair<V,V>,2> upper_rays{{ray(in,l,a,b,py,1.1,top),ray(in,l,a,b,py,1.6,top)}};
+        auto upper_hits=j.pair(3,upper_rays[0],upper_rays[1]);
+        for(size_t i=0;i<2;++i){
+            const auto &r=upper_rays[i];const Answer &upper=upper_hits[i];
             if(!upper.status)continue;
             double length=distance(upper.point,r.first);if(length<target)hits.push_back(Hit{length,r.first,r.second,upper});
         }
@@ -195,6 +242,13 @@ void run(Job &j,double *b,int out){
 }
 }
 void offline_world_reset(){jobs.clear();traces.clear();}
+int offline_world::sweep(const offline_world::Input &input, bool batch_independent) {
+    Job job;
+    job.in = input;
+    job.synchronous = true;
+    job.batch_independent = batch_independent;
+    return ::sweep(job);
+}
 int offline_world_dispatch(double *b,int n){
     Reader r(b,n);int op=static_cast<int>(b[0]);
     if(op==405){Job j;j.in=input(r);r.end();j.synchronous=true;b[0]=sweep(j);b[1]=j.cursor;return 0;}

@@ -34,7 +34,7 @@ def main():
         '_Strict1513Component', '_HitTester1513', '_combat_descriptor', '_bot_equipment_contracts',
         '_effective_params_snapshot'))
     bodies.update(select('tests/test_port_0922_destructibles.py', (
-        '_Vector', '_Manager', '_catalog', '_empty_catalog_scan_fixture')))
+        '_Vector', '_Manager', '_ItemMatrix', '_catalog', '_empty_catalog_scan_fixture')))
     bodies.update(select('tools/benchmark_bot_workload.py', ('make_runtime', 'combat_native_queries')))
     bodies['crew_factors_module'] = (ROOT / 'tests/effective_params_fixture.py').read_text()
     bodies['make_runtime'] = bodies['make_runtime'].replace(
@@ -50,6 +50,12 @@ def main():
         '        def __init__(self, **values):\n'
         '            self.__dict__.update(values)\n'
         '    holder = Holder(')
+    # Expose the existing owner to the explicit native resolver experiment.
+    # Source/control runners keep the original resolver and native-query laws.
+    bodies['combat_native_queries'] = bodies['combat_native_queries'].replace(
+        '    runtime.motion_resolver = lambda',
+        '    runtime._ffi_world_owner = holder\n'
+        '    runtime.motion_resolver = lambda')
     args.output.write_text(json.dumps(bodies, sort_keys=True))
 
 

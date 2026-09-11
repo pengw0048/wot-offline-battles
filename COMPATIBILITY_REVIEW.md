@@ -1433,6 +1433,132 @@ python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
 sh tools/ffi_experiment/build_1513.sh /tmp/ffi-hot-1513
 ```
 
+The next experiment composes collision arbitration and the world sweep directly
+inside the owned motion kernel (`kernel,world-sync,world-resolver`). Its review
+still belongs to the complete experimental PR against `main`. The frozen
+`fb2ba3cf` kernel, adapters and production source remain the previous-performance
+control; the Python oracle remains production source `900744ce`.
+
+The resolver reads current native Bot state, computes corridor eligibility and
+directional kinetic admission, runs the C++ world sweep, and combines its result
+with the source catalog's exact contact receipt. Collision extents and the
+unmodified descriptor's forward/backward limits are compiled once per vehicle
+mode. They are distinct from crew/equipment-adjusted driving parameters. Siege
+transitions select the corresponding compiled profile. Missing collision
+extents reject construction; partially installed adapters are restored on
+failure. No production entry point or package installs this experiment.
+
+The exported fixture exposes its existing battle owner explicitly; it retains
+the source resolver for Python and frozen-control runs. Native callbacks use a
+64-double packet for begin, scalar query, completion and paired query operations.
+Python owns fresh operation-local native hit/filter references and every actual
+engine/catalog call. Native code retains none of those Python objects. Both
+normal completion and failed updates clear the operation; repeated teardown is
+safe. Callback entry checks the Bot runtime, round, space and catalog owner, and
+paired queries recheck those identities between their two native calls.
+Reuse and completion also check ownership after the catalog callback returns.
+
+Only queries already unconditional in the source are paired: the two initial
+under-hull ground columns and the two ordinary upper collision rays. Their
+engine calls still run sequentially in the original order. Ground-dependent
+geometry, midpoint/profile probes, slope-branch early exits, destruction/recast
+and catalog commits remain barriers. A first-query exception or non-finite
+answer stops the second query. The source catalog continues to own spatial
+indexes, live destruction, delayed skins, filters and canonical publication.
+This change does not claim migration of that catalog or projectile terminals.
+
+Expanded variable-step whole-update coverage found an existing C++ arithmetic
+mismatch in the previously isolated world core: optimizing `pow(x, 2)` to `x*x`
+changed an inside-hull length from `4.000000000000032` to
+`4.0000000000000329`, then changed a ray endpoint from `0.9719008512196334` to
+`0.9719008512196335`. Replaying the source's single-sweep trace reproduced it
+without batching. All source power expressions in the world core now retain
+the libm call used by CPython 2, including constant exponents. A regression uses
+that exact pose and ground transition; comparisons still require exact equality.
+
+On the final source, 480 focused source comparisons cover resolver branches,
+query exceptions, malformed receipts, varied extents/speed caps, and populated
+fragile/structure catalogs. The latter compare ordered native destruction,
+canonical publications, pending skins and subsequent filter decisions. Separate
+lifetime checks retire the round during an upper ray or catalog completion,
+reject an unrelated world owner after partial startup, and verify restoration.
+Seven 80-frame whole-update variants pass: six with this resolver (including
+combined Siege/human/cover/order changes and Himmelsdorf navigation), plus the
+previous callback path. New-path checks also inject a failed engine leaf and
+verify update cleanup and repeated teardown. The state, gunnery/launch,
+perception/lane, motion, aim, route/driver/traffic, contact and borrowed-buffer
+suites pass. Both scalar and synchronous world adapters pass 75 physical tests
+and 145 recorded query/result traces; one internal-helper mock remains a
+source-only test. ASan/UBSan pass the 480-case audit, borrowed callbacks and an
+80-frame combined update, with errors fatal and extension leak detection
+disabled. Host and x86 builds pass with warnings as errors; the x86 PE imports
+only `KERNEL32.dll` and `msvcrt.dll`. Client and changed runtime-side experiment
+sources compile under CPython 2.7.
+
+Three rotating rounds (nine fresh processes) on the same Linux aarch64 host
+under CPython 2.7.18 use Great Wall combat, 29 Bots and 30 simulated seconds at
+15 callbacks/second. The previous kernel and runner are frozen at `fb2ba3cf`;
+all nine complete snapshots match, including messages, ordered engine queries,
+motion probes, decisions, navigation progress and diagnostics.
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Unmodified production Python | 11.130556 s | 11.066111–11.145113 s | 0.00% |
+| Frozen kernel and adapters (`fb2ba3cf`) | 6.462702 s | 6.357355–6.573080 s | 41.94% |
+| Direct collision flow and paired queries | 6.244988 s | 6.156629–6.256726 s | 43.89% |
+
+The incremental median reduction is 3.37%, not another 43.89%. Median native
+initialization is 0.167170 s (control: 0.164288 s). Loop timing includes ordinary
+callback marshalling and per-frame snapshot/navigation capture, but excludes
+fixture/process startup and final file serialization. Earlier measurements use
+their own controls; their savings must not be added to this result.
+
+Forward dispatches fall from 7,600 to 2,562. Native-to-Python callbacks fall from
+136,127 to 111,533: 48,682 engine leaves, 134 navigation notifications and 62,717
+world callbacks. The latter comprise 5,038 begins, 5,038 completions, 23,009 scalar
+queries and 29,632 query pairs. They still execute 82,273 ordered world leaves
+and exactly 77,172 fake collision rays. Actor reads fall from 44,678 to 39,640
+and decodes from 22,924 to 17,955. A separate final-source loop profile confirms
+those counts and its snapshot also matches; its instrumented timings are not
+included above. It still records 241,222 vector constructions, 3,830
+`_fell_trees_near` calls and 8,516 spatial-signature calls. These are remaining
+allocation/catalog costs, not evidence that all of them can be removed.
+
+This modest gain supports direct composition but does not establish a route to
+90% CPU savings. The measured registry is empty and projectile launches are
+acknowledged without terminal simulation. Populated catalog checks prove local
+ordering and outcome parity, not representative catalog performance. Further
+allocation work should identify redundant object construction and measure
+populated scenes before changing ownership. The oracle remains source
+`900744ce`, not the newer `main`. Host fake-query CPU is not Windows FPS;
+#1513 loading, x86 numerical parity, native ownership and frame pacing still
+require the exact Windows client. The extension remains unshipped.
+
+Reproduce this stage with a fresh fixture and separately built frozen control
+(set `FFI_PY27` to the CPython 2.7.18 executable):
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+FFI_WORLD_CONTROL=/tmp/ffi-world-control
+git worktree add --detach "$FFI_WORLD_CONTROL" fb2ba3cf
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-world-fixture.json
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-world-host
+(cd "$FFI_WORLD_CONTROL" && sh tools/ffi_experiment/build_host.sh \
+  "$FFI_PY27" /tmp/ffi-world-control-host)
+"$FFI_PY27" tools/ffi_experiment/check_kernel_world.py \
+  --module /tmp/ffi-world-host/offline_astar_native.so --fixture /tmp/ffi-world-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-world-host/offline_astar_native.so --fixture /tmp/ffi-world-fixture.json \
+  --frames 80 --native-world --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-world-host/offline_astar_native.so --fixture /tmp/ffi-world-fixture.json \
+  --components kernel,world-sync,world-resolver --control-components kernel,world-sync \
+  --control-module /tmp/ffi-world-control-host/offline_astar_native.so \
+  --control-runner "$FFI_WORLD_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --seconds 30 --rounds 3 --output /tmp/ffi-world-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-world-1513
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;
