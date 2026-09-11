@@ -1266,6 +1266,8 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
 
         sweeps = destructibles_sensor._tree_pose_sweep_boxes_1513(
             start, start_yaw, end, end_yaw, bbox)
+        hulls = tuple(destructibles_sensor._tree_xz_zonotope_hull_1513(sweep)
+                      for sweep in sweeps)
 
         for sample in range(101):
             fraction = sample / 100.0
@@ -1283,9 +1285,105 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
                     world_z = (position.z - sine * local_x +
                                cosine * local_z)
                     self.assertTrue(any(
-                        destructibles_sensor._point_near_tree_sweep_1513(
-                            world_x, world_z, sweep, 0.0)
-                        for sweep in sweeps))
+                        destructibles_sensor._point_near_tree_hull_1513(
+                            world_x, world_z, hull, 0.0)
+                        for hull in hulls))
+
+    def test_tree_sweep_polygon_is_shared_across_trees_and_chunks_only_per_query(self):
+        positions = tuple(_Vector(-0.5, 0.0, 2.0 + index * 0.05)
+                          for index in range(12))
+        bbox = ((-1.0, -1.0, -3.0), (1.0, 1.0, 3.0), None)
+        (manager, area, bigworld, math_module, descriptor,
+         authority, destroyed, destroy_calls) = self._tree_motion_fixture(
+             positions, bbox=bbox)
+        manager.set_chunk_count(23, len(positions))
+        area.chunkIDFromPosition = lambda point: 22 if point.x < 0.0 else 23
+        bigworld.wg_getDestructibleMatrix.side_effect = (
+            lambda space, chunk, index: _ItemMatrix(_Vector(
+                -0.5 if chunk == 22 else 0.5, 0.0, positions[index].z)))
+        expected = {(chunk, index, None)
+                    for chunk in (22, 23) for index in range(12)}
+
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}), mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority), mock.patch.object(
+                    destructibles_sensor, '_tree_xz_zonotope_hull_1513',
+                    wraps=destructibles_sensor._tree_xz_zonotope_hull_1513
+                    ) as build_hull:
+            # Registration has a per-render-tick name budget. Observe both
+            # chunks becoming ready before measuring the shared query.
+            bigworld.time = lambda: float(tick)
+            for tick in range(8):
+                warmed = destructibles_sensor.prewarm_tree_registry(
+                    1, _Vector(), 0.0, descriptor, 1.0,
+                    priority_chunks=(22, 23))
+                if set(warmed['ready_chunks']) == {22, 23}:
+                    break
+            self.assertEqual({22, 23}, set(warmed['ready_chunks']))
+            build_hull.assert_not_called()
+            first = destructibles_sensor._tree_motion_proposal(
+                1, _Vector(), 0.0, _Vector(0.0, 0.0, 0.2), 0.0,
+                6.0, descriptor, 1.0)
+            self.assertEqual(expected, set(first['token']))
+            self.assertTrue(first['requires_commit'])
+            self.assertEqual(1, build_hull.call_count)
+
+            # The next proposal checks current destruction state even at the
+            # same pose. Geometry and physical verdicts never survive a query.
+            destroyed.update(expected)
+            second = destructibles_sensor._tree_motion_proposal(
+                1, _Vector(), 0.0, _Vector(0.0, 0.0, 0.2), 0.0,
+                6.0, descriptor, 1.1)
+            self.assertEqual(expected, set(second['token']))
+            self.assertFalse(second['requires_commit'])
+            self.assertEqual(2, build_hull.call_count)
+
+            # Turning the long hull away removes those contacts, although
+            # the same trees and sweep index are examined again.
+            turned = destructibles_sensor._tree_motion_proposal(
+                1, _Vector(), math.pi / 2.0,
+                _Vector(0.0, 0.0, 0.2), math.pi / 2.0,
+                6.0, descriptor, 1.2)
+            self.assertEqual('clear', turned['status'])
+            self.assertIsNone(turned['token'])
+            self.assertEqual(3, build_hull.call_count)
+        self.assertEqual([], destroy_calls)
+
+    def test_tree_sweep_without_eligible_candidates_does_not_build_polygon(self):
+        sweep = ((0.0, 0.0, 0.0),
+                 ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        bin_key = destructibles_sensor._destructible_bin_key(0.0, 0.0)
+        ineligible = [(1, 0.0, 0.0, 0.0, 2, 'model'),
+                      (2, 0.0, 0.0, 0.0, 1, '')]
+        with mock.patch.object(
+                destructibles_sensor, '_tree_xz_zonotope_hull_1513',
+                side_effect=AssertionError('unused polygon built')):
+            for registry in ({'bins': {}}, {'bins': {bin_key: ineligible}}):
+                hulls = {}
+                self.assertEqual(({}, set()),
+                    destructibles_sensor._tree_candidates_for_sweeps_1513(
+                        22, registry, (sweep,), 1, hulls))
+                self.assertEqual({}, hulls)
+
+    def test_legacy_tree_scanner_reuses_polygon_without_skipping_destruction(self):
+        positions = tuple(_Vector(0.0, 0.0, index * 0.1) for index in range(8))
+        (unused_manager, area, bigworld, math_module, descriptor,
+         authority, unused_destroyed, destroy_calls) = self._tree_motion_fixture(
+             positions)
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}), mock.patch.object(
+                    destructibles_sensor, '_get_destr_authority',
+                    return_value=authority), mock.patch.object(
+                    destructibles_sensor, '_tree_xz_zonotope_hull_1513',
+                    wraps=destructibles_sensor._tree_xz_zonotope_hull_1513
+                    ) as build_hull:
+            destructibles_sensor._fell_trees_near(
+                1, _Vector(), 0.0, 1.0, descriptor)
+        self.assertEqual(1, build_hull.call_count)
+        self.assertEqual(list(range(8)), sorted(call[2] for call in destroy_calls))
 
     def test_tree_commit_applies_only_requested_subset_and_rejects_foreign(self):
         positions = (_Vector(0.0, 0.0, 4.0),
