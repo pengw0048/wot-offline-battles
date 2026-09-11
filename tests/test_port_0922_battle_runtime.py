@@ -24218,12 +24218,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(enemy.model.visible)
         battle._binding.start_vehicle_visual.assert_called_once_with(
             1000, True)
-        self.assertEqual(1, len(battle._avatar.battle_events))
-        events = battle._avatar.battle_events[0]
-        self.assertEqual([0, 12], [event['eventType'] for event in events])
-        self.assertEqual([1000, 1000],
-                         [event['targetID'] for event in events])
-        self.assertEqual(3, events[1]['details'])
+        # Presentation only.  The ribbon and its sound follow the server's
+        # ``detection`` event, which knows whether this sighting is what
+        # revealed the enemy to the team.
+        self.assertEqual([], battle._avatar.battle_events)
 
         runtime.bigworld.wg_collideSegment = lambda *unused: (_Vector(),)
         self.assertFalse(battle._update_spotting(10.9))
@@ -24239,7 +24237,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         # first-spot ribbon or detection sound.
         runtime.bigworld.wg_collideSegment = lambda *unused: None
         self.assertTrue(battle._update_spotting(20.9))
-        self.assertEqual(1, len(battle._avatar.battle_events))
+        self.assertEqual([], battle._avatar.battle_events)
 
     def test_destroyed_enemy_wreck_does_not_require_spot_history(self):
         runtime = _runtime()
@@ -24628,7 +24626,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._binding.start_vehicle_visual.assert_not_called()
         battle._binding.start_vehicle_minimap.assert_not_called()
 
-    def test_team_relay_visibility_does_not_claim_a_direct_spot(self):
+    def test_a_local_sighting_of_a_team_lit_enemy_draws_no_ribbon(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.client = _Client()
@@ -24654,20 +24652,22 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'engine_id': 12, 'network_id': 17, 'kind': 'bot',
             'ready': True, 'local': False, 'presentation': True,
             'tombstone': False, 'spot_visible': False,
-            'spot_until': 0.0, 'radio_spot_until': 0.0,
+            'spot_until': 0.0, 'radio_spot_until': 20.0,
             'spot_next': 10.0,
             'state': {'team': 2, 'health': 500, 'alive': True}}
         battle._records = {'bot:17': record}
-        sightings = iter((False, True))
-        battle._spot_line_of_sight = (
-            lambda *unused, **unused_kwargs: next(sightings))
+        battle._spot_line_of_sight = mock.Mock(return_value=True)
 
         self.assertTrue(battle._update_spotting(10.0))
+        # Seeing an enemy the team had already revealed is not a detection,
+        # and the model appearing inside the entity AOI is not one either.
+        # Only the server knows which sighting revealed the enemy, so the
+        # ribbon waits for its ``detection`` event.
         self.assertTrue(record['spot_visible'])
         self.assertNotIn('spot_feedback_sent', record)
         self.assertEqual([], battle._avatar.battle_events)
 
-    def test_direct_spot_feedback_failure_keeps_spotting_report_alive(self):
+    def test_a_first_local_sighting_reports_without_drawing_a_ribbon(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.client = _Client()
@@ -24687,8 +24687,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._spot_line_of_sight = mock.Mock(return_value=True)
         battle._set_record_spot_visibility = lambda record, visible: \
             record.update(spot_visible=bool(visible)) or bool(visible)
-        battle._present_direct_spot = mock.Mock(
-            side_effect=RuntimeError('battle ribbon callback failed'))
+        battle._present_direct_spot = mock.Mock()
         battle._publish_spotted_targets = mock.Mock()
         record = {
             'engine_id': 12, 'network_id': 17, 'kind': 'bot',
@@ -24698,14 +24697,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': {'team': 2, 'health': 500, 'alive': True}}
         battle._records = {'bot:17': record}
 
-        with contextlib.redirect_stdout(io.StringIO()) as log:
-            self.assertTrue(battle._update_spotting(10.0))
+        self.assertTrue(battle._update_spotting(10.0))
 
         self.assertTrue(record['spot_visible'])
         battle._publish_spotted_targets.assert_called_once_with([record])
-        self.assertEqual(
-            1, log.getvalue().count(
-                'optional spotting feedback disabled for this round'))
+        battle._present_direct_spot.assert_not_called()
 
     def test_direct_spotting_observer_is_only_the_local_human(self):
         runtime = _runtime()
@@ -30974,6 +30970,105 @@ class AssistFeedTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             battle._apply_assist_event(self._event(category='ramming'))
+
+
+class DetectionFeedTests(unittest.TestCase):
+    """The spotting ribbon follows the detection the server credited."""
+
+    def _battle(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._records = {
+            'player:1': {'engine_id': 10, 'local': True,
+                         'state': {'team': 1, 'alive': True}},
+            'player:2': {'engine_id': 11, 'local': False,
+                         'state': {'team': 1, 'alive': True}},
+            'bot:7': {'engine_id': 17, 'local': False,
+                      'state': {'team': 2, 'alive': True}},
+        }
+        return battle, runtime
+
+    @staticmethod
+    def _event(**overrides):
+        event = {
+            'kind': 'detection',
+            'observer_kind': 'player', 'observer_id': 1,
+            'target_kind': 'bot', 'target_id': 7,
+        }
+        event.update(overrides)
+        return event
+
+    def test_a_credited_detection_draws_the_stock_ribbon(self):
+        battle, runtime = self._battle()
+        types_ = runtime.battle_feedback_common.BATTLE_EVENT_TYPE
+
+        self.assertTrue(battle._apply_detection_event(self._event()))
+
+        events = runtime.bigworld.avatar.battle_events[-1]
+        self.assertEqual(
+            [int(types_.SPOTTED), int(types_.TARGET_VISIBILITY)],
+            [entry['eventType'] for entry in events])
+        self.assertEqual([17, 17], [entry['targetID'] for entry in events])
+        self.assertTrue(battle._records['bot:7']['spot_feedback_sent'])
+
+    def test_the_same_enemy_never_draws_a_second_ribbon(self):
+        battle, runtime = self._battle()
+
+        self.assertTrue(battle._apply_detection_event(self._event()))
+        published = len(runtime.bigworld.avatar.battle_events)
+        self.assertTrue(battle._apply_detection_event(self._event()))
+
+        self.assertEqual(
+            published, len(runtime.bigworld.avatar.battle_events))
+
+    def test_a_detection_credited_to_somebody_else_is_not_published(self):
+        battle, runtime = self._battle()
+        before = len(runtime.bigworld.avatar.battle_events)
+
+        self.assertFalse(
+            battle._apply_detection_event(self._event(observer_id=2)))
+
+        self.assertEqual(before, len(runtime.bigworld.avatar.battle_events))
+
+    def test_the_hidden_worker_draws_no_ribbon(self):
+        battle, runtime = self._battle()
+        battle._worker_mode = True
+        before = len(runtime.bigworld.avatar.battle_events)
+
+        self.assertFalse(battle._apply_detection_event(self._event()))
+
+        self.assertEqual(before, len(runtime.bigworld.avatar.battle_events))
+
+    def test_an_unknown_target_is_refused(self):
+        battle, unused_runtime = self._battle()
+
+        with self.assertRaises(RuntimeError):
+            battle._apply_detection_event(self._event(target_id=9))
+
+    def test_a_ribbon_failure_retires_only_the_optional_feature(self):
+        battle, unused_runtime = self._battle()
+        battle._present_direct_spot = mock.Mock(
+            side_effect=RuntimeError('battle ribbon callback failed'))
+
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertTrue(battle._apply_detection_event(self._event()))
+
+        self.assertEqual(
+            1, log.getvalue().count(
+                'optional spotting feedback disabled for this round'))
+
+    def test_the_ribbon_does_not_wait_for_the_enemy_to_enter_the_world(self):
+        battle, runtime = self._battle()
+        # The ribbon merges by vehicle id and never touches the entity, so an
+        # enemy still entering the world must not park the event journal.
+        battle._records['bot:7']['ready'] = False
+
+        self.assertTrue(battle._event_is_ready(self._event()))
+        self.assertTrue(battle._apply_detection_event(self._event()))
+
+        self.assertEqual(
+            17, runtime.bigworld.avatar.battle_events[-1][0]['targetID'])
 
 
 class LocalSpottedStateTests(unittest.TestCase):

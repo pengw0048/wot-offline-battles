@@ -210,7 +210,7 @@ _PROJECTILE_POSE_CACHE_MISS = object()
 _SIMPLE_EVENT_KINDS = (
     'authority', 'bot_manifest', 'vehicle_statistics', 'destructible',
     'projectile_ricochet', 'projectile_impact', 'battle_result', 'assist',
-    'stun')
+    'stun', 'detection')
 _COMBAT_EVENT_KINDS = (
     'health', 'hit', 'bot_hit', 'bot_human_hit', 'bot_bot_hit')
 _SHOT_OCCLUSION_EPSILON = 1.0e-3
@@ -9245,10 +9245,12 @@ class BattleRuntime(object):
         """
         if self._worker_mode:
             return False
-        assister = self._records.get(self._assist_entity_key(event, 'assister'))
+        assister = self._records.get(
+            self._feedback_entity_key(event, 'assister', 'assist'))
         if assister is None or not assister.get('local'):
             return False
-        target = self._records.get(self._assist_entity_key(event, 'target'))
+        target = self._records.get(
+            self._feedback_entity_key(event, 'target', 'assist'))
         if target is None:
             raise RuntimeError('assist event has no known target')
         name = self._ASSIST_EVENT_TYPES.get(event.get('category'))
@@ -9272,14 +9274,43 @@ class BattleRuntime(object):
                 damage, self._attack_reason('SHOT', 0)))}])
         return True
 
+    def _apply_detection_event(self, event):
+        """Draw the stock spotting ribbon the server just credited.
+
+        ``PlayerAvatar.onBattleEvents`` forwards only the controlled vehicle's
+        own events, so publish nothing unless this client is the observer.
+        The server credits one detection per enemy, at the moment the enemy
+        became visible to a team that could not see it, which is the same
+        number the results column shows.  Seeing an enemy a teammate had
+        already revealed earns neither.
+
+        Like the assist above, this needs the enemy's record only for its
+        engine id: the stock detection ribbon merges by vehicle id and the
+        visibility trigger carries one, so neither waits for the entity to
+        finish entering the world.
+        """
+        if self._worker_mode:
+            return False
+        observer = self._records.get(
+            self._feedback_entity_key(event, 'observer', 'detection'))
+        if observer is None or not observer.get('local'):
+            return False
+        target = self._records.get(
+            self._feedback_entity_key(event, 'target', 'detection'))
+        if target is None:
+            raise RuntimeError('detection event has no known target')
+        self._run_optional_feature(
+            'spotting feedback', self._present_direct_spot, (target,))
+        return True
+
     @staticmethod
-    def _assist_entity_key(event, role):
+    def _feedback_entity_key(event, role, label):
         """Resolve one ``<role>_kind``/``<role>_id`` pair to a record key."""
         kind = event.get(role + '_kind')
         actor = event.get(role + '_id')
         if kind not in ('player', 'bot') or actor is None:
             raise RuntimeError(
-                'assist event has an invalid %s identity' % role)
+                '%s event has an invalid %s identity' % (label, role))
         return '%s:%s' % (kind, actor)
 
     def _apply_ordered_event(self, event):
@@ -9301,6 +9332,8 @@ class BattleRuntime(object):
             self._apply_vehicle_statistics_event(event)
         elif kind == 'assist':
             self._apply_assist_event(event)
+        elif kind == 'detection':
+            self._apply_detection_event(event)
         elif kind == 'stun':
             target = self._records.get(self._stun_entity_key(event))
             if target is None:
@@ -23280,7 +23313,12 @@ class BattleRuntime(object):
         return model_visible, marker_visible
 
     def _present_direct_spot(self, record):
-        """Publish the one stock ribbon and sound for a first direct spot."""
+        """Publish the one stock ribbon and sound for a credited detection.
+
+        The server owns the decision and sends it once per enemy; the latch
+        below keeps a repeated delivery to the single ribbon #1513 draws,
+        which merges its own detections by vehicle id anyway.
+        """
         if record.get('spot_feedback_sent'):
             return False
         feedback_common = getattr(
@@ -23911,10 +23949,11 @@ class BattleRuntime(object):
                 record, entity, remembered)
             if (visible, marker_visible) != previous:
                 changed = True
-            if visible and not previous[0] and direct_seen:
-                self._run_optional_feature(
-                    'spotting feedback', self._present_direct_spot,
-                    (record,))
+            # The spotting ribbon is not a local presentation edge.  This
+            # transition is the enemy's model appearing inside the 565 m
+            # entity AOI, which happens for an enemy a teammate revealed long
+            # before, so it drew a ribbon the results column never counted.
+            # The server publishes the detection it actually credited.
             if visible and bool(record.get('direct_spot_visible', False)):
                 spotted_records.append(record)
         self._publish_spotted_targets(spotted_records)

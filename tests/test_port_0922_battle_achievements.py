@@ -1236,6 +1236,53 @@ class DetectionTests(unittest.TestCase):
         state._commit_detections()
         self.assertEqual(0, state._statistics_row('player', 1)['spotted'])
 
+    @staticmethod
+    def _detections(state):
+        return [event for event in state.pending_events
+                if event.get('kind') == 'detection']
+
+    def test_a_credited_detection_reaches_its_human_observer(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._commit_detections()
+
+        # #1513 draws the in-battle ribbon from the detection the results
+        # column counts, so the server publishes the one it credited.
+        self.assertEqual([{
+            'kind': 'detection',
+            'observer_kind': 'player', 'observer_id': 1,
+            'target_kind': 'bot', 'target_id': 1,
+        }], self._detections(state))
+
+        # The same enemy is counted once, so it is published once.
+        state._commit_detections()
+        self.assertEqual(1, len(self._detections(state)))
+
+    def test_a_detection_by_a_bot_publishes_nothing(self):
+        state, unused_player = self._battle()
+        state.bot_states[2]['team'] = 1
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._commit_detections()
+
+        self.assertEqual(1, state._statistics_row('bot', 2)['spotted'])
+        self.assertEqual([], self._detections(state))
+
+    def test_seeing_an_enemy_the_team_already_lit_publishes_nothing(self):
+        state, unused_player = self._battle()
+        state.bot_states[2]['team'] = 1
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+
+        # The human now sees the enemy its teammate revealed.  Retail counts
+        # no detection for it, so no ribbon may be drawn either.
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+
+        self.assertEqual(0, state._statistics_row('player', 1)['spotted'])
+        self.assertEqual([], self._detections(state))
+
 
 class SpottingAssistTests(unittest.TestCase):
     """A spotting assist needs a blind shooter, and is shared by spotters."""

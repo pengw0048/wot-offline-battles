@@ -12047,7 +12047,8 @@ class BattleState:
         observer already revealed adds nothing, while an enemy whose lease
         expired and is found again credits whoever finds it that time.  This
         is the ``spotted`` column the results screen shows and the count
-        Scout (``scout``) reads.
+        Scout (``scout``) reads, and ``_publish_detection`` gives a human
+        observer's client the in-battle ribbon for the same decision.
         """
         observers = [(("bot", int(bot_id)), spotted)
                      for bot_id, spotted in self.bot_spotted.items()]
@@ -12075,8 +12076,28 @@ class BattleState:
                     interaction["spotted"] = 1
                     row = self._statistics_row(*reporter)
                     row["spotted"] = int(row.get("spotted", 0)) + 1
+                    self._publish_detection(reporter, target)
             self.team_visible_targets[team] = set(visible) | set(
                 self.team_lit_targets.get(team, ()))
+
+    def _publish_detection(self, observer, target):
+        """Tell a human observer's client about the detection it just earned.
+
+        #1513 draws the in-battle spotting ribbon from the same detection the
+        results column counts, so the authority that owns the statistic owns
+        the ribbon.  A visible client cannot decide this for itself: it knows
+        only its own line of sight and the team's merged spot lease, never
+        whether its own sighting is what revealed the enemy.  A Bot has no
+        ribbon to draw, so only a human observer is published.
+        """
+        if observer[0] != "player":
+            return False
+        self.pending_events.append({
+            "kind": "detection",
+            "observer_kind": "player", "observer_id": int(observer[1]),
+            "target_kind": str(target[0]), "target_id": int(target[1]),
+        })
+        return True
 
     def _direct_spotters(self, target):
         """Return every enemy observer that directly sees ``target``.
