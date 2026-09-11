@@ -431,6 +431,8 @@ _FRAME_STAGE_NAMES = (
     'house', 'sync', 'critical', 'drown', 'prewarm', 'transition', 'local',
     'outline', 'bots_update', 'bot_present', 'bot_events', 'spot', 'lock',
     'schedule', 'diag_emit')
+# These durations are contained in ``local`` and must not be added to it.
+_FRAME_DETAIL_NAMES = ('local_ground', 'local_solver')
 _PROJECTILE_METRIC_NAMES = (
     'active', 'chords', 'debt', 'advance', 'terminals', 'scans',
     'candidates')
@@ -500,10 +502,10 @@ class _FrameDiagnostics(object):
         self._load_busiest = ()
         self._collections = {}
         self._worker_runtime = {}
-        self._stage_sums = dict((name, 0.0)
-                                for name in _FRAME_STAGE_NAMES)
-        self._stage_maxima = dict((name, 0.0)
-                                  for name in _FRAME_STAGE_NAMES)
+        self._stage_sums = dict(
+            (name, 0.0) for name in _FRAME_STAGE_NAMES + _FRAME_DETAIL_NAMES)
+        self._stage_maxima = dict(
+            (name, 0.0) for name in _FRAME_STAGE_NAMES + _FRAME_DETAIL_NAMES)
         self._probe_sums = dict((name, 0) for name in PROBE_KINDS)
         self._probe_maxima = dict((name, 0) for name in PROBE_KINDS)
         self._probe_duration_sums = dict(
@@ -607,7 +609,7 @@ class _FrameDiagnostics(object):
             self._sim_caps += 1
         if row.get('context', {}).get('role') == 'authority':
             self._authority_frames += 1
-        for name in _FRAME_STAGE_NAMES:
+        for name in _FRAME_STAGE_NAMES + _FRAME_DETAIL_NAMES:
             value = max(0.0, float(row['stages'].get(name, 0.0)))
             self._stage_sums[name] += value
             self._stage_maxima[name] = max(
@@ -684,7 +686,11 @@ class _FrameDiagnostics(object):
             'outside_ms': round(row['outside'] * 1000.0, 3),
             'offframe_ms': round(row.get('offframe', 0.0) * 1000.0, 3),
             'stages_ms': dict((name, round(value * 1000.0, 3))
-                              for name, value in row['stages'].items()),
+                              for name, value in row['stages'].items()
+                              if name in _FRAME_STAGE_NAMES),
+            'details_ms': dict((name, round(value * 1000.0, 3))
+                               for name, value in row['stages'].items()
+                               if name in _FRAME_DETAIL_NAMES),
             'projectile': dict(row.get('projectile') or {}),
             'detail': row.get('combat'),
         }
@@ -734,12 +740,14 @@ class _FrameDiagnostics(object):
         outside_distribution = self._distribution(
             self._outside_samples, self._outside_max)
         stage_snapshot = {}
-        for name in _FRAME_STAGE_NAMES:
+        for name in _FRAME_STAGE_NAMES + _FRAME_DETAIL_NAMES:
             stage_snapshot[name] = {
                 'avg_ms': self._milliseconds(
                     self._stage_sums[name] / samples),
                 'max_ms': self._milliseconds(self._stage_maxima[name]),
             }
+        detail_snapshot = dict(
+            (name, stage_snapshot.pop(name)) for name in _FRAME_DETAIL_NAMES)
         probe_snapshot = {}
         for name in PROBE_KINDS:
             probe_snapshot[name] = {
@@ -775,6 +783,7 @@ class _FrameDiagnostics(object):
             'python_callback_ms': exec_distribution,
             'outside_callback_ms': outside_distribution,
             'python_stages_ms': stage_snapshot,
+            'python_details_ms': detail_snapshot,
             # One logical probe can contain several native calls. The current
             # Python boundary cannot truthfully derive raw call/primitives.
             'raw_native_calls_measured': False,
@@ -887,6 +896,12 @@ class _FrameDiagnostics(object):
                 self._milliseconds(self._stage_maxima[name])))
         lines.append(prefix + 'stages_ms_avg_max ' +
                      ' '.join(stage_values) + '\n')
+        lines.append(prefix + 'details_ms_avg_max parent=local ' +
+                     ' '.join('%s=%.3f/%.3f' % (
+                         name,
+                         self._milliseconds(self._stage_sums[name] / samples),
+                         self._milliseconds(self._stage_maxima[name]))
+                         for name in _FRAME_DETAIL_NAMES) + '\n')
         probe_values = []
         for name in PROBE_KINDS:
             probe_values.append('%s=%.2f/%d' % (
@@ -956,7 +971,7 @@ class _FrameDiagnostics(object):
                  'pose_step_m=%.4f speed_mps=%.3f camera_mps=%.3f '
                  'airborne=%d grind=%d bots=%d outgoing=%d '
                  'transition=%d prev_emit=%d '
-                 'projectile=%s stages_ms=%s logical_probes=%s '
+                 'projectile=%s stages_ms=%s details_ms=%s logical_probes=%s '
                  'logical_probe_ms=%s\n') % (
                      rank, row['cause'], row['next'],
                      self._milliseconds(row['wall_gap']),
@@ -989,6 +1004,9 @@ class _FrameDiagnostics(object):
                      ','.join('%s:%.3f' % (
                          name, self._milliseconds(stages.get(name, 0.0)))
                               for name in _FRAME_STAGE_NAMES),
+                     ','.join('%s:%.3f' % (
+                         name, self._milliseconds(stages.get(name, 0.0)))
+                              for name in _FRAME_DETAIL_NAMES),
                      ','.join('%s:%d' % (
                          name, int(probes.get(name, 0)))
                               for name in PROBE_KINDS),
@@ -1710,6 +1728,7 @@ class BattleRuntime(object):
         self._local_suspension_failed_this_tick = False
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
+        self._local_frame_stages = None
         self._local_pitch = 0.0
         self._local_roll = 0.0
         self._local_suspension_pitch_velocity = 0.0
@@ -16207,7 +16226,11 @@ class BattleRuntime(object):
                 stages['transition'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
             if self._battle_live and not self._worker_mode:
-                self._drive_local(dt)
+                self._local_frame_stages = stages if profiling else None
+                try:
+                    self._drive_local(dt)
+                finally:
+                    self._local_frame_stages = None
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['local'] = max(0.0, next_boundary - boundary)
@@ -20090,12 +20113,17 @@ class BattleRuntime(object):
             position, motion_pose, previous_plane)
         sweep_drop = vehicle_physics.suspension_vertical_sweep_drop(
             self._local_vertical_speed + support_speed_delta, dt)
+        timings = self._local_frame_stages
+        ground_started = _PROFILE_CLOCK() if timings is not None else 0.0
         ground = self._local_suspension_ground_samples(
             position, yaw, probe_height=probe_height,
             support_gradient=support_gradient, sweep_drop=sweep_drop)
         pseudo_ground = self._local_suspension_pseudo_ground_samples(
             position, yaw, probe_height=probe_height,
             support_gradient=support_gradient, sweep_drop=sweep_drop)
+        if timings is not None:
+            timings['local_ground'] = timings.get('local_ground', 0.0) + max(
+                0.0, _PROFILE_CLOCK() - ground_started)
         if (not armed_before and
                 (not ground or all(value is None for value in ground)) and
                 (not pseudo_ground or
@@ -20159,9 +20187,13 @@ class BattleRuntime(object):
             'roll': previous_roll,
             'roll_velocity': self._local_suspension_roll_velocity,
         }
+        solver_started = _PROFILE_CLOCK() if timings is not None else 0.0
         solved = vehicle_physics.damper_suspension_step(
             params, physics_state, ground, dt, pseudo_ground,
             support_vertical_speed)
+        if timings is not None:
+            timings['local_solver'] = timings.get('local_solver', 0.0) + max(
+                0.0, _PROFILE_CLOCK() - solver_started)
         values = (
             solved['height'], solved['vertical_velocity'],
             solved['pitch'], solved['pitch_velocity'],

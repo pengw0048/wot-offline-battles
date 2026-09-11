@@ -874,22 +874,33 @@ def derive_suspension_params(descriptor):
 	}
 
 
-def suspension_point_offset(point, pitch=0.0, roll=0.0):
-	'''Rotate one local suspension point by the same YPR law as the hull.'''
-	x, y, z = float(point['x']), float(point.get('y', 0.0)), float(point['z'])
+def _suspension_rotation(pitch, roll):
+	'''Prepare one immutable pose; rebuild after each solver pose change.'''
 	sp, cp = math.sin(float(pitch)), math.cos(float(pitch))
 	sr, cr = math.sin(float(roll)), math.cos(float(roll))
+	return sp, cp, sr, cr
+
+
+def _suspension_point_offset(point, rotation):
+	x, y, z = float(point['x']), float(point.get('y', 0.0)), float(point['z'])
+	sp, cp, sr, cr = rotation
 	rolled_y = sr * x + cr * y
 	return (cr * x - sr * y, cp * rolled_y - sp * z,
 		sp * rolled_y + cp * z)
 
 
+def suspension_point_offset(point, pitch=0.0, roll=0.0):
+	'''Rotate one local suspension point by the same YPR law as the hull.'''
+	return _suspension_point_offset(point, _suspension_rotation(pitch, roll))
+
+
 def _suspension_world_points(points, position, yaw, pitch, roll):
 	x, unused_y, z = map(float, position)
 	sine, cosine = math.sin(float(yaw)), math.cos(float(yaw))
+	rotation = _suspension_rotation(pitch, roll)
 	result = []
 	for point in points:
-		local_x, unused_y, local_z = suspension_point_offset(point, pitch, roll)
+		local_x, unused_y, local_z = _suspension_point_offset(point, rotation)
 		result.append((x + cosine * local_x + sine * local_z,
 			z - sine * local_x + cosine * local_z))
 	return tuple(result)
@@ -1077,7 +1088,8 @@ def suspension_ground_plane(params, ground_heights,
 def suspension_world_ground_plane(params, ground_heights, position, yaw,
 		maximum_residual=None, pitch=0.0, roll=0.0):
 	'''Fit one suspension plane in stable world-space coordinates.'''
-	points = tuple(suspension_point_offset(spring, pitch, roll)
+	rotation = _suspension_rotation(pitch, roll)
+	points = tuple(_suspension_point_offset(spring, rotation)
 		for spring in params['springs'])
 	local_plane = suspension_ground_plane(
 		params, ground_heights, maximum_residual,
@@ -1362,16 +1374,21 @@ def suspension_vertical_sweep_drop(vertical_speed, dt):
 	return max(0.0, -float(vertical_speed) * step + GRAVITY * step * step)
 
 
-def _rigid_point_height(state, point):
-	return float(state['height']) + suspension_point_offset(
-		point, state.get('pitch', 0.0), state.get('roll', 0.0))[1]
-
-
-def _rigid_point_height_gradients(state, point):
-	pitch, roll = float(state.get('pitch', 0.0)), float(state.get('roll', 0.0))
+def _rigid_point_height(state, point, rotation=None):
+	if rotation is None:
+		rotation = _suspension_rotation(
+			state.get('pitch', 0.0), state.get('roll', 0.0))
+	sp, cp, sr, cr = rotation
 	x, y, z = float(point['x']), float(point.get('y', 0.0)), float(point['z'])
-	sp, cp = math.sin(pitch), math.cos(pitch)
-	sr, cr = math.sin(roll), math.cos(roll)
+	return float(state['height']) + (cp * (sr * x + cr * y) - sp * z)
+
+
+def _rigid_point_height_gradients(state, point, rotation=None):
+	if rotation is None:
+		rotation = _suspension_rotation(
+			state.get('pitch', 0.0), state.get('roll', 0.0))
+	x, y, z = float(point['x']), float(point.get('y', 0.0)), float(point['z'])
+	sp, cp, sr, cr = rotation
 	return (-sp * (sr * x + cr * y) - cp * z, cp * (cr * x - sr * y))
 
 
@@ -1393,6 +1410,7 @@ def _spring_point_velocity(state, spring):
 def _suspension_contact_keys(params, state, ground_heights,
 		pseudo_ground_heights):
 	'''Return final geometric contacts, separated from within-step impacts.'''
+	rotation = None
 	contacts = set()
 	left = set()
 	right = set()
@@ -1400,9 +1418,12 @@ def _suspension_contact_keys(params, state, ground_heights,
 		ground = ground_heights[index]
 		if ground is None:
 			continue
+		if rotation is None:
+			rotation = _suspension_rotation(
+				state.get('pitch', 0.0), state.get('roll', 0.0))
 		compression = (
 			spring['static_compression'] + float(ground) -
-			_spring_height(state, spring))
+			_rigid_point_height(state, spring, rotation))
 		if compression <= 0.0:
 			continue
 		key = ('spring', index)
@@ -1415,7 +1436,10 @@ def _suspension_contact_keys(params, state, ground_heights,
 		ground = pseudo_ground_heights[index]
 		if ground is None:
 			continue
-		gap = float(ground) - _rigid_point_height(state, contact)
+		if rotation is None:
+			rotation = _suspension_rotation(
+				state.get('pitch', 0.0), state.get('roll', 0.0))
+		gap = float(ground) - _rigid_point_height(state, contact, rotation)
 		if gap < -CONTACT_PENETRATION:
 			continue
 		key = ('pseudo', index)
@@ -1429,32 +1453,31 @@ def _suspension_contact_keys(params, state, ground_heights,
 
 def suspension_limit_excess(params, state, ground_heights):
 	'''Return the largest compression beyond a projected hard limit.'''
+	rotation = None
 	maximum = 0.0
 	for index, spring in enumerate(params['springs']):
 		ground = ground_heights[index]
 		if ground is None:
 			continue
+		if rotation is None:
+			rotation = _suspension_rotation(
+				state.get('pitch', 0.0), state.get('roll', 0.0))
 		compression = (
 			spring['static_compression'] + float(ground) -
-			_spring_height(state, spring))
+			_rigid_point_height(state, spring, rotation))
 		maximum = max(maximum, compression - spring['max_compression'])
 	return maximum
 
 
-def _project_suspension_limits(params, state, ground_heights,
-		pseudo_ground_heights=None, support_vertical_velocity=0.0,
-		support_height_offset=0.0):
-	'''Resolve hard limits with an order-independent worst-contact projection.'''
-	inv_mass = 1.0 / params['mass']
-	inv_pitch = 1.0 / params['pitch_inertia']
-	inv_roll = 1.0 / params['roll_inertia']
+def _suspension_constraints(params, ground_heights, pseudo_ground_heights):
+	'''Prepare the fixed contacts of one immutable ground sample set.'''
 	constraints = []
 	for index, spring in enumerate(params['springs']):
 		ground = ground_heights[index]
 		if ground is not None:
 			constraints.append((
 				('spring', index), spring,
-				float(ground) + support_height_offset,
+				float(ground),
 				float(spring['max_compression']) -
 				float(spring['static_compression'])))
 	pseudo_ground_heights = pseudo_ground_heights or ()
@@ -1464,19 +1487,40 @@ def _project_suspension_limits(params, state, ground_heights,
 		if ground is not None:
 			constraints.append((
 				('pseudo', index), contact,
-				float(ground) + support_height_offset,
+				float(ground),
 				float(contact.get('penetration', ALLOWED_PENETRATION))))
+	return constraints
+
+
+def _project_suspension_limits(params, state, ground_heights,
+		pseudo_ground_heights=None, support_vertical_velocity=0.0,
+		support_height_offset=0.0, constraints=None):
+	'''Resolve hard limits with an order-independent worst-contact projection.'''
+	inv_mass = 1.0 / params['mass']
+	inv_pitch = 1.0 / params['pitch_inertia']
+	inv_roll = 1.0 / params['roll_inertia']
+	if constraints is None:
+		constraints = _suspension_constraints(
+			params, ground_heights, pseudo_ground_heights)
+	if not constraints:
+		return set()
+	if support_height_offset:
+		constraints = [(key, point, ground + support_height_offset, penetration)
+			for key, point, ground, penetration in constraints]
 	touched = set()
 	for unused_iteration in range(params['constraint_iterations']):
+		rotation = _suspension_rotation(
+			state.get('pitch', 0.0), state.get('roll', 0.0))
 		rows = []
 		maximum_excess = 0.0
 		for key, point, ground, penetration in constraints:
 			excess = (
-				ground - _rigid_point_height(state, point) - penetration)
+				ground - _rigid_point_height(state, point, rotation) - penetration)
 			if excess <= 1.0e-5:
 				continue
 			touched.add(key)
-			pitch_height, roll_height = _rigid_point_height_gradients(state, point)
+			pitch_height, roll_height = _rigid_point_height_gradients(
+				state, point, rotation)
 			pitch_grad, roll_grad = -pitch_height, -roll_height
 			denominator = (inv_mass + pitch_grad * pitch_grad * inv_pitch +
 				roll_grad * roll_grad * inv_roll)
@@ -1503,7 +1547,9 @@ def _project_suspension_limits(params, state, ground_heights,
 		velocity_roll = []
 		for point, excess, pitch_grad, roll_grad, denominator in selected:
 			point_velocity = (
-				_rigid_point_velocity(state, point) -
+				(float(state.get('vertical_velocity', 0.0)) +
+				-pitch_grad * float(state.get('pitch_velocity', 0.0)) +
+				-roll_grad * float(state.get('roll_velocity', 0.0))) -
 				support_vertical_velocity)
 			if point_velocity < 0.0:
 				velocity_impulse = -point_velocity / denominator
@@ -1532,8 +1578,10 @@ def _project_suspension_limits(params, state, ground_heights,
 	# projection (not a reported-value clamp) and satisfies every half-space at
 	# once without adding pitch/roll bias or another iterative sweep.
 	remaining_excess = 0.0
+	rotation = _suspension_rotation(
+		state.get('pitch', 0.0), state.get('roll', 0.0))
 	for key, point, ground, penetration in constraints:
-		excess = ground - _rigid_point_height(state, point) - penetration
+		excess = ground - _rigid_point_height(state, point, rotation) - penetration
 		if excess > 0.0:
 			remaining_excess = max(remaining_excess, excess)
 			touched.add(key)
@@ -1554,6 +1602,8 @@ def damper_suspension_step(params, state, ground_heights, dt,
 		pseudo_ground_heights = (None,) * len(pseudo_contacts)
 	if len(pseudo_ground_heights) != len(pseudo_contacts):
 		raise ValueError('pseudo-contact ground sample count mismatch')
+	constraints = _suspension_constraints(
+		params, ground_heights, pseudo_ground_heights)
 	try:
 		support_vertical_velocity = float(support_vertical_velocity)
 	except (TypeError, ValueError, OverflowError):
@@ -1581,6 +1631,8 @@ def damper_suspension_step(params, state, ground_heights, dt,
 	pitch_acceleration = 0.0
 	roll_acceleration = 0.0
 	for substep_index in range(steps):
+		rotation = (_suspension_rotation(result['pitch'], result['roll'])
+			if constraints else None)
 		# Horizontal travel moves the reduced heave constraint from the
 		# previous sample position to the current one.  Forces are evaluated at
 		# the start of this semi-implicit substep; its hard projection is
@@ -1604,7 +1656,7 @@ def damper_suspension_step(params, state, ground_heights, dt,
 			ground = float(ground) + support_force_offset
 			compression = (
 				spring['static_compression'] + ground -
-				_spring_height(result, spring))
+				_rigid_point_height(result, spring, rotation))
 			if compression <= 0.0:
 				continue
 			maximum_compression = max(maximum_compression, compression)
@@ -1616,8 +1668,12 @@ def damper_suspension_step(params, state, ground_heights, dt,
 				impact_speed = (substep_vertical_speed
 					if impact_speed is None else
 					min(impact_speed, substep_vertical_speed))
+			pitch_gradient, roll_gradient = _rigid_point_height_gradients(
+				result, spring, rotation)
 			relative_point_velocity = (
-				_spring_point_velocity(result, spring) -
+				(float(result['vertical_velocity']) +
+				pitch_gradient * float(result['pitch_velocity']) +
+				roll_gradient * float(result['roll_velocity'])) -
 				support_vertical_velocity)
 			force = (spring['stiffness'] * compression -
 				spring['damping'] * relative_point_velocity)
@@ -1627,8 +1683,6 @@ def damper_suspension_step(params, state, ground_heights, dt,
 					1.0 + excess / max(spring['max_compression'], 0.01))
 			force = max(0.0, min(spring['max_force'], force))
 			total_force += force
-			pitch_gradient, roll_gradient = _rigid_point_height_gradients(
-				result, spring)
 			pitch_torque += pitch_gradient * force
 			roll_torque += roll_gradient * force
 		for index, contact in enumerate(pseudo_contacts):
@@ -1636,7 +1690,7 @@ def damper_suspension_step(params, state, ground_heights, dt,
 			if ground is None:
 				continue
 			ground = float(ground) + support_force_offset
-			gap = ground - _rigid_point_height(result, contact)
+			gap = ground - _rigid_point_height(result, contact, rotation)
 			if gap < -CONTACT_PENETRATION:
 				continue
 			key = ('pseudo', index)
@@ -1671,7 +1725,7 @@ def damper_suspension_step(params, state, ground_heights, dt,
 		pre_projection_speed = result['vertical_velocity']
 		projected = _project_suspension_limits(
 			params, result, ground_heights, pseudo_ground_heights,
-			support_vertical_velocity, support_projection_offset)
+			support_vertical_velocity, support_projection_offset, constraints)
 		if projected:
 			if (not contact_transition_seen and
 					pre_projection_speed -
@@ -1715,13 +1769,15 @@ def damper_suspension_step(params, state, ground_heights, dt,
 	result['max_compression'] = maximum_compression
 	result['max_limit_excess'] = max(
 		0.0, suspension_limit_excess(params, result, ground_heights))
+	rotation = (_suspension_rotation(result['pitch'], result['roll'])
+		if constraints else None)
 	for index, contact in enumerate(pseudo_contacts):
 		ground = pseudo_ground_heights[index]
 		if ground is None:
 			continue
 		result['max_limit_excess'] = max(
 			result['max_limit_excess'], float(ground) -
-			_rigid_point_height(result, contact) -
+			_rigid_point_height(result, contact, rotation) -
 			float(contact.get('penetration', ALLOWED_PENETRATION)))
 	return result
 
