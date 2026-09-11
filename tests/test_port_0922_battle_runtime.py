@@ -6862,7 +6862,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         first = diagnostics.begin(0.0, 0.02)
         wall[0] = 0.006
         diagnostics.finish(
-            first, 0.0, 0.02, 0.02, {'local': 0.004},
+            first, 0.0, 0.02, 0.02,
+            {'local': 0.004, 'local_ground': 0.001, 'local_solver': 0.002},
             {'lane': 7}, {'role': 'authority', 'speed': 14.0},
             probe_durations={'lane': 0.005}, projectile={
                 'active': 29, 'chords': 58, 'debt': 0.05,
@@ -6914,6 +6915,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIn('gap_ms=120.000', first_row)
         self.assertIn('raw_dt_ms=120.000', first_row)
         self.assertIn('local:4.000', first_row)
+        self.assertIn('details_ms=local_ground:1.000,local_solver:2.000', first_row)
         self.assertIn('lane:7', first_row)
         self.assertIn('probe_ms=', first_row)
         self.assertIn('lane:5.000', first_row)
@@ -6937,6 +6939,14 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIn('scans=870.00/1740', payloads[0])
         snapshot = diagnostics.snapshot()
         self.assertEqual(2, snapshot['samples'])
+        self.assertEqual({'avg_ms': 0.5, 'max_ms': 1.0},
+                         snapshot['python_details_ms']['local_ground'])
+        self.assertEqual({'avg_ms': 1.0, 'max_ms': 2.0},
+                         snapshot['python_details_ms']['local_solver'])
+        self.assertNotIn('local_solver', snapshot['python_stages_ms'])
+        self.assertEqual(2.0, snapshot['python_stages_ms']['local']['avg_ms'])
+        self.assertIn('details_ms_avg_max parent=local local_ground=0.500/1.000 '
+                      'local_solver=1.000/2.000', payloads[0])
         self.assertAlmostEqual(
             150.0, snapshot['frame_interval_ms']['p50'])
         self.assertAlmostEqual(
@@ -16895,6 +16905,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         battle._fail.assert_called_once_with(error)
         battle._schedule.assert_not_called()
+        self.assertIsNone(battle._local_frame_stages)
 
     def test_optional_frame_failures_disable_features_not_the_round(self):
         runtime = _runtime()
@@ -21514,6 +21525,36 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._local_airborne)
         self.assertFalse(battle._local_left_flying)
         self.assertFalse(battle._local_right_flying)
+
+    def test_local_suspension_timing_accumulates_ground_and_solver_passes(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._local_fall_armed = True
+        entity = _Vehicle(
+            10, _suspension_descriptor(), _Vector(), (0, 0, 0),
+            {'health': 500})
+        battle._suspension_ground_y = mock.Mock(return_value=0.0)
+        battle._local_frame_stages = {}
+        # Two support passes in one render callback: a real elapsed-time
+        # solve and a zero-time endpoint correction must both be accounted.
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime._PROFILE_CLOCK',
+                side_effect=(1.0, 1.002, 1.003, 1.007,
+                             2.0, 2.003, 2.005, 2.006)):
+            for dt in (0.025, 0.0):
+                battle._update_vertical_motion(
+                    entity, (0.0, 0.0, 0.0), 0.0, dt)
+
+        self.assertEqual(44, battle._suspension_ground_y.call_count)
+        self.assertAlmostEqual(0.005, battle._local_frame_stages['local_ground'])
+        self.assertAlmostEqual(0.005, battle._local_frame_stages['local_solver'])
+        battle._local_frame_stages = None
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime._PROFILE_CLOCK',
+                side_effect=AssertionError('disabled timing must not read the clock')):
+            battle._update_vertical_motion(entity, (0.0, 0.0, 0.0), 0.0, 0.025)
+        self.assertEqual(66, battle._suspension_ground_y.call_count)
 
     def test_local_suspension_tick_prepares_one_broken_skin_filter(self):
         """The 22 columns of one pose share the prepared envelope filter."""

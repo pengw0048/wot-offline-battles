@@ -3,6 +3,7 @@ import math
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -342,6 +343,48 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertAlmostEqual(0.0, solved['roll'], places=12)
         self.assertFalse(solved['airborne'])
         self.assertEqual(18, solved['contact_count'])
+
+    def test_full_contact_solver_does_not_recompute_rotation_per_point(self):
+        """The moving-frame solver keeps all contacts within a trig budget."""
+        ground, pseudo_ground = self._plane_samples(self.params, 0.0, 0.15)
+        state = self._state(pitch=-0.1, roll=0.05, vertical_velocity=-0.3,
+                            pitch_velocity=0.03, roll_velocity=-0.01)
+        with mock.patch.object(vehicle_physics.math, 'sin',
+                               wraps=math.sin) as sine, \
+                mock.patch.object(vehicle_physics.math, 'cos',
+                                  wraps=math.cos) as cosine:
+            solved = vehicle_physics.damper_suspension_step(
+                self.params, state, ground, 0.025, pseudo_ground)
+
+        # The previous per-point height/gradient path needed over 500 of
+        # each for this same two-substep slope contact. This budget allows
+        # every solver iteration while preventing that repetition.
+        self.assertLess(sine.call_count, 100)
+        self.assertLess(cosine.call_count, 100)
+        self.assertFalse(solved['airborne'])
+        self.assertLessEqual(solved['max_limit_excess'], 1.0e-6)
+        self.assertNotEqual(state['pitch'], solved['pitch'])
+        self.assertNotEqual(state['roll'], solved['roll'])
+
+    def test_airborne_step_integrates_without_unused_contact_rotations(self):
+        state = self._state(height=2.0, vertical_velocity=-3.0,
+                            pitch=0.2, roll=-0.3, pitch_velocity=0.1)
+        dt = self.params['fixed_step'] * 0.5
+        with mock.patch.object(vehicle_physics.math, 'sin',
+                               wraps=math.sin) as sine, \
+                mock.patch.object(vehicle_physics.math, 'cos',
+                                  wraps=math.cos) as cosine:
+            solved = vehicle_physics.damper_suspension_step(
+                self.params, state, (None,) * 10, dt, (None,) * 12)
+
+        self.assertTrue(solved['airborne'])
+        self.assertEqual(0, solved['contact_count'])
+        velocity = -3.0 - vehicle_physics.GRAVITY * dt
+        self.assertAlmostEqual(velocity, solved['vertical_velocity'])
+        self.assertAlmostEqual(2.0 + velocity * dt, solved['height'])
+        self.assertNotEqual(state['pitch'], solved['pitch'])
+        sine.assert_not_called()
+        cosine.assert_not_called()
 
     def test_support_velocity_comes_only_from_plane_and_horizontal_motion(
             self):
