@@ -36,12 +36,10 @@ except ImportError:
 
 
 MODS_LISTING_LIMIT = 400
-# Directories under `mods/` that this launcher owns.  They must be summarised
-# rather than walked: `prepare_worker_resource_root` unpacks the whole port
-# `res` tree into `mods/configs/offline_lan_0922/worker_res`, which on an
-# isolated-worker machine is hundreds of files.  Walking them would spend the
-# listing budget on our own payload and truncate before reaching the player's
-# third-party mods - the one thing this section exists to show.
+# Directories under `mods/` that this launcher owns.  Older builds may leave
+# hundreds of payload files in `mods/configs/offline_lan_0922/worker_res`.
+# Summarise those leftovers instead of spending the listing budget on them
+# before reaching the player's third-party mods.
 OWN_MOD_DIRECTORIES = ("configs/offline_lan_0922",)
 # BigWorld writes its own crash banner onto the faulting thread's stack:
 # "Application <exe> crashed <date> at <time> / Message: / FATAL ERROR: ...".
@@ -257,17 +255,7 @@ def environment_report(game_root, session=None):
         _megabytes(free) if free is not None else "unavailable"))
 
     lines.extend(_lines("hidden worker resources"))
-    try:
-        entries = core.worker_resource_path_list(game_root)
-    except Exception as error:
-        entries = None
-        lines.append("resource list failed: %s" % error)
-    if entries:
-        lines.append("isolated: yes (%d entries)" % len(entries))
-        lines.append("first entry: %s" % entries[0])
-    else:
-        lines.append(
-            "isolated: no; the worker runs on the client's own paths.xml")
+    lines.append("resource list: client paths.xml")
     return "\n".join(lines) + "\n"
 
 

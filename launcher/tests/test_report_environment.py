@@ -12,7 +12,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-import core
 import report_environment
 
 
@@ -164,6 +163,7 @@ class SectionTest(unittest.TestCase):
         self.assertIn("== machine", text)
         self.assertIn("== game", text)
         self.assertIn("client address space:", text)
+        self.assertIn("resource list: client paths.xml", text)
 
     def _dependency_report(self, names):
         with mock.patch.object(report_environment, "_import_table",
@@ -285,18 +285,17 @@ if __name__ == "__main__":
 class OwnPayloadIsNotListedTest(unittest.TestCase):
     """The listing must not spend its budget on this launcher's own files.
 
-    `prepare_worker_resource_root` unpacks the whole port `res` tree into
-    `mods/configs/offline_lan_0922/worker_res`.  On a machine that ran the
-    isolated worker that is hundreds of files, and walking them would
-    truncate the listing before it reached the player's third-party mods -
-    which is the only thing this section exists to show.
+    Older builds may leave hundreds of extracted payload files in
+    `mods/configs/offline_lan_0922/worker_res`.  Listing those leftovers would
+    truncate the report before it reached the player's third-party mods.
     """
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, True)
         self.game = os.path.join(self.root, "game")
-        own = os.path.join(self.game, core.WORKER_RESOURCE_ROOT_0922)
+        own = os.path.join(self.game, "mods", "configs", "offline_lan_0922",
+                           "worker_res")
         os.makedirs(own)
         for index in range(500):
             with open(os.path.join(own, "payload%03d.py" % index),
