@@ -1977,7 +1977,8 @@ class BotRuntime(object):
                  water_depth_probe=None, ram_contact_probe=None,
                  bot_equipment_resolver=None,
                  destructible_body_scan=None, control_seconds=None,
-                 incoming_lane_probe=None, combat_diagnostics=None):
+                 incoming_lane_probe=None, combat_diagnostics=None,
+                 turret_motion_probe=None, turret_hulls_provider=None):
         self.local_player_id = local_player_id
         self._combat_diagnostics = combat_diagnostics
         self.descriptor_resolver = descriptor_resolver or (lambda unused: {})
@@ -2059,6 +2060,9 @@ class BotRuntime(object):
         self.native_motion = bool(native_motion)
         self.motion_resolver = motion_resolver
         self.motion_report = motion_report
+        self._turret_motion_probe = turret_motion_probe
+        self._turret_hulls_provider = turret_hulls_provider
+        self._turret_pending_landing_impacts = None
         self.world_receipt_probe = (
             self._adapt_world_receipt_probe(world_receipt_probe)
             if callable(world_receipt_probe) else None)
@@ -6400,6 +6404,13 @@ class BotRuntime(object):
             state.get('half_length', 3.5),
             state.get('half_width', 1.7),
             terrain_pitch, state.get('roll', 0.0))
+        if self._turret_motion_probe is not None:
+            before = self._turret_state_pose(state)
+            after = dict(before)
+            after.update(pitch=pitch + suspension_pitch, roll=roll)
+            if not self._turret_motion_probe(
+                    before, after, self._descriptors.get(int(state['id']))):
+                return False
         state['terrain_pitch'] = pitch
         state['pitch'] = pitch + suspension_pitch
         state['roll'] = roll
@@ -6524,6 +6535,10 @@ class BotRuntime(object):
     def _apply_bot_landing_impact(
             self, state, impact_speed, normal_impact=False):
         """Retain airborne skid and apply legacy or normal impact speed."""
+        pending = self._turret_pending_landing_impacts
+        if pending is not None:
+            pending.append((impact_speed, normal_impact))
+            return 0
         lateral_x = state.get('air_lateral_x', 0.0)
         lateral_z = state.get('air_lateral_z', 0.0)
         lateral_speed = math.sqrt(
@@ -6828,6 +6843,45 @@ class BotRuntime(object):
     def _update_vertical_motion(self, state, step, tick_pose=None,
                                 attempted_yaw=None,
                                 suspension_motion_pose=None):
+        """Commit suspension and landing only after the full turret sweep."""
+        if self._turret_motion_probe is None:
+            return self._integrate_vertical_motion(
+                state, step, tick_pose, attempted_yaw,
+                suspension_motion_pose)
+        before = self._turret_state_pose(state)
+        snapshot = self._snapshot_bot_suspension_state(state)
+        pending = []
+        self._turret_pending_landing_impacts = pending
+        try:
+            blocked = self._integrate_vertical_motion(
+                state, step, tick_pose, attempted_yaw,
+                suspension_motion_pose)
+        finally:
+            self._turret_pending_landing_impacts = None
+        if not self._turret_motion_probe(
+                before, self._turret_state_pose(state),
+                self._descriptors.get(int(state['id']))):
+            self._restore_bot_suspension_state(state, snapshot)
+            state['x'], state['y'], state['z'] = (
+                before['x'], before['y'], before['z'])
+            state['yaw'] = before['yaw']
+            state['speed'] = 0.0
+            state['movement_dir'] = 0
+            state['rotation_dir'] = 0
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            self._turn_speeds[int(state['id'])] = 0.0
+            self._invalidate_realised_motion(
+                int(state['id']), before['yaw'] if attempted_yaw is None
+                else attempted_yaw)
+            return True
+        for impact_speed, normal_impact in pending:
+            self._apply_bot_landing_impact(state, impact_speed, normal_impact)
+        return blocked
+
+    def _integrate_vertical_motion(self, state, step, tick_pose=None,
+                                   attempted_yaw=None,
+                                   suspension_motion_pose=None):
         """Run grounded/ballistic phases and reject false raised support."""
         params = self._suspension_params_for(state['id'])
         trace = state.get('_motion_stall_pending')
@@ -8001,9 +8055,14 @@ class BotRuntime(object):
                 abs(math.cos(relative_yaw)))
             separation_distance = max(
                 1.0, move_distance + hull_support)
-            if not self._clear(
-                    _position(state), contact_yaw, contact_speed, None,
-                    separation_distance, corridor_half_width):
+            position = _position(state)
+            candidate = (position[0] + move_x, position[1],
+                         position[2] + move_z)
+            if (not self._turret_pose_is_clear(
+                    state, position, yaw, candidate, yaw) or
+                    not self._clear(
+                        position, contact_yaw, contact_speed, None,
+                        separation_distance, corridor_half_width)):
                 # Tank separation is not permission to cross static world
                 # geometry. Let the other hull keep its inverse-mass share.
                 move_x = 0.0
@@ -8510,8 +8569,28 @@ class BotRuntime(object):
         self._ram_contacts = frozenset(current_ram_contacts)
         return reports
 
+    @staticmethod
+    def _turret_state_pose(state):
+        return dict((name, state.get(name, 0.0))
+                    for name in ('x', 'y', 'z', 'yaw', 'pitch', 'roll'))
+
+    def _turret_pose_is_clear(self, state, start, start_yaw, end, end_yaw):
+        """Keep turns and contact pushes outside the same landed turret body."""
+        probe = self._turret_motion_probe
+        if probe is None:
+            return True
+        descriptor = self._descriptors.get(int(state['id']))
+        before = {
+            'x': start[0], 'y': start[1], 'z': start[2],
+            'yaw': start_yaw, 'pitch': state.get('pitch', 0.0),
+            'roll': state.get('roll', 0.0),
+        }
+        after = dict(before)
+        after.update(x=end[0], y=end[1], z=end[2], yaw=end_yaw)
+        return bool(probe(before, after, descriptor))
+
     def _publish_static_hulls(self, players):
-        """Give the navigator this tick's wrecks as static graph geometry.
+        """Give the navigator wrecks and landed turrets as static geometry.
 
         A destroyed vehicle is exact new world geometry that appears mid-round.
         Without it the terrain graph keeps returning the lane the wreck now
@@ -8546,6 +8625,8 @@ class BotRuntime(object):
             hulls.append((
                 player_id, _number(raw.get('x')), _number(raw.get('z')),
                 _number(raw.get('yaw')), shape[1], shape[0]))
+        if self._turret_hulls_provider is not None:
+            hulls.extend(self._turret_hulls_provider())
         publish(hulls)
 
     @staticmethod
@@ -11619,12 +11700,17 @@ class BotRuntime(object):
                     candidate_hull_yaw -= math.pi * 2.0
                 while candidate_hull_yaw < -math.pi:
                     candidate_hull_yaw += math.pi * 2.0
-                if not self._baked_pose_progress_clear(
+                if (not self._baked_pose_progress_clear(
                         state, position, old_hull_yaw,
-                        position, candidate_hull_yaw):
+                        position, candidate_hull_yaw) or
+                        (abs(_angle_delta(candidate_hull_yaw,
+                                          old_hull_yaw)) > 1.0e-8 and
+                         not self._turret_pose_is_clear(
+                             state, position, old_hull_yaw,
+                             position, candidate_hull_yaw))):
                     # Turning is a pose change even without translation. Keep
                     # the prior legal OBB until the hull first moves far enough
-                    # inward to rotate without crossing the official red line.
+                    # inward to rotate without crossing a red line or turret.
                     turn_speed = 0.0
                     candidate_hull_yaw = old_hull_yaw
                     state['rotation_dir'] = 0

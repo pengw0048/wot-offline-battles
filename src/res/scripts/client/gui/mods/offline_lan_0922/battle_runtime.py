@@ -3378,6 +3378,8 @@ class BattleRuntime(object):
                 cover_probe=self._sample_bot_cover,
                 motion_resolver=self._resolve_bot_motion,
                 motion_report=self._report_bot_destructible_contact,
+                turret_motion_probe=self._turret_motion_is_clear,
+                turret_hulls_provider=self._turret_navigation_hulls,
                 world_receipt_probe=self._direction_world_receipt,
                 water_depth_probe=self._water_depth,
                 ram_contact_probe=self._bot_ram_contact_armor,
@@ -17824,10 +17826,43 @@ class BattleRuntime(object):
             '_pending': saw_pending,
         }
 
+    def _turret_motion_is_clear(self, start_pose, end_pose, descriptor):
+        """Use the room's published turret geometry for every moving hull."""
+        obstacles = getattr(self, '_detached_turret_obstacles', None)
+        if obstacles is None:
+            return True
+        return not obstacles.sweep_blocks(
+            start_pose, end_pose, descriptor, self._turret_server_time_ms())
+
+    def _turret_navigation_hulls(self):
+        obstacles = getattr(self, '_detached_turret_obstacles', None)
+        if obstacles is None:
+            return ()
+        return obstacles.navigation_hulls(self._turret_server_time_ms())
+
+    def _turret_pose_is_clear(
+            self, start, start_yaw, end, end_yaw, descriptor,
+            pitch=0.0, roll=0.0):
+        if getattr(self, '_detached_turret_obstacles', None) is None:
+            return True
+        before = {
+            'x': start[0], 'y': start[1], 'z': start[2],
+            'yaw': start_yaw, 'pitch': pitch, 'roll': roll,
+        }
+        after = dict(before)
+        after.update(x=end[0], y=end[1], z=end[2], yaw=end_yaw)
+        return self._turret_motion_is_clear(before, after, descriptor)
+
     def _pose_sweep_is_clear(
             self, entity, start_position, start_yaw, end_position, end_yaw,
             speed, dt):
         """Submit one visible rotating-hull proposal before applying its pose."""
+        if not self._turret_pose_is_clear(
+                start_position, start_yaw, end_position, end_yaw,
+                entity.typeDescriptor, self._local_pitch, self._local_roll):
+            self._local_motion_kinds = 'detached_turret'
+            self._local_motion_status = 'hard'
+            return False
         now = self._clock()
         rotation_speed_cap = self._destructible_rotation_speed_cap(
             self._local_physics,
@@ -17940,6 +17975,12 @@ class BattleRuntime(object):
                 float(position[2]) +
                 math.cos(float(world_motion_yaw)) *
                 abs(float(speed)) * float(dt))
+        if not self._turret_pose_is_clear(
+                position, world_hull_yaw, contact_end, world_hull_yaw,
+                entity.typeDescriptor, self._local_pitch, self._local_roll):
+            self._local_motion_kinds = 'detached_turret'
+            self._local_motion_status = 'hard'
+            return False
         if self._destructibles is not None:
             proposal_now = self._clock()
             proposer = getattr(
@@ -18111,6 +18152,16 @@ class BattleRuntime(object):
         travel_yaw = (
             float(motion_yaw) if motion_yaw is not None else
             float(yaw) if speed >= 0.0 else float(yaw) + math.pi)
+        contact_end = (
+            float(position[0]) + math.sin(travel_yaw) * abs(speed) * dt,
+            float(position[1]),
+            float(position[2]) + math.cos(travel_yaw) * abs(speed) * dt)
+        if not self._turret_pose_is_clear(
+                position, yaw, contact_end, yaw, descriptor,
+                _number(bot_state.get('terrain_pitch', bot_state.get('pitch'))),
+                _number(bot_state.get('roll'))):
+            self._bot_motion_kinds[int(bot_id)] = 'detached_turret'
+            return 'hard'
         destructible_motion = (
             {} if motion_yaw is None else
             {'motion_yaw': float(motion_yaw)})
@@ -20457,6 +20508,15 @@ class BattleRuntime(object):
         position = self._local_position
         tick_pose = position
         yaw = self._local_yaw
+        turret_tick_pose = None
+        turret_suspension_snapshot = None
+        if getattr(self, '_detached_turret_obstacles', None) is not None:
+            turret_tick_pose = {
+                'x': position[0], 'y': position[1], 'z': position[2],
+                'yaw': yaw, 'pitch': self._local_pitch,
+                'roll': self._local_roll,
+            }
+            turret_suspension_snapshot = self._local_suspension_state_snapshot()
         contact_path = None
         reader = getattr(self._destructibles, 'take_ground_skip_count', None)
         if callable(reader):
@@ -20688,6 +20748,28 @@ class BattleRuntime(object):
             if not ram_resolved:
                 position = self._resolve_local_tank_contacts(
                     entity, position, yaw, dt)
+        if turret_tick_pose is not None:
+            realised_pose = {
+                'x': position[0], 'y': position[1], 'z': position[2],
+                'yaw': yaw, 'pitch': self._local_pitch,
+                'roll': self._local_roll,
+            }
+            if not self._turret_motion_is_clear(
+                    turret_tick_pose, realised_pose, entity.typeDescriptor):
+                # Suspension and slope sampling can change the complete hull
+                # after the horizontal query. Reject that pose and its pending
+                # landing observation before publishing either one.
+                self._restore_local_suspension_state(
+                    turret_suspension_snapshot)
+                position, yaw = tick_pose, turret_tick_pose['yaw']
+                self._local_speed = 0.0
+                self._local_turn_speed = 0.0
+                self._local_drive_turn = 0.0
+                self._local_push_x = 0.0
+                self._local_push_z = 0.0
+                self._local_motion_kinds = 'detached_turret'
+                self._local_motion_status = 'hard'
+                contact_path = 'detached_turret'
         self._report_local_contact_tick(
             contact_path, previous_speed, slope_pitch,
             position[1] - tick_pose[1])

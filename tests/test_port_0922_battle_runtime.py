@@ -19440,6 +19440,134 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(
             battle._motion_is_clear.call_args.kwargs['allow_crush_drive'])
 
+    def test_landed_turret_blocks_player_translation_before_world_queries(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_pitch, battle._local_roll = 0.2, -0.1
+        battle._turret_server_time_ms = lambda: 1250.0
+        block = mock.Mock(return_value=True)
+        battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
+        entity = types.SimpleNamespace(typeDescriptor=_Descriptor())
+        for speed, travel, hull in ((4.0, 0.4, None), (-4.0, 0.4, None),
+                                    (4.0, -0.55, 0.4)):
+            with self.subTest(speed=speed, travel=travel, hull=hull), mock.patch(
+                    'gui.mods.offline_lan_0922.battle_runtime.'
+                    'world_collision.check_horizontal_collision') as world:
+                block.reset_mock()
+                self.assertFalse(battle._motion_is_clear(
+                    entity, (1.0, 2.0, 3.0), travel, speed, 0.1,
+                    hull_yaw=hull))
+                before, after, descriptor, clock = block.call_args.args
+                self.assertEqual((0.2, -0.1), (before['pitch'], before['roll']))
+                self.assertEqual(travel if hull is None else hull, before['yaw'])
+                self.assertAlmostEqual(1.0 + math.sin(travel) * speed * 0.1, after['x'])
+                self.assertAlmostEqual(3.0 + math.cos(travel) * speed * 0.1, after['z'])
+                self.assertIs(entity.typeDescriptor, descriptor)
+                self.assertEqual(1250.0, clock)
+                self.assertEqual('detached_turret', battle._local_motion_kinds)
+                world.assert_not_called()
+
+    def test_landed_turret_blocks_player_rotation_and_allows_clear_escape(self):
+        battle = BattleRuntime(_runtime())
+        battle._local_pitch, battle._local_roll = 0.2, -0.1
+        battle._turret_server_time_ms = lambda: 1300.0
+        block = mock.Mock(return_value=True)
+        battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
+        entity = types.SimpleNamespace(typeDescriptor=_Descriptor())
+        battle._destructible_pose_sweep = mock.Mock()
+        self.assertFalse(battle._pose_sweep_is_clear(
+            entity, (1.0, 2.0, 3.0), 0.0, (1.0, 2.0, 3.0), 0.2, 0.0, 0.1))
+        before, after, descriptor, clock = block.call_args.args
+        self.assertEqual((0.0, 0.2), (before['yaw'], after['yaw']))
+        battle._destructible_pose_sweep.assert_not_called()
+        block.return_value = False
+        self.assertTrue(battle._turret_motion_is_clear(before, after, descriptor))
+        battle._detached_turret_obstacles = None
+        self.assertTrue(battle._turret_motion_is_clear(before, after, descriptor))
+
+    def test_landed_turret_preempts_bot_cached_world_clear_receipt(self):
+        battle = BattleRuntime(_runtime())
+        battle._turret_server_time_ms = lambda: 1500.0
+        block = mock.Mock(return_value=True)
+        battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
+        reusable = mock.Mock(return_value=True)
+        battle._bots = types.SimpleNamespace(states={11: {
+            'movement_dir': 1, 'airborne': False, 'terrain_pitch': 0.2, 'roll': -0.1,
+        }}, motion_world_corridor_reusable=reusable)
+        battle._destructibles = mock.Mock()
+        battle._destructibles._catalog_hull_contact.return_value = False
+        descriptor = _Descriptor()
+        for speed, motion in ((4.0, None), (-4.0, None), (4.0, -0.55)):
+            with self.subTest(speed=speed, motion=motion):
+                self.assertEqual('hard', battle._resolve_bot_motion(
+                    11, (1.0, 2.0, 3.0), 0.4, speed, descriptor, 0.1, 5.0,
+                    motion_yaw=motion))
+                before, after, used, clock = block.call_args.args
+                angle = motion if motion is not None else 0.4
+                distance = abs(speed) * 0.1 if motion is not None else speed * 0.1
+                self.assertAlmostEqual(1.0 + math.sin(angle) * distance, after['x'])
+                self.assertAlmostEqual(3.0 + math.cos(angle) * distance, after['z'])
+                self.assertEqual((0.4, 0.2, -0.1), (before['yaw'], before['pitch'], before['roll']))
+                self.assertIs(descriptor, used)
+                self.assertEqual(1500.0, clock)
+        reusable.assert_not_called()
+        battle._destructibles._catalog_motion_blocked.assert_not_called()
+
+    def test_landed_turret_rejects_final_player_suspension_pose_and_landing(self):
+        for changed in ('y', 'pitch', 'roll'):
+            with self.subTest(changed=changed):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle.client = _Client()
+                battle._avatar = runtime.bigworld.avatar
+                entity = _Vehicle(
+                    10, _Descriptor(), _Vector(2, 3, 4), (0, 0, 0),
+                    {'health': 500})
+                runtime.bigworld.entities[10] = entity
+                battle._server = types.SimpleNamespace(vehicle_id=10)
+                battle._sender = types.SimpleNamespace(
+                    forward=0.0, turn=0.0, handbrake=False,
+                    send_current=mock.Mock(return_value=True))
+                battle._local_position = (2.0, 3.0, 4.0)
+                battle._local_descriptor = entity.typeDescriptor
+                battle._attach_local_presentation()
+                battle._pending_landing_impacts = [9.0]
+                battle._turret_server_time_ms = lambda: 1500.0
+                block = mock.Mock(side_effect=lambda before, after, *unused:
+                                  abs(after[changed] - before[changed]) > 0.01)
+                battle._detached_turret_obstacles = types.SimpleNamespace(
+                    sweep_blocks=block)
+                battle._smoothed_drive_pitch = mock.Mock(return_value=0.0)
+                battle._motion_is_clear = mock.Mock(return_value=True)
+                battle._ground_pitch = mock.Mock(return_value=0.0)
+                battle._apply_slope_slide = mock.Mock(
+                    side_effect=lambda position, *unused: position)
+                battle._resolve_local_tank_contacts = mock.Mock(
+                    side_effect=lambda unused_entity, position, *unused: position)
+
+                def settle(unused_entity, position, unused_yaw, unused_dt):
+                    battle._local_pitch = 0.3
+                    battle._local_roll = -0.2
+                    battle._local_spring_ground_memory = [5.0]
+                    battle._pending_landing_impacts.append(15.0)
+                    return (position[0], position[1] - 0.5, position[2])
+
+                battle._update_vertical_motion = settle
+                before = battle._local_suspension_state_snapshot()
+                with mock.patch(
+                        'gui.mods.offline_lan_0922.battle_runtime.'
+                        'vehicle_physics.longitudinal_step', return_value=0.0), \
+                        mock.patch(
+                            'gui.mods.offline_lan_0922.battle_runtime.'
+                            'vehicle_physics.traverse_step', return_value=0.0):
+                    battle._drive_local_step(0.1)
+
+                self.assertEqual((2.0, 3.0, 4.0), battle._local_position)
+                self.assertEqual(before, battle._local_suspension_state_snapshot())
+                self.assertEqual('detached_turret', battle._local_motion_kinds)
+                self.assertEqual('hard', battle._local_motion_status)
+                self.assertEqual((2.5, 0.3, -0.2), tuple(
+                    block.call_args.args[1][key] for key in ('y', 'pitch', 'roll')))
+
     def test_bot_braking_opposite_motion_does_not_enable_cap_crush(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -30483,6 +30611,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             bots._probe_started = lambda: None
             bots._probe_finished = lambda index, started: None
             bots._physics_ground_probe = lambda x, z, hint: 2.0
+            bots._turret_motion_probe = None
             bots.set_camera_position((0.0, 0.0, 0.0))
             for step in range(20):
                 state['x'] += 0.5
