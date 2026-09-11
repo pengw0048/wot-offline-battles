@@ -60,6 +60,48 @@ def _graph(map_name='01_karelia', waypoint_count=2):
     }
 
 
+def _flat_open_graph():
+    """A flat, fully linked 31x31 graph for pure contact-physics fixtures."""
+    graph = _graph()
+    width = 31
+    directions = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                  (1, 0), (-1, 1), (0, 1), (1, 1))
+    links = []
+    for z in range(width):
+        for x in range(width):
+            links.append(sum(
+                1 << index for index, (dx, dz) in enumerate(directions)
+                if 0 <= x + dx < width and 0 <= z + dz < width))
+    graph.update({
+        'origin': (-60.0, -60.0), 'bounds': (-62.0, -62.0, 62.0, 62.0),
+        'width': width, 'height': width,
+        'heights_mm': [0] * (width * width),
+        'links': links, 'hazards': [0] * (width * width),
+    })
+    return graph
+
+
+def _plain_attribute_factors(unused_descriptor, crew=None, crew_level=None):
+    """The #1513 default-crew factor set every Bot fixture needs."""
+    level = (100.0 if crew_level is None else
+             max(50.0, min(100.0, float(crew_level))))
+    factor = 0.57 + 0.0043 * level
+    return {
+        'turret/rotationSpeed': factor,
+        'gun/rotationSpeed': factor,
+        'gun/reloadTime': 1.0 / factor,
+        'gun/aimingTime': 1.0 / factor,
+        'shotDispersion': (1.0 / factor,),
+        'repairSpeed': 0.57,
+        'vehicle/rotationSpeed': 1.0,
+        'engine/power': 1.0,
+        'chassis/terrainResistance': (1.0, 1.0, 1.0),
+        'radio/distance': 1.0,
+        'circularVisionRadius': 1.0,
+        'camouflage': 0.57,
+    }
+
+
 def _spawn_resolver(team, slot):
     point = _graph()['spawn_formations'][str(int(team))][int(slot)]
     return ((point[0], point[1], point[2]), point[3])
@@ -14265,9 +14307,10 @@ class BotRuntimeTests(unittest.TestCase):
             self.assertFalse(runtime._ram_contacts)
             # Broad phase uses each mounted hull's size, including a wreck;
             # it must never assume that all tanks fit a default-size circle.
+            # The wreck resolves too: a live neighbour in reach can shove it.
             peer.update(alive=False, collision_shape=(20.0, 3.5, -0.8, 2.0))
             runtime._resolve_tank_contacts([], 1.1, 0.1)
-            self.assertEqual([(11, (12,))], calls)
+            self.assertEqual([(11, (12,)), (12, (11,))], calls)
         finally:
             self.module.tank_collision.resolve_tank = original
 
@@ -19991,6 +20034,313 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(busiest[0][1], 1)
         # Reading the report clears the window's counters.
         self.assertEqual((), runtime.load_report()['busiest'])
+
+
+class ShovedWreckTests(unittest.TestCase):
+    """A destroyed hull is a body on tracks, not a piece of world geometry."""
+
+    def setUp(self):
+        self._modules = dict((key, value) for key, value in sys.modules.items()
+                             if key == 'gui' or key.startswith('gui.'))
+        self.module = _load()
+        self._native_attribute_factors = self.module.loadout.attribute_factors
+        self.module.loadout.attribute_factors = _plain_attribute_factors
+        self.start = {
+            'round_id': 5, 'map': '01_karelia', 'bot_authority_id': 1,
+            'bot_skill_mode': 'brutal',
+            'bots': [{'id': 11, 'team': 2, 'slot': 0, 'name': 'Wreck'},
+                     {'id': 12, 'team': 1, 'slot': 0, 'name': 'Driver'}]}
+
+    def tearDown(self):
+        self.module.loadout.attribute_factors = self._native_attribute_factors
+        for key in list(sys.modules):
+            if key == 'gui' or key.startswith('gui.'):
+                sys.modules.pop(key, None)
+        sys.modules.update(self._modules)
+
+    def _runtime(self, ground=0.0, clear=True):
+        probe = (lambda *unused, **kwargs: {
+            'clear': clear, 'collision': not clear,
+            'water': False, 'slope': 0.0})
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(
+                {'throttle': 0.0, 'turn': 0.0, 'fire_allowed': False}),
+            direction_probe=probe,
+            ground_probe=lambda *unused: ground,
+            physics_ground_probe=lambda *unused: ground,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.battle_start(self.start)
+        return runtime
+
+    def _wreck(self, runtime):
+        state = runtime.states[11]
+        state.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0, alive=False,
+                     health=0, half_length=3.5, half_width=1.7,
+                     grounded_once=True, push_x=0.0, push_z=0.0)
+        return state
+
+    def test_a_shove_moves_the_wreck_and_re_settles_it_on_the_ground(self):
+        runtime = self._runtime(ground=0.0)
+        state = self._wreck(runtime)
+
+        moved = runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 2.0),
+                    'correction': (0.0, 0.05)}, 0.1)
+
+        self.assertTrue(moved)
+        self.assertGreater(state['z'], 0.0)
+        self.assertEqual(0.0, state['y'])
+
+    def test_a_wreck_is_never_shoved_through_static_geometry(self):
+        runtime = self._runtime(ground=0.0, clear=False)
+        state = self._wreck(runtime)
+
+        moved = runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 2.0),
+                    'correction': (0.0, 0.05)}, 0.1)
+
+        self.assertFalse(moved)
+        self.assertEqual(0.0, state['z'])
+        self.assertEqual(0.0, state['push_z'])
+
+    def test_a_wreck_settle_cannot_move_down_into_a_landed_turret(self):
+        runtime = self._runtime(ground=-0.3)
+        state = self._wreck(runtime)
+        state.update(pitch=0.2, terrain_pitch=0.15,
+                     suspension_pitch=0.05, roll=0.1)
+        probes = []
+
+        def clear(before, after, descriptor):
+            probes.append((before, after))
+            return after['y'] >= before['y']
+
+        runtime._turret_motion_probe = clear
+        moved = runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 2.0),
+                    'correction': (0.0, 0.05)}, 0.1)
+
+        self.assertFalse(moved)
+        self.assertEqual((0.0, 0.0, 0.0), (state['x'], state['y'], state['z']))
+        self.assertEqual((0.0, 0.0), (state['push_x'], state['push_z']))
+        self.assertTrue(any(after['y'] < before['y'] for before, after in probes))
+        self.assertEqual(0.15, probes[-1][1]['chassis']['pitch'])
+
+    def test_a_slide_off_a_cliff_lip_is_undone_instead_of_dropping(self):
+        runtime = self._runtime(ground=-40.0)
+        state = self._wreck(runtime)
+
+        moved = runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 2.0),
+                    'correction': (0.0, 0.05)}, 0.1)
+
+        self.assertFalse(moved)
+        self.assertEqual(0.0, state['z'])
+        self.assertEqual(0.0, state['y'])
+        self.assertEqual(0.0, state['push_z'])
+
+    def test_a_wreck_keeps_no_engine_and_bleeds_at_the_parked_hold(self):
+        runtime = self._runtime(ground=0.0)
+        state = self._wreck(runtime)
+        state['push_z'] = 2.0
+
+        runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 0.0),
+                    'correction': (0.0, 0.0)}, 0.1)
+
+        params = runtime._physics_params_for(11)
+        expected = 2.0 - self.module.vehicle_physics.contact_push_decel(
+            params, False)[0] * 0.1
+        self.assertAlmostEqual(expected, state['push_z'])
+        self.assertEqual(0.0, state['speed'])
+
+    def test_a_settled_wreck_stops_moving_entirely(self):
+        runtime = self._runtime(ground=0.0)
+        state = self._wreck(runtime)
+        state['push_z'] = 0.4
+
+        for unused_tick in range(60):
+            runtime._apply_wreck_contact_response(
+                state, {'delta_velocity': (0.0, 0.0),
+                        'correction': (0.0, 0.0)}, 1.0 / 30.0)
+
+        self.assertEqual(0.0, state['push_z'])
+        settled = state['z']
+        runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 0.0),
+                    'correction': (0.0, 0.0)}, 1.0 / 30.0)
+        self.assertEqual(settled, state['z'])
+
+    def test_a_wreck_never_publishes_a_ram_report(self):
+        runtime = self._runtime(ground=0.0)
+        wreck = self._wreck(runtime)
+        wreck.update(x=0.0, z=0.0, team=1)
+        driver = runtime.states[12]
+        driver.update(x=0.0, y=0.0, z=5.0, yaw=math.pi, speed=12.0,
+                      alive=True, half_length=3.5, half_width=1.7,
+                      grounded_once=True, push_x=0.0, push_z=0.0, team=2)
+
+        reports = runtime._resolve_tank_contacts((), 100.0, 1.0 / 30.0)
+
+        self.assertEqual(
+            [], [report for report in reports
+                 if int(report.get('bot_id', -1)) == 11])
+        # The wreck is genuinely shoved out of the overlap it started in.
+        self.assertLess(wreck['z'], -0.1)
+        self.assertLess(wreck['push_z'], 0.0)
+        self.assertGreater(driver['z'], 5.0)
+
+
+class WreckPushMassTests(unittest.TestCase):
+    """Who can shove a wreck, measured through the real contact loop.
+
+    ``_drive_into`` in the physics tests is the one-dimensional version of
+    this. It cannot see the Baumgarte separation, which is not a force and
+    would otherwise walk any wreck along at the pusher's inverse-mass share
+    whatever the hulls weigh. These cases run the whole worker tick.
+    """
+
+    def setUp(self):
+        self._modules = dict((key, value) for key, value in sys.modules.items()
+                             if key == 'gui' or key.startswith('gui.'))
+        self.module = _load()
+        self._native_attribute_factors = self.module.loadout.attribute_factors
+        self.module.loadout.attribute_factors = _plain_attribute_factors
+
+    def tearDown(self):
+        self.module.loadout.attribute_factors = self._native_attribute_factors
+        for key in list(sys.modules):
+            if key == 'gui' or key.startswith('gui.'):
+                sys.modules.pop(key, None)
+        sys.modules.update(self._modules)
+
+    def _travel(self, pusher_mass, pusher_hp, wreck_mass, ticks=180):
+        module = self.module
+        runtime = module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter({
+                'throttle': 1.0, 'turn': 0.0, 'fire_allowed': False,
+                'movement_intent': True, 'combat_mode': 'route',
+                'recovery_mode': 'drive', 'target_yaw': 0.0,
+                'move_position': (0.0, 0.0, 60.0)}),
+            direction_probe=lambda *unused, **kwargs: {
+                'clear': True, 'collision': False,
+                'water': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=lambda team, slot: (
+                (0.0, 0.0, 0.0 if slot == 0 else 12.0), 0.0),
+            baked_graph=_flat_open_graph())
+        runtime.battle_start({
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'bots': [{'id': 1, 'team': 1, 'slot': 0, 'name': 'Push',
+                      'vehicle': 'fake'},
+                     {'id': 2, 'team': 1, 'slot': 1, 'name': 'Dead',
+                      'vehicle': 'fake'}]})
+        pusher, wreck = runtime.states[1], runtime.states[2]
+        pusher.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0, alive=True,
+                      grounded_once=True, push_x=0.0, push_z=0.0)
+        wreck.update(x=0.0, y=0.0, z=8.0, yaw=0.0, speed=0.0, alive=False,
+                     health=0, grounded_once=True, push_x=0.0, push_z=0.0)
+
+        def pin():
+            runtime._physics_params[1]['mass'] = float(pusher_mass)
+            runtime._physics_params[1]['powerW'] = (
+                float(pusher_hp) * 735.49875)
+            runtime._physics_params[2]['mass'] = float(wreck_mass)
+            pusher['mass'] = float(pusher_mass)
+            wreck['mass'] = float(wreck_mass)
+            wreck['alive'] = False
+            wreck['health'] = 0
+            wreck['speed'] = 0.0
+
+        pin()
+        start = wreck['z']
+        for tick in range(ticks):
+            runtime.update(1.0 / 30.0, tick / 30.0)
+            pin()
+        return wreck['z'] - start
+
+    def test_a_heavy_hull_shoves_a_light_wreck_down_the_road(self):
+        self.assertGreater(self._travel(68000.0, 1050.0, 32000.0), 10.0)
+
+    def test_a_heavy_hull_still_shoves_an_equally_heavy_wreck(self):
+        self.assertGreater(self._travel(68000.0, 1050.0, 68000.0), 5.0)
+
+    def test_a_medium_cannot_walk_a_heavy_wreck_along(self):
+        # Only the first contact's separation, then the tracks hold.
+        self.assertLess(self._travel(32000.0, 500.0, 68000.0), 1.0)
+
+    def test_a_light_cannot_walk_a_heavy_wreck_along(self):
+        self.assertLess(self._travel(21000.0, 430.0, 68000.0), 1.0)
+
+
+class HumanShovedWreckTests(unittest.TestCase):
+    """The player's own hull must be able to move a wreck too."""
+
+    def setUp(self):
+        self._modules = dict((key, value) for key, value in sys.modules.items()
+                             if key == 'gui' or key.startswith('gui.'))
+        self.module = _load()
+        self._native_attribute_factors = self.module.loadout.attribute_factors
+        self.module.loadout.attribute_factors = _plain_attribute_factors
+
+    def tearDown(self):
+        self.module.loadout.attribute_factors = self._native_attribute_factors
+        for key in list(sys.modules):
+            if key == 'gui' or key.startswith('gui.'):
+                sys.modules.pop(key, None)
+        sys.modules.update(self._modules)
+
+    def _runtime(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor(),
+            adapter_factory=lambda *unused, **kwargs: _FixedAdapter(
+                {'throttle': 0.0, 'turn': 0.0, 'fire_allowed': False}),
+            direction_probe=lambda *unused, **kwargs: {
+                'clear': True, 'collision': False,
+                'water': False, 'slope': 0.0},
+            ground_probe=lambda *unused: 0.0,
+            physics_ground_probe=lambda *unused: 0.0,
+            spawn_resolver=_spawn_resolver, baked_graph=_graph())
+        runtime.battle_start({
+            'round_id': 5, 'map': '01_karelia', 'bot_authority_id': 1,
+            'bots': [{'id': 11, 'team': 2, 'slot': 0, 'name': 'Dead'}]})
+        return runtime
+
+    def _player(self, speed):
+        return {'id': 1, 'team': 1, 'vehicle': 'fake', 'alive': True,
+                'x': 0.0, 'y': 0.0, 'z': -5.0, 'yaw': 0.0, 'speed': speed,
+                'effective_params': _effective_params_snapshot(mass=68000.0)}
+
+    def test_a_player_driving_into_a_wreck_transfers_real_momentum(self):
+        runtime = self._runtime()
+        wreck = runtime.states[11]
+        wreck.update(x=0.0, y=0.0, z=0.0, yaw=0.0, speed=0.0, alive=False,
+                     health=0, mass=25000.0, grounded_once=True,
+                     push_x=0.0, push_z=0.0)
+
+        runtime._resolve_tank_contacts(
+            [self._player(9.0)], 100.0, 1.0 / 30.0)
+
+        # A shove the tracks cannot hold becomes real velocity, not just the
+        # separation the solver would have applied to any mass at all.
+        self.assertGreater(wreck['push_z'], 0.0)
+        self.assertGreater(wreck['z'], 0.0)
+
+    def test_a_creeping_player_cannot_break_the_tracks_loose(self):
+        runtime = self._runtime()
+        wreck = runtime.states[11]
+        wreck.update(x=0.0, y=0.0, z=-1.4, yaw=0.0, speed=0.0, alive=False,
+                     health=0, mass=68000.0, grounded_once=True,
+                     push_x=0.0, push_z=0.0)
+        before = wreck['z']
+
+        runtime._resolve_tank_contacts(
+            [self._player(0.05)], 100.0, 1.0 / 30.0)
+
+        self.assertEqual(0.0, wreck['push_z'])
+        self.assertEqual(before, wreck['z'])
 
 
 class BotOwnStationaryVisionTests(unittest.TestCase):

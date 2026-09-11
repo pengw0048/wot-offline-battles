@@ -43,9 +43,11 @@ SLOPE_GRIP_LNG_FULL_Y = math.cos(math.radians(27.5))
 SLOPE_GRIP_LNG_FULL = 1.0
 SLOPE_GRIP_LNG_MIN_Y = math.cos(math.radians(32.0))
 SLOPE_GRIP_LNG_MIN = 0.1
-# The contrib suspension trial applies a separate side-slip projection. These
-# two points came from the contributed implementation; this repository has not
-# proved that they reproduce the #1513 native curve.
+# Side grip. Exact #1513 ``g_defaultTankXPhysicsCfg['chassis']`` stores
+# ``slopeGripSdwTerrain = (0.9099612708765432, 1.0, 0.8746197071393957, 0.1)``,
+# which is (cos 24.5 deg, 1.0, cos 29 deg, 0.1): the same clamped two-point
+# form as the longitudinal curve above. The contrib suspension trial guessed
+# these two angles; this build's own configuration confirms them.
 SLOPE_GRIP_SDW_FULL_Y = math.cos(math.radians(24.5))
 SLOPE_GRIP_SDW_FULL = 1.0
 SLOPE_GRIP_SDW_MIN_Y = math.cos(math.radians(29.0))
@@ -1868,6 +1870,78 @@ def brake_force(p, active, terrainIdx=0, slope_pitch=0.0):
 		return p['mass'] * brake
 	return (rolling_resist_force(p, terrainIdx, False) +
 		p['mass'] * COAST_BRAKE_SHARE * brake)
+
+
+def contact_push_decel(p, rolling, terrainIdx=0, normal_y=1.0):
+	'''Return the (longitudinal, lateral) m/s^2 the tracks oppose an EXTERNAL
+	push with. This is the ground reaction to another hull shoving this one, so
+	it is deliberately anisotropic: a track rolls along the hull and scrubs
+	across it.
+
+	rolling=True means this hull's own drivetrain is already turning (it has
+	throttle or road speed), so a shove along the hull only fights
+	rolling_resist_force. rolling=False is the parked/wrecked hull whose tracks
+	are held; it resists with the same static perch limit longitudinal_step uses
+	for a parked hull on a slope. Sideways there is no rolling case at all - the
+	tracks always scrub - so the lateral axis keeps the fall-line hold
+	slope_slide_speed already applies, scaled by the #1513 side-grip curve.
+
+	No constant here is new: the whole point is that being pushed uses the same
+	track laws as driving, braking and sliding.'''
+	ny = normal_y if normal_y > 0.1 else 0.1
+	roll = rolling_resist_force(p, terrainIdx, False) / (
+		p['mass'] if p['mass'] > 1.0 else 1.0)
+	hold = SLIDE_HOLD_TAN * GRAVITY * ny
+	longitudinal = roll if rolling else (hold if hold > roll else roll)
+	lateral = SLIDE_HOLD_TAN * lateral_slope_grip(normal_y) * GRAVITY * ny
+	if lateral < roll:
+		lateral = roll
+	return longitudinal, lateral
+
+
+def _bleed(value, budget):
+	'''Coulomb bleed: remove up to budget, never crossing zero.'''
+	if budget <= 0.0:
+		return value
+	if value > budget:
+		return value - budget
+	if value < -budget:
+		return value + budget
+	return 0.0
+
+
+def contact_push_step(p, push_x, push_z, yaw, dt, rolling=False,
+                      terrainIdx=0, normal_y=1.0):
+	'''Advance one hull's external contact-push velocity by dt.
+
+	The push is a world-frame velocity a contact impulse gave this hull. Resolve
+	it into the hull frame, spend the matching track budget on each axis, and
+	rotate back. Dry friction removes a fixed amount of speed per second and
+	stops the hull dead, which is why a shove no longer creeps forever the way
+	an exponential decay did.'''
+	dt = float(dt)
+	if dt <= 0.0:
+		return float(push_x), float(push_z)
+	longitudinal, lateral = contact_push_decel(
+		p, rolling, terrainIdx, normal_y)
+	sine = math.sin(yaw)
+	cosine = math.cos(yaw)
+	forward = push_x * sine + push_z * cosine
+	right = push_x * cosine - push_z * sine
+	forward = _bleed(forward, longitudinal * dt)
+	right = _bleed(right, lateral * dt)
+	return (forward * sine + right * cosine,
+		forward * cosine - right * sine)
+
+
+def contact_push_is_held(p, push_x, push_z, yaw, dt, rolling=False,
+                         terrainIdx=0, normal_y=1.0):
+	'''Return whether the tracks absorb this whole push within one slice.
+
+	The static Coulomb test, expressed through the same budget contact_push_step
+	spends, so the predicate and the integration can never disagree.'''
+	return contact_push_step(
+		p, push_x, push_z, yaw, dt, rolling, terrainIdx, normal_y) == (0.0, 0.0)
 
 
 def _grip_decel(p, slope_pitch):

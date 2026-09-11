@@ -40,6 +40,12 @@ TIMED_DELAY_GROW_STALL_US = 100000.0
 TIMED_WARMUP_INTERVALS = 3
 TIMED_WARMUP_HEADROOM_RATIO = 1.0 / 3.0
 TIMED_WARMUP_MAX_HEADROOM_US = 20000.0
+# A destroyed hull is still a body another tank can shove. It has no drive,
+# no jitter buffer and no timed sample history, so it simply chases the
+# authority pose and then stops emitting entirely: 29 settled wrecks must cost
+# nothing per rendered frame.
+WRECK_SETTLE_DISTANCE = 0.002
+WRECK_SETTLE_ANGLE = 0.001
 SNAP_DISTANCE = 25.0
 MAX_VELOCITY = 80.0
 MAX_MOTION_TIME_US = 10000000000000000
@@ -390,11 +396,21 @@ class SnapshotSync(object):
         if not alive:
             if not record['dead']:
                 record['dead'] = True
+                record['wreck_settled'] = True
                 if pose is not None:
                     record['current'] = dict(pose)
+                    record['target'] = dict(pose)
                 self._emit({'type': 'destroy', 'entity': key, 'kind': kind,
                             'id': state['id'], 'reason': 'dead',
                             'keep_corpse': True, 'state': _copy_state(state)}, output)
+                return
+            # A wreck keeps receiving poses: the authority shoves it when a
+            # live hull leans on it. Feed the frame chase directly; the live
+            # timed buffer belongs to entities that drive themselves.
+            if pose is not None and record['current'] is not None:
+                record['target'] = dict(pose)
+                record['target_time'] = now
+                record['timed_prediction'] = False
             return
         if record['dead']:
             return
@@ -596,6 +612,53 @@ class SnapshotSync(object):
                                 'revision': revision}, output)
         return output
 
+    def _advance_wreck(self, record, key, alpha, output):
+        """Chase one shoved wreck's authority pose, then go quiet.
+
+        ``wreck_settled`` is derived, never remembered from the producer: a
+        wreck that is not being pushed converges once, emits one final exact
+        pose, and then costs nothing until something moves it again.
+        """
+        target = record['target']
+        current = record['current']
+        if record.get('wreck_settled') and current == target:
+            return False
+        delta_x = target['x'] - current['x']
+        delta_y = target['y'] - current['y']
+        delta_z = target['z'] - current['z']
+        angle_error = max(
+            [abs(_angle_delta(current[axis], target[axis]))
+             for axis in ('yaw', 'aim_yaw')] +
+            [abs(target[axis] - current[axis])
+             for axis in ('pitch', 'roll', 'gun_pitch')])
+        if (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z <=
+                WRECK_SETTLE_DISTANCE * WRECK_SETTLE_DISTANCE and
+                angle_error <= WRECK_SETTLE_ANGLE):
+            record['current'] = dict(target)
+            record['wreck_settled'] = True
+            snapped = True
+            presented = target
+        else:
+            current = dict(current)
+            for axis in ('x', 'y', 'z'):
+                current[axis] += (target[axis] - current[axis]) * alpha
+            for axis in ('yaw', 'aim_yaw'):
+                current[axis] += _angle_delta(
+                    current[axis], target[axis]) * alpha
+            for axis in ('pitch', 'roll'):
+                current[axis] += (target[axis] - current[axis]) * alpha
+            current['gun_pitch'] += (
+                target['gun_pitch'] - current['gun_pitch']) * alpha
+            record['current'] = current
+            record['wreck_settled'] = False
+            snapped = False
+            presented = current
+        self._emit({'type': 'update', 'entity': key, 'kind': record['kind'],
+                    'id': record['id'], 'pose': dict(presented),
+                    'remote': True, 'presentation_time_us': None,
+                    'interpolated': True, 'snap': snapped}, output)
+        return True
+
     def advance(self, now=None):
         """Return interpolated/predicted remote poses for one render frame."""
         now = self._now() if now is None else float(now)
@@ -606,7 +669,10 @@ class SnapshotSync(object):
         alpha = 1.0 - math.exp(-20.0 * delta)
         output = []
         for key, record in self._entities.items():
-            if record['dead'] or record['target'] is None or record['current'] is None:
+            if record['target'] is None or record['current'] is None:
+                continue
+            if record['dead']:
+                self._advance_wreck(record, key, alpha, output)
                 continue
             target = record['target']
             elapsed = max(0.0, now - record['target_time'])

@@ -1223,5 +1223,156 @@ class VehiclePhysicsAirborneTests(unittest.TestCase):
             0.0, vehicle_physics.launch_vertical_speed(12.0, pitch))
 
 
+def _params(mass, horsepower):
+    """One vehicle's physics with everything but mass and power at default."""
+    params = vehicle_physics.derive_params({})
+    params['mass'] = float(mass)
+    params['powerW'] = float(horsepower) * 735.49875
+    params['speedFwd'] = 55.0 / 3.6
+    params['speedBwd'] = 15.0 / 3.6
+    return params
+
+
+class ContactPushLawTests(unittest.TestCase):
+    """The ground reaction that decides how far an outside shove carries."""
+
+    def test_a_rolling_hull_resists_a_shove_along_it_with_rolling_drag_only(self):
+        params = _params(30000.0, 500.0)
+
+        rolling = vehicle_physics.contact_push_decel(params, True)
+        parked = vehicle_physics.contact_push_decel(params, False)
+
+        expected = (vehicle_physics.rolling_resist_force(params, 0, False) /
+                    params['mass'])
+        self.assertAlmostEqual(expected, rolling[0])
+        self.assertGreater(parked[0], rolling[0] * 4.0)
+
+    def test_a_parked_hull_resists_with_the_static_perch_hold(self):
+        params = _params(30000.0, 500.0)
+
+        longitudinal, unused_lateral = vehicle_physics.contact_push_decel(
+            params, False)
+
+        self.assertAlmostEqual(
+            vehicle_physics.SLIDE_HOLD_TAN * vehicle_physics.GRAVITY,
+            longitudinal)
+
+    def test_tracks_always_scrub_sideways_even_while_the_hull_rolls(self):
+        params = _params(30000.0, 500.0)
+
+        rolling = vehicle_physics.contact_push_decel(params, True)
+        parked = vehicle_physics.contact_push_decel(params, False)
+
+        self.assertAlmostEqual(rolling[1], parked[1])
+        self.assertGreater(rolling[1], rolling[0] * 4.0)
+
+    def test_side_grip_releases_the_lateral_hold_on_a_steep_bank(self):
+        params = _params(30000.0, 500.0)
+
+        flat = vehicle_physics.contact_push_decel(params, False, 0, 1.0)
+        bank = vehicle_physics.contact_push_decel(
+            params, False, 0, math.cos(math.radians(29.0)))
+
+        self.assertLess(bank[1], flat[1] * 0.2)
+
+    def test_a_shove_stops_dead_instead_of_creeping(self):
+        params = _params(30000.0, 500.0)
+        push_x, push_z = 0.0, 0.4
+
+        for unused_step in range(200):
+            push_x, push_z = vehicle_physics.contact_push_step(
+                params, push_x, push_z, 0.0, 1.0 / 60.0)
+
+        self.assertEqual(0.0, push_x)
+        self.assertEqual(0.0, push_z)
+
+    def test_a_shove_bleeds_in_the_hull_frame_not_the_world_frame(self):
+        """A hull facing east resists an east-west shove along its tracks."""
+        params = _params(30000.0, 500.0)
+        yaw = math.pi / 2.0
+
+        along, unused = vehicle_physics.contact_push_step(
+            params, 2.0, 0.0, yaw, 0.1, rolling=True)
+        unused_x, across = vehicle_physics.contact_push_step(
+            params, 0.0, 2.0, yaw, 0.1, rolling=True)
+
+        # 2 m/s along the tracks keeps almost all of itself; the same speed
+        # across them loses six times as much in the same tenth of a second.
+        self.assertGreater(along, 1.9)
+        self.assertLess(across, 1.45)
+
+    def test_a_push_never_reverses_through_zero(self):
+        params = _params(30000.0, 500.0)
+
+        push_x, push_z = vehicle_physics.contact_push_step(
+            params, 0.0, 0.05, 0.0, 1.0)
+
+        self.assertEqual(0.0, push_x)
+        self.assertEqual(0.0, push_z)
+
+
+class PushedPairTests(unittest.TestCase):
+    """End-to-end: who moves whom, from engine power and track laws alone."""
+
+    @staticmethod
+    def _drive_into(pusher, target, target_rolling, seconds=6.0,
+                    step=1.0 / 30.0):
+        """Return the target's travel after one hull drives into it.
+
+        Both hulls are axis-aligned and nose to tail, so this is the pure
+        one-dimensional version of what ``resolve_tank`` plus the contact
+        push law do per tick: cancel the closing speed at the contact, then
+        let each hull spend its own track budget.
+        """
+        speed = 0.0
+        push = 0.0
+        travel = 0.0
+        elapsed = 0.0
+        while elapsed < seconds:
+            speed = vehicle_physics.longitudinal_step(
+                pusher, speed, 1.0, False, 0.0, step)
+            if speed > push:
+                shared = ((pusher['mass'] * speed + target['mass'] * push) /
+                          (pusher['mass'] + target['mass']))
+                speed, push = shared, shared
+            unused_x, push = vehicle_physics.contact_push_step(
+                target, 0.0, push, 0.0, step, rolling=target_rolling)
+            travel += push * step
+            elapsed += step
+        return travel
+
+    def test_a_heavy_hull_shoves_a_parked_medium(self):
+        travel = self._drive_into(
+            _params(68000.0, 1050.0), _params(32000.0, 500.0), False)
+
+        self.assertGreater(travel, 5.0)
+
+    def test_a_medium_cannot_shove_a_parked_heavy(self):
+        travel = self._drive_into(
+            _params(32000.0, 500.0), _params(68000.0, 1050.0), False)
+
+        self.assertLess(travel, 0.25)
+
+    def test_a_light_cannot_shove_a_parked_heavy(self):
+        travel = self._drive_into(
+            _params(21000.0, 430.0), _params(68000.0, 1050.0), False)
+
+        self.assertLess(travel, 0.25)
+
+    def test_the_same_medium_shoves_its_own_twin(self):
+        travel = self._drive_into(
+            _params(32000.0, 500.0), _params(32000.0, 500.0), False)
+
+        self.assertGreater(travel, 2.0)
+
+    def test_a_rolling_target_gives_way_much_further_than_a_parked_one(self):
+        pusher = _params(32000.0, 500.0)
+
+        parked = self._drive_into(pusher, _params(32000.0, 500.0), False)
+        rolling = self._drive_into(pusher, _params(32000.0, 500.0), True)
+
+        self.assertGreater(rolling, parked * 1.5)
+
+
 if __name__ == '__main__':
     unittest.main()

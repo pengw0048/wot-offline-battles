@@ -7278,6 +7278,10 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'spot_visible': False}
             bodies.append({
                 'id': 1000000 + engine_id, 'team': team, 'alive': alive,
+                # A Bot wreck is shoved by the authority worker and keeps a
+                # real inverse mass; a dead human hull nobody integrates
+                # stays world geometry.
+                'immovable': not alive and kind != 'bot',
                 'x': state['x'], 'y': state['y'], 'z': state['z'],
                 'yaw': state['yaw'], 'mass': mass, 'shape': shape,
                 'vx': math.sin(state['yaw']) * state['speed'],
@@ -7315,7 +7319,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': {'x': 0.0, 'y': 0.0, 'z': 6.5, 'yaw': 0.0,
                       'speed': 0.0, 'alive': True,
                       'effective_params': _effective_params_snapshot()}}}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 5.0
         battle._motion_is_clear = mock.Mock(return_value=True)
         battle._baked_pose_safe = mock.Mock(return_value=True)
@@ -7339,7 +7343,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle.client = _Client()
         battle._avatar = runtime.bigworld.avatar
         battle._arena_bounds = (-300.0, -300.0, 300.0, 300.0)
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_pitch = 0.23
         battle._local_roll = -0.17
         battle._contact_tanks = mock.Mock(return_value=[])
@@ -7406,7 +7410,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
                           'yaw': math.pi, 'alive': True}],
             }))
         battle._last_snapshot = {'bot_state_revision': 38}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 10.0
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._local_position = (0.0, 0.0, 0.0)
@@ -7487,7 +7491,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
                           'yaw': math.pi, 'alive': True}],
             }))
         battle._last_snapshot = {'bot_state_revision': 38}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 10.0
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._local_position = (99.0, 0.0, 99.0)
@@ -8428,7 +8432,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': state,
         }}
         battle._bots = types.SimpleNamespace(states={11: state})
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 0.0
         battle._local_push_x = 0.0
         battle._local_push_z = 0.0
@@ -8468,14 +8472,21 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 battle._local_push_x, battle._local_push_z))
         self.assertEqual(dead_results[0], dead_results[1])
 
-    def test_local_push_decay_is_equal_across_render_rates(self):
+    def test_local_push_bleeds_at_the_track_budget_at_every_render_rate(self):
+        """An outside shove is spent against this hull's own track laws.
+
+        The old 0.90-per-60-Hz exponential took about 6.3 m/s2 at 1 m/s in
+        every direction and never quite reached zero. Dry friction removes a
+        fixed budget per second on each hull axis and stops the hull dead, and
+        it stays identical at 20, 30 and 60 FPS.
+        """
         def run_for_one_second(frame_rate):
             runtime = _runtime()
             battle = BattleRuntime(runtime)
             battle._local_effective_params = _effective_params_snapshot()
             battle._avatar = runtime.bigworld.avatar
             battle._records = {}
-            battle._local_physics = {'mass': 25000.0}
+            battle._local_physics = _effective_params_snapshot()['physics']
             battle._local_speed = 0.0
             battle._local_push_x = 10.0
             battle._local_push_z = -4.0
@@ -8495,13 +8506,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         results = dict((frame_rate, run_for_one_second(frame_rate))
                        for frame_rate in (20, 30, 60))
-        expected = 10.0 * 0.90 ** 60
+        # yaw 0 puts the hull's forward axis on +z and its right axis on +x,
+        # and a stopped hull with no throttle is held on both.
+        longitudinal, lateral = vehicle_physics.contact_push_decel(
+            _effective_params_snapshot()['physics'], False)
 
-        self.assertAlmostEqual(9.0, results[60][0], places=12)
+        self.assertAlmostEqual(
+            10.0 - lateral / 60.0, results[60][0], places=12)
         for unused_frame_rate, (unused_first, final_push) in results.items():
-            self.assertAlmostEqual(expected, final_push, places=12)
+            # 4 m/s along the tracks is fully absorbed inside the second;
+            # 10 m/s across them keeps exactly what the budget could not take.
+            self.assertAlmostEqual(10.0 - lateral, final_push, places=12)
         self.assertAlmostEqual(results[20][1], results[30][1], places=12)
         self.assertAlmostEqual(results[30][1], results[60][1], places=12)
+        self.assertGreater(longitudinal, 4.0)
 
     def test_local_tank_contact_cannot_push_hull_through_world_geometry(self):
         runtime = _runtime()
@@ -8519,7 +8537,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'state': {'x': 0.0, 'y': 0.0, 'z': 6.5, 'yaw': 0.0,
                       'speed': 0.0, 'alive': True,
                       'effective_params': _effective_params_snapshot()}}}
-        battle._local_physics = {'mass': 25000.0}
+        battle._local_physics = _effective_params_snapshot()['physics']
         battle._local_speed = 5.0
         battle._motion_is_clear = mock.Mock(return_value=False)
         battle._baked_pose_safe = mock.Mock(return_value=True)
@@ -28075,6 +28093,57 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual((0, 0, 0), entity.health_change)
         battle._binding.arena_vehicle_killed.assert_called_once_with(
             11, 0, 0)
+
+    def test_shoved_wreck_snapshot_updates_retained_native_pose_and_collision(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace()
+        battle._binding = mock.Mock()
+        initial = {'id': 2, 'health': 500, 'alive': True,
+                   'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0}
+        record = {'engine_id': 11, 'state': dict(initial),
+                  'kind': 'bot', 'network_id': 2, 'local': False,
+                  'ready': True}
+        battle._records = {'bot:2': record}
+        entity = _Vehicle(11, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[11] = entity
+        sync = battle_runtime_module.SnapshotSync(
+            1, on_event=battle._apply_sync_event,
+            clock=lambda: runtime.bigworld.now)
+        sync.manifest({'round_id': 1, 'bots': [initial]})
+        sync.snapshot({'round_id': 1, 'server_tick': 1, 'bots': [initial]})
+        dead = dict(initial, health=0, alive=False)
+        sync.snapshot({'round_id': 1, 'server_tick': 2, 'bots': [dead]})
+        self.assertEqual(0, entity.health)
+        self.assertIs(record, battle._records['bot:2'])
+        self.assertFalse(record.get('tombstone'))
+        self.assertEqual([], sync.advance(runtime.bigworld.now))
+        battle._binding.reset_mock()
+
+        moved = dict(dead, x=0.0005, pitch=0.0002, roll=0.0003,
+                     aim_yaw=0.0004, gun_pitch=0.0005)
+        sync.snapshot({'round_id': 1, 'server_tick': 3, 'bots': [moved]})
+        runtime.bigworld.now += 0.05
+        events = sync.advance(runtime.bigworld.now)
+
+        self.assertEqual(['update'], [event['type'] for event in events])
+        args = battle._binding.set_vehicle_pose.call_args.args
+        self.assertEqual((0.0005, 0.0, 0.0), tuple(args[1]))
+        self.assertEqual(_engine_rotation(0.0, 0.0002, 0.0003), args[2])
+        battle._binding.update_vehicle_aim.assert_called_once_with(
+            11, 0.0, 0.0004, 0.0005)
+        collision_pose = record['projectile_collision_pose']
+        self.assertEqual((0.0005, 0.0, 0.0), tuple(
+            collision_pose[axis] for axis in ('x', 'y', 'z')))
+        self.assertEqual((0.0002, 0.0003),
+                         (collision_pose['pitch'], collision_pose['roll']))
+        self.assertIs(record, battle._records['bot:2'])
+        self.assertEqual(0, entity.health)
+        self.assertEqual([], sync.advance(runtime.bigworld.now + 0.05))
+        battle._binding.destroy_entity.assert_not_called()
 
     def test_pending_remote_presentation_destroy_cancels_late_load(self):
         runtime = _runtime()

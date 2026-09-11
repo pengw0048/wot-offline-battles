@@ -211,6 +211,12 @@ BOT_OVERTURN_WARNING_COSINE = vehicle_physics.OVERTURN_WARNING_COSINE
 BOT_OVERTURN_DANGER_COSINE = vehicle_physics.OVERTURN_DANGER_COSINE
 BOT_OVERTURN_DEATH_SECONDS = 30.0
 BOT_OVERTURN_DEATH_REASON = 7
+# A shoved wreck re-settles on the ground it slid onto. It has no engine, so
+# it may follow a drop of about one hull clearance and may not be lifted onto
+# anything it could not have rolled over. Outside that envelope the slide is
+# undone rather than left floating or sunk.
+WRECK_SUPPORT_DROP = 0.60
+WRECK_SUPPORT_RISE = 0.25
 
 # The ten-spring trial may follow a rise above the mature 0.6 m step gate only
 # when the last and current spring batches describe one continuous terrain
@@ -8072,10 +8078,124 @@ class BotRuntime(object):
                 push_z = 0.0
         state['x'] += move_x
         state['z'] += move_z
-        push_decay = (0.90 ** (max(0.0, float(step)) * 60.0)
-                      if advance_push else 1.0)
-        state['push_x'] = push_x * push_decay
-        state['push_z'] = push_z * push_decay
+        if not advance_push:
+            state['push_x'] = push_x
+            state['push_z'] = push_z
+            return
+        if state.get('alive', True):
+            # A live hull keeps the reviewed residual decay. Replacing it with
+            # the track budget below is the physically correct law, but a
+            # residual push is also today's only escape from a terrain wedge:
+            # with dry friction the Himmelsdorf and Airfield 24 FPS spawn
+            # guards each strand one Bot whose separation the world probe
+            # vetoes. That belongs to the wedge recovery, not to this change.
+            decay = 0.90 ** (max(0.0, float(step)) * 60.0)
+            state['push_x'] = push_x * decay
+            state['push_z'] = push_z * decay
+            return
+        state['push_x'], state['push_z'] = self._bleed_contact_push(
+            state, push_x, push_z, step)
+
+    def _bleed_contact_push(self, state, push_x, push_z, step):
+        """Spend one slice of this wreck's own track budget on its push.
+
+        A destroyed hull has no drivetrain, so both of its axes resist with
+        the held track laws: the parked perch limit along the hull and the
+        fall-line hold across it. Dry friction removes a fixed amount of
+        speed per second and stops the hull dead, which is what keeps a
+        shoved wreck from creeping for the rest of the round.
+        """
+        try:
+            params = self._physics_params_for(int(state['id']))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return push_x, push_z
+        if not params:
+            return push_x, push_z
+        return vehicle_physics.contact_push_step(
+            params, push_x, push_z, _number(state.get('yaw')), step,
+            rolling=False,
+            normal_y=(math.cos(_number(state.get('pitch'))) *
+                      math.cos(_number(state.get('roll')))))
+
+    def _wreck_tracks_absorb(self, state, result, step):
+        """Return whether this wreck's tracks hold against the whole impulse.
+
+        The applied impulse divided by the slice is the acceleration the
+        contact is asking of the hull. Comparing it against the same parked
+        perch hold that keeps a stopped tank on a slope is exactly the
+        Coulomb static test, so a light hull leaning on a heavy wreck moves
+        nothing while a heavy one breaks it loose.
+        """
+        try:
+            params = self._physics_params_for(int(state['id']))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        if not params:
+            return False
+        return vehicle_physics.contact_push_is_held(
+            params,
+            state.get('push_x', 0.0) + result['delta_velocity'][0],
+            state.get('push_z', 0.0) + result['delta_velocity'][1],
+            _number(state.get('yaw')), step, rolling=False,
+            normal_y=(math.cos(_number(state.get('pitch'))) *
+                      math.cos(_number(state.get('roll')))))
+
+    def _apply_wreck_contact_response(self, state, result, step):
+        """Shove one destroyed hull and keep it standing on the ground.
+
+        A wreck has no planner, no drive step and no suspension pass, so this
+        is its whole integrator. It reuses the live contact response for the
+        horizontal move - including the same world-collision veto, so a wreck
+        can never be shoved through a wall - and then re-settles the hull on
+        the terrain it slid onto. A move whose new column has no usable
+        support is undone rather than left hanging: the last pose a dead hull
+        was seen at is always a legal one.
+        """
+        if self._wreck_tracks_absorb(state, result, step):
+            # Static friction: the pusher could not break the tracks loose.
+            # Baumgarte separation is not a force and would otherwise walk
+            # any wreck along at the pusher's inverse-mass share whatever its
+            # mass, so the pusher owns the whole overlap this tick instead.
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            return False
+        before = _position(state)
+        self._apply_tank_contact_response(state, result, step)
+        if (abs(state['x'] - before[0]) <= 1.0e-6 and
+                abs(state['z'] - before[2]) <= 1.0e-6):
+            return False
+        try:
+            ground = self._ground_probe_at(
+                state['x'], state['z'], state['y'])
+        except (TypeError, ValueError, AttributeError, RuntimeError,
+                OverflowError):
+            # Without a ground authority the new column cannot be verified.
+            # Undo this hull's slide rather than leave a dead tank hanging.
+            ground = None
+        if ground is None:
+            state['x'], state['y'], state['z'] = before
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            return False
+        rise = float(ground) - _number(state.get('y'))
+        if not -WRECK_SUPPORT_DROP <= rise <= WRECK_SUPPORT_RISE:
+            # A cliff lip or a step the hull could not have climbed. Keep the
+            # wreck where it already rested instead of dropping or lifting it.
+            state['x'], state['y'], state['z'] = before
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            return False
+        candidate = (state['x'], float(ground), state['z'])
+        if not self._turret_pose_is_clear(
+                state, before, state['yaw'], candidate, state['yaw']):
+            # The horizontal probe used the old support height. Settling can
+            # enter a landed turret even when that first sweep was clear.
+            state['x'], state['y'], state['z'] = before
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            return False
+        state['y'] = float(ground)
+        return True
 
     def _resolve_human_ram_receipts(self, players, now, step=None,
                                     processed_pairs=None,
@@ -8455,6 +8575,11 @@ class BotRuntime(object):
                 # the exception: it owns the velocity response so the local
                 # player does not inherit the teammate's lateral momentum.
                 'impulse': False,
+                # A dead human hull has no integrator at all: the visible
+                # client stops its drive step on death and this worker never
+                # owned the player pose.  Keep it as world geometry instead of
+                # handing it a share of a correction nobody applies.
+                'immovable': not alive,
                 'x': raw.get('x', 0.0), 'y': raw.get('y', 0.0),
                 'z': raw.get('z', 0.0), 'yaw': yaw,
                 'mass': profile['mass'], 'shape': profile['shape'],
@@ -8507,8 +8632,10 @@ class BotRuntime(object):
             return tuple(reversed(canonical))
 
         for state in self._ordered_states():
-            if not state.get('alive', True):
-                continue
+            # A wreck resolves too.  It has no engine and never rams, but it
+            # is a hull on tracks and its inverse-mass share of a live hull's
+            # push has to actually move it.
+            state_alive = bool(state.get('alive', True))
             own = by_id.get(int(state['id']))
             if own is None:
                 continue
@@ -8538,29 +8665,62 @@ class BotRuntime(object):
                 # A separated tank still owns residual contact momentum and
                 # must advance/decay it through the same world collision gate.
                 if state.get('push_x', 0.0) or state.get('push_z', 0.0):
-                    self._apply_tank_contact_response(state, {
-                        'correction': (0.0, 0.0),
-                        'delta_velocity': (0.0, 0.0),
-                    }, step)
+                    idle = {'correction': (0.0, 0.0),
+                            'delta_velocity': (0.0, 0.0)}
+                    if state_alive:
+                        self._apply_tank_contact_response(state, idle, step)
+                    else:
+                        self._apply_wreck_contact_response(state, idle, step)
                 continue
-            resolve_kwargs = {
-                'now': now,
-                'ram_cooldowns': self._ram_cooldowns,
-                'active_ram_contacts': frozenset(
-                    set(previous_ram_contacts) | current_ram_contacts),
-            }
-            if self.ram_contact_probe is not None:
-                resolve_kwargs['contact_armor_probe'] = \
-                    contact_armor_probe
+            if not state_alive:
+                # ``impulse`` false says the visible client owns the player's
+                # half of the pair and the Bot's half arrives as a ram
+                # receipt.  No receipt is ever produced for a wreck, so this
+                # solver is the only owner of the wreck's half; leaving the
+                # flag alone let a player's shove reach the hull as bare
+                # separation with its track resistance never consulted.
+                others = [dict(other, impulse=True)
+                          if (other.get('kind') == 'player' and
+                              not other.get('impulse', True)) else other
+                          for other in others]
+            if not state_alive and not (
+                    state.get('push_x', 0.0) or state.get('push_z', 0.0) or
+                    any(other.get('alive', True) or other['vx'] or
+                        other['vz'] for other in others)):
+                # Nothing in reach can move this wreck and it carries no
+                # momentum of its own. Two settled wrecks left overlapping by
+                # their death poses must not re-solve each other every tick
+                # for the rest of the round.
+                continue
+            if state_alive:
+                resolve_kwargs = {
+                    'now': now,
+                    'ram_cooldowns': self._ram_cooldowns,
+                    'active_ram_contacts': frozenset(
+                        set(previous_ram_contacts) | current_ram_contacts),
+                }
+                if self.ram_contact_probe is not None:
+                    resolve_kwargs['contact_armor_probe'] = \
+                        contact_armor_probe
+            else:
+                # ``now`` None keeps every separation and impulse while
+                # disabling ram admission, so a shoved wreck can never open a
+                # damage episode or consume an armour probe.
+                resolve_kwargs = {'now': None}
             result = tank_collision.resolve_tank(
                 own, others, **resolve_kwargs)
-            self._ram_cooldowns = result['cooldowns']
-            current_ram_contacts.update(result['contacts'])
+            if state_alive:
+                self._ram_cooldowns = result['cooldowns']
+                current_ram_contacts.update(result['contacts'])
+            if not state_alive:
+                self._apply_wreck_contact_response(state, result, step)
+                continue
             if (any(abs(value) > 0.0001
                     for value in result['delta_velocity']) or
                     any(abs(value) > 0.0001
                         for value in result['correction'])):
                 # Another hull owns this tank's lack of progress this tick.
+                # A wreck has no driver and no stuck timer to protect.
                 contacted_bot_ids.add(int(state['id']))
             self._apply_tank_contact_response(state, result, step)
             reports.extend(self._ram_reports(

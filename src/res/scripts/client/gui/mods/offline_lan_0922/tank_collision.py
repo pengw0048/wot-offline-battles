@@ -533,7 +533,22 @@ def planar_closing_speed(velocity_a, velocity_b, normal):
 
 def pair_response(contact, inverse_a, inverse_b, velocity_a, velocity_b,
                   slop=POSITION_SLOP, percent=POSITION_PERCENT):
-    """Return inverse-mass corrections and e=0 impulses for both bodies."""
+    """Return inverse-mass corrections and e=0 impulses for both bodies.
+
+    Exact #1513 ``physics_shared.updateCommonConf`` publishes the retail
+    solver's hull-to-hull Coulomb coefficient as
+    ``wg_setupPhysicsParam('CONTACT_FRICTION_VEHICLES', 0.3)``, so a real
+    contact also carries a tangential impulse this pure normal response does
+    not.  Adding it strands one Bot in the Himmelsdorf and Airfield 24 FPS
+    spawn guards, whose local traffic solution currently depends on hulls
+    sliding across each other without along-face drag; that wedge has to be
+    understood before the term can land.  ``USE_PSEUDO_CONTACTS`` True and
+    ``CONTACT_PENETRATION`` 0.1 from the same function are the
+    positional-correction class implemented above. That Python function does
+    not configure ``RESTITUTION``; this does not establish the native default
+    or retail restitution. The normal term preserves this project's existing
+    e=0 response.
+    """
     zero = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     if contact is None:
         return zero
@@ -683,10 +698,12 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
                  active_ram_contacts=None, contact_armor_probe=None):
     """Resolve one hull against other hulls using only plain data.
 
-    A body with ``alive`` false is a wreck: it still blocks and separates, but
-    it never moves and never produces a ram event.  A body with ``impulse``
-    false separates without transferring velocity, which leaves one owner for
-    a contact that both sides resolve.
+    A body with ``alive`` false is a wreck: it blocks, separates and can be
+    shoved by its inverse-mass share, but it never produces a ram event and
+    never takes ram damage.  A body with ``immovable`` true keeps the old
+    infinite-mass behaviour for a hull no process integrates.  A body with
+    ``impulse`` false separates without transferring velocity, which leaves
+    one owner for a contact that both sides resolve.
 
     The return value is a mapping with:
 
@@ -743,6 +760,12 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
         if other is None or other_id == self_id:
             continue
         other_is_wreck = not _tank_value(other, 'alive', True)
+        # A wreck has no engine, but it is still a hull resting on tracks and
+        # a heavy enough neighbour shoves it.  ``immovable`` is for a body no
+        # process integrates - the local player's own wreck - which has to
+        # keep behaving as world geometry rather than absorb a share of the
+        # correction nobody will ever apply.
+        other_is_immovable = bool(_tank_value(other, 'immovable', False))
         other_x = float(_tank_value(other, 'x', 0.0) or 0.0)
         other_y = _tank_value(other, 'y')
         other_z = float(_tank_value(other, 'z', 0.0) or 0.0)
@@ -761,7 +784,7 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
 
         mass_other = max(
             float(_tank_value(other, 'mass', 1.0) or 1.0), 1.0)
-        inverse_other = 0.0 if other_is_wreck else 1.0 / mass_other
+        inverse_other = 0.0 if other_is_immovable else 1.0 / mass_other
         other_yaw = float(_tank_value(other, 'yaw', 0.0) or 0.0)
         contact = obb_contact(
             x, z, yaw, own_shape,
@@ -773,9 +796,12 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
         pair = (min(self_id, other_id), max(self_id, other_id))
         overlap_pairs.add(pair)
 
-        if other_is_wreck:
+        if other_is_immovable:
             other_velocity_x = other_velocity_y = other_velocity_z = 0.0
         else:
+            # A pushed wreck carries a real contact velocity.  Reading it as
+            # zero made the solver see a closing pair that was already moving
+            # together and re-cancel the same momentum every frame.
             other_velocity_x = float(_tank_value(other, 'vx', 0.0) or 0.0)
             other_velocity_y = float(_tank_value(other, 'vy', 0.0) or 0.0)
             other_velocity_z = float(_tank_value(other, 'vz', 0.0) or 0.0)
