@@ -17,37 +17,36 @@ switches to ``turret_touchdown_*`` / ``flamingOnGround`` when
 ``onStaticCollision`` reports the landing, and ``VehicleStickers`` reattaches
 the vehicle's own marks and damage decals.
 
-The vehicle's detachment flag removes the turret and gun from the source
-wreck's collision on every peer, including the hidden worker.  The flying
-entity remains presentation only: clients can omit it for an unseen vehicle,
-a full model budget, or a failed asynchronous model load.  A worker obstacle
-would therefore block shots at a turret that some clients never draw.
+The vehicle's detachment flag removes the source turret/gun collision on
+every peer. A server-accepted frozen flight separately owns the landed
+obstacle: the same rest pose supplies exact shell hit tests, static vehicle
+contact boxes and late visible admission. Presentation never reruns a local
+arc for an accepted record.
 
-Two deliberate differences from retail remain:
-
-* the flying and landed turret is not shootable and does not block a shot.
-  It keeps its stock ``ProjectileAwareEntities`` membership so
-  ``onLeaveWorld`` stays intact, and is excluded from dynamic collision
-  through the port's existing ``_offlineNativeRemote`` draw gate.
-* ``isCollidingWithWorld`` stays false for its whole life.  It is the only
-  gate that makes ``__checkIsBeingPulled`` read native ``Entity.velocity``
-  off the unfed ``WGTurretFilter``, and the property drives nothing but the
-  drag/pull effect this version does not produce.  Retail's turret is also a
-  cell-physics body that a tank can push and be crushed by; this port does
-  not reproduce that body.
+The client-created entity remains outside stock dynamic collision, because
+the canonical obstacle is the room's collision owner. Its stock
+``ProjectileAwareEntities`` membership remains intact for cleanup. Native
+``isCollidingWithWorld`` stays false: the unfed WGTurretFilter cannot supply
+the drag-effect velocity. Landed obstacles do not push, roll, or crush tanks;
+movement is resolved as contact with a fixed accepted volume.
 """
 
+import copy
 import sys
 
 from gui.mods.offline_lan_0922 import shot_geometry
 from gui.mods.offline_lan_0922 import turret_detachment
+from gui.mods.offline_lan_0922.entities.turret_obstacles import (
+    DetachedTurretObstacles, rest_on_component_bounds, turret_components)
 
 
 # One detached turret owns a turret plus gun compound for the rest of the
 # round.  The client is 32-bit and has run out of address space on a single
 # large texture reservation before, so bound how many can be resident at
-# once; beyond the cap the wreck still detaches, but its flying turret is omitted.
+# once. The server applies the same accepted-record cap to the whole room.
 MAX_ACTIVE_TURRETS = 12
+CANONICAL_CREATE_RETRY_SECONDS = 1.0
+CANONICAL_MODEL_TIMEOUT_SECONDS = 30.0
 
 _ENTITY_TYPE = 'DetachedTurret'
 
@@ -71,10 +70,16 @@ class DetachedTurretPresentation(object):
         self._max_active = int(max_active)
         self._turrets = []
         self._retiring = []
+        self._canonical_attempts = {}
         self._closed = False
 
     def active(self):
         return len(self._turrets)
+
+    def has_vehicle(self, engine_id):
+        """Whether a source still owns any pending, resident or retiring id."""
+        return any(turret['vehicle_id'] == int(engine_id)
+                   for turret in self._turrets + self._retiring)
 
     def prepare(self, entity, pose):
         """Freeze the launch pose and geometry before the death callbacks.
@@ -117,6 +122,69 @@ class DetachedTurretPresentation(object):
         models = getattr(component, 'models', None)
         return getattr(models, 'exploded', None)
 
+    def prepare_canonical(self, entity, row):
+        """Prepare a visible source for a previously accepted frozen flight.
+
+        Exact SynchronousDetachment still searches for a started source
+        Vehicle. The runtime can retry this preparation when that source
+        becomes ready or visible; absence here never consumes a load attempt.
+        The accepted flight is not recomputed from this client's pose.
+        """
+        if self._closed or not getattr(entity, 'isStarted', False):
+            return None
+        descriptor = getattr(entity, 'typeDescriptor', None)
+        if (self._exploded_model(getattr(descriptor, 'turret', None)) is None or
+                self._exploded_model(getattr(descriptor, 'gun', None)) is None):
+            return None
+        try:
+            return {
+                'entity_id': int(entity.id),
+                'descriptor': descriptor,
+                'compact_descr': descriptor.makeCompactDescr(),
+                'space_id': int(self._avatar.spaceID),
+                'attitude': tuple(row['attitude']),
+                'launch': tuple(row['flight']['origin']),
+            }
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            self._note('canonical turret descriptor unavailable', error)
+            return None
+
+    def launch_canonical(self, plan, row, now, elapsed):
+        """Materialize one accepted flight, including late AOI admission.
+
+        ``elapsed`` is the age of the server-stamped record in seconds. A
+        late admission therefore starts at the current flight/rest pose and
+        performs no local raycast. Failed creation/load attempts are spaced
+        apart and never overlap an unretired id for the same actor. An
+        accepted obstacle remains eligible after a safely retired failure.
+        """
+        if self._closed or plan is None:
+            return False
+        key = (str(row['actor_kind']), int(row['actor_id']))
+        attempt = self._canonical_attempts.get(key)
+        if attempt is None:
+            if len(self._canonical_attempts) >= self._max_active:
+                return False
+            attempt = {'row': copy.deepcopy(row),
+                       'next_retry': float(now)}
+            self._canonical_attempts[key] = attempt
+        elif attempt['row'] != row:
+            # One accepted actor owns one immutable throw for this round.
+            return False
+        for turret in self._turrets:
+            if turret.get('canonical_key') == key:
+                return True
+        self._retire_entities()
+        if (self.has_vehicle(plan['entity_id']) or
+                any(turret.get('canonical_key') == key
+                    for turret in self._retiring) or
+                float(now) < attempt['next_retry']):
+            return False
+        attempt['next_retry'] = float(now) + CANONICAL_CREATE_RETRY_SECONDS
+        return self._launch_frozen(
+            plan, row['flight'], row['spin'], float(now) - max(0.0, float(elapsed)),
+            float(now), canonical_key=key)
+
     def launch(self, plan, seed, now):
         """Create the stock entity and start driving its compound.
 
@@ -139,13 +207,19 @@ class DetachedTurretPresentation(object):
         flight = turret_detachment.resolve_flight(
             plan['launch'], impulse['velocity'], self._collide,
             clearance=plan['clearance'])
+        return self._launch_frozen(plan, flight, impulse['spin'], now, now)
+
+    def _launch_frozen(self, plan, flight, spin, started, now,
+                       canonical_key=None):
+        vehicle_id = int(plan['entity_id'])
+        position, attitude = turret_detachment.pose_at(
+            flight, plan['attitude'], spin, max(0.0, float(now) - float(started)))
         entity_id = None
         try:
             entity_id = self._bigworld.createEntity(
                 _ENTITY_TYPE, plan['space_id'], 0,
-                self._vector(plan['launch']),
-                (plan['attitude'][2], plan['attitude'][1],
-                 plan['attitude'][0]),
+                self._vector(position),
+                (attitude[2], attitude[1], attitude[0]),
                 {'vehicleID': vehicle_id,
                  'vehicleCompDescr': plan['compact_descr'],
                  'isUnderWater': False,
@@ -155,10 +229,12 @@ class DetachedTurretPresentation(object):
             turret = {
                 'id': int(entity_id),
                 'vehicle_id': vehicle_id,
-                'flight': flight,
-                'attitude': plan['attitude'],
-                'spin': impulse['spin'],
-                'started': float(now),
+                'flight': copy.deepcopy(flight),
+                'attitude': tuple(plan['attitude']),
+                'spin': tuple(spin),
+                'started': float(started),
+                'created': float(now),
+                'canonical_key': canonical_key,
                 'matrix': None,
                 'entity': None,
                 'impacted': False,
@@ -172,7 +248,9 @@ class DetachedTurretPresentation(object):
             # An allocated id may still be loading prerequisites.  Retain it
             # for safe retirement instead of destroying a not-yet-owned id.
             if entity_id is not None:
-                self._retiring.append({'id': int(entity_id), 'entity': None})
+                self._retiring.append({'id': int(entity_id), 'entity': None,
+                                       'vehicle_id': vehicle_id,
+                                       'canonical_key': canonical_key})
                 self._retire_entities()
             self._note('detached turret creation failed', error)
             return False
@@ -192,8 +270,13 @@ class DetachedTurretPresentation(object):
                 # entity disappearing means retirement, not pending loading.
                 if turret['entity'] is not None:
                     self._turrets.remove(turret)
+                elif self._canonical_load_expired(turret, now):
+                    self._retire_failed_load(turret, now)
                 continue
             if turret['entity'] is not None and turret['entity'] is not entity:
+                self._turrets.remove(turret)
+                continue
+            if not self._entity_matches(entity, turret):
                 self._turrets.remove(turret)
                 continue
             turret['entity'] = entity
@@ -202,6 +285,8 @@ class DetachedTurretPresentation(object):
                 # #1513 enters a client-created entity only after its
                 # compound resources are resident.  Time keeps running, so a
                 # late model appears already partway along its arc.
+                if self._canonical_load_expired(turret, now):
+                    self._retire_failed_load(turret, now)
                 continue
             if turret['settled']:
                 # The rest pose is written once and nothing else drives this
@@ -235,14 +320,25 @@ class DetachedTurretPresentation(object):
                     self._report_impact(entity, turret['flight'])
         return written
 
+    @staticmethod
+    def _canonical_load_expired(turret, now):
+        return (turret.get('canonical_key') is not None and
+                float(now) - turret['created'] >= CANONICAL_MODEL_TIMEOUT_SECONDS)
+
+    def _retire_failed_load(self, turret, now):
+        self._turrets.remove(turret)
+        self._retiring.append(turret)
+        attempt = self._canonical_attempts.get(turret['canonical_key'])
+        if attempt is not None:
+            attempt['next_retry'] = float(now) + CANONICAL_CREATE_RETRY_SECONDS
+        self._retire_entities()
+        self._note('canonical turret model load timed out', RuntimeError(
+            'vehicle %d entity %d' % (turret['vehicle_id'], turret['id'])))
+
     def _bind(self, entity, turret):
         """Replace the native filter matrix with the frozen arc's provider."""
         try:
             matrix = self._math.Matrix()
-            matrix.setRotateYPR(
-                (turret['attitude'][0], turret['attitude'][1],
-                 turret['attitude'][2]))
-            matrix.translation = self._vector(turret['flight']['origin'])
             entity.model.matrix = matrix
             entity.targetCaps = []
             turret['matrix'] = matrix
@@ -250,9 +346,8 @@ class DetachedTurretPresentation(object):
             self._note('detached turret binding failed', error)
             return False
         try:
-            # Reuse the reviewed LAN draw gate so stock dynamic collision,
-            # the gun marker and its penetration indicator never resolve a
-            # turret the hidden worker's projectiles cannot hit.
+            # Reuse the LAN gate so stock collision does not compete with
+            # the canonical obstacle's server-timed hit tests.
             entity._offlineNativeRemote = True
             entity._offlineNativeDrawVisible = False
         except Exception as error:
@@ -303,12 +398,28 @@ class DetachedTurretPresentation(object):
             if entity is None and previous is None:
                 continue
             if entity is not None and (previous is None or previous is entity):
+                if not self._entity_matches(entity, turret):
+                    self._retiring.remove(turret)
+                    continue
                 turret['entity'] = entity
                 if not self._destroy_entity(turret['id']):
                     continue
                 retired += 1
             self._retiring.remove(turret)
         return retired
+
+    @staticmethod
+    def _entity_matches(entity, turret):
+        """Check the source identity before adopting a never-observed id."""
+        vehicle_id = getattr(entity, 'vehicleID', None)
+        if vehicle_id is None:
+            properties = getattr(entity, 'properties', None)
+            if isinstance(properties, dict):
+                vehicle_id = properties.get('vehicleID')
+        try:
+            return int(vehicle_id) == int(turret['vehicle_id'])
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def _destroy_entity(self, entity_id):
         destroy = getattr(self._bigworld, 'destroyEntity', None)
@@ -430,3 +541,31 @@ def detachment_plan(entity, pose):
         'attitude': (yaw + turret_yaw, pitch, roll),
         'clearance': _turret_clearance(turret),
     }
+
+
+def freeze_obstacle_plan(entity, pose, seed, collide):
+    """Resolve one worker proposal using this vehicle's exact loaded geometry.
+
+    The server supplies actor identity and creation time only after admission.
+    Both collision and presentation consume the returned frozen flight; the
+    final rest Y supports the complete rotated turret/gun underside.
+    """
+    plan = detachment_plan(entity, pose)
+    if plan is None:
+        return None
+    try:
+        descriptor = plan['descriptor']
+        components = turret_components(descriptor)
+        if any(DetachedTurretPresentation._exploded_model(component) is None
+               for unused_name, component, unused_offset, unused_bounds in components):
+            return None
+        impulse = turret_detachment.launch_impulse(seed)
+        flight = turret_detachment.resolve_flight(
+            plan['launch'], impulse['velocity'], collide,
+            clearance=plan['clearance'])
+        flight = rest_on_component_bounds(
+            flight, plan['attitude'], impulse['spin'], components)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        return None
+    return {'flight': flight, 'attitude': plan['attitude'],
+            'spin': impulse['spin']}
