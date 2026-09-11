@@ -18940,6 +18940,11 @@ class BattleRuntime(object):
                 # only keeps the player at full speed after a ram, so it
                 # immediately catches and damages the same Bot again.
                 'impulse': True,
+                # A Bot wreck is shoved by the authority worker, so it keeps a
+                # real inverse mass here and the local hull only takes its own
+                # share of the separation.  A dead human hull has no
+                # integrator in any process and stays world geometry.
+                'immovable': not alive and record.get('kind') != 'bot',
                 'x': x, 'y': y, 'z': z,
                 'yaw': yaw,
                 'mass': _number(mass, 25000.0),
@@ -19018,13 +19023,33 @@ class BattleRuntime(object):
                 push_z = 0.0
             else:
                 position = candidate
-        # Preserve the existing 0.90-per-60-Hz-tick damping in real time.
-        # Applying 0.90 once per rendered frame made a lateral shove last
-        # several times longer at the 20-30 FPS rates this client commonly
-        # reaches, which is why a teammate could slide the player so far.
-        push_decay = 0.90 ** (max(0.0, float(dt)) * 60.0)
-        self._local_push_x = push_x * push_decay
-        self._local_push_z = push_z * push_decay
+        # The hull resists an outside shove with the tracks it is standing
+        # on, not with a fixed exponential: rolling drag along the hull while
+        # the drivetrain turns, the parked perch hold when it does not, and
+        # the fall-line hold across the tracks either way.  The old 0.90 per
+        # 60 Hz tick removed about 6.3 m/s2 at 1 m/s in every direction, seven
+        # times a tank's own rolling drag, and never actually reached zero.
+        #
+        # Both halves of a human/Bot contact still share one impulse; only the
+        # residual decay differs, because a live Bot keeps the reviewed
+        # exponential for now (see bot_runtime: the residual push is currently
+        # the only escape from a terrain wedge in the spawn departure guards).
+        # A shoved wreck already uses this law on the authority side.
+        if self._local_physics is None:
+            # Every drive step installs the descriptor's physics before this
+            # runs; a bare harness without one keeps the push unchanged
+            # rather than inventing a resistance for an unknown hull.
+            self._local_push_x, self._local_push_z = push_x, push_z
+        else:
+            rolling = bool(
+                abs(self._local_speed) > 0.05 or
+                abs(_number(getattr(self._sender, 'forward', 0.0))) > 0.0)
+            self._local_push_x, self._local_push_z = (
+                vehicle_physics.contact_push_step(
+                    self._local_physics, push_x, push_z, yaw, dt,
+                    rolling=rolling,
+                    normal_y=(math.cos(self._local_pitch) *
+                              math.cos(self._local_roll))))
         return position
 
     def local_ram_contact(self):
