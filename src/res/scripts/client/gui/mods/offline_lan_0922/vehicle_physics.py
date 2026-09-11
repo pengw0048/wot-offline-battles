@@ -401,6 +401,22 @@ def _native_power_ratio(td, power_w):
 	return 1.0
 
 
+def descriptor_mass(td):
+	'''Read the same kilogram mass as derive_params without drive parameters.
+
+	Contact bodies do not consume engine power, traverse or terrain factors.
+	Read the mounted descriptor each time so an in-place equipment or Siege
+	change cannot leave a cached weight behind.
+	'''
+	try:
+		physics = getattr(td, 'physics', None) or {}
+		if 'weight' in physics:
+			return float(physics['weight'])
+	except Exception:
+		pass
+	return _DEFAULTS['mass']
+
+
 @observed('physics.derive_params')
 def derive_params(td, factors=None):
 	'''Real per-vehicle parameter set from a VehicleDescr. Every consumer

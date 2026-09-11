@@ -8252,8 +8252,14 @@ class BattleRuntime(object):
             if not timeline:
                 self._ram_bot_history_index.pop(bot_id, None)
 
-    def _ram_bot_state_at(self, bot_id, revision, sample_time_us):
-        """Interpolate one bot from the exact wire samples a player saw."""
+    def _ram_bot_state_at(self, bot_id, revision, sample_time_us,
+                          velocity_only=False):
+        """Read a wire pose, or just its velocity for presented contacts.
+
+        Both projections use the same brackets and exact-sample neighbour.
+        The render-frame contact path already has its displayed pose and must
+        not interpolate/copy the full combat checkpoint just to read velocity.
+        """
         try:
             bot_id = int(bot_id)
             revision = int(revision)
@@ -8261,6 +8267,8 @@ class BattleRuntime(object):
         except (TypeError, ValueError, OverflowError):
             return None
         cache_key = (bot_id, revision, sample_time_us)
+        if velocity_only:
+            cache_key += ('velocity',)
         if cache_key in self._ram_bot_lookup_cache:
             cached = self._ram_bot_lookup_cache[cache_key]
             return None if cached is None else dict(cached)
@@ -8292,7 +8300,7 @@ class BattleRuntime(object):
             self._ram_bot_lookup_cache[cache_key] = None
             return None
         if left_time == right_time:
-            result = dict(left_state)
+            result = {} if velocity_only else dict(left_state)
             result['ram_vx'] = 0.0
             result['ram_vy'] = 0.0
             result['ram_vz'] = 0.0
@@ -8324,22 +8332,24 @@ class BattleRuntime(object):
         if span_us <= 0.0:
             self._ram_bot_lookup_cache[cache_key] = None
             return None
-        progress = max(0.0, min(
-            (sample_time_us - left_time) / span_us, 1.0))
-        result = dict(left_state)
-        for name in ('x', 'y', 'z', 'pitch', 'roll', 'aim_yaw',
-                     'gun_pitch'):
-            if name in left_state and name in right_state:
-                result[name] = (_number(left_state.get(name)) +
-                                (_number(right_state.get(name)) -
-                                 _number(left_state.get(name))) * progress)
-        if 'yaw' in left_state and 'yaw' in right_state:
-            result['yaw'] = (_number(left_state.get('yaw')) +
-                             _angle_delta(
-                                 _number(left_state.get('yaw')),
-                                 _number(right_state.get('yaw'))) * progress)
-        if progress >= 1.0:
-            result['alive'] = bool(right_state.get('alive', True))
+        result = {}
+        if not velocity_only:
+            progress = max(0.0, min(
+                (sample_time_us - left_time) / span_us, 1.0))
+            result = dict(left_state)
+            for name in ('x', 'y', 'z', 'pitch', 'roll', 'aim_yaw',
+                         'gun_pitch'):
+                if name in left_state and name in right_state:
+                    result[name] = (_number(left_state.get(name)) +
+                                    (_number(right_state.get(name)) -
+                                     _number(left_state.get(name))) * progress)
+            if 'yaw' in left_state and 'yaw' in right_state:
+                result['yaw'] = (_number(left_state.get('yaw')) +
+                                 _angle_delta(
+                                     _number(left_state.get('yaw')),
+                                     _number(right_state.get('yaw'))) * progress)
+            if progress >= 1.0:
+                result['alive'] = bool(right_state.get('alive', True))
         result['ram_vx'] = (
             _number(right_state.get('x')) -
             _number(left_state.get('x'))) * 1000000.0 / span_us
@@ -18793,18 +18803,50 @@ class BattleRuntime(object):
             (previous & (overlapping | closing_gaps)) | newly_armed)
         return bool(newly_armed)
 
-    def _contact_tanks(self):
-        """Return current non-local chassis bodies for 0.8.2 contact physics."""
+    def _contact_tanks(self, position, own_shape):
+        """Build only bodies that can contact this presented player pose.
+
+        Use the solver's conservative chassis-radius bound before projecting
+        history, mass or crew. Existing Bot compression episodes stay in the
+        set even across a presentation gap: relative motion must release them,
+        otherwise a returning hull could earn the same ram damage twice.
+        """
         result = []
+        own_radius = math.sqrt(
+            own_shape[0] * own_shape[0] + own_shape[1] * own_shape[1])
         bot_states = getattr(self._bots, 'states', {}) if self._bots else {}
         for record in self._records.values():
             if (record.get('local') or record.get('tombstone') or
                     not record.get('ready')):
                 continue
             state = record.get('state') or {}
+            presented_pose = None
             if record.get('kind') == 'bot':
                 state = bot_states.get(record.get('network_id'), state)
                 presented_pose = record.get('presented_pose')
+            pose = presented_pose if isinstance(presented_pose, dict) else {}
+            x = _number(pose.get('x', state.get('x')))
+            y = _number(pose.get('y', state.get('y')))
+            z = _number(pose.get('z', state.get('z')))
+            remote = self._server_entity(record['engine_id'])
+            descriptor = getattr(remote, 'typeDescriptor', None)
+            shape = state.get('collision_shape')
+            if shape is None:
+                shape = self._collision_shape(descriptor)
+            active_episode = (
+                record.get('kind') == 'bot' and
+                record.get('network_id') in self._local_ram_episode_contacts)
+            if not active_episode:
+                if not tank_collision.vertical_overlap(
+                        position[1], own_shape, y, shape):
+                    continue
+                radius = math.sqrt(shape[0] * shape[0] + shape[1] * shape[1])
+                reach = (own_radius + radius +
+                         tank_collision.CONTACT_BROADPHASE_PADDING)
+                dx, dz = position[0] - x, position[2] - z
+                if dx * dx + dz * dz > reach * reach:
+                    continue
+            if record.get('kind') == 'bot':
                 if isinstance(presented_pose, dict):
                     state = dict(state)
                     state.update(presented_pose)
@@ -18813,15 +18855,14 @@ class BattleRuntime(object):
                     record.get('network_id'), presentation_time_us)
                 historical = (self._ram_bot_state_at(
                     record.get('network_id'), revision,
-                    presentation_time_us) if revision is not None else None)
+                    presentation_time_us, velocity_only=True)
+                              if revision is not None else None)
                 if isinstance(historical, dict):
                     state = dict(state)
                     for name in ('ram_vx', 'ram_vy', 'ram_vz'):
                         if name in historical:
                             state[name] = historical[name]
             alive = bool(state.get('alive', True))
-            remote = self._server_entity(record['engine_id'])
-            descriptor = getattr(remote, 'typeDescriptor', None)
             yaw = _number(state.get('yaw'))
             speed = _number(state.get('speed')) if alive else 0.0
             player_effective = None
@@ -18831,10 +18872,7 @@ class BattleRuntime(object):
                     if player_effective is not None else state.get('mass'))
             if (mass is None and descriptor is not None and
                     record.get('kind') != 'player'):
-                mass = vehicle_physics.derive_params(descriptor).get('mass')
-            shape = state.get('collision_shape')
-            if shape is None:
-                shape = self._collision_shape(descriptor)
+                mass = vehicle_physics.descriptor_mass(descriptor)
             ram_profile = (
                 self._player_ram_profile(
                     player_effective, state.get('critical') or {})
@@ -18858,9 +18896,7 @@ class BattleRuntime(object):
                 # only keeps the player at full speed after a ram, so it
                 # immediately catches and damages the same Bot again.
                 'impulse': True,
-                'x': _number(state.get('x')),
-                'y': _number(state.get('y')),
-                'z': _number(state.get('z')),
+                'x': x, 'y': y, 'z': z,
                 'yaw': yaw,
                 'mass': _number(mass, 25000.0),
                 'shape': shape,
@@ -18879,7 +18915,6 @@ class BattleRuntime(object):
     def _resolve_local_tank_contacts(self, entity, position, yaw, dt):
         """Apply chassis OBB separation without pushing a tank into walls."""
         self._retry_native_ram_contact_proofs()
-        others = self._contact_tanks()
         own_mass = _number(
             (self._local_physics or {}).get('mass'), 25000.0)
         own = {
@@ -18896,6 +18931,7 @@ class BattleRuntime(object):
             'vy': self._local_vertical_speed,
             'vz': math.cos(yaw) * self._local_speed + self._local_push_z,
         }
+        others = self._contact_tanks(position, own['shape'])
         self._poll_local_ram_contact_episodes(entity, own, others)
         now = self._clock()
         contact = tank_collision.resolve_tank(
