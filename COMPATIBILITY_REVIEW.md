@@ -709,8 +709,9 @@ test; this source review cannot claim that the visible hitch is eliminated.
 Visible clients additionally emit `PERF visible_costs` for the existing frame
 windows. `visible_diagnostics.py` selects one frame per eight-frame block,
 rotating the position within each block to avoid always observing the same
-phase of periodic track feeds. Only synchronous sync playback and local
-driving bind the observer. Fixed stages cover sync event application, pose and
+phase of periodic track feeds. Synchronous housekeeping, sync playback and local
+driving bind the frame observer; LAN polls own a separate rotating sample.
+Fixed stages cover housekeeping owners, sync event application, pose and
 aim setters, track updates, motion checks, world-probe helpers, tank contacts,
 support, ground samples, suspension solving, and local presentation. Counts
 refer to these Python boundaries, including early returns and failed calls;
@@ -731,6 +732,53 @@ no actors or call arguments. Clock/scope failures discard only the sample.
 Sampling does not depend on player input or change gameplay cadence, collision
 queries, interpolation, or native writes. Exact Windows reports are required
 to locate a remaining hotspot and assess both sampler overhead and FPS.
+
+`PERF frame_accounting` seals the same entry-to-entry intervals. LAN poll wall
+time is included in `offframe`; `outside` means the residual after the frame
+and known callbacks, not native rendering. Poll batch size, handled messages,
+superseded snapshots and receive-to-poll age are recorded without retaining
+payloads. Sampled network rows separate handling, dispatch, snapshot/event
+application, destructibles, projectile/turret state, Bot state and pose
+timelines. Their denominator is **sampled polls**, not render frames. The
+sampled scene reports alive/dead/moving remotes and local motion;
+`draw_enabled_remotes` is a presentation flag, not a native frustum census.
+Phase counts and unprofiled phase totals separate countdown/live intervals.
+
+The x86 sidecar exposes Win32 `GetThreadTimes` and `GetProcessTimes` through
+the existing validated `PyInt_FromLong` ABI, with no new client RVA. Kernel
+plus user CPU time is returned in integer milliseconds, or -1 on failure or
+overflow. Missing counters are explicit. OS accounting is coarse: use
+**window totals**, not per-frame CPU latency. Matching entry/exit counters
+distinguish main-thread CPU inside the frame from CPU between callbacks.
+Between-callback CPU includes network, other Python, native work and diagnostic
+overhead. Process CPU sums its threads and can exceed wall time. Neither
+identifies Ready versus Waiting or proves a GPU bottleneck. See the
+[Win32 counter contract](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadtimes).
+
+Visible rounds request two two-second builtin `_lsprof` windows, 35 and 95
+seconds after the first live callback. Profiling spans callbacks and reports
+the top 40 self-time and top 20 inclusive-time functions, including stock
+Python and Python-to-native boundaries. Existing profilers are not replaced;
+failure is local to diagnostics and teardown disables the owned profiler.
+Engine work without a Python call boundary is not measured. Profiled
+intervals, including start/stop frames, are tagged and excluded from
+`unprofiled` FPS and fine frame/poll samples. Function timings are perturbed
+and must not be treated as FPS acceptance evidence. Records use the existing
+bounded multipart logger.
+
+The launcher starts `capture_performance.ps1` without a console or an elevation
+prompt. With WPR and administrator rights available, it waits at most 180
+seconds for this session's first live PERF record, then captures CPU
+stacks/scheduling and GPU events for at most 60 seconds. A unique WPR instance
+is stopped/cancelled only by its owner; existing recordings are not stopped.
+The system-wide trace can contain process paths and stacks; heap and network
+payload capture are not requested. See the
+[WPR instance commands](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/wpr-command-line-options).
+`performance-trace.txt` records availability and completion. Finalized ETLs
+of at most 512 MiB enter the normal error report intact; incomplete ETLs are
+never included or truncated. A new session retires the preceding completed
+performance artifacts. VM CPU/GPU provider visibility remains a Windows
+runtime evidence boundary.
 
 The current hidden worker also supports bounded combat timing beyond its
 five-second startup probe sample. `worker_diagnostics.py` captures up to three

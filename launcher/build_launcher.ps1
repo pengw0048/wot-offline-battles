@@ -94,6 +94,9 @@ Copy-Item -Force `
     (Join-Path $LauncherRoot "LAUNCHER_README.txt") `
     (Join-Path $DistRoot "$AppName\README.txt")
 Copy-Item -Force `
+    (Join-Path $LauncherRoot "capture_performance.ps1") `
+    (Join-Path $DistRoot "$AppName\capture_performance.ps1")
+Copy-Item -Force `
     (Join-Path $RepoRoot "LICENSE") `
     (Join-Path $DistRoot "$AppName\LICENSE")
 Copy-Item -Force `

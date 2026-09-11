@@ -1346,7 +1346,49 @@ static PyObject *show_process_windows(PyObject *unused_self,
 }
 
 
+/* Reuse the already validated PyInt_FromLong ABI. Milliseconds fit in a
+ * signed x86 long for 24 days of CPU time; fail explicitly beyond that.
+ * These OS counters are coarse and must be aggregated over whole windows. */
+static long cpu_milliseconds(int process)
+{
+	FILETIME created, exited, kernel, user;
+	uint64_t total;
+	BOOL ok = process ?
+		GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) :
+		GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user);
+	if (!ok) {
+		return -1L;
+	}
+	total = ((((uint64_t)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime) +
+		(((uint64_t)user.dwHighDateTime << 32) | user.dwLowDateTime)) / 10000U;
+	return total <= 0x7fffffffU ? (long)total : -1L;
+}
+
+static PyObject *current_thread_cpu_ms(PyObject *self, PyObject *args)
+{
+	(void)self; (void)args;
+	return python_int(cpu_milliseconds(0));
+}
+
+static PyObject *current_process_cpu_ms(PyObject *self, PyObject *args)
+{
+	(void)self; (void)args;
+	return python_int(cpu_milliseconds(1));
+}
+
+static PyObject *current_thread_id(PyObject *self, PyObject *args)
+{
+	(void)self; (void)args;
+	return python_int((long)GetCurrentThreadId());
+}
+
 static PyMethodDef MODULE_METHODS[] = {
+	{"current_thread_cpu_ms", current_thread_cpu_ms, METH_NOARGS,
+	 "Return current-thread kernel plus user CPU milliseconds, or -1."},
+	{"current_process_cpu_ms", current_process_cpu_ms, METH_NOARGS,
+	 "Return process kernel plus user CPU milliseconds, or -1."},
+	{"current_thread_id", current_thread_id, METH_NOARGS,
+	 "Return the Win32 thread identifier for trace correlation."},
 	{
 		"install_atmosphere_owner_guard", install_atmosphere_owner_guard,
 		METH_NOARGS,

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import sys
 import struct
 import subprocess
 import threading
@@ -92,6 +93,10 @@ _CRASH_TEXT_FILENAMES = {
     ROLE_HIDDEN_WORKER: "hidden-worker.crash-text.txt",
 }
 TRAIL_MAX_BYTES = 1024 * 1024
+PERFORMANCE_ARTIFACTS = {
+    'performance-trace.txt': 1024 * 1024,
+    'performance-trace.etl': 512 * 1024 * 1024,
+}
 _SESSION_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 _CHUNK_BYTES = 64 * 1024
 LOG_MAX_BYTES = 16 * 1024 * 1024
@@ -304,6 +309,15 @@ def cleanup_session_dumps(session, roles=None):
     return _remove_dump_entries(directory, candidates)
 
 
+def cleanup_session_performance(session):
+    """Retain at most the current session's potentially large completed ETL."""
+    directory, _paths = _recorded_dump_layout(session)
+    if not _safe_dump_directory(directory, create=False):
+        return ()
+    return _remove_dump_entries(directory, tuple(
+        os.path.join(directory, name) for name in PERFORMANCE_ARTIFACTS))
+
+
 def set_session_crash_roles(session, roles):
     """Allow only confirmed crashing process roles into the report ZIP."""
     _recorded_dump_layout(session)
@@ -431,6 +445,7 @@ def begin_session(game_root, needs_worker=False, local_server=False,
         try:
             if _recorded_dump_layout(previous, required=False) is not None:
                 cleanup_session_dumps(previous)
+                cleanup_session_performance(previous)
         except core.LauncherError:
             # Never follow a stale or redirected boundary just to clean it up.
             pass
@@ -477,7 +492,32 @@ def begin_session(game_root, needs_worker=False, local_server=False,
         "crashRoles": [],
     }
     _write_state(session)
+    _start_performance_capture(session)
     return session
+
+
+def _start_performance_capture(session):
+    """Try one bounded capture without a console, focus change, or UAC prompt."""
+    if os.name != 'nt':
+        return
+    directory = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else (
+        os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(directory, 'capture_performance.ps1')
+    try:
+        subprocess.Popen(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+             'Bypass', '-File', script, '-SessionState', session_state_path(),
+             '-SessionId', session['id']],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, ValueError) as error:
+        try:
+            path = os.path.join(session['dumpDirectory'], 'performance-trace.txt')
+            with open(path, 'w', encoding='utf-8') as stream:
+                stream.write('Performance capture unavailable: %s\n' % error)
+        except OSError:
+            pass
 
 
 def _is_latest(session):
@@ -668,8 +708,16 @@ def session_trail_path(session, role):
 
 def _open_recorded_trail(session, role):
     """Open one fixed native exception trail inside this session's folder."""
+    if role not in DUMP_ROLES:
+        return None
+    return _open_session_artifact(session, _TRAIL_FILENAMES[role],
+                                  TRAIL_MAX_BYTES, tail=True)
+
+
+def _open_session_artifact(session, filename, max_bytes, tail=False):
+    """Open a fixed artifact; an ETL must be finalized and copied in full."""
     layout = _recorded_dump_layout(session, required=False)
-    if layout is None or role not in DUMP_ROLES:
+    if layout is None:
         return None
     directory, _paths = layout
     try:
@@ -677,7 +725,7 @@ def _open_recorded_trail(session, role):
             return None
     except core.LauncherError:
         return None
-    path = os.path.join(directory, _TRAIL_FILENAMES[role])
+    path = os.path.join(directory, filename)
     try:
         path_stat = os.lstat(path)
         if (_is_reparse_point(path_stat) or
@@ -695,11 +743,11 @@ def _open_recorded_trail(session, role):
             stream.close()
             return None
         size = int(value.st_size)
-        if size <= 0:
+        if size <= 0 or (not tail and size > max_bytes):
             stream.close()
             return None
         # Keep the tail: the fault that ended the process is the last record.
-        length = min(size, TRAIL_MAX_BYTES)
+        length = min(size, max_bytes)
         stream.seek(size - length)
         return stream, length
     except Exception:
@@ -1086,6 +1134,15 @@ def create_report(now=None):
                         banner + "\n")
                     if written:
                         included_files.append(written)
+            for archive_name, limit in sorted(PERFORMANCE_ARTIFACTS.items()):
+                opened = _open_session_artifact(session, archive_name, limit)
+                if opened is not None:
+                    stream, length = opened
+                    try:
+                        _write_slice(archive, archive_name, stream, length)
+                    finally:
+                        stream.close()
+                    included_files.append(archive_name)
             # A report is worth sending only when the session actually
             # produced something; generated sections describe the machine and
             # must not, on their own, make an empty session look collectable.

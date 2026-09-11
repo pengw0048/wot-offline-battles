@@ -7,6 +7,21 @@ Tanks, and stops that server when the game closes. Its bundled client and
 server payloads are only for the exact #1513 client described below; it does
 not install or start earlier client lines.
 
+Performance diagnostic build: play a full battle and create the usual error
+report. It includes detailed frame/network timings and two short Python
+function profiles. Those two profiling intervals may briefly lower FPS and
+are marked separately from ordinary frame measurements.
+
+For CPU scheduling and GPU evidence in the same report, start this launcher
+as administrator for the diagnostic run. If Windows Performance Recorder
+(wpr.exe) is available, a hidden helper records 60 seconds of the first live
+battle. It does not prompt for elevation or change focus. The system-wide
+trace can include process names, paths and call stacks. The report contains
+performance-trace.txt and, on success, performance-trace.etl. Without WPR or
+administrator rights, other measurements still work and the text records the
+missing evidence. Play at least two minutes after the countdown so both
+function profiles can finish before collecting the report.
+
 1. Start WoT-Offline-Battles-Launcher.exe from this folder. Keep the folder
    together; the launcher needs the files beside it.
 2. Select your World of Tanks folder. The list holds the folders you used

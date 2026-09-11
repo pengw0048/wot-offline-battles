@@ -63,6 +63,7 @@ from gui.mods.offline_lan_0922 import (
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
     vehicle_blacklist, vehicle_configuration, vehicle_physics, visible_diagnostics,
+    frame_accounting,
     world_collision)
 
 
@@ -471,6 +472,8 @@ class _FrameDiagnostics(object):
         self.reset()
 
     def reset(self):
+        self._cpu_clock = frame_accounting.CpuClock()
+        self._cpu_entry = None
         self._pending = None
         self._recent_frames = collections.deque(maxlen=3)
         self._frame_id = 0
@@ -480,6 +483,7 @@ class _FrameDiagnostics(object):
         self._reset_window()
 
     def _reset_window(self):
+        self._accounting = frame_accounting.Window()
         self._samples = 0
         self._window_elapsed = 0.0
         self._gap_sum = 0.0
@@ -535,17 +539,19 @@ class _FrameDiagnostics(object):
         self._pending = None
         self._slow = []
 
-    def begin(self, entry_wall, raw_dt, offframe=0.0):
+    def begin(self, entry_wall, raw_dt, offframe=0.0, network=None):
         """Seal the previous callback using this callback's entry interval.
 
-        ``offframe`` is the time this port's other scheduled callbacks spent
-        inside that gap, so ``outside`` isolates work this port does not run.
+        ``offframe`` and the LAN poll cover known callbacks inside the gap.
+        ``outside`` remains unattributed: it can include other Python/native
+        work, CPU scheduling and waits. It is not a renderer timer.
         """
         self._frame_id += 1
         frame_id = self._frame_id
         if not self.enabled:
             return frame_id
         try:
+            self._cpu_entry = self._cpu_clock.read()
             pending = self._pending
             if pending is not None:
                 wall_gap = float(entry_wall) - pending['entry_wall']
@@ -555,13 +561,16 @@ class _FrameDiagnostics(object):
                 observed_raw = float(raw_dt)
                 if observed_raw < 0.0:
                     self._clock_regressions += 1
-                off = max(0.0, float(offframe))
+                off = (max(0.0, float(offframe)) +
+                       max(0.0, (network or {}).get('wall_seconds', 0.0)))
                 row = dict(pending)
                 row.update({
                     'next': frame_id,
                     'wall_gap': wall_gap,
                     'raw_dt': observed_raw,
                     'offframe': off,
+                    'network': network or {},
+                    'cpu_next': self._cpu_entry,
                     'outside': max(0.0, wall_gap - pending['exec'] - off),
                     'bw_minus_wall': observed_raw - wall_gap,
                 })
@@ -572,6 +581,7 @@ class _FrameDiagnostics(object):
             return frame_id
 
     def _add(self, row):
+        self._accounting.add(row)
         if row.get('context', {}).get('role') == 'worker':
             compact = self._compact_frame(row)
             for previous in self._slow:
@@ -834,6 +844,7 @@ class _FrameDiagnostics(object):
             'python_stages_ms': stage_snapshot,
             'python_details_ms': detail_snapshot,
             'visible_costs': self._visible_summary(),
+            'frame_accounting': self._accounting.snapshot(self._cpu_clock),
             # One logical probe can contain several native calls. The current
             # Python boundary cannot truthfully derive raw call/primitives.
             'raw_native_calls_measured': False,
@@ -953,6 +964,12 @@ class _FrameDiagnostics(object):
                          self._milliseconds(self._stage_maxima[name]))
                          for name in _FRAME_DETAIL_NAMES) + '\n')
         visible_summary = self._last_snapshot['visible_costs']
+        accounting = self._last_snapshot['frame_accounting']
+        accounting.update(window=self._window_id,
+                          round=context.get('round', '-'),
+                          map=context.get('map', '-'),
+                          role=context.get('role', '-'))
+        lines.append(_combat_log_lines(prefix, 'frame_accounting', accounting))
         if visible_summary is not None:
             lines.append(_combat_log_lines(
                 prefix, 'visible_costs', visible_summary))
@@ -1118,6 +1135,8 @@ class _FrameDiagnostics(object):
             stages['diag_emit'] = emit_seconds
             end_wall = self._clock()
             self._pending = {
+                'cpu_start': self._cpu_entry,
+                'cpu_end': self._cpu_clock.read(),
                 'cause': int(frame_id), 'entry_wall': float(entry_wall),
                 'exec': max(0.0, end_wall - float(entry_wall)),
                 'tick_dt': max(0.0, float(tick_dt)),
@@ -1793,6 +1812,8 @@ class BattleRuntime(object):
         self._local_pseudo_ground_memory = None
         self._local_frame_stages = None
         self._visible_frame_costs = None
+        self._poll_costs = None
+        self._function_profiles = None
         self._local_pitch = 0.0
         self._local_roll = 0.0
         self._local_suspension_pitch_velocity = 0.0
@@ -2054,6 +2075,12 @@ class BattleRuntime(object):
         self._detached_turret_retry = {}
         self._next_turret_publish = 0.0
         self.client = lan_client
+        if PERFORMANCE_DIAGNOSTICS:
+            self._poll_costs = frame_accounting.PollCosts(_PROFILE_CLOCK)
+            self.client._poll_costs = self._poll_costs
+            if not self._worker_mode:
+                self._function_profiles = frame_accounting.FunctionProfiles(
+                    _PROFILE_CLOCK, self._write_performance_record)
         self._damage_info_failure_reported = False
         self._optional_failures_reported = set()
         self._disabled_optional_features = set()
@@ -2855,6 +2882,7 @@ class BattleRuntime(object):
             # interval between geometry mapping and PySpaces publication.
             raise _LiveSpaceVisibilityPending()
 
+    @visible_diagnostics.measured('house.visibility')
     def _maintain_standard_space_visibility(self, now):
         """Restore a gameplay bit if later stock code widens the server mask."""
         boundary = self._standard_space_visibility
@@ -2958,6 +2986,7 @@ class BattleRuntime(object):
             self._warn_optional_failure(feature, error, disable=disable)
             return False
 
+    @visible_diagnostics.measured('house.chat')
     def _start_team_chat_when_roster_ready(self):
         """Start stock Chat2 only after its ArenaDP teammate guard passes."""
         if (self._worker_mode or self._team_chat_initialized or
@@ -5193,6 +5222,7 @@ class BattleRuntime(object):
         return any(value > 0.00001 for value in
                    self._arena_pose_violations(entity, position, yaw))
 
+    @visible_diagnostics.measured('local.arena')
     def _arena_motion_is_clear(self, entity, position, travel_yaw,
                                speed, dt, hull_yaw=None):
         """Keep every chassis corner inside, but let stale poses recover."""
@@ -8243,6 +8273,7 @@ class BattleRuntime(object):
             return True
         return False
 
+    @visible_diagnostics.network_measured('net.apply_snapshot')
     def on_snapshot(self, message):
         if self.state in ('failed', 'stopped', 'leaving'):
             return False
@@ -8255,25 +8286,29 @@ class BattleRuntime(object):
             self._ack_local_destructible_contacts(self._last_snapshot)
             self._observe_destructibles_disabled(self._last_snapshot)
             self._observe_projectile_message(self._last_snapshot)
-            self._reconcile_projectile_snapshot(self._last_snapshot)
-            self._reconcile_detached_turret_snapshot(self._last_snapshot)
+            visible_diagnostics.call(self, 'net.projectiles',
+                                     self._reconcile_projectile_snapshot, self._last_snapshot)
+            visible_diagnostics.call(self, 'net.turrets',
+                                     self._reconcile_detached_turret_snapshot, self._last_snapshot)
             if 'rules' in self._last_snapshot:
                 self._apply_rules(self._last_snapshot.get('rules'))
             if self._last_snapshot.get('battle_result') is not None:
                 self._apply_battle_result(
                     self._last_snapshot['battle_result'])
             if 'destructibles' in self._last_snapshot:
-                self._apply_destructible_state(
-                    self._last_snapshot.get('destructibles'))
+                visible_diagnostics.call(self, 'net.destructibles',
+                    self._apply_destructible_state, self._last_snapshot.get('destructibles'))
             if self._bots is not None:
                 if 'bot_authority_id' in self._last_snapshot:
                     self._reconcile_bot_authority(
                         self._last_snapshot.get('bot_authority_id'))
-                self._bots.apply_snapshot(self._last_snapshot)
+                visible_diagnostics.call(self, 'net.bot_snapshot',
+                                         self._bots.apply_snapshot, self._last_snapshot)
                 self._remember_ram_bot_snapshot(self._last_snapshot)
             if self._sync is not None:
                 try:
-                    self._sync.snapshot(message)
+                    visible_diagnostics.call(self, 'net.pose_snapshot',
+                                             self._sync.snapshot, message)
                 except Exception as error:
                     # The Bot state store has already consumed this frame.
                     # Rolling the whole snapshot back here would leave the
@@ -9044,6 +9079,7 @@ class BattleRuntime(object):
             changed = True
         return changed
 
+    @visible_diagnostics.network_measured('net.apply_events')
     def on_events(self, message):
         if self.state in ('failed', 'stopped', 'leaving'):
             return False
@@ -9592,6 +9628,7 @@ class BattleRuntime(object):
                 len(getattr(self._remote_factory, '_hit_testers', ()) or ())))
         return True
 
+    @visible_diagnostics.measured('house.events')
     def _drain_event_journal(self):
         # A transient tree-stream boundary must not freeze unrelated combat
         # events behind it.  Give every event present at entry one attempt;
@@ -16082,6 +16119,44 @@ class BattleRuntime(object):
                 return True
         return False
 
+    def _frame_housekeeping(self, now):
+        self._run_optional_feature(
+            'map visibility filtering',
+            self._maintain_standard_space_visibility, (now,),
+            self._disable_standard_space_visibility)
+        self._flush_pending_bot_create(now)
+        self._flush_pending_entities(now)
+        self._start_team_chat_when_roster_ready()
+        self._drain_event_journal()
+        self._run_optional_feature(
+            'foliage camouflage',
+            self._refresh_fallen_tree_foliage, (now,))
+        self._retry_bot_manifest(now)
+        self._maybe_send_battle_ready()
+
+    @staticmethod
+    def _write_performance_record(kind, payload):
+        try:
+            sys.stdout.write(_combat_log_lines('[Offline LAN 0.9.22] PERF ', kind, payload))
+        except Exception:
+            pass
+
+    def _visible_scene(self):
+        result = {'alive_remotes': 0, 'dead_remotes': 0,
+                  'draw_enabled_remotes': 0, 'moving_remotes': 0,
+                  'local_speed_mps': abs(float(self._local_speed)),
+                  'local_moving': int(abs(self._local_speed) > 0.01),
+                  'local_airborne': int(bool(self._local_airborne))}
+        for record in self._records.values():
+            if record.get('local') or record.get('tombstone') or not record.get('ready'):
+                continue
+            state = record.get('state') or {}
+            alive = bool(state.get('alive', not state.get('dead', False))) and _number(state.get('health'), 1) > 0
+            result['alive_remotes' if alive else 'dead_remotes'] += 1
+            result['draw_enabled_remotes'] += int(bool(record.get('spot_visible', True)) or not alive)
+            result['moving_remotes'] += int(alive and abs(_number(state.get('speed'))) > 0.01)
+        return result
+
     def _frame(self):
         if self.state != 'running':
             return
@@ -16113,10 +16188,16 @@ class BattleRuntime(object):
         self._offframe_seconds = 0.0
         self._effect_reports = 0
         self._spotted_signature = None
-        frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe)
+        network = (self._poll_costs.drain() if self._poll_costs is not None else None)
+        frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe, network=network)
                     if profiling else 0)
+        function_profile = (self._function_profiles.tick(
+            self._battle_live, (self._start_message or {}).get('round_id'))
+            if profiling and self._function_profiles is not None else False)
+        if self._poll_costs is not None:
+            self._poll_costs.profile_active = function_profile
         visible_costs = (visible_diagnostics.new_frame(frame_id, _PROFILE_CLOCK)
-                         if profiling and not self._worker_mode else None)
+                         if profiling and not self._worker_mode and not function_profile else None)
         combat_diagnostic = self._combat_diagnostics
         if combat_diagnostic is not None and self._battle_live and profiling:
             trigger = None
@@ -16142,19 +16223,11 @@ class BattleRuntime(object):
         projectile_perf = {}
         boundary = entry_wall
         try:
-            self._run_optional_feature(
-                'map visibility filtering',
-                self._maintain_standard_space_visibility, (now,),
-                self._disable_standard_space_visibility)
-            self._flush_pending_bot_create(now)
-            self._flush_pending_entities(now)
-            self._start_team_chat_when_roster_ready()
-            self._drain_event_journal()
-            self._run_optional_feature(
-                'foliage camouflage',
-                self._refresh_fallen_tree_foliage, (now,))
-            self._retry_bot_manifest(now)
-            self._maybe_send_battle_ready()
+            self._visible_frame_costs = visible_costs
+            try:
+                visible_diagnostics.call(self, 'house', self._frame_housekeeping, now)
+            finally:
+                self._visible_frame_costs = None
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['house'] = max(0.0, next_boundary - boundary)
@@ -16547,6 +16620,8 @@ class BattleRuntime(object):
                     'role': ('worker' if self._worker_mode else
                              ('authority' if authority else 'guest')),
                     'probe_timing': probe_timing,
+                    'function_profile': function_profile,
+                    'scene': self._visible_scene() if visible_costs is not None else {},
                     'bot_count': bot_count,
                     'outgoing_count': len(outgoing_messages),
                     'pose_step': pose_step,
@@ -17326,6 +17401,7 @@ class BattleRuntime(object):
         self._sixth_sense.observe(visible, now)
         return visible
 
+    @visible_diagnostics.measured('house.ready')
     def _maybe_send_battle_ready(self):
         """Open the shared countdown after the complete line-up has entered.
 
@@ -17523,6 +17599,7 @@ class BattleRuntime(object):
         self._local_last_pitch = pitch
         return pitch
 
+    @visible_diagnostics.measured('local.tree')
     def _tree_motion_proposal(
             self, start_position, start_yaw, end_position, end_yaw,
             speed, descriptor, now, dt):
@@ -17634,6 +17711,7 @@ class BattleRuntime(object):
             result['impact_speed'] = catalog['impact_speed']
         return result
 
+    @visible_diagnostics.measured('local.catalog_commit')
     def _commit_local_destructible_motion(
             self, detail, start_position, start_yaw, end_position, end_yaw,
             descriptor, speed, now, dt, catalog_speed=None):
@@ -17686,6 +17764,7 @@ class BattleRuntime(object):
                 predictor(catalog_token)
         return True
 
+    @visible_diagnostics.measured('local.tree_commit')
     def _commit_local_tree_contact(
             self, tree_detail, start_position, start_yaw,
             end_position, end_yaw, descriptor, speed, now, dt):
@@ -17985,6 +18064,7 @@ class BattleRuntime(object):
         }
         return pose
 
+    @visible_diagnostics.measured('local.turret')
     def _turret_pose_is_clear(
             self, start, start_yaw, end, end_yaw, descriptor,
             pitch=0.0, roll=0.0):
@@ -18128,7 +18208,7 @@ class BattleRuntime(object):
             proposal_now = self._clock()
             proposer = getattr(
                 self._destructibles, '_catalog_motion_proposal', None)
-            catalog_proposal = (proposer(
+            catalog_proposal = (visible_diagnostics.call(self, 'local.catalog', proposer,
                 self._avatar.spaceID, self._vector(position), world_hull_yaw,
                 speed, entity.typeDescriptor, proposal_now,
                 dt=dt, kinetic_speed=kinetic_speed,
@@ -18230,7 +18310,8 @@ class BattleRuntime(object):
             return False
         if self._destructibles is None:
             return world_status == 'clear'
-        detail = self._destructibles._catalog_motion_blocked(
+        detail = visible_diagnostics.call(self, 'local.catalog',
+            self._destructibles._catalog_motion_blocked,
             self._avatar.spaceID, self._vector(position), world_hull_yaw,
             speed, entity.typeDescriptor, self._clock(),
             dt=dt, kinetic_speed=kinetic_speed,
@@ -21955,6 +22036,7 @@ class BattleRuntime(object):
         self._bot_manifest_retry_identity = None
         return True
 
+    @visible_diagnostics.measured('house.ready')
     def _retry_bot_manifest(self, now):
         """Retry the current authority tenure's manifest at bounded cadence."""
         if (not self._worker_mode or self.state != 'running' or
@@ -22545,6 +22627,7 @@ class BattleRuntime(object):
             pending['state'].update(state)
         return True
 
+    @visible_diagnostics.measured('house.create')
     def _flush_pending_bot_create(self, now):
         """Create the next queued bot in this render callback.
 
@@ -22665,6 +22748,7 @@ class BattleRuntime(object):
             self._projectile_boundary_pose(position, seed_pose)
         self._materialize_record(self._records[key])
 
+    @visible_diagnostics.measured('sync.entity')
     def _update_entity(self, event):
         record = self._records.get(event.get('entity'))
         if record is not None and record.get('tombstone'):
@@ -22992,6 +23076,7 @@ class BattleRuntime(object):
             self._update_local_hull_aiming(entity, 0.0)
         return True
 
+    @visible_diagnostics.measured('sync.present')
     def _apply_record_pose(self, record, pose):
         state = record.get('state') or {}
         yaw = pose.get('yaw', 0.0)
@@ -23085,6 +23170,7 @@ class BattleRuntime(object):
                         record['_remote_track_state_signature'] = track_signature
             return bool(pose_changed or aim_changed)
 
+    @visible_diagnostics.measured('house.entities')
     def _flush_pending_entities(self, now):
         for unused_key, record in list(self._records.items()):
             if record.get('tombstone'):
@@ -23634,6 +23720,7 @@ class BattleRuntime(object):
                 float(vector.x), float(vector.y), float(vector.z)))
         return world_center, tuple(half_axes)
 
+    @visible_diagnostics.measured('house.foliage')
     def _refresh_fallen_tree_foliage(self, now, force=False):
         if self._foliage is None:
             return False
@@ -25283,6 +25370,13 @@ class BattleRuntime(object):
             raise cleanup_error
 
     def _cleanup(self):
+        if self._function_profiles is not None:
+            self._function_profiles.stop('battle_cleanup')
+            self._function_profiles = None
+        if (self.client is not None and self._poll_costs is not None and
+                getattr(self.client, '_poll_costs', None) is self._poll_costs):
+            self.client._poll_costs = None
+        self._poll_costs = None
         combat_diagnostic = self._combat_diagnostics
         if combat_diagnostic is not None:
             combat_diagnostic.close()
