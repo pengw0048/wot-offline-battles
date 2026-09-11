@@ -95,7 +95,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
             dict(member, instance='commander', roles=['commander']),
             dict(member, instance='driver', roles=['driver'])])
         params['critical']['activation_targets'] = [
-            {'index': 1, 'name': 'commander'}, {'index': 2, 'name': 'driver'}]
+            {'index': 7, 'name': 'commander'}, {'index': 2, 'name': 'driver'}]
         params['equipment'] = [equipment_mechanics.project_equipment(
             types.SimpleNamespace(
                 name='medkit', id=(15, 2), compactDescr=763,
@@ -115,7 +115,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
         intent = {
             'type': 'equipment_intent', 'round_id': state.round_id,
             'intent_seq': 1, 'equipment_id': 2,
-            'activation_code': (1 << 16) | 2,
+            'activation_code': (7 << 16) | 2,
             'selected': 'commander', 'requested_active': None,
         }
 
@@ -150,7 +150,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
         player.critical['fire'] = True
         intent = {
             'type': 'equipment_intent', 'round_id': state.round_id,
-            'intent_seq': 1, 'equipment_id': 0, 'activation_code': 0,
+            'intent_seq': 1, 'equipment_id': 0, 'activation_code': 65536,
             'selected': None, 'requested_active': None,
         }
         before_critical = copy.deepcopy(player.critical)
@@ -184,7 +184,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
 
     def test_zero_id_manual_extinguisher_joins_and_extinguishes_once(self):
         from gui.mods.offline_lan_0922 import equipment_mechanics
-        # Exact #1513 handExtinguishers: local ID 0, packed equipment ID 251.
+        # #1513 handExtinguishers: ID 0, compact 251, HUD activation 65536.
         equipment = equipment_mechanics.project_equipment(types.SimpleNamespace(
             name='handExtinguishers', id=(15, 0), compactDescr=251,
             cooldownSeconds=90.0, reuseCount=1))
@@ -215,18 +215,89 @@ class EffectiveParamsContractTests(unittest.TestCase):
         client.round_id = state.round_id
         messages = []
         client._send = lambda message: messages.append(message) or True
-        self.assertEqual(1, client.send_equipment_intent(0, activation_code=0))
+        self.assertEqual(1, client.send_equipment_intent(
+            0, activation_code=65536))
         self.assertTrue(state.submit_equipment_intent(player.player_id, messages[0]))
         self.assertTrue(player.equipment_intent_result['accepted'])
         self.assertFalse(player.critical['fire'])
+        mounted = player.equipment_states[0]
+        after_use = mounted.snapshot(player.equipment_clock)
+        self.assertEqual(1, after_use['usesLeft'])
+        self.assertEqual(90.0, after_use['cooldownTimeLeft'])
+        self.assertEqual({'251': 1}, state._statistics_row(
+            'player', player.player_id)['equipment_used'])
         revision = player.equipment_revision
         self.assertTrue(state.submit_equipment_intent(player.player_id, messages[0]))
         self.assertEqual(revision, player.equipment_revision)
+        self.assertEqual(after_use, mounted.snapshot(player.equipment_clock))
+        player.critical['fire'] = True
+        self.assertEqual(2, client.send_equipment_intent(
+            0, activation_code=65536))
+        self.assertTrue(state.submit_equipment_intent(player.player_id, messages[1]))
+        self.assertEqual({
+            'intent_seq': 2, 'accepted': False,
+            'reason': 'equipment_ineligible'}, player.equipment_intent_result)
+        self.assertTrue(player.critical['fire'])
+        self.assertEqual(revision, player.equipment_revision)
+        self.assertEqual(after_use, mounted.snapshot(player.equipment_clock))
         for invalid in (-1, False, 65536):
             self.assertIsNone(client.send_equipment_intent(
-                invalid, activation_code=0))
-            forged = dict(messages[0], equipment_id=invalid, intent_seq=2)
+                invalid, activation_code=65536))
+            forged = dict(messages[0], equipment_id=invalid, intent_seq=3)
             self.assertFalse(state.submit_equipment_intent(player.player_id, forged))
+
+    def test_extinguisher_activation_rejects_invalid_codes_targets_and_modes(self):
+        from gui.mods.offline_lan_0922 import equipment_mechanics
+        for automatic, equipment_id, compact_descr, name in (
+                (False, 0, 251, 'handExtinguishers'),
+                (True, 1, 507, 'autoExtinguishers')):
+            params = effective_params()
+            params['equipment'] = [equipment_mechanics.project_equipment(
+                types.SimpleNamespace(
+                    name=name, id=(15, equipment_id),
+                    compactDescr=compact_descr, autoactivate=automatic,
+                    cooldownSeconds=90.0, reuseCount=1))]
+            state = BattleState()
+            player, error = state.add_player(
+                _Connection(), ('127.0.0.1', 2000), _hello(params))
+            self.assertIsNone(error)
+            self.assertTrue(state._install_player_equipments(player))
+            state.phase = 'battle'
+            state.tick = 10000
+            player.participating = True
+            player.critical['fire'] = True
+            mounted = player.equipment_states[0]
+            before = mounted.snapshot(0.0)
+            revision = player.equipment_revision
+            cases = [
+                (0, None, None, 'invalid_activation_code'),
+                (2, None, None, 'invalid_activation_code'),
+                (32767, None, None, 'invalid_activation_code'),
+                (1, 'engineHealth', None, 'invalid_equipment_target'),
+                (1, None, True, 'invalid_activation_mode'),
+            ]
+            if automatic:
+                cases.append((1, None, None, 'automatic_only'))
+            for sequence, (high_word, selected, active, reason) in enumerate(
+                    cases, 1):
+                with self.subTest(automatic=automatic, sequence=sequence):
+                    intent = {
+                        'type': 'equipment_intent', 'round_id': state.round_id,
+                        'intent_seq': sequence, 'equipment_id': equipment_id,
+                        'activation_code': (high_word << 16) | equipment_id,
+                        'selected': selected, 'requested_active': active,
+                    }
+                    self.assertTrue(state.submit_equipment_intent(
+                        player.player_id, intent))
+                    self.assertEqual({
+                        'intent_seq': sequence, 'accepted': False,
+                        'reason': reason}, player.equipment_intent_result)
+                    self.assertTrue(player.critical['fire'])
+                    self.assertEqual(revision, player.equipment_revision)
+                    self.assertEqual(
+                        before, mounted.snapshot(player.equipment_clock))
+                    self.assertEqual({}, state._statistics_row(
+                        'player', player.player_id)['equipment_used'])
 
     def test_dynamic_spotting_ratios_use_native_factor_pairs(self):
         healthy = {
