@@ -53,6 +53,28 @@ class VehiclePhysicsDescriptorTests(unittest.TestCase):
 
         self.assertEqual(0.75, params['rotSpd'])
 
+    def test_contact_mass_matches_drive_mass_without_reading_drive_fields(self):
+        class MassDescriptor(object):
+            physics = {'weight': 21000.0}
+
+            @property
+            def chassis(self):
+                raise AssertionError('mass read the traverse descriptor')
+
+            @property
+            def engine(self):
+                raise AssertionError('mass read the engine descriptor')
+
+        self.assertEqual(21000.0, vehicle_physics.descriptor_mass(MassDescriptor()))
+        for physics in ({'weight': 21000.0}, {'weight': '35000'}, {},
+                        {'weight': None}, {'weight': 'invalid'}):
+            descriptor = types.SimpleNamespace(
+                physics=physics,
+                chassis=_Strict1513Component(rotationSpeed=0.75))
+            with self.subTest(physics=physics):
+                self.assertEqual(vehicle_physics.derive_params(descriptor)['mass'],
+                                 vehicle_physics.descriptor_mass(descriptor))
+
     def test_zero_native_brake_force_keeps_track_grip_fallback(self):
         descriptor = types.SimpleNamespace(
             physics={'weight': 21000.0, 'brakeForce': 0.0},
