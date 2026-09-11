@@ -256,3 +256,34 @@ class CanonicalTurretPresentationTests(unittest.TestCase):
         presentation.destroy_all()
         self.assertEqual(world.destroy_attempts, [])
         self.assertIs(world.entities[901], replacement)
+
+    def test_one_bad_matrix_does_not_starve_later_turrets_and_can_retry(self):
+        world = _BigWorld()
+        math_module = _Math()
+        first, second = math_module.Matrix(), math_module.Matrix()
+        first_rotate = first.setRotateYPR
+
+        def fail_rotate(angles):
+            raise RuntimeError('native pose provider unavailable')
+
+        first.setRotateYPR = fail_rotate
+        matrices = [first, second]
+        math_module.Matrix = lambda: matrices.pop(0)
+        failures = []
+        presentation = detached_turret.DetachedTurretPresentation(
+            world, math_module, types.SimpleNamespace(spaceID=5),
+            lambda *args: self.fail('canonical presentation must not raycast'),
+            log=lambda what, error: failures.append(what))
+        for actor_id in (17, 18):
+            accepted = row()
+            accepted['actor_id'] = actor_id
+            plan = presentation.prepare_canonical(_Vehicle(actor_id), accepted)
+            self.assertTrue(presentation.launch_canonical(plan, accepted, 10, 10))
+        self.assertEqual(presentation.advance(10), 1)
+        self.assertEqual(world.entity(901).impacts, [])
+        self.assertEqual(len(world.entity(902).impacts), 1)
+        self.assertIn('detached turret pose write failed', failures)
+        first.setRotateYPR = first_rotate
+        self.assertEqual(presentation.advance(11), 1)
+        self.assertEqual(len(world.entity(901).impacts), 1)
+        self.assertEqual(len(world.entity(902).impacts), 1)

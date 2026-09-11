@@ -309,9 +309,15 @@ class DetachedTurretPresentation(object):
                 turret['flight'], turret['attitude'], turret['spin'],
                 elapsed)
             matrix = turret['matrix']
-            matrix.setRotateYPR(
-                (attitude[0], attitude[1], attitude[2]))
-            matrix.translation = self._vector(position)
+            try:
+                matrix.setRotateYPR(
+                    (attitude[0], attitude[1], attitude[2]))
+                matrix.translation = self._vector(position)
+            except Exception as error:
+                # One failing native provider must not starve later turrets.
+                # Keep this accepted flight for a fresh write next frame.
+                self._note('detached turret pose write failed', error)
+                continue
             written += 1
             if elapsed >= float(turret['flight']['duration']):
                 turret['settled'] = True
