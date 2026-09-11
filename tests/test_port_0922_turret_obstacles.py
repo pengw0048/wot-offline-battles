@@ -147,6 +147,23 @@ class TurretObstacleTests(unittest.TestCase):
         self.assertTrue(obstacles.sweep_blocks(pose(x=1.25), pose(x=1.1), descriptor(), 4000))
         self.assertTrue(obstacles.sweep_blocks(pose(x=1.25), pose(x=-3), descriptor(), 4000))
 
+    def test_hydraulic_body_and_chassis_use_separate_frames(self):
+        td = descriptor()
+        td.chassis.hitTester = BoxTester((-0.1, -0.1, -2), (0.1, 0.1, 2))
+        td.hull.hitTester = BoxTester((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1))
+        obstacles = self.obstacle()
+        body = pose(y=3.2, pitch=math.pi / 2)
+        self.assertTrue(obstacles.sweep_blocks(body, body, td, 4000))
+        split = dict(body, chassis=pose(y=3.2))
+        self.assertFalse(obstacles.sweep_blocks(split, split, td, 4000))
+        # The local adapter sends a ground root and a separate native body,
+        # including its hydraulic vertical offset.
+        td.hull.hitTester = BoxTester((-0.1, -0.1, -2), (0.1, 0.1, 2))
+        local = dict(pose(y=3.2), hull=body)
+        self.assertTrue(obstacles.sweep_blocks(local, local, td, 4000))
+        local['hull'] = pose(y=6, pitch=math.pi / 2)
+        self.assertFalse(obstacles.sweep_blocks(local, local, td, 4000))
+
     def test_rows_are_immutable_and_navigation_components_have_stable_ids(self):
         accepted = row()
         obstacles = self.obstacle(accepted)

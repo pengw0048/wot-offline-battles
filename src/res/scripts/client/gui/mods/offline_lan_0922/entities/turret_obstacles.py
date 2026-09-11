@@ -145,8 +145,8 @@ def _moving_components(descriptor):
         hull_position = _xyz(chassis.hullPosition)
     except (AttributeError, IndexError, TypeError, ValueError):
         raise ValueError('moving vehicle hull mount is unavailable')
-    return ((component_bounds(chassis), (0.0, 0.0, 0.0)),
-            (component_bounds(hull), hull_position))
+    return (('chassis', component_bounds(chassis), (0.0, 0.0, 0.0)),
+            ('hull', component_bounds(hull), hull_position))
 
 
 def _component_sweeps(bounds, offset, start, end):
@@ -321,8 +321,11 @@ class DetachedTurretObstacles(object):
         ready = tuple(self._ready(server_time_ms))
         if not ready:
             return False
-        start, end = _read_pose(start_pose), _read_pose(end_pose)
-        for bounds, offset in _moving_components(descriptor):
+        for name, bounds, offset in _moving_components(descriptor):
+            # Hydraulic bodies use a different frame from their chassis.
+            # Ordinary vehicles keep the shared root pose contract.
+            start = _read_pose(start_pose.get(name, start_pose))
+            end = _read_pose(end_pose.get(name, end_pose))
             initial = _world_box(bounds, offset, *start)
             final = _world_box(bounds, offset, *end)
             sweeps = _component_sweeps(bounds, offset, start, end)

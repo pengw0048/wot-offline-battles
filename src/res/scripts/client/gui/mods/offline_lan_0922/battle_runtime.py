@@ -6197,13 +6197,24 @@ class BattleRuntime(object):
                             desired_pitch, float(self._local_pitch),
                             gun_minimum, gun_maximum,
                             params['minimum'], params['maximum']))
-            self._local_siege_aim_pitch = hull_aiming.slew(
+            correction = hull_aiming.slew(
                 self._local_siege_aim_pitch, desired, speed, elapsed)
         except (AttributeError, TypeError, ValueError, OverflowError):
             # A malformed or stale descriptor degrades to the flat copied
             # pose. It must not terminate a round or call unsafe native state.
-            self._local_siege_aim_pitch = 0.0
+            correction = 0.0
             active = False
+        if (correction != self._local_siege_aim_pitch and
+                getattr(self, '_detached_turret_obstacles', None) is not None):
+            before = self._local_turret_pose(
+                self._local_position, self._local_yaw,
+                self._local_pitch, self._local_roll)
+            after = self._local_turret_pose(
+                self._local_position, self._local_yaw,
+                self._local_pitch, self._local_roll, aim_pitch=correction)
+            if not self._turret_motion_is_clear(before, after, descriptor):
+                correction = self._local_siege_aim_pitch
+        self._local_siege_aim_pitch = correction
         matrix.setRotateYPR((0.0, self._local_siege_aim_pitch, 0.0))
         return active
 
@@ -17840,17 +17851,48 @@ class BattleRuntime(object):
             return ()
         return obstacles.navigation_hulls(self._turret_server_time_ms())
 
+    def _local_turret_pose(self, position, yaw, pitch, roll, aim_pitch=None):
+        """Freeze the same separate body/chassis frames as local armour.
+
+        The selected hydraulic body is native body * inverse(native ground)
+        * copied aim * copied base. Build the candidate with fresh providers
+        so a rejected motion never mutates the live native pose. Sampling its
+        complete matrix preserves hydraulic height and combined rotations.
+        """
+        pose = {
+            'x': position[0], 'y': position[1], 'z': position[2],
+            'yaw': yaw, 'pitch': pitch, 'roll': roll,
+        }
+        body = self._local_siege_body_matrix
+        obstacles = getattr(self, '_detached_turret_obstacles', None)
+        if (obstacles is None or
+                body is None or
+                getattr(self._local_pose_matrix, 'a', None) is not body or
+                obstacles.active() == 0):
+            return pose
+        base = self._runtime.math.Matrix()
+        base.setRotateYPR((yaw, pitch, roll))
+        base.translation = self._vector(position)
+        aim = self._runtime.math.Matrix()
+        aim.setRotateYPR((0.0, self._local_siege_aim_pitch
+                          if aim_pitch is None else aim_pitch, 0.0))
+        matrix = self._runtime.math.Matrix(self._matrix_product(
+            body.a, self._matrix_product(aim, base)))
+        point = _xyz(matrix.translation)
+        pose['hull'] = {
+            'x': point[0], 'y': point[1], 'z': point[2],
+            'yaw': float(matrix.yaw), 'pitch': float(matrix.pitch),
+            'roll': float(matrix.roll),
+        }
+        return pose
+
     def _turret_pose_is_clear(
             self, start, start_yaw, end, end_yaw, descriptor,
             pitch=0.0, roll=0.0):
         if getattr(self, '_detached_turret_obstacles', None) is None:
             return True
-        before = {
-            'x': start[0], 'y': start[1], 'z': start[2],
-            'yaw': start_yaw, 'pitch': pitch, 'roll': roll,
-        }
-        after = dict(before)
-        after.update(x=end[0], y=end[1], z=end[2], yaw=end_yaw)
+        before = self._local_turret_pose(start, start_yaw, pitch, roll)
+        after = self._local_turret_pose(end, end_yaw, pitch, roll)
         return self._turret_motion_is_clear(before, after, descriptor)
 
     def _pose_sweep_is_clear(
@@ -20512,11 +20554,8 @@ class BattleRuntime(object):
         turret_tick_pose = None
         turret_suspension_snapshot = None
         if getattr(self, '_detached_turret_obstacles', None) is not None:
-            turret_tick_pose = {
-                'x': position[0], 'y': position[1], 'z': position[2],
-                'yaw': yaw, 'pitch': self._local_pitch,
-                'roll': self._local_roll,
-            }
+            turret_tick_pose = self._local_turret_pose(
+                position, yaw, self._local_pitch, self._local_roll)
             turret_suspension_snapshot = self._local_suspension_state_snapshot()
         contact_path = None
         reader = getattr(self._destructibles, 'take_ground_skip_count', None)
@@ -20750,11 +20789,8 @@ class BattleRuntime(object):
                 position = self._resolve_local_tank_contacts(
                     entity, position, yaw, dt)
         if turret_tick_pose is not None:
-            realised_pose = {
-                'x': position[0], 'y': position[1], 'z': position[2],
-                'yaw': yaw, 'pitch': self._local_pitch,
-                'roll': self._local_roll,
-            }
+            realised_pose = self._local_turret_pose(
+                position, yaw, self._local_pitch, self._local_roll)
             if not self._turret_motion_is_clear(
                     turret_tick_pose, realised_pose, entity.typeDescriptor):
                 # Suspension and slope sampling can change the complete hull
