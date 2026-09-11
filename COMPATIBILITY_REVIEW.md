@@ -706,6 +706,32 @@ return values, freshness windows, deadlines and 110-pair safety budget are
 unchanged. Straight-line Windows driving remains the frame-pacing acceptance
 test; this source review cannot claim that the visible hitch is eliminated.
 
+Visible clients additionally emit `PERF visible_costs` for the existing frame
+windows. `visible_diagnostics.py` selects one frame per eight-frame block,
+rotating the position within each block to avoid always observing the same
+phase of periodic track feeds. Only synchronous sync playback and local
+driving bind the observer. Fixed stages cover sync event application, pose and
+aim setters, track updates, motion checks, world-probe helpers, tank contacts,
+support, ground samples, suspension solving, and local presentation. Counts
+refer to these Python boundaries, including early returns and failed calls;
+they are not raw native-call counts. Timings include Python and native work
+within each boundary, plus observer overhead. They do not measure rendering
+outside the callback or distinguish CPU work from waiting.
+
+`total_ms_per_sample` includes measured children; `self_ms_per_sample` removes
+them. Inclusive totals must not be added across nested stages. Averages use
+the reported valid `sampled_frames`, including zero calls to a stage, rather
+than all `window_frames`; `failed_frames` are discarded separately. The
+existing all-frame stage and ground/solver averages keep their denominators.
+`PERF visible_slow` attaches numeric rows to a sampled slow interval's causal
+frame; an unsampled slow interval has no inferred detail. Both records use the
+same bounded line splitting as combat records below. Storage is bounded by
+fixed stage names, nesting depth, and the existing slow-frame limit; it holds
+no actors or call arguments. Clock/scope failures discard only the sample.
+Sampling does not depend on player input or change gameplay cadence, collision
+queries, interpolation, or native writes. Exact Windows reports are required
+to locate a remaining hotspot and assess both sampler overhead and FPS.
+
 The current hidden worker also supports bounded combat timing beyond its
 five-second startup probe sample. `worker_diagnostics.py` captures up to three
 30-second windows per round, with a 30-second cooldown. A live battle frame

@@ -62,7 +62,7 @@ from gui.mods.offline_lan_0922 import (
     prebaked_foliage,
     prebaked_navigation, native_mapping_mask, shot_geometry, spotting,
     tank_collision, track_damage,
-    vehicle_blacklist, vehicle_configuration, vehicle_physics,
+    vehicle_blacklist, vehicle_configuration, vehicle_physics, visible_diagnostics,
     world_collision)
 
 
@@ -506,6 +506,9 @@ class _FrameDiagnostics(object):
             (name, 0.0) for name in _FRAME_STAGE_NAMES + _FRAME_DETAIL_NAMES)
         self._stage_maxima = dict(
             (name, 0.0) for name in _FRAME_STAGE_NAMES + _FRAME_DETAIL_NAMES)
+        self._visible_samples = 0
+        self._visible_failures = 0
+        self._visible_costs = {}
         self._probe_sums = dict((name, 0) for name in PROBE_KINDS)
         self._probe_maxima = dict((name, 0) for name in PROBE_KINDS)
         self._probe_duration_sums = dict(
@@ -614,6 +617,21 @@ class _FrameDiagnostics(object):
             self._stage_sums[name] += value
             self._stage_maxima[name] = max(
                 self._stage_maxima[name], value)
+        visible = row.get('visible')
+        if visible is not None:
+            if visible.get('failed'):
+                self._visible_failures += 1
+            else:
+                self._visible_samples += 1
+                for name, values in visible['stages'].items():
+                    calls, total, own, maximum_call = values
+                    cost = self._visible_costs.setdefault(
+                        name, [0, 0.0, 0.0, 0.0, 0.0])
+                    cost[0] += calls
+                    cost[1] += total
+                    cost[2] += own
+                    cost[3] = max(cost[3], maximum_call)
+                    cost[4] = max(cost[4], total)
         for name in PROBE_KINDS:
             value = max(0, int(row['probes'].get(name, 0)))
             self._probe_sums[name] += value
@@ -728,6 +746,37 @@ class _FrameDiagnostics(object):
         """Return the most recently completed bounded performance window."""
         return dict(self._last_snapshot)
 
+    def _visible_summary(self):
+        if not self._visible_samples and not self._visible_failures:
+            return None
+        samples = max(1, self._visible_samples)
+        stages = {}
+        for name in visible_diagnostics.STAGES:
+            values = self._visible_costs.get(name)
+            if values is None:
+                continue
+            calls, total, own, maximum_call, maximum_frame = values
+            stages[name] = {
+                'calls': calls,
+                'calls_per_sample': round(float(calls) / samples, 3),
+                'total_ms_per_sample': self._milliseconds(total / samples),
+                'self_ms_per_sample': self._milliseconds(own / samples),
+                'max_call_ms': self._milliseconds(maximum_call),
+                'max_frame_ms': self._milliseconds(maximum_frame),
+            }
+        return {
+            'schema': 1, 'stride': visible_diagnostics.FRAME_STRIDE,
+            'selection': 'rotating_phase',
+            'window': self._window_id,
+            'round': self._last_context.get('round', '-'),
+            'map': self._last_context.get('map', '-'),
+            'phase': self._last_context.get('phase', '-'),
+            'sampled_frames': self._visible_samples,
+            'failed_frames': self._visible_failures,
+            'window_frames': self._samples,
+            'stages': stages,
+        }
+
     def _format(self):
         samples = max(1, self._samples)
         elapsed = max(1e-9, self._window_elapsed)
@@ -784,6 +833,7 @@ class _FrameDiagnostics(object):
             'outside_callback_ms': outside_distribution,
             'python_stages_ms': stage_snapshot,
             'python_details_ms': detail_snapshot,
+            'visible_costs': self._visible_summary(),
             # One logical probe can contain several native calls. The current
             # Python boundary cannot truthfully derive raw call/primitives.
             'raw_native_calls_measured': False,
@@ -902,6 +952,10 @@ class _FrameDiagnostics(object):
                          self._milliseconds(self._stage_sums[name] / samples),
                          self._milliseconds(self._stage_maxima[name]))
                          for name in _FRAME_DETAIL_NAMES) + '\n')
+        visible_summary = self._last_snapshot['visible_costs']
+        if visible_summary is not None:
+            lines.append(_combat_log_lines(
+                prefix, 'visible_costs', visible_summary))
         probe_values = []
         for name in PROBE_KINDS:
             probe_values.append('%s=%.2f/%d' % (
@@ -1014,6 +1068,14 @@ class _FrameDiagnostics(object):
                          name, self._milliseconds(
                              probe_durations.get(name, 0.0)))
                               for name in PROBE_KINDS)))
+            if row.get('visible') is not None:
+                lines.append(_combat_log_lines(prefix, 'visible_slow', {
+                    'schema': 1, 'cause': row['cause'],
+                    'window': self._window_id,
+                    'costs': row['visible'],
+                    'units': 'seconds',
+                    'row_fields': ['calls', 'total', 'self', 'max_call'],
+                }))
             if context.get('role') == 'worker':
                 frames = [('focus', 0, self._compact_frame(row))]
                 if rank == 1:
@@ -1037,7 +1099,7 @@ class _FrameDiagnostics(object):
 
     def finish(self, frame_id, entry_wall, tick_dt, motion_dt, stages,
                probes, context, probe_durations=None, projectile=None,
-               combat=None):
+               combat=None, visible=None):
         if not self.enabled:
             return
         try:
@@ -1064,6 +1126,7 @@ class _FrameDiagnostics(object):
                 'probe_durations': dict(probe_durations or {}),
                 'projectile': dict(projectile or {}),
                 'combat': combat,
+                'visible': visible,
                 'context': dict(context or {}), 'emitted': emitted,
             }
         except Exception:
@@ -1729,6 +1792,7 @@ class BattleRuntime(object):
         self._local_spring_ground_memory = None
         self._local_pseudo_ground_memory = None
         self._local_frame_stages = None
+        self._visible_frame_costs = None
         self._local_pitch = 0.0
         self._local_roll = 0.0
         self._local_suspension_pitch_velocity = 0.0
@@ -6793,6 +6857,7 @@ class BattleRuntime(object):
             (velocity[axis] - previous[axis]) / window for axis in range(3))
         return velocity, acceleration
 
+    @visible_diagnostics.measured('local.present')
     def _update_local_presentation(self, entity, dt=0.0):
         if self._local_matrix is None or self._local_model is None:
             raise RuntimeError('player presentation is not attached')
@@ -6898,6 +6963,7 @@ class BattleRuntime(object):
             return (ENGINE_MODE_RUNNING, flags)
         return (ENGINE_MODE_IDLE, flags)
 
+    @visible_diagnostics.measured('local.tracks')
     def _update_local_tracks(self, entity):
         """Feed the native track, wheel, spline and trace animation.
 
@@ -16049,6 +16115,8 @@ class BattleRuntime(object):
         self._spotted_signature = None
         frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe)
                     if profiling else 0)
+        visible_costs = (visible_diagnostics.new_frame(frame_id, _PROFILE_CLOCK)
+                         if profiling and not self._worker_mode else None)
         combat_diagnostic = self._combat_diagnostics
         if combat_diagnostic is not None and self._battle_live and profiling:
             trigger = None
@@ -16092,7 +16160,11 @@ class BattleRuntime(object):
                 stages['house'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
             if self._sync is not None:
-                self._sync.advance(now)
+                self._visible_frame_costs = visible_costs
+                try:
+                    visible_diagnostics.call(self, 'sync', self._sync.advance, now)
+                finally:
+                    self._visible_frame_costs = None
             if self._battle_live and self._worker_mode:
                 self._advance_player_fire_authority(rule_dt, now)
                 self._publish_player_environment(rule_dt, now)
@@ -16227,10 +16299,12 @@ class BattleRuntime(object):
                 boundary = next_boundary
             if self._battle_live and not self._worker_mode:
                 self._local_frame_stages = stages if profiling else None
+                self._visible_frame_costs = visible_costs
                 try:
-                    self._drive_local(dt)
+                    visible_diagnostics.call(self, 'local', self._drive_local, dt)
                 finally:
                     self._local_frame_stages = None
+                    self._visible_frame_costs = None
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['local'] = max(0.0, next_boundary - boundary)
@@ -16484,7 +16558,9 @@ class BattleRuntime(object):
                 }, probe_durations=probe_durations,
                 projectile=projectile_perf,
                 combat=(combat_diagnostic.finish_frame()
-                        if combat_diagnostic is not None else None))
+                        if combat_diagnostic is not None else None),
+                visible=(visible_costs.snapshot()
+                         if visible_costs is not None else None))
 
     def _mutable_shot_ray(self):
         """Copy #1513's native gun ray before normalising or scattering it."""
@@ -17918,6 +17994,7 @@ class BattleRuntime(object):
         after = self._local_turret_pose(end, end_yaw, pitch, roll)
         return self._turret_motion_is_clear(before, after, descriptor)
 
+    @visible_diagnostics.measured('local.motion')
     def _pose_sweep_is_clear(
             self, entity, start_position, start_yaw, end_position, end_yaw,
             speed, dt):
@@ -17993,6 +18070,7 @@ class BattleRuntime(object):
             start_position, start_yaw)
         return status in ('clear', 'crushed', 'approach')
 
+    @visible_diagnostics.measured('local.motion')
     def _motion_is_clear(self, entity, position, yaw, speed, dt,
                          allow_crush_drive=False, hull_yaw=None):
         """Thin tuple-to-Vector adapter around the copied 0.8.2 probe."""
@@ -18104,7 +18182,8 @@ class BattleRuntime(object):
                         self._send_pending_local_destructible_contacts()
                     return False
                 self._send_pending_local_destructible_contacts()
-                world_status = world_collision.check_horizontal_collision(
+                world_status = visible_diagnostics.call(
+                    self, 'local.world', world_collision.check_horizontal_collision,
                     self._runtime.bigworld, self._runtime.math,
                     self._avatar.spaceID, self._vector(position),
                     world_hull_yaw, speed,
@@ -18122,7 +18201,8 @@ class BattleRuntime(object):
                     'clear', 'crushed', 'approach')
             if tree_contact is not None:
                 self._send_pending_local_destructible_contacts()
-        world_status = world_collision.check_horizontal_collision(
+        world_status = visible_diagnostics.call(
+            self, 'local.world', world_collision.check_horizontal_collision,
             self._runtime.bigworld, self._runtime.math,
             self._avatar.spaceID, self._vector(position),
             world_hull_yaw, speed,
@@ -19126,6 +19206,7 @@ class BattleRuntime(object):
             })
         return result
 
+    @visible_diagnostics.measured('local.contacts')
     def _resolve_local_tank_contacts(self, entity, position, yaw, dt):
         """Apply chassis OBB separation without pushing a tank into walls."""
         self._retry_native_ram_contact_proofs()
@@ -19661,6 +19742,7 @@ class BattleRuntime(object):
         self._report_local_suspension_trial('retired: %s' % (error,))
         self._warn_optional_failure('ten-spring suspension trial', error)
 
+    @visible_diagnostics.measured('local.ground')
     def _local_suspension_ground_samples(
             self, position, yaw, probe_height=None,
             support_gradient=None, sweep_drop=0.0):
@@ -19705,6 +19787,7 @@ class BattleRuntime(object):
         self._local_spring_ground_memory = memory
         return tuple(result)
 
+    @visible_diagnostics.measured('local.ground')
     def _local_suspension_pseudo_ground_samples(
             self, position, yaw, probe_height=None,
             support_gradient=None, sweep_drop=0.0):
@@ -20028,6 +20111,7 @@ class BattleRuntime(object):
             self._local_airborne = False
         return position
 
+    @visible_diagnostics.measured('local.support')
     def _update_vertical_motion(
             self, entity, position, yaw, dt,
             support_height_delta=0.0, support_speed_delta=0.0):
@@ -20188,7 +20272,8 @@ class BattleRuntime(object):
             'roll_velocity': self._local_suspension_roll_velocity,
         }
         solver_started = _PROFILE_CLOCK() if timings is not None else 0.0
-        solved = vehicle_physics.damper_suspension_step(
+        solved = visible_diagnostics.call(
+            self, 'local.solver', vehicle_physics.damper_suspension_step,
             params, physics_state, ground, dt, pseudo_ground,
             support_vertical_speed)
         if timings is not None:
@@ -21118,6 +21203,7 @@ class BattleRuntime(object):
             return (ENGINE_MODE_RUNNING, flags)
         return (ENGINE_MODE_IDLE, 0)
 
+    @visible_diagnostics.measured('sync.tracks')
     def _update_bot_tracks(self, record, state, now, turn_override=None):
         """Drive one bot's belts from its authority speed and turn rate."""
         # The hidden authority needs native hull and gun poses for collision
@@ -22397,6 +22483,7 @@ class BattleRuntime(object):
         accepted = sender(*args, **kwargs)
         return accepted == shot_seq
 
+    @visible_diagnostics.measured('sync.apply')
     def _apply_sync_event(self, event):
         if self.state in ('failed', 'stopped', 'leaving'):
             return
@@ -22944,7 +23031,8 @@ class BattleRuntime(object):
                 # mutate its provider. A later sample may return to that old
                 # pose instead of retrying the failed target.
                 record.pop('_remote_pose_signature', None)
-                self._binding.set_vehicle_pose(
+                visible_diagnostics.call(
+                    self, 'sync.pose', self._binding.set_vehicle_pose,
                     record['engine_id'], self._vector((x, y, z)),
                     _engine_rotation(yaw, pitch, roll), now=now)
                 record['_remote_pose_signature'] = signature
@@ -22977,7 +23065,8 @@ class BattleRuntime(object):
                 # Turret yaw can succeed before gun pitch fails. The old
                 # signature no longer describes that partially written aim.
                 record.pop('_remote_aim_signature', None)
-                self._binding.update_vehicle_aim(
+                visible_diagnostics.call(
+                    self, 'sync.aim', self._binding.update_vehicle_aim,
                     record['engine_id'], yaw, aim_yaw, gun_pitch)
                 record['_remote_aim_signature'] = aim_signature
             if record.get('kind') in ('bot', 'player'):
