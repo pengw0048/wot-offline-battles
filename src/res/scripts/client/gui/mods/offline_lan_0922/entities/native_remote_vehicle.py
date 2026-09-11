@@ -172,9 +172,13 @@ class _NativeRemoteState(object):
         self._capabilities_changed = False
 
     def _write_matrix(self, matrix):
+        previous = getattr(self, '_matrix_pose', None)
+        # A failed rotation/translation pair may have changed the provider.
+        # The next sample must repair it even if it returns to the old pose.
+        self._matrix_pose = None
         self._matrix_pose = _write_changed_pose(
             matrix, self.position, (self.yaw, self.pitch, self.roll),
-            getattr(self, '_matrix_pose', None))
+            previous)
 
     def _matrix_product(self, first, second=None):
         product_type = getattr(self._math, 'MatrixProduct', None)
