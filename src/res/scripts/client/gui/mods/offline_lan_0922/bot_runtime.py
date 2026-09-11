@@ -8845,7 +8845,8 @@ class BotRuntime(object):
 
     @classmethod
     def _update_hydraulic_suspension(
-            cls, state, descriptor, world_yaw, world_pitch, elapsed):
+            cls, state, descriptor, world_yaw, world_pitch, elapsed,
+            motion_probe=None):
         try:
             params = hull_aiming.pitch_params(descriptor)
         except ValueError:
@@ -8864,6 +8865,12 @@ class BotRuntime(object):
             correction = hull_aiming.slew(
                 current, target, params['speed'], elapsed)
         terrain_pitch = cls._terrain_pitch(state)
+        if motion_probe is not None:
+            before = cls._turret_state_pose(state)
+            after = dict(before)
+            after['pitch'] = terrain_pitch + correction
+            if not motion_probe(before, after, descriptor):
+                return _number(state.get('suspension_pitch'))
         state['terrain_pitch'] = terrain_pitch
         state['suspension_pitch'] = correction
         state['pitch'] = terrain_pitch + correction
@@ -9406,7 +9413,8 @@ class BotRuntime(object):
                                (aim_position[1] + 1.0) - origin[1],
                                max(0.5, horizontal)))
         self._update_hydraulic_suspension(
-            state, descriptor, desired_yaw, world_pitch, step)
+            state, descriptor, desired_yaw, world_pitch, step,
+            self._turret_motion_probe)
         local_angles = self._local_gun_angles_for_world(
             state, desired_yaw, world_pitch)
         if local_angles is None:

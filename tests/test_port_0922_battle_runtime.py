@@ -19491,7 +19491,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._detached_turret_obstacles = types.SimpleNamespace(sweep_blocks=block)
         reusable = mock.Mock(return_value=True)
         battle._bots = types.SimpleNamespace(states={11: {
-            'movement_dir': 1, 'airborne': False, 'terrain_pitch': 0.2, 'roll': -0.1,
+            'movement_dir': 1, 'airborne': False, 'terrain_pitch': 0.1,
+            'pitch': 0.2, 'roll': -0.1,
         }}, motion_world_corridor_reusable=reusable)
         battle._destructibles = mock.Mock()
         battle._destructibles._catalog_hull_contact.return_value = False

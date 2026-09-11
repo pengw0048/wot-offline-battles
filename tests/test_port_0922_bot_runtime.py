@@ -13549,6 +13549,23 @@ class BotRuntimeTests(unittest.TestCase):
             self.assertTrue(self.runtime._update_slope_pose(state))
         self.assertEqual((0.3, -0.4), (state['pitch'], state['roll']))
 
+    def test_landed_turret_blocks_hydraulic_hull_aiming_pose(self):
+        state = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0,
+                 'pitch': 0.3, 'terrain_pitch': 0.1,
+                 'suspension_pitch': 0.2, 'roll': -0.1}
+        descriptor = _combat_descriptor()
+        clear = mock.Mock(return_value=False)
+        self.assertEqual(0.2, self.runtime._update_hydraulic_suspension(
+            state, descriptor, 0.0, 0.0, 0.1, clear))
+        self.assertEqual((0.3, 0.2), (state['pitch'], state['suspension_pitch']))
+        before, after, used = clear.call_args.args
+        self.assertEqual((0.3, 0.1), (before['pitch'], after['pitch']))
+        self.assertIs(descriptor, used)
+        clear.return_value = True
+        self.assertEqual(0.0, self.runtime._update_hydraulic_suspension(
+            state, descriptor, 0.0, 0.0, 0.1, clear))
+        self.assertEqual((0.1, 0.0), (state['pitch'], state['suspension_pitch']))
+
     def test_tank_separation_is_probed_at_the_distance_it_moves(self):
         """Static geometry beyond the hull must not veto a small unjam.
 

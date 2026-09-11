@@ -18158,7 +18158,7 @@ class BattleRuntime(object):
             float(position[2]) + math.cos(travel_yaw) * abs(speed) * dt)
         if not self._turret_pose_is_clear(
                 position, yaw, contact_end, yaw, descriptor,
-                _number(bot_state.get('terrain_pitch', bot_state.get('pitch'))),
+                _number(bot_state.get('pitch')),
                 _number(bot_state.get('roll'))):
             self._bot_motion_kinds[int(bot_id)] = 'detached_turret'
             return 'hard'
