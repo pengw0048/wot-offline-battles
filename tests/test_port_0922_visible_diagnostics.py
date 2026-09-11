@@ -240,7 +240,7 @@ class VisibleRuntimeTests(unittest.TestCase):
                     self.assertEqual(sampled, snapshot is not None)
                     if sampled:
                         self.assertFalse(snapshot['failed'])
-                        self.assertEqual({'sync', 'local'}, set(snapshot['stages']))
+                        self.assertTrue({'sync', 'local', 'house'}.issubset(snapshot['stages']))
 
     def test_real_phase_failures_keep_round_failure_and_clear_observer(self):
         for phase in ('sync', 'local'):

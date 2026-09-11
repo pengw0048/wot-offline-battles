@@ -17,6 +17,7 @@ from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import siege_mechanics
 from gui.mods.offline_lan_0922 import spotting
 from gui.mods.offline_lan_0922 import turret_obstacle_schema
+from gui.mods.offline_lan_0922 import frame_accounting, visible_diagnostics
 
 
 PROTOCOL_VERSION = 5
@@ -1532,6 +1533,8 @@ class LANClient(object):
         self._published_player_effective_params = {}
         self._published_player_effective_param_sources = {}
         self.on_event = on_event
+        self._visible_frame_costs = None
+        self._poll_costs = None
         self.bigworld = bigworld
         self.sock = None
         self.thread = None
@@ -3838,6 +3841,7 @@ class LANClient(object):
         self._poll_callback = self.bigworld.callback(
             POLL_INTERVAL, self._poll)
 
+    @frame_accounting.poll
     def _poll(self):
         self._poll_callback = None
         messages = []
@@ -3845,6 +3849,8 @@ class LANClient(object):
             if self._pending:
                 messages = self._pending
                 self._pending = []
+        if self._poll_costs is not None:
+            self._poll_costs.batch(messages, _monotonic_time())
         latest_snapshot = None
         for message in messages:
             if message.get('type') == 'snapshot':
@@ -3863,6 +3869,8 @@ class LANClient(object):
                     latest_snapshot = None
                     if not self.running:
                         break
+                if latest_snapshot is not None and self._poll_costs is not None:
+                    self._poll_costs.data['coalesced_snapshots'] += 1
                 latest_snapshot = message
             elif (message.get('type') == 'events' and
                   latest_snapshot is not None and
@@ -4112,6 +4120,7 @@ class LANClient(object):
             return None
         return round_id
 
+    @frame_accounting.message
     def _handle_message(self, message, trusted_player_static=None):
         if not isinstance(message, dict):
             return
@@ -5145,6 +5154,7 @@ class LANClient(object):
                 self.last_snapshot = message
         self._notify(kind, message)
 
+    @visible_diagnostics.measured('net.dispatch')
     def _notify(self, kind, message):
         if self.on_event is not None and kind is not None:
             if (isinstance(message, dict) and

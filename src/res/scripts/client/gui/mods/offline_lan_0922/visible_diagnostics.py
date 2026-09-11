@@ -1,6 +1,6 @@
 """Sample the visible client's extra sync and local-update work.
 
-Only synchronous calls inside those two frame phases bind this observer.
+Only explicitly bounded synchronous frame or network scopes bind this observer.
 Rows contain numbers and fixed stage names, never vehicles or call arguments.
 Inclusive time contains children; self time removes instrumented children.
 Neither the sampler nor a diagnostic failure may change gameplay work.
@@ -12,10 +12,18 @@ import math
 
 FRAME_STRIDE = 8
 STAGES = (
+    'house', 'house.visibility', 'house.create', 'house.entities',
+    'house.chat', 'house.events', 'house.foliage', 'house.ready',
     'sync', 'sync.apply', 'sync.pose', 'sync.aim', 'sync.tracks',
+    'sync.entity', 'sync.present',
     'local', 'local.motion', 'local.world', 'local.contacts',
+    'local.arena', 'local.turret', 'local.catalog', 'local.tree',
+    'local.tree_commit', 'local.catalog_commit',
     'local.support', 'local.ground', 'local.solver',
     'local.present', 'local.tracks',
+    'net.poll', 'net.snapshot', 'net.events', 'net.other', 'net.dispatch',
+    'net.apply_snapshot', 'net.apply_events', 'net.destructibles',
+    'net.projectiles', 'net.turrets', 'net.bot_snapshot', 'net.pose_snapshot',
 )
 MAX_DEPTH = 16
 
@@ -114,5 +122,21 @@ def measured(name):
                 return method(self, *args, **kwargs)
             finally:
                 costs.stop(token)
+        return measured_call
+    return decorate
+
+
+def network_measured(name):
+    """Borrow the current LAN poll sample only for this synchronous call."""
+    def decorate(method):
+        @functools.wraps(method)
+        def measured_call(self, *args, **kwargs):
+            previous = self._visible_frame_costs
+            self._visible_frame_costs = getattr(
+                self.client, '_visible_frame_costs', None)
+            try:
+                return call(self, name, method, self, *args, **kwargs)
+            finally:
+                self._visible_frame_costs = previous
         return measured_call
     return decorate
