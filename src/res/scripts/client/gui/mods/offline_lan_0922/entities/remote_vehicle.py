@@ -1416,18 +1416,6 @@ def _component_aim_angles(descriptor, turret_yaw, gun_pitch):
     return float(turret_yaw), float(gun_pitch)
 
 
-def turret_is_attached(vehicle):
-    """Return #1513's own ``getComponents`` attachment bit for turret and gun.
-
-    Exact ``Vehicle.getComponents`` publishes ``not self.isTurretDetached``
-    for the turret and the gun, and ``Vehicle.__collideSegment`` skips every
-    component whose bit is false.  An ammo-bay detachment therefore removes
-    both hit testers from the wreck; without that the empty turret ring keeps
-    stopping shells above a turretless hull.
-    """
-    return not bool(getattr(vehicle, 'isTurretDetached', False))
-
-
 def _write_changed_pose(matrix, position, rotation, previous):
     """Write changed components of one persistent presentation matrix.
 
@@ -1444,6 +1432,18 @@ def _write_changed_pose(matrix, position, rotation, previous):
     if rotated or previous[1] != xyz:
         matrix.translation = position
     return matrix, xyz, rotation
+
+
+def turret_is_attached(vehicle):
+    """Return #1513's own ``getComponents`` attachment bit for turret and gun.
+
+    Exact ``Vehicle.getComponents`` publishes ``not self.isTurretDetached``
+    for the turret and the gun, and ``Vehicle.__collideSegment`` skips every
+    component whose bit is false.  An ammo-bay detachment therefore removes
+    both hit testers from the wreck; without that the empty turret ring keeps
+    stopping shells above a turretless hull.
+    """
+    return not bool(getattr(vehicle, 'isTurretDetached', False))
 
 
 def _pose_components(vehicle, math_module):
