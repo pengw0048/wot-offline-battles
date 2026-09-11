@@ -2487,179 +2487,53 @@ class ResetStateNameTests(unittest.TestCase):
             self.assertFalse(core._reset_state_name(name), name)
 
 
-class WorkerResourceIsolationTest(unittest.TestCase):
-    """The hidden worker must start against this port and nothing else.
+class WorkerClientPathsTest(unittest.TestCase):
+    """A hidden worker starts on paths.xml without an isolated-path retry."""
 
-    Field reports 20260910-014738/-015542 lost every battle to a third-party
-    plugin that had replaced ``AppLoader.showBattleLoading`` inside the hidden
-    worker, and 20260910-044828 ran fifteen other mods there.  The client
-    mounts all of them from ``paths.xml``; ``BW_RES_PATH`` replaces that list.
-    """
+    def test_worker_clears_inherited_resource_overrides(self):
+        inherited = {"BW_RES_PATH": "old-worker-res",
+                     "WOT_OFFLINE_WORKER_RES_PATH": "old-worker-res"}
+        environment = core.worker_environment(
+            "/game", "192.168.1.3", 28783, environment=inherited)
+        self.assertNotIn("BW_RES_PATH", environment)
+        self.assertNotIn("WOT_OFFLINE_WORKER_RES_PATH", environment)
+        self.assertEqual("192.168.1.3",
+                         environment[core.CLIENT_SERVER_HOST_ENV_0922])
+        self.assertEqual("28783",
+                         environment[core.CLIENT_SERVER_PORT_ENV_0922])
+        self.assertEqual("old-worker-res", inherited["BW_RES_PATH"])
 
-    PATHS_XML = (
-        '<root>\n'
-        '  <Paths>\n'
-        '    <Path>./res_mods/0.9.22.0.1</Path>\n'
-        '    <Path mode="recursive" mask="*.wotmod" root="res">'
-        './mods/0.9.22.0.1</Path>\n'
-        '    <Path type="sd,hd">./res/packages/scripts.pkg</Path>\n'
-        '    <Path>./res</Path>\n'
-        '  </Paths>\n'
-        '</root>\n')
+    def test_worker_success_or_failure_never_starts_an_isolation_retry(self):
+        import wot_launcher
 
-    def setUp(self):
-        self.root = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.root, True)
-        with open(os.path.join(self.root, "paths.xml"), "w",
-                  encoding="utf-8") as stream:
-            stream.write(self.PATHS_XML)
-        os.makedirs(os.path.join(self.root, "res", "packages"))
-        with open(os.path.join(
-                self.root, "res", "packages", "scripts.pkg"), "wb") as stream:
-            stream.write(b"pkg")
-
-    def _install_payload(self, package_name="org.peng.offline_lan_0922_1.0.wotmod"):
-        package_dir = os.path.join(self.root, "mods", "0.9.22.0.1")
-        os.makedirs(package_dir)
-        package = os.path.join(package_dir, package_name)
-        with zipfile.ZipFile(package, "w") as archive:
-            archive.writestr("meta.xml", "<root/>")
-            archive.writestr(
-                "res/scripts/client/gui/mods/mod_offline_lan_0922.py", "x = 1")
-            archive.writestr("res/system/fonts/offline.font", "font")
-        config_dir = os.path.join(self.root, "res_mods", "0.9.22.0.1")
-        os.makedirs(config_dir)
-        config = os.path.join(config_dir, "engine_config.offline-worker.xml")
-        with open(config, "wb") as stream:
-            stream.write(b"<root/>")
-        return package, config
-
-    def test_mod_roots_are_the_only_entries_removed(self):
-        entries = core.client_resource_paths(self.root)
-        self.assertEqual([
-            os.path.normpath(os.path.join(
-                self.root, "res", "packages", "scripts.pkg")),
-            os.path.normpath(os.path.join(self.root, "res")),
-        ], entries)
-
-    def test_a_package_this_content_type_never_installed_is_left_out(self):
-        # paths.xml lists every sd and hd package and the client filters on
-        # the type attribute; a flat search path cannot, so only what is
-        # actually on disk goes on the list.
-        os.unlink(os.path.join(self.root, "res", "packages", "scripts.pkg"))
-        self.assertEqual(
-            [os.path.normpath(os.path.join(self.root, "res"))],
-            core.client_resource_paths(self.root))
-
-    def test_a_client_without_its_stock_resource_root_is_left_alone(self):
-        self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        shutil.rmtree(os.path.join(self.root, "res"))
-        self.assertIsNone(core.worker_resource_path_list(self.root))
-
-    def test_a_client_without_paths_xml_keeps_its_own_mod_paths(self):
-        os.unlink(os.path.join(self.root, "paths.xml"))
-        self.assertIsNone(core.client_resource_paths(self.root))
-        self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        self.assertIsNone(core.worker_resource_path_list(self.root))
-
-    def test_the_worker_root_carries_the_payload_and_engine_config(self):
-        self._install_payload()
-        actions = core.prepare_worker_resource_root(self.root)
-        self.assertTrue(any("isolated resource root" in action
-                            for action in actions), actions)
-        root = core.worker_resource_root(self.root)
-        self.assertTrue(os.path.isfile(os.path.join(
-            root, "scripts", "client", "gui", "mods",
-            "mod_offline_lan_0922.py")))
-        self.assertTrue(os.path.isfile(os.path.join(
-            root, "engine_config.offline-worker.xml")))
-        # The package's own metadata is not client resource content.
-        self.assertFalse(os.path.exists(os.path.join(root, "meta.xml")))
-        self.assertEqual(
-            [root] + core.client_resource_paths(self.root),
-            core.worker_resource_path_list(self.root))
-
-    def test_a_second_prepare_is_a_no_op_until_the_payload_changes(self):
-        package, unused_config = self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        repeat = core.prepare_worker_resource_root(self.root)
-        self.assertTrue(any("already up to date" in action
-                            for action in repeat), repeat)
-        with zipfile.ZipFile(package, "w") as archive:
-            archive.writestr(
-                "res/scripts/client/gui/mods/mod_offline_lan_0922.py",
-                "x = 2")
-        os.utime(package, (1, 1))
-        rebuilt = core.prepare_worker_resource_root(self.root)
-        self.assertTrue(any("isolated resource root (" in action
-                            for action in rebuilt), rebuilt)
-        with open(os.path.join(
-                core.worker_resource_root(self.root), "scripts", "client",
-                "gui", "mods", "mod_offline_lan_0922.py"),
-                encoding="utf-8") as stream:
-            self.assertEqual("x = 2", stream.read())
-
-    def test_a_missing_package_leaves_the_worker_on_the_client_paths(self):
-        actions = core.prepare_worker_resource_root(self.root)
-        self.assertTrue(any("keeps the client's own mod paths" in action
-                            for action in actions), actions)
-        self.assertIsNone(core.worker_resource_path_list(self.root))
-
-    def test_a_missing_source_cannot_reuse_an_older_worker_root(self):
-        package, config = self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        for source in (package, config):
-            with open(source, "rb") as stream:
-                payload = stream.read()
-            os.unlink(source)
-            core.prepare_worker_resource_root(self.root)
-            self.assertIsNone(core.worker_resource_path_list(self.root))
-            with open(source, "wb") as stream:
-                stream.write(payload)
-            core.prepare_worker_resource_root(self.root)
-            self.assertIsNotNone(core.worker_resource_path_list(self.root))
-
-    def test_a_failed_upgrade_cannot_mount_the_previous_worker_payload(self):
-        package, unused_config = self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        with open(package, "wb") as stream:
-            stream.write(b"unreadable replacement")
-        actions = core.prepare_worker_resource_root(self.root)
-        self.assertTrue(any("could not be built" in action
-                            for action in actions), actions)
-        self.assertIsNone(core.worker_resource_path_list(self.root))
-        environment = core.worker_environment(self.root, environment={})
-        self.assertNotIn(core.WORKER_RES_PATH_ENV_0922, environment)
-
-    def test_a_corrupt_member_falls_back_after_the_archive_opens(self):
-        package, unused_config = self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        with zipfile.ZipFile(package, "w") as archive:
-            archive.writestr("res/scripts/replacement.py", b"payload-bytes")
-        with open(package, "rb") as stream:
-            payload = stream.read()
-        with open(package, "wb") as stream:
-            stream.write(payload.replace(b"payload-bytes", b"PAYLOAD-bytes", 1))
-        actions = core.prepare_worker_resource_root(self.root)
-        self.assertTrue(any("could not be built" in action
-                            for action in actions), actions)
-        self.assertIsNone(core.worker_resource_path_list(self.root))
-
-    def test_only_an_isolated_worker_receives_the_resource_variable(self):
-        self._install_payload()
-        core.prepare_worker_resource_root(self.root)
-        isolated = core.worker_environment(
-            self.root, environment={}, isolated_mods=True)
-        self.assertEqual(
-            ";".join(core.worker_resource_path_list(self.root)),
-            isolated[core.WORKER_RES_PATH_ENV_0922])
-        stock = core.worker_environment(
-            self.root,
-            environment={core.WORKER_RES_PATH_ENV_0922: "stale"},
-            isolated_mods=False)
-        self.assertNotIn(core.WORKER_RES_PATH_ENV_0922, stock)
+        for ready in (True, False):
+            with self.subTest(ready=ready):
+                window = object.__new__(wot_launcher.LauncherWindow)
+                window._active_report_session = None
+                window._stop_requested = False
+                window._stop_requested_roles = set()
+                window._log = mock.Mock()
+                window._log_worker_failure = mock.Mock()
+                window._observe_process_exit = mock.Mock(return_value=None)
+                window._stop_worker = mock.Mock()
+                window._crash_capture_environment = lambda value, role: value
+                with mock.patch.dict(wot_launcher.os.environ, {}, clear=True), \
+                        mock.patch.object(wot_launcher.os.path, "isfile", return_value=True), \
+                        mock.patch.object(core, "worker_ready_marker_token", return_value=None), \
+                        mock.patch.object(core, "wait_for_worker_ready", return_value=ready), \
+                        mock.patch.object(core, "prepare_worker_resource_root", create=True, return_value=[]), \
+                        mock.patch.object(core, "worker_resource_path_list", create=True, return_value=["old-worker-res"]), \
+                        mock.patch.object(wot_launcher.subprocess, "Popen") as spawn:
+                    self.assertEqual(ready, window._start_worker(
+                        "/game", "127.0.0.1", 28782))
+                self.assertEqual(1, spawn.call_count)
+                environment = spawn.call_args.kwargs["env"]
+                self.assertNotIn("BW_RES_PATH", environment)
+                self.assertNotIn("WOT_OFFLINE_WORKER_RES_PATH", environment)
+                if ready:
+                    window._stop_worker.assert_not_called()
+                else:
+                    window._stop_worker.assert_called_once_with(room_owned=False)
 
 
 class ExitCodeDescriptionTest(unittest.TestCase):

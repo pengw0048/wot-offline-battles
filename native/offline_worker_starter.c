@@ -43,7 +43,6 @@
 #define PLAYER_HANDOFF_GRACE_MS 10000
 #define PLAYER_HANDOFF_POLL_MS 100
 #define MAX_GAME_PROCESS_IDS 32
-#define WORKER_RES_PATH_ENV L"WOT_OFFLINE_WORKER_RES_PATH"
 #define BW_RES_PATH_ENV L"BW_RES_PATH"
 #define PROCDUMP_PATH_ENV L"WOT_OFFLINE_PROCDUMP_PATH"
 #define CRASH_DUMP_PATH_ENV L"WOT_OFFLINE_CRASH_DUMP_PATH"
@@ -330,45 +329,6 @@ static void cancel_procdump_now(HANDLE *procdump_process,
 		CloseHandle(*procdump_process);
 		*procdump_process = 0;
 	}
-}
-
-
-/* #1513 builds its resource search path from the first source that yields
- * one: --res, then BW_RES_PATH, then the client's own paths.xml.  paths.xml is
- * what mounts ./res_mods/<version> and ./mods/<version>, so publishing
- * BW_RES_PATH for the worker alone gives it this port and the stock packages
- * without any other installed mod.  The launcher composes the list; a missing
- * or empty variable simply leaves the worker on paths.xml. */
-static int apply_worker_resource_path(void)
-{
-	WCHAR *value;
-	DWORD length;
-	DWORD copied;
-	length = GetEnvironmentVariableW(WORKER_RES_PATH_ENV, 0, 0);
-	if (length == 0) {
-		SetEnvironmentVariableW(BW_RES_PATH_ENV, 0);
-		return 0;
-	}
-	value = (WCHAR *)HeapAlloc(
-		GetProcessHeap(), 0, (SIZE_T)length * sizeof(WCHAR));
-	if (value == 0) {
-		log_failure("worker_res_path_alloc", ERROR_OUTOFMEMORY);
-		return -1;
-	}
-	copied = GetEnvironmentVariableW(WORKER_RES_PATH_ENV, value, length);
-	if (copied == 0 || copied >= length) {
-		HeapFree(GetProcessHeap(), 0, value);
-		log_failure("worker_res_path_read", GetLastError());
-		return -1;
-	}
-	if (!SetEnvironmentVariableW(BW_RES_PATH_ENV, value)) {
-		HeapFree(GetProcessHeap(), 0, value);
-		log_failure("worker_res_path_publish", GetLastError());
-		return -1;
-	}
-	HeapFree(GetProcessHeap(), 0, value);
-	log_status("worker_res_path_applied", "characters", copied);
-	return 1;
 }
 
 
@@ -1485,10 +1445,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 		goto worker_cleanup;
 	}
 
-	if (apply_worker_resource_path() < 0) {
-		result = 7;
-		goto worker_cleanup;
-	}
+	/* Use the client's paths.xml, including its installed mods. */
+	SetEnvironmentVariableW(BW_RES_PATH_ENV, 0);
 	if (FAILED(StringCchPrintfW(child_command, 2 * MAX_PATH,
 			L"\"%s\" --config engine_config.offline-worker.xml "
 			L"--logFilePrefix offline-worker-", game_path))) {

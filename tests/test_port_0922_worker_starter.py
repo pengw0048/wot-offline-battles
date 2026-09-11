@@ -91,6 +91,21 @@ class WorkerStarterTests(unittest.TestCase):
         self.assertNotIn(
             'SetEnvironmentVariableW(SERVER_PORT_ENV, 0);', launch)
 
+    def test_both_clients_clear_resource_overrides_before_launch(self):
+        source = SOURCE.read_text(encoding='utf-8')
+        launch = source.split(
+            'static int launch_player', 1)[1].split(
+                'int WINAPI wWinMain', 1)[0]
+        main = source.split('int WINAPI wWinMain', 1)[1]
+
+        self.assertNotIn('WOT_OFFLINE_WORKER_RES_PATH', source)
+        self.assertNotIn('apply_worker_resource_path', source)
+        self.assertNotIn('--res ', source)
+        for body in (launch, main):
+            self.assertLess(
+                body.index('SetEnvironmentVariableW(BW_RES_PATH_ENV, 0);'),
+                body.index('CreateProcessW(game_path, child_command'))
+
     def test_visible_player_job_tracks_client_process_handoffs(self):
         source = SOURCE.read_text(encoding='utf-8')
         launch = source.split(
@@ -458,6 +473,9 @@ class WorkerStarterTests(unittest.TestCase):
             'WOT_OFFLINE_PROCDUMP_PATH'.encode('utf-16le'), payload)
         self.assertIn(
             'WOT_OFFLINE_CRASH_DUMP_PATH'.encode('utf-16le'), payload)
+        self.assertNotIn(
+            'WOT_OFFLINE_WORKER_RES_PATH'.encode('utf-16le'), payload)
+        self.assertIn('BW_RES_PATH'.encode('utf-16le'), payload)
         self.assertIn(
             '.monitor-%02lu.tmp.dmp'.encode('utf-16le'), payload)
         self.assertIn('-cancel %lu'.encode('utf-16le'), payload)
