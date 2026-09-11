@@ -1627,6 +1627,120 @@ python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
 sh tools/ffi_experiment/build_1513.sh /tmp/ffi-world-1513
 ```
 
+The boundary-cost follow-up separates remaining native execution from Python
+callbacks instead of treating all time inside `dispatch_sync` as C++. The
+earlier full cProfile observer increased a roughly 6.2 s loop to 12.168 s;
+its call counts are useful, but its percentages cannot be applied to the
+uninstrumented loop. The optional host-only `build_host.sh --profile` build
+instead partitions process CPU at synchronous dispatch/callback boundaries.
+Its four zones restore their previous owner across nested dispatch and failure.
+Observation starts after owner setup and stops before final report-file serialization.
+It is absent from normal builds and the #1513 bridge.
+
+The Python aim adapter also copied the unused tail of its 32,768-double shared
+buffer on every request. The native producer lends a 256-double packet, and
+the widest aim request uses 17 parameters. Bounding that copy to those 17
+parameters reduces the 8,914 aim slices in this workload from 2,329,691,728 to
+1,212,304 bytes. The native packets, actor projections, callback order, query
+count and gameplay results are unchanged. A guarded borrowed-packet regression
+fails on the original adapter's out-of-request read and passes after the fix.
+
+Fifteen fresh processes in three rotating rounds compare the unchanged Python,
+frozen `49c03342` runner/binary, final normal binary, and a profiling binary with
+observation disabled/enabled. The scene, interpreter and source oracle remain
+as above. All fifteen complete snapshots match. Primary timings exclude the
+optional observer:
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Unmodified production Python | 11.165138 s | 11.060664–11.253421 s | 0.00% |
+| Frozen collision-flow kernel (`49c03342`) | 6.255879 s | 6.241917–6.267949 s | 43.97% |
+| Bounded Python aim arguments | 6.001333 s | 5.971952–6.022205 s | 46.25% |
+
+This removes another 4.07% of loop CPU without moving another gameplay algorithm
+to C++. Median initialization is 0.166846 s. The profiling binary takes 6.088295 s
+with observation off and 6.366738 s with it on: observed deltas are 1.45% for
+compiled-in instrumentation and another 4.57% when enabled, with overlapping
+run ranges. These are observer-effect measurements, not performance gains.
+
+Mean ownership attribution across the three observed loops is:
+
+| CPU owner | Mean observed CPU | Share |
+| --- | ---: | ---: |
+| Native dispatch body, excluding callbacks | 2.485329 s | 39.13% |
+| Python callbacks, including call entry and ordinary callees | 3.265702 s | 51.41% |
+| Python outer loop, input/output conversion and snapshot capture | 0.483124 s | 7.61% |
+| C callback-buffer copies and result release | 0.117789 s | 1.85% |
+
+These are ownership zones, not irreducible costs or opcode-level language
+timings. Clock overhead remains included. In particular, the 1.85% C bridge
+zone is not all FFI overhead: Python argument decoding, actor dictionaries,
+vector construction and call entry are charged to Python callbacks. The latter
+also include builtin operations and deterministic engine fakes, so 51.41%
+cannot be advertised as removable production Python. Inclusive callback rows
+can overlap during nesting; only the four zones form a partition. For hotspot
+orientation, observed world-query leaves total about 1.307 s, catalog completion
+plus body scanning 0.810 s, and aim/origin/friendly-lane callbacks 0.351 s.
+
+A separate 200 Hz native stack sample of the final normal binary selects 1,726
+samples whose workload frame is inside the measured loop. The deepest Python
+frame attributes 669 samples to native dispatch/bridge, 484 to callback
+adapters, 191 to the Python catalog, 137 to fixture fakes, and 245 to other
+Python work. Of the 669 native-side samples, 133 end in allocation/free, 40 in
+shared-container destruction, and 100 in hash-table operations. Those 273
+samples (40.8% of the native-side sample) identify remaining representation and
+allocation costs; they do not establish that these costs can all be removed.
+Inlining, sampling error and one failed unwind limit attribution precision.
+The sampler wrote its result before a post-exit `No child process` error; the
+sampled workload completed and its entire snapshot matches the Python oracle.
+Its timing is excluded from the primary comparison.
+
+Thus about 39% of the observed loop is already native, but no measured share
+has been proved an optimization floor. Python adapters and catalog work remain
+specific candidates, and the bounded-copy fix demonstrates one removable cost.
+The native container/lookup sample argues for further native representation
+work too. Empty-catalog/fake-engine results do not quantify a populated Windows
+battle, and no percentage of remaining Python is promised removable.
+
+Both normal and profiling CPython 2.7 host builds pass with warnings as errors.
+The bridge audit passes with and without profiling, including nested buffers,
+230 callbacks during observation, original exception identity, result release,
+profile ownership guards and repeated start/stop. Seven Python leaf tests pass
+on Python 2.7 and Python 3; 2,320 aim transitions and 1,410 ordered queries pass,
+as does the 80-frame combined Siege/human/cover/order native-world comparison.
+Client and changed runtime-side experiment sources compile under Python 2.7.
+This stage changes no C++ gameplay core or #1513 bridge; their previous native
+acceptance limitations still apply.
+
+Reproduce the boundary comparison using `FFI_PY27` as above:
+
+```bash
+FFI_BOUNDARY_CONTROL=/tmp/ffi-boundary-control
+git worktree add --detach "$FFI_BOUNDARY_CONTROL" 49c03342
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-boundary-host
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-boundary-profile --profile
+(cd "$FFI_BOUNDARY_CONTROL" && sh tools/ffi_experiment/build_host.sh \
+  "$FFI_PY27" /tmp/ffi-boundary-control-host)
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-boundary-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_host_profile.py \
+  --module /tmp/ffi-boundary-profile/offline_astar_native.so
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --fixture /tmp/ffi-boundary-fixture.json --seconds 30 --rounds 3 \
+  --module /tmp/ffi-boundary-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver \
+  --control-components kernel,world-sync,world-resolver \
+  --control-module /tmp/ffi-boundary-control-host/offline_astar_native.so \
+  --control-runner "$FFI_BOUNDARY_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --profile-module /tmp/ffi-boundary-profile/offline_astar_native.so \
+  --output /tmp/ffi-boundary-comparison
+py-spy record --native --rate 200 --format raw --full-filenames \
+  --output /tmp/ffi-boundary-stacks.txt -- "$FFI_PY27" \
+  tools/ffi_experiment/portable_workload.py --fixture /tmp/ffi-boundary-fixture.json \
+  --backend native --module /tmp/ffi-boundary-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver --seconds 30 \
+  --output /tmp/ffi-boundary-sampled.json
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;

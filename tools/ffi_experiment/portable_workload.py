@@ -120,6 +120,8 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--output', required=True)
     parser.add_argument('--stage-timing', action='store_true')
+    parser.add_argument('--boundary-profile', action='store_true',
+                        help='attribute host CPU using a --profile build; separate from primary timing')
     parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow,kernel,world-resolver')
     parser.add_argument('--world-trace-output', help='record ordered collision leaves for a separate computation estimate')
     args = parser.parse_args()
@@ -127,6 +129,8 @@ def main():
         parser.error('positive duration/cadence and a native module are required')
     if args.world_trace_output and args.backend != 'python':
         parser.error('--world-trace-output requires the unmodified Python backend')
+    if args.boundary_profile and args.backend == 'python':
+        parser.error('--boundary-profile requires the native host bridge')
     if 'world-resolver' in args.components.split(',') and (
             'kernel' not in args.components.split(',') or args.scenario != 'combat'):
         parser.error('world-resolver requires the kernel and combat owner fixture')
@@ -136,6 +140,8 @@ def main():
     motion_component = None
     kernel_component = None
     world_recorder = None
+    boundary_profile = None
+    profiling = False
     messages, progress = [], []
     random.seed(17)
     with redirected():
@@ -194,6 +200,9 @@ def main():
                 if args.stage_timing:
                     from stage_timing import Recorder
                     stage_recorder = Recorder(backend, runtime)
+                if args.boundary_profile:
+                    backend.module.profile_start()
+                    profiling = True
                 started = CLOCK()
                 for frame in range(int(round(args.seconds * args.fps))):
                     outgoing = runtime.update(1.0 / args.fps, 100.0 + (frame + 1) / args.fps)
@@ -212,6 +221,9 @@ def main():
                         'paths': sorted((repr(key), path) for key, path in nav.paths.items()),
                     })
                 cpu_seconds = CLOCK() - started
+                if args.boundary_profile:
+                    boundary_profile = backend.module.profile_stop()
+                    profiling = False
             if kernel_component is not None:
                 runtime._decision_counts = kernel_component.counters()['decisions']
             counts = ({'calls': backend.calls, 'expansions': backend.expansions,
@@ -220,6 +232,8 @@ def main():
                         'probes': runtime.probe_totals(), 'decisions': runtime._decision_counts,
                         'navigation': progress, 'diagnostics': runtime.diagnostic_totals()}
         finally:
+            if profiling:
+                backend.module.profile_stop()
             if stage_recorder is not None:
                 stage_recorder.close()
             for component in reversed(components):
@@ -245,6 +259,8 @@ def main():
             leaves=leaves.calls)
     if stage_recorder is not None:
         report['stage_timings'] = stage_recorder.rows
+    if boundary_profile is not None:
+        report['boundary_profile'] = boundary_profile
     if world_recorder is not None:
         with open(args.world_trace_output, 'w') as stream:
             json.dump(world_recorder.traces, stream)
