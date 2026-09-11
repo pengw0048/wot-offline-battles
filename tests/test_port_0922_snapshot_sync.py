@@ -1264,3 +1264,33 @@ class SnapshotSyncTests(unittest.TestCase):
             3.0, self.sync._entities['bot:7']['current']['x'])
         self.now[0] = moment + 1.0
         self.assertEqual([], self.sync.advance(self.now[0]))
+
+    def test_a_settled_wreck_presents_each_changed_pose_angle(self):
+        for angle in ('yaw', 'pitch', 'roll', 'aim_yaw', 'gun_pitch'):
+            with self.subTest(angle=angle):
+                sync = self.module.SnapshotSync(1, clock=lambda: self.now[0])
+                initial = player(7, 0.0, alive=False)
+                sync.manifest({'round_id': 1, 'bots': [initial]})
+                sync.snapshot({'round_id': 1, 'server_tick': 1, 'bots': [initial]})
+                self.assertEqual([], sync.advance(0.0))
+                moved = dict(initial)
+                moved[angle] = 0.25
+                sync.snapshot({'round_id': 1, 'server_tick': 2, 'bots': [moved]})
+                events = sync.advance(0.05)
+                self.assertEqual(['update'], [event['type'] for event in events])
+                self.assertGreater(events[0]['pose'][angle], 0.0)
+                self.assertLess(events[0]['pose'][angle], 0.25)
+
+    def test_a_settled_wreck_applies_a_final_subthreshold_pose_once(self):
+        initial = player(7, 0.0, alive=False)
+        self.sync.manifest({'round_id': 1, 'bots': [initial]})
+        self.sync.snapshot({'round_id': 1, 'server_tick': 1, 'bots': [initial]})
+        self.assertEqual([], self.sync.advance(0.0))
+        moved = dict(initial, x=0.0005, pitch=0.0002)
+        self.sync.snapshot({'round_id': 1, 'server_tick': 2, 'bots': [moved]})
+        events = self.sync.advance(0.05)
+        self.assertEqual(['update'], [event['type'] for event in events])
+        self.assertEqual((0.0005, 0.0002),
+                         (events[0]['pose']['x'], events[0]['pose']['pitch']))
+        self.assertTrue(events[0]['snap'])
+        self.assertEqual([], self.sync.advance(0.1))

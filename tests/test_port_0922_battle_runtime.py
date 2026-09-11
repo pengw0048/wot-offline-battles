@@ -28053,6 +28053,57 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._binding.arena_vehicle_killed.assert_called_once_with(
             11, 0, 0)
 
+    def test_shoved_wreck_snapshot_updates_retained_native_pose_and_collision(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle.state = 'running'
+        battle._avatar = runtime.bigworld.avatar
+        battle._server = types.SimpleNamespace()
+        battle._binding = mock.Mock()
+        initial = {'id': 2, 'health': 500, 'alive': True,
+                   'x': 0.0, 'y': 0.0, 'z': 0.0, 'yaw': 0.0}
+        record = {'engine_id': 11, 'state': dict(initial),
+                  'kind': 'bot', 'network_id': 2, 'local': False,
+                  'ready': True}
+        battle._records = {'bot:2': record}
+        entity = _Vehicle(11, _Descriptor(), _Vector(), (0, 0, 0),
+                          {'health': 500})
+        runtime.bigworld.entities[11] = entity
+        sync = battle_runtime_module.SnapshotSync(
+            1, on_event=battle._apply_sync_event,
+            clock=lambda: runtime.bigworld.now)
+        sync.manifest({'round_id': 1, 'bots': [initial]})
+        sync.snapshot({'round_id': 1, 'server_tick': 1, 'bots': [initial]})
+        dead = dict(initial, health=0, alive=False)
+        sync.snapshot({'round_id': 1, 'server_tick': 2, 'bots': [dead]})
+        self.assertEqual(0, entity.health)
+        self.assertIs(record, battle._records['bot:2'])
+        self.assertFalse(record.get('tombstone'))
+        self.assertEqual([], sync.advance(runtime.bigworld.now))
+        battle._binding.reset_mock()
+
+        moved = dict(dead, x=0.0005, pitch=0.0002, roll=0.0003,
+                     aim_yaw=0.0004, gun_pitch=0.0005)
+        sync.snapshot({'round_id': 1, 'server_tick': 3, 'bots': [moved]})
+        runtime.bigworld.now += 0.05
+        events = sync.advance(runtime.bigworld.now)
+
+        self.assertEqual(['update'], [event['type'] for event in events])
+        args = battle._binding.set_vehicle_pose.call_args.args
+        self.assertEqual((0.0005, 0.0, 0.0), tuple(args[1]))
+        self.assertEqual(_engine_rotation(0.0, 0.0002, 0.0003), args[2])
+        battle._binding.update_vehicle_aim.assert_called_once_with(
+            11, 0.0, 0.0004, 0.0005)
+        collision_pose = record['projectile_collision_pose']
+        self.assertEqual((0.0005, 0.0, 0.0), tuple(
+            collision_pose[axis] for axis in ('x', 'y', 'z')))
+        self.assertEqual((0.0002, 0.0003),
+                         (collision_pose['pitch'], collision_pose['roll']))
+        self.assertIs(record, battle._records['bot:2'])
+        self.assertEqual(0, entity.health)
+        self.assertEqual([], sync.advance(runtime.bigworld.now + 0.05))
+        battle._binding.destroy_entity.assert_not_called()
+
     def test_pending_remote_presentation_destroy_cancels_late_load(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

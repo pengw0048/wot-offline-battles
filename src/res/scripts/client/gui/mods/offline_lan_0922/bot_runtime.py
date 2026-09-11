@@ -8159,10 +8159,10 @@ class BotRuntime(object):
             state['push_x'] = 0.0
             state['push_z'] = 0.0
             return False
-        before = (state['x'], state['z'])
+        before = _position(state)
         self._apply_tank_contact_response(state, result, step)
         if (abs(state['x'] - before[0]) <= 1.0e-6 and
-                abs(state['z'] - before[1]) <= 1.0e-6):
+                abs(state['z'] - before[2]) <= 1.0e-6):
             return False
         try:
             ground = self._ground_probe_at(
@@ -8173,7 +8173,7 @@ class BotRuntime(object):
             # Undo this hull's slide rather than leave a dead tank hanging.
             ground = None
         if ground is None:
-            state['x'], state['z'] = before
+            state['x'], state['y'], state['z'] = before
             state['push_x'] = 0.0
             state['push_z'] = 0.0
             return False
@@ -8181,7 +8181,16 @@ class BotRuntime(object):
         if not -WRECK_SUPPORT_DROP <= rise <= WRECK_SUPPORT_RISE:
             # A cliff lip or a step the hull could not have climbed. Keep the
             # wreck where it already rested instead of dropping or lifting it.
-            state['x'], state['z'] = before
+            state['x'], state['y'], state['z'] = before
+            state['push_x'] = 0.0
+            state['push_z'] = 0.0
+            return False
+        candidate = (state['x'], float(ground), state['z'])
+        if not self._turret_pose_is_clear(
+                state, before, state['yaw'], candidate, state['yaw']):
+            # The horizontal probe used the old support height. Settling can
+            # enter a landed turret even when that first sweep was clear.
+            state['x'], state['y'], state['z'] = before
             state['push_x'] = 0.0
             state['push_z'] = 0.0
             return False

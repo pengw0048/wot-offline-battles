@@ -621,15 +621,19 @@ class SnapshotSync(object):
         """
         target = record['target']
         current = record['current']
+        if record.get('wreck_settled') and current == target:
+            return False
         delta_x = target['x'] - current['x']
         delta_y = target['y'] - current['y']
         delta_z = target['z'] - current['z']
-        delta_yaw = _angle_delta(current['yaw'], target['yaw'])
+        angle_error = max(
+            [abs(_angle_delta(current[axis], target[axis]))
+             for axis in ('yaw', 'aim_yaw')] +
+            [abs(target[axis] - current[axis])
+             for axis in ('pitch', 'roll', 'gun_pitch')])
         if (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z <=
                 WRECK_SETTLE_DISTANCE * WRECK_SETTLE_DISTANCE and
-                abs(delta_yaw) <= WRECK_SETTLE_ANGLE):
-            if record.get('wreck_settled'):
-                return False
+                angle_error <= WRECK_SETTLE_ANGLE):
             record['current'] = dict(target)
             record['wreck_settled'] = True
             snapped = True

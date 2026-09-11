@@ -20104,6 +20104,28 @@ class ShovedWreckTests(unittest.TestCase):
         self.assertEqual(0.0, state['z'])
         self.assertEqual(0.0, state['push_z'])
 
+    def test_a_wreck_settle_cannot_move_down_into_a_landed_turret(self):
+        runtime = self._runtime(ground=-0.3)
+        state = self._wreck(runtime)
+        state.update(pitch=0.2, terrain_pitch=0.15,
+                     suspension_pitch=0.05, roll=0.1)
+        probes = []
+
+        def clear(before, after, descriptor):
+            probes.append((before, after))
+            return after['y'] >= before['y']
+
+        runtime._turret_motion_probe = clear
+        moved = runtime._apply_wreck_contact_response(
+            state, {'delta_velocity': (0.0, 2.0),
+                    'correction': (0.0, 0.05)}, 0.1)
+
+        self.assertFalse(moved)
+        self.assertEqual((0.0, 0.0, 0.0), (state['x'], state['y'], state['z']))
+        self.assertEqual((0.0, 0.0), (state['push_x'], state['push_z']))
+        self.assertTrue(any(after['y'] < before['y'] for before, after in probes))
+        self.assertEqual(0.15, probes[-1][1]['chassis']['pitch'])
+
     def test_a_slide_off_a_cliff_lip_is_undone_instead_of_dropping(self):
         runtime = self._runtime(ground=-40.0)
         state = self._wreck(runtime)

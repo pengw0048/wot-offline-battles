@@ -544,8 +544,10 @@ def pair_response(contact, inverse_a, inverse_b, velocity_a, velocity_b,
     sliding across each other without along-face drag; that wedge has to be
     understood before the term can land.  ``USE_PSEUDO_CONTACTS`` True and
     ``CONTACT_PENETRATION`` 0.1 from the same function are the
-    positional-correction class implemented above, and ``RESTITUTION`` is
-    never loaded in this build, so the normal term stays e=0.
+    positional-correction class implemented above. That Python function does
+    not configure ``RESTITUTION``; this does not establish the native default
+    or retail restitution. The normal term preserves this project's existing
+    e=0 response.
     """
     zero = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     if contact is None:
