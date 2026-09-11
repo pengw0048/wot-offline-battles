@@ -2640,6 +2640,60 @@ class RemotePresentationWriteTests(unittest.TestCase):
                                  (vehicle.matrix.yaw, vehicle.matrix.pitch,
                                   vehicle.matrix.roll))
 
+    def test_failed_matrix_write_can_return_to_the_previous_pose(self):
+        for vehicle in self._vehicles():
+            with self.subTest(adapter=type(vehicle).__name__):
+                original = _Vector(4.0, 2.0, 8.0)
+                vehicle.set_pose(original, (0.1, 0.2, 0.3))
+                vehicle.matrix.fail_translation = True
+                with self.assertRaisesRegex(RuntimeError, 'translation failed'):
+                    vehicle.set_pose(_Vector(1.0, 2.0, 3.0), (0.4, 0.5, 0.6))
+                vehicle.set_pose(original, (0.1, 0.2, 0.3))
+                self.assertEqual(tuple(original), tuple(vehicle.matrix.translation))
+                self.assertEqual((0.3, 0.2, 0.1),
+                                 (vehicle.matrix.yaw, vehicle.matrix.pitch,
+                                  vehicle.matrix.roll))
+
+    def test_failed_record_pose_can_return_to_the_previous_sample(self):
+        native, unused_fallback = self._vehicles()
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._binding.set_vehicle_pose.side_effect = (
+            lambda unused_id, position, rotation, **kwargs:
+            native.set_pose(position, rotation, **kwargs))
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        record = {'engine_id': 11, 'kind': 'bot', 'state': {'speed': 8.0}}
+        original = dict(x=4.0, y=2.0, z=8.0, yaw=0.3, pitch=0.2, roll=0.1)
+        battle._apply_record_pose(record, original)
+        native.matrix.fail_translation = True
+        with self.assertRaisesRegex(RuntimeError, 'translation failed'):
+            battle._apply_record_pose(record, dict(original, x=9.0, yaw=0.6))
+        battle._apply_record_pose(record, original)
+        self.assertEqual(3, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual((4.0, 2.0, 8.0), tuple(native.matrix.translation))
+        self.assertEqual(0.3, native.matrix.yaw)
+
+    def test_failed_record_aim_can_return_to_the_previous_sample(self):
+        native, unused_fallback = self._vehicles()
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._binding.update_vehicle_aim.side_effect = (
+            lambda unused_id, *angles: native.set_aim(*angles))
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        record = {'engine_id': 11, 'kind': 'bot', 'state': {'speed': 8.0}}
+        original = dict(x=4.0, y=2.0, z=8.0, yaw=0.0,
+                        aim_yaw=0.3, gun_pitch=0.1)
+        battle._apply_record_pose(record, original)
+        with mock.patch.object(native.aim.gunMatrix, 'setRotateYPR',
+                               side_effect=RuntimeError('gun aim failed')):
+            with self.assertRaisesRegex(RuntimeError, 'gun aim failed'):
+                battle._apply_record_pose(
+                    record, dict(original, aim_yaw=0.6, gun_pitch=0.2))
+        battle._apply_record_pose(record, original)
+        self.assertEqual(3, battle._binding.update_vehicle_aim.call_count)
+        self.assertAlmostEqual(0.3, native.aim.turretMatrix.yaw)
+        self.assertEqual(0.1, native.aim.gunMatrix.pitch)
+
     def test_aim_writes_follow_component_inputs_and_record_lifecycle(self):
         original = dict(x=4.0, y=2.0, z=8.0, yaw=0.3, pitch=0.1, roll=0.2,
                         aim_yaw=0.7, gun_pitch=-0.1)

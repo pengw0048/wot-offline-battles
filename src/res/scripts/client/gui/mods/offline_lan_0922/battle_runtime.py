@@ -22666,6 +22666,10 @@ class BattleRuntime(object):
                 # The matrix owner deduplicates unchanged hull components,
                 # including an aim-only sample, without dropping velocity or
                 # acceleration settlement from the original pose stream.
+                # Clear the old signature before a setter can partially
+                # mutate its provider. A later sample may return to that old
+                # pose instead of retrying the failed target.
+                record.pop('_remote_pose_signature', None)
                 self._binding.set_vehicle_pose(
                     record['engine_id'], self._vector((x, y, z)),
                     _engine_rotation(yaw, pitch, roll), now=now)
@@ -22696,6 +22700,9 @@ class BattleRuntime(object):
                 record.get('presented_siege_state'))
             aim_changed = aim_signature != record.get('_remote_aim_signature')
             if aim_changed:
+                # Turret yaw can succeed before gun pitch fails. The old
+                # signature no longer describes that partially written aim.
+                record.pop('_remote_aim_signature', None)
                 self._binding.update_vehicle_aim(
                     record['engine_id'], yaw, aim_yaw, gun_pitch)
                 record['_remote_aim_signature'] = aim_signature

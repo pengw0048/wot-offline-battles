@@ -1928,9 +1928,12 @@ class RemoteVehicle(object):
         self._update_matrix()
 
     def _update_matrix(self):
+        previous = getattr(self, '_matrix_pose', None)
+        # Native setters can fail after changing part of the transform.
+        self._matrix_pose = None
         self._matrix_pose = _write_changed_pose(
             self.matrix, self.position, (self.yaw, self.pitch, self.roll),
-            getattr(self, '_matrix_pose', None))
+            previous)
 
     def attach_visual(self, entity, entity_id, model):
         self.bw_entity = entity
