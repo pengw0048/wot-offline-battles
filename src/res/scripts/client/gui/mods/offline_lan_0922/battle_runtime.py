@@ -18156,10 +18156,11 @@ class BattleRuntime(object):
             float(position[0]) + math.sin(travel_yaw) * abs(speed) * dt,
             float(position[1]),
             float(position[2]) + math.cos(travel_yaw) * abs(speed) * dt)
-        if not self._turret_pose_is_clear(
-                position, yaw, contact_end, yaw, descriptor,
-                _number(bot_state.get('pitch')),
-                _number(bot_state.get('roll'))):
+        if not self._turret_motion_is_clear(
+                BotRuntime._turret_state_pose(
+                    bot_state, position, yaw),
+                BotRuntime._turret_state_pose(
+                    bot_state, contact_end, yaw), descriptor):
             self._bot_motion_kinds[int(bot_id)] = 'detached_turret'
             return 'hard'
         destructible_motion = (

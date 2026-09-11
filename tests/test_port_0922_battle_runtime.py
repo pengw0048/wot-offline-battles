@@ -19508,6 +19508,12 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 self.assertAlmostEqual(1.0 + math.sin(angle) * distance, after['x'])
                 self.assertAlmostEqual(3.0 + math.cos(angle) * distance, after['z'])
                 self.assertEqual((0.4, 0.2, -0.1), (before['yaw'], before['pitch'], before['roll']))
+                self.assertEqual(0.1, before['chassis']['pitch'])
+                self.assertEqual(0.1, after['chassis']['pitch'])
+                self.assertEqual((before['x'], before['z']),
+                                 (before['chassis']['x'], before['chassis']['z']))
+                self.assertEqual((after['x'], after['z']),
+                                 (after['chassis']['x'], after['chassis']['z']))
                 self.assertIs(descriptor, used)
                 self.assertEqual(1500.0, clock)
         reusable.assert_not_called()

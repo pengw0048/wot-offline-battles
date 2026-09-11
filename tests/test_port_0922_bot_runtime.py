@@ -13540,11 +13540,15 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual(before, self.runtime._snapshot_bot_suspension_state(state))
         self.assertEqual((0.3, 0.4, -0.5), tuple(
             clear.call_args.args[1][key] for key in ('y', 'pitch', 'roll')))
+        self.assertEqual((0.1, 0.4), tuple(
+            pose['chassis']['pitch'] for pose in clear.call_args.args[:2]))
         self.runtime._suspension_params[11] = None
         state.pop('pose_sample', None)
         with mock.patch.object(self.module, 'slope_pose', return_value=(0.3, -0.4)):
             self.assertFalse(self.runtime._update_slope_pose(state))
             self.assertEqual((0.1, -0.2), (state['pitch'], state['roll']))
+            self.assertEqual((0.1, 0.3), tuple(
+                pose['chassis']['pitch'] for pose in clear.call_args.args[:2]))
             clear.return_value = True
             self.assertTrue(self.runtime._update_slope_pose(state))
         self.assertEqual((0.3, -0.4), (state['pitch'], state['roll']))
@@ -13560,11 +13564,31 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual((0.3, 0.2), (state['pitch'], state['suspension_pitch']))
         before, after, used = clear.call_args.args
         self.assertEqual((0.3, 0.1), (before['pitch'], after['pitch']))
+        self.assertEqual((0.1, 0.1),
+                         (before['chassis']['pitch'], after['chassis']['pitch']))
         self.assertIs(descriptor, used)
         clear.return_value = True
         self.assertEqual(0.0, self.runtime._update_hydraulic_suspension(
             state, descriptor, 0.0, 0.0, 0.1, clear))
         self.assertEqual((0.1, 0.0), (state['pitch'], state['suspension_pitch']))
+
+    def test_landed_turret_bot_pose_keeps_chassis_separate_from_hydraulic_hull(self):
+        state = {'id': 11, 'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.4,
+                 'pitch': 0.3, 'suspension_pitch': 0.2, 'roll': -0.1}
+        clear = mock.Mock(return_value=True)
+        self.runtime._turret_motion_probe = clear
+        self.assertTrue(self.runtime._turret_pose_is_clear(
+            state, (4.0, 5.0, 6.0), 0.7, (7.0, 8.0, 9.0), 0.8))
+        before, after, unused_descriptor = clear.call_args.args
+        self.assertEqual((0.3, 0.3), (before['pitch'], after['pitch']))
+        self.assertAlmostEqual(0.1, before['chassis']['pitch'])
+        self.assertAlmostEqual(0.1, after['chassis']['pitch'])
+        for pose, expected in ((before, (4.0, 5.0, 6.0, 0.7)),
+                               (after, (7.0, 8.0, 9.0, 0.8))):
+            self.assertEqual(expected, tuple(pose[key] for key in ('x', 'y', 'z', 'yaw')))
+            self.assertEqual(expected, tuple(pose['chassis'][key]
+                                            for key in ('x', 'y', 'z', 'yaw')))
+            self.assertEqual(-0.1, pose['chassis']['roll'])
 
     def test_tank_separation_is_probed_at_the_distance_it_moves(self):
         """Static geometry beyond the hull must not veto a small unjam.

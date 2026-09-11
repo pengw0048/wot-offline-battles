@@ -6408,6 +6408,7 @@ class BotRuntime(object):
             before = self._turret_state_pose(state)
             after = dict(before)
             after.update(pitch=pitch + suspension_pitch, roll=roll)
+            after['chassis'] = dict(before['chassis'], pitch=pitch, roll=roll)
             if not self._turret_motion_probe(
                     before, after, self._descriptors.get(int(state['id']))):
                 return False
@@ -8570,9 +8571,18 @@ class BotRuntime(object):
         return reports
 
     @staticmethod
-    def _turret_state_pose(state):
-        return dict((name, state.get(name, 0.0))
+    def _turret_state_pose(state, position=None, yaw=None):
+        pose = dict((name, state.get(name, 0.0))
                     for name in ('x', 'y', 'z', 'yaw', 'pitch', 'roll'))
+        if position is not None:
+            pose.update(x=position[0], y=position[1], z=position[2])
+        if yaw is not None:
+            pose['yaw'] = yaw
+        chassis = dict(pose)
+        chassis['pitch'] = state.get(
+            'terrain_pitch', pose['pitch'] - state.get('suspension_pitch', 0.0))
+        pose['chassis'] = chassis
+        return pose
 
     def _turret_pose_is_clear(self, state, start, start_yaw, end, end_yaw):
         """Keep turns and contact pushes outside the same landed turret body."""
@@ -8580,13 +8590,8 @@ class BotRuntime(object):
         if probe is None:
             return True
         descriptor = self._descriptors.get(int(state['id']))
-        before = {
-            'x': start[0], 'y': start[1], 'z': start[2],
-            'yaw': start_yaw, 'pitch': state.get('pitch', 0.0),
-            'roll': state.get('roll', 0.0),
-        }
-        after = dict(before)
-        after.update(x=end[0], y=end[1], z=end[2], yaw=end_yaw)
+        before = self._turret_state_pose(state, start, start_yaw)
+        after = self._turret_state_pose(state, end, end_yaw)
         return bool(probe(before, after, descriptor))
 
     def _publish_static_hulls(self, players):
