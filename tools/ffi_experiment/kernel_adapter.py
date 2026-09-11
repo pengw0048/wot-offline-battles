@@ -28,8 +28,16 @@ def bot_config(state, gun, ammo, burst):
 
 def critical_config(rt, runtime, bot_id):
     descriptor = runtime._descriptors[bot_id]
-    return descriptor_critical_config(rt, descriptor,
-                                     runtime._bot_repair_factor(bot_id, descriptor))
+    result = descriptor_critical_config(
+        rt, descriptor, runtime._bot_repair_factor(bot_id, descriptor))
+    result.update(
+        repair_base_factor=rt.loadout.modifiers(
+            descriptor, factors=rt._bot_default_crew_factors(
+                descriptor, runtime.bot_crew_level(bot_id)))['repair_factor'],
+        repair_crew_base=rt.device_damage.CREW_FACTOR_BASE,
+        repair_misc_factor=rt.device_damage._misc_factor(
+            descriptor, 'repairSpeedFactor'))
+    return result
 
 
 def descriptor_critical_config(rt, descriptor, factor=1.0):
@@ -37,10 +45,13 @@ def descriptor_critical_config(rt, descriptor, factor=1.0):
     return dict(devices=[dict(
         name=name, maximum=damage.device_max_hp(descriptor, name),
         cap=damage.device_regen_hp(descriptor, name),
-        seconds=damage.repair_seconds(name, descriptor, 100.0, False, factor),
+        seconds=damage.repair_seconds(name, descriptor, repair_factor=factor),
+        base_seconds=(damage.BASE_TRACK_REPAIR_SECONDS if 'track' in name.lower()
+                      else damage.BASE_MODULE_REPAIR_SECONDS),
         no_fire_repair=name in damage.NO_REPAIR_PROGRESS_DEVICES)
         for name in rt.bot_state_codec.DEVICE_NAMES],
         roster=rt._descriptor_crew_roster(descriptor),
+        terminal_roster=rt.critical_damage._crew_roster(descriptor),
         fire_duration=damage.FIRE_DURATION_SECONDS,
         fire_fraction=damage.FIRE_DAMAGE_FRACTION_PER_SEC,
         critical_fraction=damage.CRITICAL_HP_FRACTION)
@@ -336,6 +347,8 @@ class KernelBackend(object):
         from navigation_flow_adapter import NavigationFlowBackend
         from kernel_engine import EngineLeaves
         from gui.mods.offline_lan_0922.ai import navigation
+        if runtime._turret_motion_probe is not None or runtime._turret_hulls_provider is not None:
+            raise ValueError('Owned kernel experiment does not yet copy detached-turret collision')
         if runtime.native_motion or runtime._suspension_ground_probe is not None:
             raise ValueError('Owned kernel experiment requires the copied vertical controller')
         self.backend, self.runtime, self.module = backend, runtime, rt
@@ -380,6 +393,7 @@ class KernelBackend(object):
             aim=aim_config(rt, runtime), driver=driver_config(rt, runtime), orders=orders,
             contacts=dict(human_base=rt.HUMAN_TARGET_ID_BASE,
                           has_armor=callable(runtime.ram_contact_probe),
+                          wreck_drop=rt.WRECK_SUPPORT_DROP, wreck_rise=rt.WRECK_SUPPORT_RISE,
                           py2=simulation_config(rt, runtime)['py2'], sequence=runtime._ram_seq),
             simulation=simulation_config(rt, runtime))
         self.engine = EngineLeaves(rt, runtime)

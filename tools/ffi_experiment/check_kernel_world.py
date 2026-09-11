@@ -201,7 +201,8 @@ class Audit(object):
         self.check_scripted(kernel, rounding)
         unused_result, tape = self.scripted(kernel, rounding, False)
         first = next(row for row in tape if row[0] == 'ray' and row[2][0] != row[3][0])
-        assert first[3][1] == .9719008512196334
+        # The discontinuous lower floor no longer pulls down the occupied hull ray.
+        assert first[3][1] == .9984518347729856
         for speed, drive, airborne, turn, reuse, wall in itertools.product(
                 (-4, 0, 4), (-1, 0, 1), (False, True), (0, 1), (False, True), (False, True)):
             self.check_scripted(kernel, dict(speed=speed, drive=drive, airborne=airborne,

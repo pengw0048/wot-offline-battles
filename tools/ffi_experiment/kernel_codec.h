@@ -141,8 +141,12 @@ struct Codec {
                     ++count;
             if (count == g.names.size())
                 flags |= g.flag;
-            else if (count)
-                throw std::invalid_argument("bot state group is incomplete");
+            else if (count) {
+                std::string reason = "bot state group is incomplete: ";
+                for (size_t i = 0; i < g.names.size(); ++i)
+                    reason += (i ? "," : "") + g.names[i].text;
+                throw std::invalid_argument(reason);
+            }
         }
         double movement = field(state, sf::movement_dir), rotation = field(state, sf::rotation_dir);
         if (movement > 0.01)

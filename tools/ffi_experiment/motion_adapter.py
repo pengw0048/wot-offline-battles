@@ -4,6 +4,7 @@ from __future__ import print_function
 CONSTANTS = (
     'GRAVITY GRAVITY_FACTOR COHESION DRIVE_TRACTION '
     'SLOPE_GRIP_LNG_FULL_Y SLOPE_GRIP_LNG_FULL SLOPE_GRIP_LNG_MIN_Y SLOPE_GRIP_LNG_MIN '
+    'SLOPE_GRIP_SDW_FULL_Y SLOPE_GRIP_SDW_FULL SLOPE_GRIP_SDW_MIN_Y SLOPE_GRIP_SDW_MIN '
     'POWER_FACTOR BKWD_POWER_FRACTION ENGINE_MIN_V STEER_RESIST_MULT '
     'COH_DECAY_Y COH_DECAY_FACTOR COH_DECAY_POW SLOPE_COH_DECAY_Y SLOPE_COH_DECAY COH_DECAY_BOUND '
     'COAST_BRAKE_SHARE SLIDE_KINETIC SLIDE_HOLD_TAN SLIP_THRESHOLD_TAN SLIP_DRAG '
@@ -445,7 +446,7 @@ class MotionFlowBackend(object):
             trace['suspension'] = False
         values = ([620, self.handle, self.physics.handle, bot_id] + list(module._position(state)) +
                   [module._number(state.get('yaw')), max(1.5, module._number(state.get('half_length'), 3.5)),
-                   state['speed'], step, state.get('vertical_speed', 0.0), state.get('last_drive_pitch', 0.0),
+                   max(0.3, module._number(state.get('half_width'), 1.7)), state['speed'], step, state.get('vertical_speed', 0.0), state.get('last_drive_pitch', 0.0),
                    int(bool(state.get('airborne', False))), int(bool(state.get('grounded_once', False))),
                    int(tick_pose is not None)] + list(tick_pose or (0.0, 0.0, 0.0)) + [int(trace is not None)])
         def query():

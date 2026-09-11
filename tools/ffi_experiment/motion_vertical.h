@@ -6,7 +6,7 @@ namespace offline_motion {
 struct Vertical {
     int bot=0,driver=0;
     Point position;Optional<Point> tick;
-    double yaw=0,speed=0,half_length=3.5,step=0,vertical=0,pitch=0,attempted=0;
+    double yaw=0,speed=0,half_length=3.5,half_width=1.7,step=0,vertical=0,pitch=0,attempted=0;
     bool airborne=false,grounded=false,blocked=false,landed=false,trace=false;
     double impact=0;
     Optional<double> highest,centre;
@@ -32,7 +32,23 @@ inline bool continuous_rise(Flow &flow,const Vertical &v){
     return std::abs(v.centre.value-previous)<=limit;
 }
 inline Vertical vertical_step(Flow &flow,const Tuning &t,Vertical v){
+    double gap=ground_gap(t,v.speed,v.pitch,v.step),support_gap=std::min(gap,t.GROUND_FOLLOW_MIN);
+    const double straddle_rise=0.12; // tank_collision.SUPPORT_STRADDLE_RISE
     v.centre=ground(flow,v.bot,v.position.x,v.position.z,v.position.y);v.highest=v.centre;
+    if(v.centre.has&&v.position.y-v.centre.value>support_gap){
+        double s=std::sin(v.yaw),c=std::cos(v.yaw),length=std::max(1.5,v.half_length),width=std::max(0.3,v.half_width);
+        Optional<double> bridge;
+        for(Point axis:{Point(s*length,0,c*length),Point(c*width,0,-s*width)}){
+            auto first=ground(flow,v.bot,v.position.x+axis.x,v.position.z+axis.z,v.position.y);
+            auto second=ground(flow,v.bot,v.position.x-axis.x,v.position.z-axis.z,v.position.y);
+            if(first.has&&second.has&&first.value-v.position.y>=-support_gap&&first.value-v.position.y<=straddle_rise&&
+                    second.value-v.position.y>=-support_gap&&second.value-v.position.y<=straddle_rise){
+                double candidate=std::max(first.value,second.value);
+                if(!bridge.has||candidate>bridge.value)bridge=candidate;
+            }
+        }
+        if(bridge.has&&bridge.value>v.centre.value)v.centre=v.highest=bridge;
+    }
     if(!v.centre.has){
         double s=std::sin(v.yaw),c=std::cos(v.yaw),length=std::max(1.5,v.half_length);
         for(double offset:{length,-length}){
@@ -43,7 +59,6 @@ inline Vertical vertical_step(Flow &flow,const Tuning &t,Vertical v){
     if(v.trace){std::vector<double> args{0.0};put(args,v.highest);put(args,v.centre);args.push_back(v.grounded);flow.event(631,v.bot,args);}
     Optional<double> support=v.centre.has?v.centre:v.highest;
     if(support.has){
-        double gap=ground_gap(t,v.speed,v.pitch,v.step);
         v.maximum_climb=std::max(0.6,std::abs(v.speed)*v.step*2.5);
         v.rise_obstacle=v.grounded&&v.centre.has&&v.centre.value-v.position.y>std::min(std::max(0.0,v.maximum_climb),0.85)+0.02;
         if(v.rise_obstacle){

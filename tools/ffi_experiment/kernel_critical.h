@@ -5,26 +5,45 @@
 namespace offline_kernel {
 struct CriticalConfig {
     struct Device {
-        double maximum, cap, seconds;
+        double maximum, cap, seconds, base_seconds;
         bool has_maximum, has_cap, no_fire_repair;
     };
     std::map<std::string, Device> devices;
-    Value roster;
+    Value roster, terminal_roster;
     double fire_duration = 0, fire_fraction = 0, critical_fraction = 0;
-    explicit CriticalConfig(const Value &v) : roster(v.get("roster")) {
+    bool dynamic_repair = false;
+    double repair_base_factor = 1, repair_crew_base = 1, repair_misc_factor = 1;
+    explicit CriticalConfig(const Value &v) : roster(v.get("roster")), terminal_roster(v.get("terminal_roster")) {
         for (const Value &raw : elements(v.get("devices"))) {
             Device d;
             d.maximum = field(raw, sf::maximum);
             d.cap = field(raw, sf::cap);
             d.seconds = field(raw, sf::seconds);
+            d.base_seconds = field(raw, "base_seconds");
             d.has_maximum = raw.get(sf::maximum).kind != Value::Null;
             d.has_cap = raw.get(sf::cap).kind != Value::Null;
             d.no_fire_repair = flag(raw, sf::no_fire_repair);
             devices[raw.get(sf::name).text()] = d;
         }
+        dynamic_repair = v.has("repair_base_factor");
+        repair_base_factor = field(v, "repair_base_factor", 1);
+        repair_crew_base = field(v, "repair_crew_base", 1);
+        repair_misc_factor = field(v, "repair_misc_factor", 1);
         fire_duration = field(v, "fire_duration");
         fire_fraction = field(v, "fire_fraction");
         critical_fraction = field(v, "critical_fraction");
+    }
+    void refresh_repair(const std::vector<Equipment> &equipment) {
+        if (!dynamic_repair)
+            return;
+        double factor = repair_base_factor * (1 + std::max(
+            0.0, field(equipment_passives(equipment), "repairkitBonusValue")));
+        factor = std::max(0.0, factor) / repair_crew_base;
+        factor *= repair_misc_factor;
+        if (factor <= 0)
+            factor = 1;
+        for (auto &item : devices)
+            item.second.seconds = item.second.base_seconds / factor;
     }
     const Device *device(const std::string &name) const {
         auto at = devices.find(name);
@@ -157,7 +176,7 @@ struct Critical {
             destroyed.insert(v.first);
         }
         yellow.clear();
-        const auto roster_names = names(config.roster);
+        const auto roster_names = names(config.terminal_roster);
         crew.insert(roster_names.begin(), roster_names.end());
         Value result = payload();
         if (config.roster.truth()) {

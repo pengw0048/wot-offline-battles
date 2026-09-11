@@ -1741,9 +1741,9 @@ py-spy record --native --rate 200 --format raw --full-filenames \
   --output /tmp/ffi-boundary-sampled.json
 ```
 
-The publication follow-up replaces the nested temporary signature with two
-reusable native buffers. Bound scalar fields retain explicit presence and
-`Value` equality; ordered Bot, ammunition, equipment, shot, launch and ram
+The historical publication follow-up replaces the nested temporary signature
+with two reusable native buffers. Bound scalar fields retain explicit presence
+and `Value` equality; ordered Bot, ammunition, equipment, shot, launch and ram
 records retain the previous shallow ownership. Equipment readiness changes
 only at the same cooldown boundary, while inactive pending timestamps and
 ordinary pose/time changes do not create durable events. Wire rows reserve
@@ -1828,7 +1828,9 @@ only `KERNEL32.dll` and `msvcrt.dll`. Sanitizers halt on error with leak checkin
 disabled. Production CI does not compile or run this opt-in experiment, and
 the standalone thread probe is not linked into either bridge.
 
-Reproduce this stage with `FFI_PY27` and the exported fixture from above:
+These publication/thread measurements use the pre-rebase source oracle. To
+reproduce this historical stage, check out `47b444561aecfb821b727a55fdebb32aa1521ee7`
+and use `FFI_PY27` and the exported fixture from above:
 
 ```bash
 FFI_PUBLICATION_CONTROL=/tmp/ffi-publication-control
@@ -1863,6 +1865,118 @@ c++ -std=c++11 -O2 -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math -pthre
 /tmp/ffi-codec-threads /tmp/ffi-codec-fixture.json 1 10000
 /tmp/ffi-codec-threads /tmp/ffi-codec-fixture.json 2 10000
 sh tools/ffi_experiment/build_1513.sh /tmp/ffi-publication-1513
+```
+
+The complete experiment has subsequently been rebased onto production
+`c6b2d373847254b140531213fcd3b7bab91c1195`. The original nine experiment commits
+remain in review scope, followed by a runtime-contract reconciliation commit.
+The diff remains confined to this document and `tools/ffi_experiment/`.
+Production source, installation and packages retain the fetched main tree.
+
+Three rotating rounds use six fresh CPython 2.7.18 processes on the Linux
+aarch64 host, the same 29-Bot Great Wall combat scene, and 30 simulated seconds
+at 15 callbacks/second. Both variants now use this production source oracle:
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Current-main Python | 11.025851 s | 10.986024–11.071962 s | 0.00% |
+| Reconciled C++ kernel | 5.666254 s | 5.625207–5.685573 s | 48.61% |
+
+All six complete snapshots match, including 225 state publications, 77,944
+fake engine queries, decision counts, probes, navigation and diagnostics.
+Median native initialization is 0.169759 s; the hot-loop speedup is 1.95x.
+The uninstrumented native build uses `-O2`, `-ffp-contract=off` and
+`-fno-fast-math`. Timing includes ordinary callbacks and per-frame capture,
+excluding process/fixture startup and final report serialization. The previous
+ownership and thread measurements were not rerun, and no earlier-stage savings
+are added to this current-source comparison. This scene still acknowledges
+launches without simulating terminals and uses deterministic query fakes.
+
+The rebase required semantic updates even though Git reported no conflicts:
+
+- Consumed repair/medical kits lose their passive bonus; repair duration uses
+  the current crew/loadout calculation and refreshes after consumption. Bot
+  kit selection and fallback crew terminal state match the current source.
+- Spotting uses the actual additive/multiplicative camouflage profile in its
+  upper bound and maintains all live targets' stationary clocks before the
+  bounded observation pass.
+- Navigation combines local and macro hard-edge penalties consistently in
+  searches, caches, direct escapes and path following. Generic probe failures
+  mark the adjacent edge in the pre-turn direction; resolved collisions use
+  the actual post-turn yaw and signed speed for edge and driver memory.
+  Chassis support checks span narrow gaps; lower discontinuous ground does not
+  pull down an occupied hull sweep. The first 30-second differential run exposed
+  a copied rise allowance of 0.60 m instead of `SUPPORT_STRADDLE_RISE`'s 0.12 m: Bot 33
+  incorrectly remained supported at frame 239. Nine deterministic boundary
+  cases now cover accepted/rejected rises, both chassis axes, maximum drops
+  and missing opposing support. The per-frame checker also accepts `--fps`
+  to reproduce the workload clock independently of its irregular-update cases.
+- Dead Bots accept contact displacement and use the current held-track
+  friction and support resettlement. Dead human bodies remain immovable.
+  Contact diagnostics retain the current impact positions.
+- A failed wire projection retains an identity-only row for that Bot, defers
+  its dependent events and suppresses new fire admission until recovery.
+  Other Bots continue publishing. The differential fixture corrupts one
+  actor's shot-angle pair, observes failure publications, repairs it and
+  observes full-row recovery.
+- Both native world adapters now preserve optional collision trace witnesses.
+  The sync route owns its trace on the stack; the stepped route reads its
+  existing job. Neither diagnostic path adds engine queries.
+
+Current-main human weapon behavior, server orders, vehicle attribute access
+and destructible sweep caching remain in their Python owners. The prototype
+still requires complete server orders and its copied vertical controller.
+It now rejects detached-turret motion/hull callbacks explicitly, alongside
+native motion and the optional ten-spring suspension; startup guards are
+checked before any native allocation. Detached-turret collision has not been
+ported. BattleRuntime damage/reconciliation ingress, authority takeover,
+projectile terminal processing and active-battle installation remain outside
+the adapter. The prior thread and CPU-ownership measurements above are
+historical, not fresh measurements against this rebase.
+
+Focused reconciliation checks pass 21,009 vertical/motion checks with 19,968
+ordered ground observations; 46,080 navigation operations and 2,160 frame states;
+2,480 motion transitions with 5,463 ordered queries; 80 perception frames;
+480 owned-world cases; and 612 contact/lifecycle transitions. The combined
+80-frame native-world Siege/human/cover/order/projection-failure scene and
+the 80-frame Himmelsdorf navigation scene match the Python oracle. ASan/UBSan
+also pass the combined scene, contacts, and the complete state suite (13,632
+weapon, 311 wire/invalid-row, 900 equipment, 4,256 decimal, 2,015 health and
+13 packed-output/lifecycle checks). Both world adapters pass all 78 physical
+source scenarios and 160 exact query/result traces under sanitizers; one
+internal-helper mock remains source-only. Sanitizers use `-O1 -g`, halt on
+errors and disable leak detection. The normal build passes 884 publication
+edge comparisons; Python 2.7 compilation covers all client files and the
+changed experiment Python files. The final `-O2` x86 build imports only
+`KERNEL32.dll` and `msvcrt.dll`. No Windows loading, x86 numerical parity,
+native engine timing or gameplay acceptance is claimed.
+
+After correcting the two late-scene differences, a 450-frame comparison at
+15 FPS passes with per-frame actor state, messages, probes and counters plus
+the complete ordered query history. The motion-flow fixture now holds one
+blocked heading long enough to exercise the current local-edge rule:
+1,000 cases pass with 3,229 ordered callback/state observations and an observed
+pending-search retirement. Randomly changing headings are not evidence of a
+repeated blocker. Nine focused straddle boundaries pass 45 ground observations.
+The final sanitized binary repeats both motion regressions and the combined
+80-frame Siege/human/cover/order/projection-failure scene successfully.
+
+Reproduce the current-source workload with a freshly exported fixture; do
+not use the historical control runner against this changed source oracle:
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-rebase-fixture.json
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-rebase-host
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-rebase-host/offline_astar_native.so \
+  --fixture /tmp/ffi-rebase-fixture.json --frames 80 \
+  --native-world --siege --human --cover --orders --projection-failure
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --fixture /tmp/ffi-rebase-fixture.json --seconds 30 --rounds 3 \
+  --module /tmp/ffi-rebase-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver --output /tmp/ffi-rebase-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-rebase-1513
 ```
 
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined

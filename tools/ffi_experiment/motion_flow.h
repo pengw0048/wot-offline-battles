@@ -126,6 +126,13 @@ struct Flow {
     void cache(int bot,Cache value){std::vector<double> args;put(args,value);auto answer=event(612,bot,args);value.result.truth=answer[0]!=0;value.result.copied=false;caches[bot]=value;}
     void remember(const Input &in,double yaw,bool hard=false){if(in.driver)offline_driver_remember(in.driver,in.bot,yaw,hard,5.0);}
     void invalidate(const Input &in,double yaw){caches[in.bot]=Cache();event(614,in.bot);remember(in,yaw,true);}
+    Optional<Point> blocked_target(const Input &in,double yaw,offline_nav::Navigator *nav){
+        if(in.move.has&&nav&&nav->grid->data->cell>0){
+            double distance=nav->grid->data->cell;
+            return Point(in.position.x+std::sin(yaw)*distance,in.position.y,in.position.z+std::cos(yaw)*distance);
+        }
+        return in.move;
+    }
     int resolve(const Input &in,double yaw,double speed,bool passive=false,bool commit=true){
         std::vector<double> args;put(args,in.position);args.push_back(yaw);args.push_back(speed);args.push_back(in.step);args.push_back(in.now);args.push_back(passive);args.push_back(commit);
         auto result=event(615,in.bot,args);double value=result[0];
@@ -203,7 +210,7 @@ struct Flow {
         bool exact=in.has_resolver&&probe.kind==2&&!deferred&&probe.collision&&!probe.water&&std::abs(probe.slope)<=0.55;
         bool clear=(hold||deferred||probe.kind==0||exact||(std::abs(throttle)<=0.01&&std::abs(in.speed)<=0.0001)||in.airborne)?true:probe.is_clear();
         if(!clear){throttle=0;if(!deferred)remember(in,travel);
-            if(nav&&!deferred&&!(probe.kind==2&&probe.collision)&&in.move.has)nav->report_blocked(in.bot,in.position,in.move,in.now);
+            if(nav&&!deferred&&!(probe.kind==2&&probe.collision)&&in.move.has)nav->report_blocked(in.bot,in.position,blocked_target(in,travel,nav),in.now);
         }
         int steering=std::abs(turn)>0.01?(turn>0?1:-1):0;
         out.movement=throttle>0.01?1:throttle<-0.01?-1:0;out.rotation=steering;
@@ -228,12 +235,13 @@ struct Flow {
         std::vector<double> integrated{2.0,out.yaw,out.turn_speed,static_cast<double>(out.rotation),static_cast<double>(out.movement),pitch,drive_speed,throttle,static_cast<double>(veto),static_cast<double>(clear),static_cast<double>(frozen),out.attempted_yaw};
         put(integrated,out.destructible_speed);event(613,in.bot,integrated);
         int status=0;bool resolved=false;double contact=out.destructible_speed.has?out.destructible_speed.value:speed,v0=speed;
+        Optional<double> realised_contact_yaw;
         if(clear&&!frozen&&std::abs(speed)>0.0001&&in.has_resolver){
             resolved=true;status=resolve(in,out.yaw,speed);
             if(status!=0&&status!=1){clear=false;
                 if(status==2){contact=std::min(std::abs(contact),std::abs(speed));speed=speed<0?-contact:contact;out.destructible_speed=speed;}
                 else if(status==3){speed=in.speed;out.destructible_speed.reset();}
-                else if(status==4){invalidate(in,travel);hard=true;out.destructible_speed.reset();}
+                else if(status==4){realised_contact_yaw=out.yaw+(v0<0?offline_nav::pi:0);invalidate(in,realised_contact_yaw.value);hard=true;out.destructible_speed.reset();}
             }else out.destructible_speed.reset();
         }
         if(hard&&!in.airborne){
@@ -247,7 +255,7 @@ struct Flow {
             auto response=hard_contact(t,speed,in.step,out.grind>0,slide.has,slide.value);
             speed=response[0];out.position=Point(in.position.x+response[1],in.position.y,in.position.z+response[2]);
             deflected=slide.has;out.grind=4;out.grind_present=true;
-            if(nav&&in.move.has)nav->report_blocked(in.bot,in.position,in.move,in.now);
+            if(nav&&in.move.has)nav->report_blocked(in.bot,in.position,blocked_target(in,realised_contact_yaw.has?realised_contact_yaw.value:travel,nav),in.now);
         }else if(status==2||status==3){out.grind=1;out.grind_present=true;}
         if(resolved&&in.has_report){std::vector<double> args{static_cast<double>(status),v0,speed};put(args,out.destructible_speed);args.push_back(out.grind_present);args.push_back(out.grind);event(616,in.bot,args);}
         if(in.siege_limit.has)speed=clamp(speed,-in.siege_limit.value,in.siege_limit.value);

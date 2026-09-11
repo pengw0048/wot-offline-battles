@@ -12,13 +12,35 @@ from navigation_adapter import Backend
 from portable_workload import load_fixture, Path, ROOT, redirected, patch_dict
 
 
-def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, cover=False, fixture_source=None, orders=False, native_world=False):
+def check_unsupported_motion(runtime, rt):
+    class NoNativeCalls(object):
+        def call(self, *unused):
+            raise AssertionError('Unsupported motion allocated native state')
+    for name, message in (('_turret_motion_probe', 'detached-turret collision'),
+                          ('_turret_hulls_provider', 'detached-turret collision'),
+                          ('native_motion', 'copied vertical controller'),
+                          ('_suspension_ground_probe', 'copied vertical controller')):
+        previous = getattr(runtime, name)
+        setattr(runtime, name, True if name == 'native_motion' else lambda *unused: None)
+        try:
+            try:
+                KernelBackend(NoNativeCalls(), runtime, rt)
+            except ValueError as error:
+                assert message in str(error), (name, error)
+            else:
+                raise AssertionError('Unsupported motion accepted: ' + name)
+        finally:
+            setattr(runtime, name, previous)
+
+
+def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, cover=False, fixture_source=None, orders=False, native_world=False, projection_failure=False, fps=None):
     with redirected():
         random.seed(17)
         source, source_ground = fixture['make_runtime'](Path(ROOT), map_name, scenario)
         random.seed(17)
         native, native_ground = fixture['make_runtime'](Path(ROOT), map_name, scenario)
     rt = fixture['fixtures']._load()
+    check_unsupported_motion(native, rt)
     player = None
     if human:
         with open(fixture_source) as stream:
@@ -43,6 +65,14 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                 enabled.physics['speedLimits'] = (10.0 / 3.6, 5.0 / 3.6)
                 runtime._descriptor_pairs[identity] = (travel, enabled)
                 runtime.states[identity]['vehicle'] = 'sweden:S11_Strv_103B'
+    failed_id = sorted(source.states)[-1]
+    if projection_failure:
+        for runtime in (source, native):
+            # A broken shot-angle pair must retain just this actor's checkpoint.
+            # Retire its driving so the fixture isolates publication recovery.
+            state = runtime.states[failed_id]
+            state.update(alive=False, health=0, speed=0, shot_yaw=0.0)
+            state.pop('shot_pitch', None)
     with fixture['combat_native_queries'](source, source_ground) as source_queries:
         source_env = dict((name, sys.modules[name]) for name in ('AreaDestructibles', 'BigWorld', 'Math'))
         with fixture['combat_native_queries'](native, native_ground) as native_queries:
@@ -74,7 +104,13 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                                    world_owner=native._ffi_world_owner if native_world else None)
             try:
                 enabled_seen = False
+                failed_publications = restored_publications = 0
+                query_cursor = 0
                 for frame in range(frames):
+                    if projection_failure and frame == 4:
+                        restored = dict(shot_pitch=0.0)
+                        source.states[failed_id].update(restored)
+                        kernel.kernel.health_actions(failed_id, [dict(method='set', state=restored)])
                     if orders and frame % 13 == 5:
                         message = dict(bot_order_revision=source._order_revision + 1,
                                        bot_orders=[dict(copy.deepcopy(order), id=identity)
@@ -87,6 +123,9 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                         assert native._apply_orders(message)
                     dt = (1.0 / 30, 1.0 / 30, 1.0 / 30, .27, .013)[frame % 5]
                     now = 100 + (frame + 1) * .13
+                    if fps is not None:
+                        dt = 1.0 / fps
+                        now = 100.0 + (frame + 1) / fps
                     players = []
                     if player is not None:
                         players = [dict(player, x=player['x'] + frame * .7,
@@ -108,7 +147,20 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                         with open('/tmp/wot-kernel-update-difference.json', 'w') as stream:
                             json.dump(dump, stream, default=repr, indent=2)
                         raise
-                    compare(plain(source_queries), plain(native_queries), (map_name, scenario, frame, 'queries'))
+                    if projection_failure:
+                        publications = [message for message in actual if message['type'] == 'bot_state']
+                        for publication in publications:
+                            affected = [row for row in publication['rows'] if row[0] == failed_id]
+                            assert len(affected) == 1
+                            assert (len(affected[0]) == 1) == (frame < 4)
+                            assert any(len(row) > 1 for row in publication['rows'])
+                            if frame < 4:
+                                failed_publications += 1
+                            else:
+                                restored_publications += 1
+                    compare(plain(source_queries[query_cursor:]), plain(native_queries[query_cursor:]),
+                            (map_name, scenario, frame, 'queries'))
+                    query_cursor = len(source_queries)
                     if native_world:
                         compare(source._ffi_world_owner._bot_motion_kinds,
                                 native._ffi_world_owner._bot_motion_kinds,
@@ -143,6 +195,12 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                         for launch in message.get('launches', ()):
                             assert source.ack_projectile_launch(launch['id'], launch['fire_seq'])
                             assert kernel.ack(launch['id'], launch['fire_seq'])
+                # Retain a full-history check for accidental mutation of old receipts.
+                compare(plain(source_queries), plain(native_queries), (map_name, scenario, 'all queries'))
+                if projection_failure:
+                    assert failed_publications, 'Fixture never published the failed actor'
+                    if frames > 4:
+                        assert restored_publications, 'Fixture never published the restored actor'
                 if cover and frames >= 30:
                     assert cover_calls[0], "Cover fixture never serviced a job"
                     assert len(kernel.engine.tokens) < 30, "Retired cover receipts leaked"
@@ -179,16 +237,20 @@ def main():
     parser.add_argument('--module', required=True)
     parser.add_argument('--fixture', required=True)
     parser.add_argument('--frames', type=int, default=30)
+    parser.add_argument('--fps', type=float, help='use the workload clock instead of irregular updates')
     parser.add_argument('--cover', action='store_true')
     parser.add_argument('--human', action='store_true')
     parser.add_argument('--siege', action='store_true')
     parser.add_argument('--orders', action='store_true')
     parser.add_argument('--native-world', action='store_true')
+    parser.add_argument('--projection-failure', action='store_true')
     parser.add_argument('--map', default='59_asia_great_wall')
     parser.add_argument('--scenario', default='combat')
     args = parser.parse_args()
+    if args.fps is not None and not 0 < args.fps < float('inf'):
+        parser.error('--fps must be positive and finite')
     fixture = load_fixture(args.fixture)
-    count = run(Backend(args.module), fixture, args.map, args.scenario, args.frames, args.siege, args.human, args.cover, args.fixture, args.orders, args.native_world)
+    count = run(Backend(args.module), fixture, args.map, args.scenario, args.frames, args.siege, args.human, args.cover, args.fixture, args.orders, args.native_world, args.projection_failure, args.fps)
     print('Native whole Bot update parity: %d complete callbacks.' % count)
 
 

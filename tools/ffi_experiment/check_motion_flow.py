@@ -92,6 +92,13 @@ def run(args):
                     probe_distance=15.0, probe_leading=3.5, deadline=now + (0.1 if case % 2 else -0.1))
                 if case % 5 == 0 and isinstance(cached['result'], dict):
                     cached['result']['world_receipt'] = copy.deepcopy(receipt)
+            if case < 29:
+                # Current contact memory follows the actual local edge. Hold
+                # one blocked heading long enough to cancel the pending path;
+                # random headings correctly never establish that evidence.
+                state.update(yaw=0.0, speed=0.0, airborne=False)
+                command.update(throttle=1.0, turn=0.0, recovery_mode='drive')
+                probe_kind, turnspeed, cached = 5, 0.0, None
             outputs, tapes = [], []
             for runtime, native in ((first, False), (second, True)):
                 runtime.states[11] = current = copy.deepcopy(state)

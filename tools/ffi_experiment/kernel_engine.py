@@ -242,6 +242,7 @@ class EngineLeaves(object):
                             ram_profile=dict(spall_coefficient=raw[11], ramming_bonus=raw[12]))
                 if raw[1]:
                     body['impulse'] = bool(raw[2])
+                    body['immovable'] = not body.get('alive', True)
                 else:
                     body.update(vy=raw[5], pitch=actor.get('pitch', 0), roll=actor.get('roll', 0))
                 bodies.append(body)
@@ -288,7 +289,13 @@ class EngineLeaves(object):
                 result = None
             reply = self.objects._receipt(result)
         elif kind == 630:
-            result = runtime._physics_ground_probe(values[2], values[3], values[4])
+            try:
+                result = runtime._physics_ground_probe(values[2], values[3], values[4])
+            except (TypeError, ValueError, AttributeError, RuntimeError, OverflowError):
+                source = self.actor(query, 1)[0]
+                if source.get('alive', True):
+                    raise
+                result = None
             reply = [result is not None, float(result) if result is not None else 0]
         elif kind == 615:
             source = self.actor(query, 1)[0]

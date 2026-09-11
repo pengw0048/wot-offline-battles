@@ -504,6 +504,7 @@ struct Motion {
         v.yaw = field(s, sf::yaw);
         v.speed = field(s, sf::speed);
         v.half_length = std::max(1.5, field(s, sf::half_length, 3.5));
+        v.half_width = std::max(.3, field(s, sf::half_width, 1.7));
         v.step = dt;
         v.vertical = field(s, sf::vertical_speed);
         v.pitch = field(s, sf::last_drive_pitch);

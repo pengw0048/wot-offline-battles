@@ -29,6 +29,23 @@ def reply(kind, hit, identity=0):
     return [1] + point(hit[0]) + normal + [identity]
 
 
+def begin_trace(trace, header, pos, yaw, speed, dt, motion_yaw, pitch, roll, airborne):
+    if trace is not None:
+        trace.clear()
+        trace.update(position=tuple(point(pos)), yaw=yaw, speed=speed, dt=dt,
+                     motion_yaw=motion_yaw, pitch=pitch, roll=roll, airborne=airborne,
+                     extents=tuple(header[5:8]))
+
+
+def finish_trace(trace, values):
+    if trace is not None and values[0]:
+        trace.update(reason=('ground_profile', 'raised_wall', 'solid_lane', 'upper_lane')[int(values[0])-1],
+                     ray_start=tuple(values[1:4]), ray_end=tuple(values[4:7]),
+                     hit=tuple(values[7:10]), normal=tuple(values[10:13]),
+                     ground_ahead=values[14] if values[13] else None,
+                     profile=list(values[16:16+int(values[15])]))
+
+
 class WorldBackend(object):
     def __init__(self, backend):
         self.backend = backend
@@ -43,11 +60,12 @@ class WorldBackend(object):
 
     def check(self, spaceID, pos, yaw, vel, td=None, airborne=False, dt=0.04,
               return_status=False, allow_kinetic=False, kinetic_speed=None,
-              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0):
+              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0, trace=None):
         import BigWorld
         import Math
         world = self.world
         header = inputs(world, pos, yaw, vel, td, airborne, dt, motion_yaw, pitch, roll)
+        begin_trace(trace, header, pos, yaw, vel, dt, motion_yaw, pitch, roll, airborne)
         values = self.backend.call([400] + header + [0] * 16)[-16:]
         handle = int(values[15])
         collision_filter, crush_state, hits = None, [False], {}
@@ -87,6 +105,8 @@ class WorldBackend(object):
                 self.backend.call(packet)
                 values = packet[-16:]
             status = int(values[1])
+            if trace is not None:
+                finish_trace(trace, self.backend.call([407, handle] + [0] * 24))
             return ('hard', 'clear', 'kinetic')[status] if return_status else status != 1
         finally:
             self.backend.call([402, handle])
@@ -96,11 +116,12 @@ class SyncWorldBackend(WorldBackend):
     """Keep the entire sweep on the C++ stack across borrowed engine calls."""
     def check(self, spaceID, pos, yaw, vel, td=None, airborne=False, dt=0.04,
               return_status=False, allow_kinetic=False, kinetic_speed=None,
-              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0):
+              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0, trace=None):
         import BigWorld
         import Math
         world = self.world
         header = inputs(world, pos, yaw, vel, td, airborne, dt, motion_yaw, pitch, roll)
+        begin_trace(trace, header, pos, yaw, vel, dt, motion_yaw, pitch, roll, airborne)
         packet = array('d', [0] * 16)
         collision_filter, crush_state, hits = [None], [False], {}
         sequence = [0]
@@ -138,6 +159,9 @@ class SyncWorldBackend(WorldBackend):
             # Equal-length replacement keeps the borrowed buffer address stable.
             packet[:8] = array('d', answer)
 
-        values = self.backend.call_sync([405] + header, packet, query)
+        command = [405] + header if trace is None else [406] + header + [0] * 24
+        values = self.backend.call_sync(command, packet, query)
         status = int(values[0])
+        if trace is not None:
+            finish_trace(trace, values[1:])
         return ('hard', 'clear', 'kinetic')[status] if return_status else status != 1

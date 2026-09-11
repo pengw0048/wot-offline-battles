@@ -201,7 +201,7 @@ struct Launches {
     bool fire(Bot &bot, int round, double factor, double dispersion_factor, const Value &receipt,
               const Value &preview, int64_t time, const Value &base) {
         if (flag(bot.state, sf::_drowning) || flag(bot.state, sf::_overturned) ||
-            !bot.ammo.can_fire())
+            bot.state.get("_wire_projection_failure").kind != Value::Null || !bot.ammo.can_fire())
             return false;
         Gun &g = bot.gun;
         Ammo &a = bot.ammo;

@@ -10,6 +10,7 @@ namespace offline_motion {
 #define OFFLINE_MOTION_CONSTANTS(X) \
     X(GRAVITY) X(GRAVITY_FACTOR) X(COHESION) X(DRIVE_TRACTION) \
     X(SLOPE_GRIP_LNG_FULL_Y) X(SLOPE_GRIP_LNG_FULL) X(SLOPE_GRIP_LNG_MIN_Y) X(SLOPE_GRIP_LNG_MIN) \
+    X(SLOPE_GRIP_SDW_FULL_Y) X(SLOPE_GRIP_SDW_FULL) X(SLOPE_GRIP_SDW_MIN_Y) X(SLOPE_GRIP_SDW_MIN) \
     X(POWER_FACTOR) X(BKWD_POWER_FRACTION) X(ENGINE_MIN_V) X(STEER_RESIST_MULT) \
     X(COH_DECAY_Y) X(COH_DECAY_FACTOR) X(COH_DECAY_POW) X(SLOPE_COH_DECAY_Y) X(SLOPE_COH_DECAY) X(COH_DECAY_BOUND) \
     X(COAST_BRAKE_SHARE) X(SLIDE_KINETIC) X(SLIDE_HOLD_TAN) X(SLIP_THRESHOLD_TAN) X(SLIP_DRAG) \
@@ -50,6 +51,19 @@ inline double rolling(const Tuning &c,const Params &p,int terrain,bool steering)
     double f=p.mass*p.specificFriction*c.GRAVITY_FACTOR*p.terrainResist[terrain];
     if(steering)f*=c.STEER_RESIST_MULT;
     return f;
+}
+inline std::array<double,2> contact_push(const Tuning &c,const Params &p,double px,double pz,double yaw,double dt,double normal){
+    if(dt<=0)return {{px,pz}};
+    double ny=std::max(normal,0.1),roll=rolling(c,p,0,false)/std::max(p.mass,1.0);
+    double hold=c.SLIDE_HOLD_TAN*c.GRAVITY*ny,longitudinal=std::max(hold,roll);
+    normal=clamp(normal,0,1);
+    double grip=normal>=c.SLOPE_GRIP_SDW_FULL_Y?c.SLOPE_GRIP_SDW_FULL:
+        normal<=c.SLOPE_GRIP_SDW_MIN_Y?c.SLOPE_GRIP_SDW_MIN:
+        c.SLOPE_GRIP_SDW_MIN+(normal-c.SLOPE_GRIP_SDW_MIN_Y)/(c.SLOPE_GRIP_SDW_FULL_Y-c.SLOPE_GRIP_SDW_MIN_Y)*(c.SLOPE_GRIP_SDW_FULL-c.SLOPE_GRIP_SDW_MIN);
+    double lateral=std::max(c.SLIDE_HOLD_TAN*grip*c.GRAVITY*ny,roll),s=std::sin(yaw),co=std::cos(yaw);
+    auto bleed=[](double value,double budget){return budget<=0?value:value>budget?value-budget:value<-budget?value+budget:0.0;};
+    double forward=bleed(px*s+pz*co,longitudinal*dt),right=bleed(px*co-pz*s,lateral*dt);
+    return {{forward*s+right*co,forward*co-right*s}};
 }
 inline double engine(const Tuning &c,const Params &p,double v,double throttle,double pitch){
     if(throttle==0)return 0;

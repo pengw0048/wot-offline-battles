@@ -6,13 +6,13 @@ namespace offline_kernel {
 struct TankBody {
     Value raw;
     int id, team;
-    bool alive, impulse, has_y;
+    bool alive, impulse, has_y, immovable;
     double x, y, z, yaw, pitch, roll, mass, vx, vy, vz;
     std::array<double, 4> shape;
     explicit TankBody(const Value &v)
         : raw(v), id(integer(v, sf::id, -1)), team(integer(v, sf::team)),
           alive(flag(v, sf::alive, true)), impulse(flag(v, "impulse", true)),
-          has_y(v.get(sf::y).kind != Value::Null), x(field(v, sf::x)), y(field(v, sf::y)),
+          has_y(v.get(sf::y).kind != Value::Null), immovable(flag(v, "immovable")), x(field(v, sf::x)), y(field(v, sf::y)),
           z(field(v, sf::z)), yaw(field(v, sf::yaw)), pitch(field(v, sf::pitch)),
           roll(field(v, sf::roll)), mass(std::max(1.0, field(v, sf::mass, 1))), vx(field(v, "vx")),
           vy(field(v, "vy")), vz(field(v, "vz")) {
@@ -95,8 +95,8 @@ struct TankContacts {
     }
     static OptionalContact contact(const TankBody &a, const TankBody &b, bool impact = false) {
         auto axes_a = a.axes(), axes_b = b.axes();
-        double dx = a.x - b.x, dz = a.z - b.z, rx = a.vx - (b.alive ? b.vx : 0),
-               rz = a.vz - (b.alive ? b.vz : 0);
+        double dx = a.x - b.x, dz = a.z - b.z, rx = a.vx - (b.immovable ? 0 : b.vx),
+               rz = a.vz - (b.immovable ? 0 : b.vz);
         offline_nav::Optional<double> best;
         Contact result{};
         for (V axis : {axes_a[0], axes_a[1], axes_b[0], axes_b[1]}) {
@@ -236,12 +236,12 @@ struct TankContacts {
                 continue;
             Pair pair(std::min(own.id, other.id), std::max(own.id, other.id));
             overlaps.insert(pair);
-            double inverse = 1 / own.mass, other_inverse = other.alive ? 1 / other.mass : 0,
+            double inverse = 1 / own.mass, other_inverse = other.immovable ? 0 : 1 / other.mass,
                    total = inverse + other_inverse,
                    correction = std::max(c.value[2] - .01, 0.0) * .95 / total;
             result.correction[0] += c.value[0] * correction * inverse;
             result.correction[1] += c.value[1] * correction * inverse;
-            V other_velocity = other.alive ? other.velocity() : V{{0, 0}};
+            V other_velocity = other.immovable ? V{{0, 0}} : other.velocity();
             double normal = (own.vx - other_velocity[0]) * c.value[0] +
                             (own.vz - other_velocity[1]) * c.value[1];
             if (normal < 0 && other.impulse) {
@@ -302,6 +302,7 @@ struct TankContacts {
             event["shape_other"] = shape(other);
             event["contact_normal"] = array(V{{impact.value[0], impact.value[1]}});
             event["contact_penetration"] = Value(impact.value[2]);
+            event["contact_positions"] = tuple_value({Value(own.x), Value(own.z), Value(other.x), Value(other.z)});
             event["closing_speed"] = Value(speed);
             double rx = own.vx - other.vx, ry = own.vy - other.vy, rz = own.vz - other.vz;
             event["relative_speed"] = Value(std::sqrt(rx * rx + ry * ry + rz * rz));
@@ -363,9 +364,44 @@ struct TankContacts {
         }
         s[sf::x] = Value(field(s, sf::x) + mx);
         s[sf::z] = Value(field(s, sf::z) + mz);
-        double decay = advance ? std::pow(.90, std::max(0.0, step) * 60) : 1;
-        s[sf::push_x] = Value(px * decay);
-        s[sf::push_z] = Value(pz * decay);
+        if (advance && !flag(s, sf::alive, true)) {
+            V velocity = bleed(bot, px, pz, step);
+            s[sf::push_x] = Value(velocity[0]);
+            s[sf::push_z] = Value(velocity[1]);
+        } else {
+            double decay = advance ? std::pow(.90, std::max(0.0, step) * 60) : 1;
+            s[sf::push_x] = Value(px * decay);
+            s[sf::push_z] = Value(pz * decay);
+        }
+    }
+    V bleed(const Bot &bot, double px, double pz, double step) const {
+        const Value &s = bot.state;
+        auto at = motion.profiles.find(integer(s, sf::id));
+        if (at == motion.profiles.end())
+            return {{px, pz}};
+        return offline_motion::contact_push(motion.tuning, at->second, px, pz,
+            field(s, sf::yaw), step, std::cos(field(s, sf::pitch)) * std::cos(field(s, sf::roll)));
+    }
+    bool apply_wreck(Bot &bot, const Response &response, double step) {
+        Value &s = bot.state;
+        V remaining = bleed(bot, field(s, sf::push_x) + response.delta[0],
+                            field(s, sf::push_z) + response.delta[1], step);
+        auto stop = [&]() { s[sf::push_x] = Value(0.0); s[sf::push_z] = Value(0.0); };
+        if (remaining == V{{0, 0}}) { stop(); return false; }
+        auto before = motion.point(s);
+        apply(bot, response, step);
+        if (std::abs(field(s, sf::x) - before.x) <= 1e-6 &&
+            std::abs(field(s, sf::z) - before.z) <= 1e-6)
+            return false;
+        Motion::Scope scope(motion);
+        auto support = offline_motion::ground(motion.flow, integer(s, sf::id),
+            field(s, sf::x), field(s, sf::z), field(s, sf::y));
+        double rise = support.value - field(s, sf::y);
+        if (!support.has || rise < -field(config, "wreck_drop") || rise > field(config, "wreck_rise")) {
+            motion.assign(s, before); stop(); return false;
+        }
+        s[sf::y] = Value(support.value);
+        return true;
     }
     Value report(int id, int other, int self_damage, int other_damage, int player = 0,
                  int seq = 0) {
@@ -404,8 +440,10 @@ struct TankContacts {
         result[sf::alive] = Value(flag(s, sf::alive, true));
         result[sf::team] = Value(integer(s, sf::team));
         result[sf::vehicle] = Value(s.get(sf::vehicle).text());
-        if (human)
+        if (human) {
             result["impulse"] = Value(false);
+            result["immovable"] = Value(!flag(s, sf::alive, true));
+        }
         for (const char *key : {"x", "y", "z", "yaw"})
             result[key] = Value(field(s, key));
         result[sf::mass] = Value(human ? field(collision, sf::mass) : field(s, sf::mass, 25000));
@@ -586,8 +624,7 @@ struct TankContacts {
         frame_armors.clear();
         for (int id : ordered) {
             Bot &bot = *bots.at(id);
-            if (!flag(bot.state, sf::alive, true))
-                continue;
+            bool alive = flag(bot.state, sf::alive, true);
             const TankBody &own = bodies.at(id);
             int x = static_cast<int>(std::floor(own.x / size)),
                 z = static_cast<int>(std::floor(own.z / size));
@@ -609,13 +646,29 @@ struct TankContacts {
                     }
                 }
             if (others.empty()) {
-                if (field(bot.state, sf::push_x) || field(bot.state, sf::push_z))
-                    apply(bot, Response(), elapsed);
+                if (field(bot.state, sf::push_x) || field(bot.state, sf::push_z)) {
+                    if (alive) apply(bot, Response(), elapsed);
+                    else apply_wreck(bot, Response(), elapsed);
+                }
                 continue;
+            }
+            if (!alive) {
+                bool moving = field(bot.state, sf::push_x) || field(bot.state, sf::push_z);
+                for (TankBody &other : others) {
+                    if (other.raw.get(sf::kind).text() == "player" && !other.impulse) {
+                        other.impulse = true;
+                        other.raw = other.raw.copy();
+                        other.raw["impulse"] = Value(true);
+                    }
+                    moving = moving || other.alive || other.vx || other.vz;
+                }
+                if (!moving) continue;
             }
             std::set<Pair> previous = active;
             previous.insert(current.begin(), current.end());
-            Response response = resolve(own, others, now, previous, flag(config, "has_armor"));
+            Response response = resolve(own, others, alive ? offline_nav::Optional<double>(now) : offline_nav::Optional<double>(),
+                                        alive ? previous : std::set<Pair>(), alive && flag(config, "has_armor"));
+            if (!alive) { apply_wreck(bot, response, elapsed); continue; }
             current.insert(response.contacts.begin(), response.contacts.end());
             if (std::abs(response.delta[0]) > .0001 || std::abs(response.delta[1]) > .0001 ||
                 std::abs(response.correction[0]) > .0001 ||
@@ -625,10 +678,12 @@ struct TankContacts {
             for (const Value &event : elements(response.events)) {
                 if (motion.diagnostics)
                     motion.diagnostics->emit("RAM", event);
-                if (integer(event, "other_id") < base)
-                    reports.append(report(id, integer(event, "other_id"),
-                                          integer(event, "damage_to_self"),
-                                          integer(event, "damage_to_other")));
+                if (integer(event, "other_id") < base) {
+                    Value row = report(id, integer(event, "other_id"),
+                                       integer(event, "damage_to_self"), integer(event, "damage_to_other"));
+                    row["contact_positions"] = event.get("contact_positions");
+                    reports.append(row);
+                }
             }
         }
         for (int id : contacted)

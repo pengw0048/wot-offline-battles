@@ -108,9 +108,9 @@ void result(Owner &o,bool value){
     j.results.push_back(std::array<int,4>{{j.cursor,visible,value,fresh}});
     ++j.cursor;j.stage=0;
 }
-double camouflage(Projection p,bool fired,double foliage,bool upper){
+double camouflage(Projection p,bool fired,double foliage){
     double value=p.moving?p.base0:p.base1;
-    value=(value+(upper?0:p.add))*std::max(0.0,upper?1:p.multiply);
+    value=(value+p.add)*std::max(0.0,p.multiply);
     if(fired)value*=clamp(p.shot,0,1);
     value+=clamp(foliage,0,0.60);return clamp(value,0,0.95);
 }
@@ -262,12 +262,12 @@ int offline_perception_dispatch(double *b,int n){
             o.templates[std::make_pair(j.cursor,j.phase)]=t;j.stage=0;
         }else if(stage==2){
             Projection p;p.view=r.next();p.base0=r.next();p.base1=r.next();p.shot=r.next();p.moving=r.integer()!=0;p.add=r.next();p.multiply=r.next();j.projection=p;
-            if(!detected(o,j.distance,p.view,camouflage(p,j.fired,0,true),true)){store(o,false);result(o,false);}
+            if(!detected(o,j.distance,p.view,camouflage(p,j.fired,0),true)){store(o,false);result(o,false);}
             else if(!admit(o,j.key))result(o,false);
             else j.stage=3;
         }else if(stage==3){
             bool los=r.integer()!=0;double foliage=r.next();
-            bool value=detected(o,j.distance,j.projection.view,camouflage(j.projection,j.fired,foliage,false),los);
+            bool value=detected(o,j.distance,j.projection.view,camouflage(j.projection,j.fired,foliage),los);
             store(o,value);result(o,value);
         }else throw std::invalid_argument("perception query tag");
         advance(o,b);return 0;

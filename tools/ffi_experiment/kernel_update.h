@@ -561,17 +561,45 @@ template <class Owner> struct Simulation {
         }
         publish_burst(bot);
     }
-    Value publication(const std::vector<int> &ids, int64_t end) {
+    Value publication(const std::vector<int> &ids, int64_t end, double now, Value &ram_reports) {
         Value rows = Value::array(ids.size());
         edges.begin(ids.size());
+        std::set<int> failed;
+        size_t published = 0;
         for (size_t i = 0; i < ids.size(); ++i) {
             Bot &bot = *k.bots.at(ids[i]);
             publish_burst(bot);
             bot.state[sf::equipment_states] = bot.equipment_wire(equipment_now);
-            rows.append(k.codec.row(bot.state));
-            edges.capture(i, bot.state, bot.equipment, equipment_now);
+            try {
+                rows.append(k.codec.row(bot.state));
+            } catch (const std::invalid_argument &error) {
+                failed.insert(ids[i]);
+                rows.append(tuple_value({Value(ids[i])}));
+                const Value &previous = bot.state.get("_wire_projection_failure");
+                std::string reason = error.what();
+                if (previous.kind == Value::Null || previous[0].text() != reason ||
+                    now - previous[1].number() >= 5) {
+                    bot.state["_wire_projection_failure"] = tuple_value({Value(reason), Value(now)});
+                    std::printf("[BOT STATE] projection unavailable round=%d bot=%d reason=%s\n",
+                                k.round, ids[i], reason.c_str());
+                }
+                continue;
+            }
+            bot.state.erase("_wire_projection_failure");
+            edges.capture(published++, bot.state, bot.equipment, equipment_now);
         }
-        if (edges.finish(k.launches.pending, pending_ram)) {
+        edges.current.bots.resize(published);
+        Value launches = Value::array(), deferred_ram = Value::array();
+        for (const Value &launch : elements(k.launches.pending))
+            if (!failed.count(integer(launch, sf::id)))
+                launches.append(launch);
+        for (const Value &report : elements(pending_ram)) {
+            bool blocked = failed.count(integer(report, "bot_id")) ||
+                (report.get(sf::target_kind).text() == "bot" && failed.count(integer(report, sf::target_id)));
+            (blocked ? deferred_ram : ram_reports).append(report);
+        }
+        pending_ram = deferred_ram;
+        if (edges.finish(launches, ram_reports)) {
             edge_sample = end;
             ++edge_revision;
         }
@@ -581,8 +609,8 @@ template <class Owner> struct Simulation {
         out["sample_time_us"] = Value(end);
         out["edge_sample_time_us"] = Value(edge_sample);
         out["edge_revision"] = Value(edge_revision);
-        if (k.launches.pending.truth())
-            out["launches"] = k.launches.pending.copy();
+        if (launches.truth())
+            out["launches"] = launches;
         return out;
     }
     Value slice(double dt, double now, const Value &players, const Value &supplied, bool refresh,
@@ -944,10 +972,10 @@ template <class Owner> struct Simulation {
         if (publish) {
             for (int id : ids)
                 k.bots.at(id)->mark_combat();
-            outgoing.append(publication(ids, end));
-            for (const Value &v : elements(pending_ram))
+            Value ram_reports = Value::array();
+            outgoing.append(publication(ids, end, now, ram_reports));
+            for (const Value &v : elements(ram_reports))
                 outgoing.append(v);
-            pending_ram = Value::array();
             if (observation) {
                 next_observation = now + field(config, "observation_seconds");
                 Value row = Value::object();

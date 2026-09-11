@@ -97,8 +97,8 @@ struct Navigator {
         for(auto item:active(macro,owner,at))result[item.first]=item.second;
         return result;
     }
-    bool penalized(int owner,Point a,Point b,double at,bool only_macro=false){
-        return grid->path_penalty(Path{a,b},only_macro?active(macro,owner,at):planning(owner,at));
+    bool penalized(int owner,Point a,Point b,double at){
+        return grid->path_penalty(Path{a,b},planning(owner,at));
     }
     void cancel(int owner,const std::string &keep="",const std::string &kind=""){
         for(auto it=searches.begin();it!=searches.end();){
@@ -116,7 +116,7 @@ struct Navigator {
         s.recovery_start.reset();s.path_key.clear();s.index=0;cancel(id);
     }
     bool start_macro(int id,State &s,Point current,Point target,double at){
-        Point escape;bool has=grid->safe_local(current,target,at,{},id%2?1:-1,{},0.42,escape);
+        Point escape;bool has=grid->safe_local(current,target,at,{},id%2?1:-1,planning(id,at),0.42,escape);
         auto edges=grid->edges(current,target);
         if(edges.empty()&&!has)return false;
         if(has){s.escape=escape;s.escape_until=at+4.0;}
@@ -146,13 +146,13 @@ struct Navigator {
             s.path_key=identity.repr;s.target=goal;s.position=current;s.progress_at=at;s.escape.reset();s.until.reset();return {};
         }
         if(s.escape.has){
-            if(at<(s.until.has?s.until.value:at)&&distance(current,s.escape.value)>1.5&&grid->dry(current,s.escape.value,at))return s.escape;
+            if(at<(s.until.has?s.until.value:at)&&distance(current,s.escape.value)>1.5&&!penalized(id,current,s.escape.value,at)&&grid->dry(current,s.escape.value,at))return s.escape;
             s.target=goal;s.position=current;s.progress_at=at;s.escape.reset();s.until.reset();return {};
         }
         double progress=distance(s.position,s.target)-distance(current,s.target);
         if(progress>=0.20){s.target=goal;s.position=current;s.progress_at=at;return {};}
         if(at-s.progress_at<12.0)return {};
-        Point escape;bool has=grid->safe_local(current,goal,at,{},id%2?1:-1,{},0.42,escape);
+        Point escape;bool has=grid->safe_local(current,goal,at,{},id%2?1:-1,planning(id,at),0.42,escape);
         s.target=goal;s.position=current;s.progress_at=at;
         if(!has)return {};
         s.escape=escape;s.until=at+4.0;++s.replans;return escape;
@@ -271,7 +271,7 @@ struct Navigator {
         if(owner>=0)cancel(owner,key,identity.kind);
         auto cached=paths.find(key);
         if(cached!=paths.end()){
-            auto value=cached->second;Penalties hard=active(macro,owner,at);
+            auto value=cached->second;Penalties hard=planning(owner,at);
             bool hull=revisions.at(key)!=grid->hull_revision&&grid->path_penalty(*value,grid->hulls);
             if(!value->empty()&&!hull&&!grid->path_timed(*value,at)&&!grid->path_penalty(*value,hard)){
                 path_times[key]=at;revisions[key]=grid->hull_revision;return {key,value};
@@ -280,7 +280,7 @@ struct Navigator {
             erase_path(key);
         }
         if(!searches.count(key)){
-            Penalties local=planning(owner,at),hard=active(macro,owner,at);
+            Penalties local=planning(owner,at),hard=local;
             if(!grid->path_penalty(Path{start,goal},local)&&grid->dry(start,goal,at)){
                 auto value=std::make_shared<Path>(Path{start,goal});save_path(key,value,at,grid->hull_revision);return {key,value};
             }
@@ -301,15 +301,16 @@ struct Navigator {
         if(s.shallow.has&&(distance(current,s.shallow.value)<=1.5||penalized(id,current,s.shallow.value,at)||
                 grid->hazard(current,s.shallow.value,3)||!grid->segment_clear(current,s.shallow.value)))s.shallow.reset();
         Point target;
-        if(safe&&grid->safe_local(current,goal,at,avoid,id%2?1:-1,active(macro,id,at),0,target)){
+        if(safe&&grid->safe_local(current,goal,at,avoid,id%2?1:-1,planning(id,at),0,target)){
             s.last_target=target;s.status=1;s.terminal=distance(target,goal)<=1.5;set_mode(id,2);return target;
         }
-        s.last_target=goal;s.status=2;s.terminal=false;set_mode(id,3);return goal;
+        target=penalized(id,current,goal,at)?current:goal;
+        s.last_target=target;s.status=2;s.terminal=false;set_mode(id,3);return target;
     }
     Point pending(int id,Point current,Point goal,double at,State &s,const Path &avoid,bool allow=true,bool immediate=false){
         if(allow&&s.last_target.has){
             Point target=s.last_target.value;bool shallow=grid->hazard(current,target,4);
-            if(grid->segment_penalty(current,target,at)<=0&&!penalized(id,current,target,at,true)&&grid->segment_clear(current,target)&&
+            if(grid->segment_penalty(current,target,at)<=0&&!penalized(id,current,target,at)&&grid->segment_clear(current,target)&&
                     (!shallow||(s.shallow.has&&s.shallow.value==target))&&distance(current,target)>1.5){
                 s.status=0;s.terminal=false;set_mode(id,0);return target;
             }
@@ -317,14 +318,16 @@ struct Navigator {
         if(!s.pending_since.has)s.pending_since=at;
         Point target;
         if((immediate||at-s.pending_since.value>=0.6)&&
-                grid->safe_local(current,goal,at,avoid,id%2?1:-1,active(macro,id,at),0,target)){
+                grid->safe_local(current,goal,at,avoid,id%2?1:-1,planning(id,at),0,target)){
             s.last_target=target;s.status=0;s.terminal=false;set_mode(id,2);return target;
         }
         s.last_target=current;s.status=0;s.terminal=false;set_mode(id,0);return current;
     }
-    bool planned_next(Point current,const Path &path,int index,double at){
+    bool planned_next(Point current,const Path &path,int index,double at,int id=-1){
         if(index+1>=static_cast<int>(path.size()))return false;
-        Point target=path[index+1];bool reached=distance(current,path[index])<=1.5;
+        Point target=path[index+1];
+        if(id>=0&&penalized(id,current,target,at))return false;
+        bool reached=distance(current,path[index])<=1.5;
         if((!reached&&!live_climb(current,path,index,index+1))||grid->segment_penalty(current,target,at)>0||!grid->segment_clear(current,target))return false;
         return !grid->hazard(current,target,4)||grid->hazard(path[index],target,4);
     }
@@ -334,10 +337,10 @@ struct Navigator {
         if(((!selected.has||selected.value!=target)&&!live_climb(current,path,index-1,index))||grid->segment_penalty(current,target,at)>0||!grid->segment_clear(current,target))return false;
         return !grid->hazard(current,target,4)||grid->hazard(path[index-1],target,4);
     }
-    int lookahead(Point current,const Path &path,int index,const Identity &identity,double at,Optional<double> distance_limit){
+    int lookahead(Point current,const Path &path,int index,const Identity &identity,double at,Optional<double> distance_limit,int id=-1){
         int result=index,limit=std::min(static_cast<int>(path.size()),index+(distance_limit.has?7:3));
         double horizon=distance_limit.has?std::max(grid->data->cell*2.0,distance_limit.value):0;
-        Penalties hard=active(macro,identity.owner,at);
+        Penalties hard=planning(id>=0?id:identity.owner,at);
         for(int candidate=index+1;candidate<limit;++candidate){
             if(distance_limit.has&&candidate>index+1&&distance(current,path[candidate])>horizon)break;
             if((!identity.prefer||grid->clearance(path,index,candidate))&&live_climb(current,path,index,candidate)&&
@@ -371,7 +374,7 @@ struct Navigator {
         else{if(s.macro_active)finish_macro(id,s);reset_macro(s,current,s.last_target,at);}
         if(s.escape.has){
             Point escape=s.escape.value;
-            if(at<(s.escape_until.has?s.escape_until.value:at)&&distance(current,escape)>1.5&&grid->dry(current,escape,at)){
+            if(at<(s.escape_until.has?s.escape_until.value:at)&&distance(current,escape)>1.5&&!penalized(id,current,escape,at)&&grid->dry(current,escape,at)){
                 s.shallow.reset();s.last_target=escape;s.status=1;s.terminal=false;set_mode(id,-1);return escape;
             }
             finish_macro(id,s);reset_macro(s,current,s.last_target,at);
@@ -385,7 +388,7 @@ struct Navigator {
         auto previous=paths.find(s.path_key);std::shared_ptr<Path> previous_path=previous==paths.end()?std::shared_ptr<Path>():previous->second;
         auto planned=path(effective,start,goal,at);std::string key=planned.first;auto route=planned.second;
         if(!route||route->empty()){
-            if(grid->dry(current,goal,at)&&!penalized(id,current,goal,at,true)){
+            if(grid->dry(current,goal,at)&&!penalized(id,current,goal,at)){
                 s.shallow.reset();s.last_target=goal;s.status=1;s.terminal=true;set_mode(id,1);return goal;
             }
             if(!route)return pending(id,current,goal,at,s,avoid,allow,transition);
@@ -405,7 +408,7 @@ struct Navigator {
         int index=std::min(s.index,static_cast<int>(route->size())-1);Optional<Point> selected_target;
         if(active_key==key&&previous_path==route&&s.last_target.has&&s.last_target.value==(*route)[index])selected_target=s.shallow;
         bool shallow=grid->hazard(current,(*route)[index],4);
-        if(grid->segment_penalty(current,(*route)[index],at)>0||penalized(id,current,(*route)[index],at,true)||
+        if(grid->segment_penalty(current,(*route)[index],at)>0||penalized(id,current,(*route)[index],at)||
                 (shallow&&!planned_current(current,*route,index,at,selected_target))||!grid->segment_clear(current,(*route)[index])){
             Identity join=prefixed(identity,"join",id,cell_repr(grid->cell(current)));
             planned=path(join,current,goal,at);key=planned.first;
@@ -414,14 +417,14 @@ struct Navigator {
             route=planned.second;s.path_key=key;s.index=0;index=0;
         }
         double radius=std::min(10.0,std::max(1.5,grid->data->cell*0.55));
-        while(index+1<static_cast<int>(route->size())&&distance(current,(*route)[index])<radius&&planned_next(current,*route,index,at))++index;
-        int look=lookahead(current,*route,index,effective,at,horizon);
+        while(index+1<static_cast<int>(route->size())&&distance(current,(*route)[index])<radius&&planned_next(current,*route,index,at,id))++index;
+        int look=lookahead(current,*route,index,effective,at,horizon,id);
         if(look==static_cast<int>(route->size())-1&&distance(current,(*route)[look])<radius&&distance((*route)[look],goal)>radius){
             Identity continuation=prefixed(identity,"continue",id,cell_repr(grid->cell(current)));
             planned=path(continuation,current,goal,at);
             if(planned.second&&!planned.second->empty()){
-                route=planned.second;s.path_key=planned.first;int next=route->size()>1&&planned_next(current,*route,0,at)?1:0;
-                next=lookahead(current,*route,next,continuation,at,horizon);s.index=next;
+                route=planned.second;s.path_key=planned.first;int next=route->size()>1&&planned_next(current,*route,0,at,id)?1:0;
+                next=lookahead(current,*route,next,continuation,at,horizon,id);s.index=next;
                 return selected(id,s,current,(*route)[next],goal);
             }
             if(!planned.second)return pending(id,current,goal,at,s,avoid,allow,transition);

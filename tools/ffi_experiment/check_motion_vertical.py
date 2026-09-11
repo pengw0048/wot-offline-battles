@@ -33,6 +33,41 @@ def first_difference(a, b, path=''):
             return diff
 
 
+def straddle_cases(first, second, initial):
+    """Cover the chassis-end rise boundary independently of random terrain."""
+    samples = (
+        (-1.0, .12, .12, None, None),
+        (-1.0, .120001, .120001, None, None),
+        (-1.0, .2, .2, None, None),
+        (-1.0, .6, .6, None, None),
+        (-1.0, None, None, .12, .12),
+        (-1.0, None, None, .120001, .120001),
+        (-1.0, -.8, -.8, None, None),
+        (-1.0, -.800001, -.800001, None, None),
+        (-1.0, .12, None, .12, None),
+    )
+    queries = 0
+    for heights in samples:
+        outputs = []
+        for runtime in (first, second):
+            state = copy.deepcopy(initial)
+            state.update(y=0.0, yaw=.35, speed=0.0, last_drive_pitch=0.0,
+                         airborne=False, grounded_once=True, vertical_speed=0.0)
+            runtime.states[11] = state
+            tape = []
+            def probe(x, z, hint):
+                tape.append((x, z, hint))
+                return heights[len(tape) - 1]
+            runtime._physics_ground_probe = probe
+            result = runtime._update_vertical_motion(state, 1.0 / 15)
+            outputs.append((result, state, tape))
+        diff = first_difference(outputs[0], outputs[1])
+        if diff:
+            raise AssertionError(('straddled support', heights, diff))
+        queries += len(outputs[0][2])
+    return len(samples), queries
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--module', required=True)
@@ -52,6 +87,7 @@ def main():
     rng = random.Random(627001513)
     checks = queries = 0
     try:
+        checks, queries = straddle_cases(first, second, initial)
         for case in range(args.cases):
             state = copy.deepcopy(initial)
             state.update(speed=rng.uniform(-9, 20), vertical_speed=rng.uniform(-30, 15),

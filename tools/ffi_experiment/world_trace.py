@@ -30,7 +30,7 @@ class Recorder(object):
 
     def check(self, spaceID, pos, yaw, vel, td=None, airborne=False, dt=0.04,
               return_status=False, allow_kinetic=False, kinetic_speed=None,
-              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0):
+              commit_enabled=True, motion_yaw=None, pitch=0.0, roll=0.0, trace=None):
         import BigWorld
         world = self.world
         header = inputs(world, pos, yaw, vel, td, airborne, dt, motion_yaw, pitch, roll)
@@ -85,7 +85,7 @@ class Recorder(object):
         try:
             value = self.original(
                 spaceID, pos, yaw, vel, td, airborne, dt, True, allow_kinetic,
-                kinetic_speed, commit_enabled, motion_yaw, pitch, roll)
+                kinetic_speed, commit_enabled, motion_yaw, pitch, roll, trace=trace)
         finally:
             world.prepare_horizontal_collision_filter = old_prepare
             world._collide_horizontal = old_horizontal

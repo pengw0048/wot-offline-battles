@@ -115,7 +115,7 @@ extern "C" int offline_motion_dispatch(double *b,int n){
             auto result=slope(flow,bot,position,yaw,length,width,pitch,roll);b[0]=result.first;b[1]=result.second;return 0;
         }
         Vertical v;v.bot=bot;v.position=position;v.yaw=yaw;v.half_length=length;
-        v.speed=r.number();v.step=r.number();v.vertical=r.number();v.pitch=r.number();v.airborne=r.integer(0,1)!=0;v.grounded=r.integer(0,1)!=0;
+        v.half_width=r.number();v.speed=r.number();v.step=r.number();v.vertical=r.number();v.pitch=r.number();v.airborne=r.integer(0,1)!=0;v.grounded=r.integer(0,1)!=0;
         bool tick=r.integer(0,1)!=0;double tx=r.number(),ty=r.number(),tz=r.number();if(tick)v.tick=Point(tx,ty,tz);v.trace=r.integer(0,1)!=0;r.end();
         if(v.step<0||v.step>0.2)throw std::invalid_argument("vertical interval");
         auto result=vertical_step(flow,t,v);std::vector<double> out;put(out,result.position);

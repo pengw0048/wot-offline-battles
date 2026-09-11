@@ -129,7 +129,17 @@ struct Equipment {
             ai_pending = false;
             return Value();
         }
-        if (effect(critical, Value(), false, stunned).kind == Value::Null || !ready(now)) {
+        bool worthwhile = critical.get("destroyed").truth();
+        if (critical.get("devices").kind == Value::Array)
+            for (const Value &record : elements(critical.get("devices"))) {
+                const std::string state = record.get("state").text();
+                const std::string name = record.get(sf::name).text();
+                worthwhile = worthwhile || state == "destroyed" ||
+                    (state == "critical" && (name == "ammoBayHealth" ||
+                     name == "engineHealth" || name == "gunHealth"));
+            }
+        if ((kind == "repairkit" && !worthwhile) ||
+            effect(critical, Value(), false, stunned).kind == Value::Null || !ready(now)) {
             ai_pending = false;
             return Value();
         }
@@ -170,9 +180,9 @@ inline Value equipment_passives(const std::vector<Equipment> &equipment) {
         std::string kind = c.get(sf::kind).text();
         if (kind == "extinguisher")
             fire *= std::max(0.0, field(c, "fireStartingChanceFactor", 1));
-        else if (kind == "repairkit")
+        else if (kind == "repairkit" && e.uses != 0)
             repair += field(c, "bonusValue");
-        else if (kind == "medkit")
+        else if (kind == "medkit" && e.uses != 0)
             medkit += field(c, "bonusValue");
         crew += field(c, "crewLevelIncrease");
         if (kind == "fuel" || (kind == "rpm_limiter" && e.active))

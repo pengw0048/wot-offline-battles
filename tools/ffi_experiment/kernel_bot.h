@@ -221,6 +221,7 @@ struct Bot {
         double elapsed =
             rounded(clamp(field(state, sf::combat_fire_elapsed), 0, critical->fire_duration), 6);
         double timer = rounded(clamp(field(state, sf::combat_fire_timer), 0, .999999), 6);
+        critical->refresh_repair(equipment);
         Critical shadow(state.get(sf::critical), *critical);
         bool repaired = shadow.repair(dt, integer(state, sf::health));
         Value repair_payload = repaired ? shadow.payload() : Value();

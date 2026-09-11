@@ -44,6 +44,18 @@ Answer checked_answer(const double *packet) {
 struct Job {
     Input in;std::vector<Answer> answers;std::vector<Query> expected;
     size_t cursor;bool validate,synchronous,batch_independent;
+    int reason=0;V hard_start,hard_end;Answer hard_hit{};Optional hard_ground;std::vector<double> hard_profile;
+    int hard(int why,V a,V b,const Answer &hit,Optional ground,const std::vector<double> &profile={}){
+        reason=why;hard_start=a;hard_end=b;hard_hit=hit;hard_ground=ground;hard_profile=profile;return 0;
+    }
+    void witness(double *out){
+        out[0]=reason;out[1]=hard_start.x;out[2]=hard_start.y;out[3]=hard_start.z;
+        out[4]=hard_end.x;out[5]=hard_end.y;out[6]=hard_end.z;
+        out[7]=hard_hit.point.x;out[8]=hard_hit.point.y;out[9]=hard_hit.point.z;
+        out[10]=hard_hit.normal.x;out[11]=hard_hit.normal.y;out[12]=hard_hit.normal.z;
+        out[13]=hard_ground.has;out[14]=hard_ground.value;out[15]=hard_profile.size();
+        std::copy(hard_profile.begin(),hard_profile.end(),out+16);
+    }
     Job():cursor(0),validate(false),synchronous(false),batch_independent(false){}
     Answer query(int kind,V a,V b,int id=0){
         Query q={kind,id,a,b};
@@ -117,11 +129,11 @@ Optional ahead(Job &j,const Lane &l,V local_start,V local_end,V py,double c,doub
         if(has_right){Answer hit=j.query(2,right.first,right.second);if(hit.status)b=Optional(hit.point.y);}
     }
     bool descending=(local_end.x-local_start.x)*py.x+(local_end.z-local_start.z)*py.z<-1e-9;
-    if(descending&&a.has&&b.has){
-        double support=j.in.pos.y+local_start.x*py.x+local_start.z*py.z;
-        if(a.value<support-1e-3)return Optional();
+    double support=j.in.pos.y+local_start.x*py.x+local_start.z*py.z;
+    if(a.has&&a.value<support-1e-3)return Optional();
+    if(a.has&&b.has&&(descending||b.value<a.value)){
         Optional middle=ground(j,(l.x1+fx)*0.5,(l.z1+fz)*0.5,l.length,p);
-        if(!middle.has||middle.value>(a.value+b.value)*0.5+1e-3)return Optional();
+        if(!middle.has||std::abs(middle.value-(a.value+b.value)*0.5)>1e-3)return Optional();
     }
     double ix=fx-l.x1,iz=fz-l.z1,dx=l.x2-l.x1,dz=l.z2-l.z1;
     double inside=std::sqrt(source_power(ix,2)+source_power(iz,2)),full=std::sqrt(source_power(dx,2)+source_power(dz,2));
@@ -198,15 +210,15 @@ int sweep(Job &j){
         Optional top=py.z!=0?ahead(j,l,a,b,py,c,s,plane):Optional();
         auto lower=ray(in,l,a,b,py,0.6,top);Answer hit=j.query(3,lower.first,lower.second);
         double target=distance(lower.second,lower.first),d=hit.status?distance(hit.point,lower.first):0;
-        std::vector<Hit> hits;
+        std::vector<Hit> hits;std::vector<double> heights;
         if(hit.status&&d<target){
-            std::vector<double> heights;double segment=0,gradient=1.75;Plane p=plane;
+            double segment=0,gradient=1.75;Plane p=plane;
             if(surface(hit,gradient))p=Plane{hit.point.x,hit.point.y+1.6,hit.point.z,-hit.normal.x/hit.normal.y,-hit.normal.z/hit.normal.y};
             if(surface(hit,gradient)||clamped){
                 segment=l.look/6.0;
                 for(int i=0;i<=6;++i){double offset=segment*i;Optional g=ground(j,l.px+l.ps*offset*l.direction,l.pz+l.pc*offset*l.direction,l.look,p);if(!g.has){heights.clear();break;}heights.push_back(g.value);}
                 gradient=!heights.empty()&&heights.back()<heights.front()?1.75:1.28;
-                if(!heights.empty()&&std::abs(heights.back()-heights.front())>0.15&&!drivable(heights,segment))return 0;
+                if(!heights.empty()&&std::abs(heights.back()-heights.front())>0.15&&!drivable(heights,segment))return j.hard(1,lower.first,lower.second,hit,top,heights);
             }
             bool is_ground=surface(hit,gradient);
             if(!is_ground&&clamped&&matches(hit,heights,segment,l))is_ground=exact(j,hit,l,p);
@@ -215,7 +227,7 @@ int sweep(Job &j){
                     auto r=ray(in,l,a,b,py,h,top);Answer upper=j.query(3,r.first,r.second);
                     if(!upper.status||distance(upper.point,r.first)>=target||surface(upper,gradient))continue;
                     if(matches(upper,heights,segment,l)&&exact(j,upper,l,p))continue;
-                    return 0;
+                    return j.hard(2,r.first,r.second,upper,top);
                 }
                 continue;
             }
@@ -231,7 +243,7 @@ int sweep(Job &j){
             double length=distance(upper.point,r.first);if(length<target)hits.push_back(Hit{length,r.first,r.second,upper});
         }
         std::stable_sort(hits.begin(),hits.end(),[](const Hit &a,const Hit &b){return a.length<b.length;});
-        for(const Hit &h:hits){Answer resolved=j.query(4,h.a,h.b,h.hit.id);if(resolved.status==2)kinetic=true;else if(resolved.status!=1)return 0;}
+        for(const Hit &h:hits){Answer resolved=j.query(4,h.a,h.b,h.hit.id);if(resolved.status==2)kinetic=true;else if(resolved.status!=1)return j.hard(hit.status&&d<target?3:4,h.a,h.b,h.hit,top,heights);}
     }
     return kinetic?2:1;
 }
@@ -251,6 +263,8 @@ int offline_world::sweep(const offline_world::Input &input, bool batch_independe
 }
 int offline_world_dispatch(double *b,int n){
     Reader r(b,n);int op=static_cast<int>(b[0]);
+    if(op==406){Job j;j.in=input(r);if(n!=r.i+24)throw std::invalid_argument("world witness width");j.synchronous=true;b[0]=sweep(j);j.witness(b+1);return 0;}
+    if(op==407){int id=r.integer();if(n!=r.i+24)throw std::invalid_argument("world witness owner width");auto it=jobs.find(id);if(it==jobs.end())throw std::invalid_argument("world owner");it->second.witness(b);return 0;}
     if(op==405){Job j;j.in=input(r);r.end();j.synchronous=true;b[0]=sweep(j);b[1]=j.cursor;return 0;}
     if(op==400){Job j;j.in=input(r);int out=r.i;if(n!=out+WIDTH)throw std::invalid_argument("world start width");int id=next_job++;jobs[id]=j;run(jobs[id],b,out);b[out+15]=id;return 0;}
     if(op==401){int id=r.integer();auto it=jobs.find(id);if(it==jobs.end())throw std::invalid_argument("world owner");Answer a=answer(r);int out=r.i;if(n!=out+WIDTH)throw std::invalid_argument("world resume width");it->second.answers.push_back(a);run(it->second,b,out);return 0;}

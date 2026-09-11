@@ -35,7 +35,8 @@ def main():
                        native._ammo_states[identity], native._burst_states[identity]) for identity in ids]
     kernel = Kernel(backend, rt.bot_state_codec, bots, engine=dict(fields=ENGINE_FIELDS),
                     motion=motion_config(rt, native),
-                    contacts=dict(human_base=rt.HUMAN_TARGET_ID_BASE, has_armor=True, py2=True))
+                    contacts=dict(human_base=rt.HUMAN_TARGET_ID_BASE, has_armor=True, py2=True,
+                                  wreck_drop=rt.WRECK_SUPPORT_DROP, wreck_rise=rt.WRECK_SUPPORT_RISE))
     leaves = EngineLeaves(rt, native)
     source_queries, native_queries, frame_box = [], [], [0]
     def install(runtime, tape):

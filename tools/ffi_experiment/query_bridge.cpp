@@ -34,7 +34,7 @@ extern "C" int offline_query_active(void) { return active_callback != 0; }
 extern "C" int offline_query_can_enter(const double *buffer,int count) {
     if(!active_callback)return 1;
     if(!available(buffer,count))return 0;
-    if(buffer[0]==405)return 1; // Stack-owned horizontal sweep; no persistent job.
+    if(buffer[0]==405||buffer[0]==406)return 1; // Stack-owned horizontal sweep; no persistent job.
     if(buffer[0]==501)return 1; // Geometry query on immutable map data.
     if(buffer[0]==512&&count>=4)return buffer[2]==6||buffer[2]==7||buffer[2]==8||buffer[2]==9;
     return 0;

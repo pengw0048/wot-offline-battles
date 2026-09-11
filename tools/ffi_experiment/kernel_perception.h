@@ -128,6 +128,15 @@ struct Perception {
     }
     void prepare(double now, bool include_humans, const std::vector<int> &ordered,
                  const std::set<int> &due, const std::map<int, ActorKey> &selected_targets) {
+        for (const Actor &actor : roster) {
+            if (!flag(actor.raw, sf::alive, true))
+                continue;
+            ActorKey key{{actor.kind, actor.id}};
+            if (std::abs(field(actor.raw, sf::speed)) > field(config, "moving_epsilon"))
+                target_still.erase(key);
+            else
+                target_still.emplace(key, now);
+        }
         std::vector<double> packet = {302, static_cast<double>(handle), now, 0};
         int count = 0;
         for (int id : ordered) {
