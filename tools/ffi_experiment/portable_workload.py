@@ -124,7 +124,11 @@ def main():
                         help='attribute host CPU using a --profile build; separate from primary timing')
     parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow,kernel,world-resolver')
     parser.add_argument('--world-trace-output', help='record ordered collision leaves for a separate computation estimate')
+    parser.add_argument('--codec-fixture-output',
+                        help='export final Python-owned rows for the isolated C++ thread experiment')
     args = parser.parse_args()
+    if args.codec_fixture_output and args.backend != 'python':
+        parser.error('--codec-fixture-output requires --backend python')
     if args.seconds <= 0 or args.fps <= 0 or (args.backend != 'python' and not args.module):
         parser.error('positive duration/cadence and a native module are required')
     if args.world_trace_output and args.backend != 'python':
@@ -221,6 +225,20 @@ def main():
                         'paths': sorted((repr(key), path) for key, path in nav.paths.items()),
                     })
                 cpu_seconds = CLOCK() - started
+                if args.codec_fixture_output:
+                    from kernel_adapter import codec_config
+                    codec = fixture['fixtures']._load().bot_state_codec
+                    identities = sorted(runtime.states)
+                    rows = [codec.encode_row(runtime.states[key]) for key in identities]
+                    # Reconstruct only the published contract. Runtime state also
+                    # contains engine fixture objects that have no JSON ABI.
+                    states = [codec.decode_row(row, dict(equipment_contracts=[
+                        e.contract for e in runtime._equipment_states.get(key, ())]))
+                        for key, row in zip(identities, rows)]
+                    with open(args.codec_fixture_output, 'w') as stream:
+                        json.dump(dict(codec=codec_config(codec), states=states,
+                                       rows=rows), stream,
+                                  sort_keys=True, allow_nan=False)
                 if args.boundary_profile:
                     boundary_profile = backend.module.profile_stop()
                     profiling = False

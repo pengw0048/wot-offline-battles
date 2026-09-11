@@ -1673,6 +1673,130 @@ py-spy record --native --rate 200 --format raw --full-filenames \
   --output /tmp/ffi-boundary-sampled.json
 ```
 
+The publication follow-up replaces the nested temporary signature with two
+reusable native buffers. Bound scalar fields retain explicit presence and
+`Value` equality; ordered Bot, ammunition, equipment, shot, launch and ram
+records retain the previous shallow ownership. Equipment readiness changes
+only at the same cooldown boundary, while inactive pending timestamps and
+ordinary pose/time changes do not create durable events. Wire rows reserve
+their fixed and optional widths once, and optional groups bind field slots at
+configuration. No publication cadence, event ordering or engine query changes.
+
+Fifteen fresh processes in three rotating rounds repeat the same 29-Bot,
+30-second Great Wall scene on CPython 2.7.18, with frozen `3c9bc7d7` as the
+previous runner/binary and production `900744ce` as the Python oracle:
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Unmodified production Python | 10.881820 s | 10.798626–10.969403 s | 0.00% |
+| Frozen bounded-argument kernel (`3c9bc7d7`) | 5.737643 s | 5.694688–5.755725 s | 47.27% |
+| Reusable C++ publication records | 5.547883 s | 5.479581–5.568934 s | 49.02% |
+
+The new native representation removes another 3.31% of loop CPU against the
+control measured in these same rounds. Median initialization is 0.167041 s.
+All fifteen complete snapshots match, including 225 state publications,
+77,172 fake collision rays, 111,533 reverse callbacks and 2,562 forward
+dispatches. No whole-update thread pool is enabled. The distinct profiling
+binary takes 5.520867 s with observation disabled and 5.875001 s enabled
+(observed deltas of -0.49% against the normal binary and +6.41% for enabling
+the observer). These are observer controls, not additional optimizations.
+Its mean zones are 2.209018 s native body (37.02%), 3.172138 s Python callbacks
+(53.16%), 0.468830 s Python outer/conversion work (7.86%), and 0.116917 s C
+bridge copying/release (1.96%). The preceding ownership and fake-engine
+limitations still apply; none of these shares is an optimization floor.
+
+The native-thread probe is deliberately a separate host executable,
+`benchmark_codec_threads.cpp`. It compares one calling thread with the caller
+plus one persistent helper, using disjoint halves of the same immutable
+29-row publication fixture. The fixture is reconstructed from final Python
+wire rows, with the source equipment contracts; it is not a live native-engine
+snapshot. Each batch waits for both halves and retains original row order.
+Both modes verify Python row equality and recovery after simultaneous first-
+and last-row failures. No Python object, query bridge or engine call is
+reachable from the helper. Each mode runs in a fresh process because creating
+a thread can change the standard library's shared-reference implementation.
+Timing includes repeated row allocation/release and, in the parallel mode,
+dispatch and completion barriers; thread startup and 20 warmup batches are excluded.
+This intentionally favorable fixed-input probe does not establish Windows
+thread performance or justify parallelizing the stateful Bot loop.
+
+Seven alternating rounds (14 fresh processes, 10,000 batches each) on this
+two-CPU Linux aarch64 host give the following uninstrumented results:
+
+| Encoding workers | Median wall time per batch | Wall range per batch | Median total CPU per batch |
+| --- | ---: | ---: | ---: |
+| Caller only | 66.954 us | 66.755–67.764 us | 66.934 us |
+| Caller plus persistent helper | 44.238 us | 43.050–45.044 us | 77.897 us |
+
+The two-thread batch finishes 33.93% sooner while using 16.38% more aggregate
+CPU. Thus this pure C++ stage does benefit from parallelism; its absolute saving
+is only 22.716 us per 29-row batch. This measures encoding alone, excluding
+equipment-state construction, edge comparison, JSON serialization and callbacks.
+Applying that isolated difference to 225 publications would save about 5.1 ms
+of encoding wall time; that extrapolation is not an end-to-end measurement.
+The helper remains a benchmark, rather than a thread pool in the Bot kernel;
+end-to-end benefit and the Windows ownership/lifecycle cost have not been
+established. A larger independent computation stage is the next candidate for
+parallel execution.
+
+The existing Bot loop commits each actor's motion before later actors consume
+it, and shares perception caches, query budgets and event ledgers. Its borrowed
+query route also has caller-thread/GIL ownership and process-global active
+buffers. Parallelizing that loop requires a separately proved immutable
+computation stage with ordered commits; putting its current callbacks on
+worker threads would violate those contracts.
+
+The publication record audit passes 884 comparisons with the previous nested
+signature oracle, including isolated field, ammunition, shot, equipment and
+cooldown changes, missing/null values, empty/shrinking/reordered rosters, launches
+and ram events. Normal and ASan/UBSan runs also pass 13,632 weapon transitions,
+311 wire/invalid rows, 900 equipment transitions, 4,256 decimal cases, 2,015
+health/publication transitions and 13 packed-output/lifecycle checks. The
+combined 80-frame native-world Siege/human/cover/order comparison passes in
+both builds; normal checks also cover 80-frame Himmelsdorf navigation and the
+original Python world-callback path. Bridge ownership and host-profile checks
+pass. Host and x86 builds treat warnings as errors; the `.pyd` still imports
+only `KERNEL32.dll` and `msvcrt.dll`. Sanitizers halt on error with leak checking
+disabled. Production CI does not compile or run this opt-in experiment, and
+the standalone thread probe is not linked into either bridge.
+
+Reproduce this stage with `FFI_PY27` and the exported fixture from above:
+
+```bash
+FFI_PUBLICATION_CONTROL=/tmp/ffi-publication-control
+git worktree add --detach "$FFI_PUBLICATION_CONTROL" 3c9bc7d7
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-publication-host
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-publication-profile --profile
+(cd "$FFI_PUBLICATION_CONTROL" && sh tools/ffi_experiment/build_host.sh \
+  "$FFI_PY27" /tmp/ffi-publication-control-host)
+c++ -std=c++11 -O2 -Wall -Wextra -Werror \
+  tools/ffi_experiment/check_kernel_publication.cpp -o /tmp/ffi-check-publication
+/tmp/ffi-check-publication
+"$FFI_PY27" tools/ffi_experiment/check_kernel_state.py \
+  --module /tmp/ffi-publication-host/offline_astar_native.so --fixture /tmp/ffi-boundary-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-publication-host/offline_astar_native.so --fixture /tmp/ffi-boundary-fixture.json \
+  --frames 80 --native-world --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --fixture /tmp/ffi-boundary-fixture.json --seconds 30 --rounds 3 \
+  --module /tmp/ffi-publication-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver \
+  --control-components kernel,world-sync,world-resolver \
+  --control-module /tmp/ffi-publication-control-host/offline_astar_native.so \
+  --control-runner "$FFI_PUBLICATION_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --profile-module /tmp/ffi-publication-profile/offline_astar_native.so \
+  --output /tmp/ffi-publication-comparison
+"$FFI_PY27" tools/ffi_experiment/portable_workload.py \
+  --fixture /tmp/ffi-boundary-fixture.json --backend python --seconds 30 \
+  --output /tmp/ffi-codec-source.json --codec-fixture-output /tmp/ffi-codec-fixture.json
+c++ -std=c++11 -O2 -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math -pthread \
+  tools/ffi_experiment/benchmark_codec_threads.cpp -o /tmp/ffi-codec-threads
+# Repeat these fresh processes in alternating order for seven rounds.
+/tmp/ffi-codec-threads /tmp/ffi-codec-fixture.json 1 10000
+/tmp/ffi-codec-threads /tmp/ffi-codec-fixture.json 2 10000
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-publication-1513
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;

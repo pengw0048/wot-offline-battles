@@ -4,12 +4,14 @@
 #include "kernel_aim.h"
 #include "kernel_lanes.h"
 #include "kernel_codec.h"
+#include "kernel_publication.h"
 
 namespace offline_kernel {
 template <class Owner> struct Simulation {
     Owner &k;
     Diagnostics diagnostic;
-    Value config, camera, edge_signature, pending_ram = Value::array();
+    Value config, camera, pending_ram = Value::array();
+    PublicationEdges edges;
     double accumulator = 0, next_publication = 0, next_observation = 0, next_lane = 0,
            next_cover = 0, equipment_now = 0;
     int64_t sample = 0, edge_sample = 0, edge_revision = 0;
@@ -39,6 +41,7 @@ template <class Owner> struct Simulation {
     bool traffic_ready = false;
     explicit Simulation(Owner &owner, const Value &v)
         : k(owner), diagnostic(v, owner.bots), config(v), camera(v.get("camera")),
+          edges(v.get("edge_fields")),
           accumulator(field(v, "accumulator")), next_publication(field(v, "next_publication")),
           next_observation(field(v, "next_observation")), next_lane(field(v, "next_lane")),
           next_cover(field(v, "next_cover")), equipment_now(field(v, "equipment_now")),
@@ -559,35 +562,16 @@ template <class Owner> struct Simulation {
         publish_burst(bot);
     }
     Value publication(const std::vector<int> &ids, int64_t end) {
-        Value rows = Value::array(), signature = Value::array(), bot_edges = Value::array();
-        for (int id : ids) {
-            Bot &bot = *k.bots.at(id);
+        Value rows = Value::array(ids.size());
+        edges.begin(ids.size());
+        for (size_t i = 0; i < ids.size(); ++i) {
+            Bot &bot = *k.bots.at(ids[i]);
             publish_burst(bot);
             bot.state[sf::equipment_states] = bot.equipment_wire(equipment_now);
             rows.append(k.codec.row(bot.state));
-            Value scalar = Value::array();
-            for (const Value &name : elements(config.get("edge_fields"))) {
-                std::string key = name.text();
-                scalar.append(tuple_value({Value(bot.state.has(key)), bot.state.get(key)}));
-            }
-            Value equipment = Value::array();
-            for (const Equipment &e : bot.equipment)
-                equipment.append(e.edge(equipment_now));
-            Value shot = Value::array();
-            for (const char *key : {"shot_yaw", "shot_pitch"})
-                shot.append(tuple_value({Value(bot.state.has(key)), bot.state.get(key)}));
-            bot_edges.append(
-                tuple_value({scalar, bot.state.get(sf::ammo_remaining), equipment, shot}));
+            edges.capture(i, bot.state, bot.equipment, equipment_now);
         }
-        Value launches = Value::array(), rams = Value::array();
-        for (const Value &v : elements(k.launches.pending))
-            launches.append(tuple_value({v.get(sf::id), v.get(sf::fire_seq)}));
-        for (const Value &v : elements(pending_ram))
-            rams.append(tuple_value(
-                {v.get("bot_id"), v.get(sf::target_kind), v.get(sf::target_id), v.get("ram_seq")}));
-        signature = tuple_value({bot_edges, launches, rams});
-        if (signature != edge_signature) {
-            edge_signature = signature;
+        if (edges.finish(k.launches.pending, pending_ram)) {
             edge_sample = end;
             ++edge_revision;
         }
