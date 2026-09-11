@@ -1940,23 +1940,52 @@ which is exactly what this January 2018 build does. Reproducing the 1.12.1
 convenience would be a deliberate product deviation from #1513, not a parity
 fix.
 
+Wargaming's own newcomer guide states the mode rule and no other condition:
+a turretless vehicle's gun "can only move horizontally up to a limit, after
+which the hull has to be turned to move it further", SPGs auto-turn the hull in
+every aiming mode, and tank destroyers do not auto-turn it in Sniper mode. It
+is silent on the throttle, so it neither supports nor refutes a drive-input
+condition.
+
 Only the cell behaviour is ours. The copied local physics reads the stock
 `getAutorotation()` and, when the unclamped mouse target leaves the installed
 `gun.turretYawLimits`, feeds one binary rotation direction into the single pose
 integrator; the descriptor, native gun rotator and copied traverse physics keep
-owning the arc, gun speed and dispersion. A live A/D command and
-`CMD_BLOCK_TRACKS` both suppress it, but the throttle does not: the pinned
-executable computes the direction in `WGGunRotatorImpl` from elapsed time, the
-desired yaw, the current turret yaw, the yaw limits and the turret and vehicle
-rotation speeds, with no drive input reaching that routine, and the movement
-flags it publishes carry `_MOVEMENT_FLAGS.FORWARD` beside the rotation bit.
-The copied cell composes that desired hull direction with forward or reverse
-driving. Its traverse integrator reverses A/D steering under reverse drive, so
-the autorotation adapter converts the desired hull direction to that input
-convention first; otherwise reversing makes the hull turn away from the aim.
+owning the arc, gun speed and dispersion. A live A/D command,
+`CMD_BLOCK_TRACKS` and any live throttle — including the native R/F cruise
+presets — all suppress it, so the mouse turns the hull only while the player
+issues no movement command at all.
+
+The pinned executable's own flags are what place the composition there.
+`WGGunRotatorImpl` computes the direction in `0x00f5ad40` from elapsed time,
+the desired yaw, the current turret yaw (`+0xcc`), the installed yaw limits
+(`+0x28`/`+0x2c`, valid per `+0x30`) and the turret and vehicle rotation speeds
+(`+0x60`/`+0x68`), clears `autorotationFlags` (`+0xd8`) whenever the clamped
+rotation reaches the desired yaw, and otherwise publishes `5` or `9` —
+`_MOVEMENT_FLAGS.FORWARD` beside one rotation bit, through
+`lea eax, [eax*4 + 5]`, and never a bare rotation bit. Those flags are shaped
+like a whole movement command rather than a rotation contribution: ORing `5`
+into a player's `BACKWARD` yields `FORWARD | BACKWARD`, which the stock
+`PlayerAvatar.moveVehicle` decode resolves as forward. That reading is
+consistent with a cell that applies them while the player issues none, but it
+does not exclude a cell that masks the rotation bits out of them under a live
+drive command, and the `FORWARD` bit alone therefore proves neither rule. What
+it does rule out is the inference this section previously drew: that the
+direction routine reading no drive input means a driving hull follows the
+mouse. It only says where the composition lives.
+
 How the retail cell merges those flags is server Python that no client build
-ships, so the exact composition remains an inference and the resulting feel
-still needs Windows play.
+ships, so the composition remains an inference. Windows play is the evidence
+that selected this one, and it is the rule this port shipped before the
+throttle-independent reading replaced it: a limited-traverse hull that kept
+following the mouse under throttle was reported as wrong, because it steered
+the vehicle off the driver's heading whenever the camera moved. Two gaps stay
+open against a retail cell. The port applies only the rotation half of the
+command, never its `FORWARD` bit, so a parked retail hull may creep forward
+while it aligns where this port pivots, and native track animation sees that
+same bare rotation. A coasting hull under no drive command also autorotates
+here, because the cell can only see flags and not a measured speed. Neither
+difference has been measured on Windows.
 
 LAN pose samples retain the fractional remainder of the nominal 30 Hz
 publication interval. Clearing the entire accumulator quantised a 40 FPS
