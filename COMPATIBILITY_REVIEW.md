@@ -826,6 +826,1159 @@ one authority slice and template/remembered-pose identity. Each observer keeps
 its own contact object and visibility flags; new poses and slices invalidate
 that reuse.
 
+An isolated A* FFI experiment lives under `tools/ffi_experiment/`; no production
+module, launcher or package imports it. Its baseline is
+`e0600d4851dbca350849568a261bf77bfab7d3f7`. The C++ core retains a copied baked
+graph and resumable search heaps, costs and parents. The adapter transfers
+changed penalties and batches paid expansions in the existing fair order,
+returning at each completed search so the unchanged Python finalizer runs
+before another search advances. Nearest-cell selection, ground/native probes,
+path smoothing, tactical decisions, motion and publication remain Python-owned.
+There is no change to cadence, expansion credits, hazards or collision safety.
+Only explicit experiment runners install and restore the temporary patches;
+the experiment requires a baked graph and one backend owner per process.
+
+The 2026-09-07 Linux aarch64 measurement used CPython 2.7.18, the Great Wall
+combat fixture, 29 Bots, 30 simulated seconds and 15 frame callbacks/second.
+Seven independent processes per variant ran sequentially in rotating order
+on a shared development host; this was not a dedicated hardware benchmark.
+The following CPU times include normal adapter marshalling and per-frame
+snapshot capture, but exclude fixture/process startup and JSON serialization.
+The separate native initialization includes module loading and graph transfer.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction | Median initialization |
+| --- | ---: | ---: | ---: | ---: |
+| Unmodified Python | 11.298922 s | 11.256200–11.394970 s | — | 0.000006 s |
+| Native A*, one FFI call per paid step | 10.941449 s | 10.852666–11.318563 s | 3.16% | 0.055710 s |
+| Native A*, fair batch | 10.640391 s | 10.530723–10.886375 s | 5.83% | 0.055796 s |
+
+Including initialization, median cold CPU was 11.298928 s for Python and
+10.695704 s for the batch variant, a 5.34% reduction. Both native variants
+performed 28,800 expansions and completed 51 searches. Total dispatch calls
+fell from 29,046 to 520 with batching; these include setup and result transfers.
+All 21 runs matched the Python reference exactly for complete outgoing
+messages, native-query geometry/order, logical probes, decisions, and every
+frame's navigation queues, paths, credits, completion counters and last-frame
+markers. Equality uses complete values, without rounding or tolerances.
+
+A separate three-round Python/batch comparison with `--stage-timing` explains
+the scope of that gain. Median inclusive A* batch CPU fell from 0.718622 s to
+0.170766 s: 76.24% less CPU, or 4.21 times faster, including dispatch,
+marshalling, scheduling and the unchanged Python path finalizer. A* accounted
+for only 6.10% of the instrumented baseline loop. Native dispatch itself took
+0.067323 s, but it excludes Python-side transfer and finalization, so comparing
+that number alone with the original complete A* stage would overstate speedup.
+Instrumentation is separate from the primary seven-round timing above.
+
+Selected mutually exclusive stage medians in that instrumented baseline were
+17.51% for motion/collision handling, 10.14% for contacts, 9.91% for ballistics,
+7.95% for driving/route work outside A*, 4.75% for gun aim, 3.17% for publication
+encoding, 2.86% for supplemental shot lanes, and 1.73% for longitudinal/traverse
+formulas. Another 31.93% remained inside the control slice outside those chosen
+scopes; work outside the slice and observer overhead also remain. These are
+host fixture costs, not measured Windows native-engine costs. They identify
+unmigrated work, not a claim that all of it is independently safe to move.
+This experiment therefore does not measure the ceiling of migrating the whole
+Bot loop, and does not establish a 90% whole-loop reduction.
+
+`check_parity.py` additionally compares exact paths, completion-step boundaries
+and timed-penalty expiry across 200 generated graphs and 36 searches on the
+shipped Karelia, Prohorovka and Great Wall graphs. It exercises missing cells,
+disconnection, shallow/fatal hazards, avoidance, changing local/global/hard
+penalties, expansion caps, cancellation, invalid commands and repeated cleanup.
+The workload exporter adapts only test scaffolding to Python 2; it executes
+production client modules directly. Its Python 3 output is independently
+checked against the runner importing the original fixtures.
+
+The final differential suite passed separately on CPython 2.7.18 and 3.12.3.
+Five-second workload checks also matched on Karelia at 30 callbacks/second and
+Prohorovka at 10 callbacks/second; these smoke runs are behavior evidence only,
+not additional timing estimates.
+The same 236-case suite passed with the host core and bridge compiled with
+AddressSanitizer and UndefinedBehaviorSanitizer (`detect_leaks=0`); this checks
+the exercised host bounds/undefined-behavior paths, not Windows bridge safety
+or leak freedom.
+
+Reproduce the primary comparison with a compatible host CPython 2.7.18 and
+Python 3 for fixture extraction/orchestration (each output directory must be
+new):
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+export FFI_PY27=/path/to/cpython-2.7.18/bin/python2.7
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-host
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_parity.py \
+  --module /tmp/ffi-host/offline_astar_native.so --random-cases 200
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-comparison \
+  --rounds 7 --include-step
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-stages \
+  --rounds 3 --stage-timing
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-x86
+```
+
+The last command cross-compiles a separate, unshipped x86 `.pyd` and checks its
+PE export/import contract. Its bridge reuses the reviewed instance-guard
+`Py_InitModule4`/`PyInt_FromLong` RVAs, checks the executable identity and code
+prologues, and requires a tuple/int layout self-test before dispatch. It passes
+only owned numeric buffers and retains no Python/native-engine objects. The
+host bridge uses the host Python C API instead; its timing does not include
+the Windows bridge's `VirtualQuery` guards. Cross-compilation does not prove
+loading, pointer/layout safety, x86 floating-point parity or speed in the
+embedded CPython 2.7.7 runtime. The experiment has not run on exact Windows
+#1513, and the synthetic workload acknowledges launches without simulating
+projectile terminals, rendering, real native-query cost or network delay.
+The measured reduction concerns this Bot loop only; it establishes neither
+Windows FPS improvement nor lower process memory use. The native graph is an
+additional copy, and no process-memory attribution was measured.
+
+A second, wider experiment extends the same bridge on production baseline
+`900744ce30c2d4b59ec86e21438b3038eec2facf`. Select it explicitly with
+`--components aiming,driver,contacts`; production source, launcher and package
+entry points still do not import the experiment. The transferred scope is:
+
+| Area | C++ ownership | Python retained at the boundary |
+| --- | --- | --- |
+| Perception | Ordered contact traversal, visibility cache, shot edges, fair probe admission/debt and team visibility leases | Exact descriptor/equipment projections, native LOS calls, human observation orchestration and publication/remembered-pose dictionaries |
+| Local driving | Complete driver state, steering leases, progress/recovery/braking, candidate fan, wreck/reverse/pivot geometry | Route orchestration and smoothing, normalized neighbour transfer and native direction/pose probes |
+| Ballistics and gun aim | Iterative moving-target intercept, physical gun reach, float32 pitch curves, hydraulic correction, gun/turret slew and final barrel orientation | Exact muzzle/part selection, mounted loadout/critical projections, gunnery rating/error/fire gating and asynchronous SPG query lifecycle |
+
+The native driver retains its state between calls. A query yield resumes the
+same operation from its initial state and already collected numeric answers;
+only C++ computation is replayed, never a Python/native query. Perception
+transfers an actor template once per pre/post-motion phase in a slice, keeps
+cache/fairness/lease state in C++, and returns at descriptor or engine leaves.
+Python materializes the original contact/message shape for existing consumers.
+Neither boundary changes elapsed time, planning budgets, accepted shots or
+one-shot events. Owned numeric buffers are synchronous; the core retains no
+Python objects, buffer addresses or BigWorld objects. Round reset retires the
+old perception owner, and runner teardown restores patches before core reset.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction | Median initialization |
+| --- | ---: | ---: | ---: | ---: |
+| Unmodified Python | 11.127597 s | 11.089077–11.275623 s | 0.00% | 0.000004 s |
+| Native A* only | 10.550740 s | 10.456242–10.628824 s | 5.18% | 0.055985 s |
+| Native A* + contacts + driving + aiming | 9.958523 s | 9.863221–10.280073 s | 10.51% | 0.061130 s |
+
+The expanded variant reduces loop CPU by 10.51% against Python and 5.61%
+against the A*-only control. Including initialization, its median cold CPU
+is 10.019653 s against 11.127600 s for Python, a 9.96% reduction.
+
+This comparison uses the same Linux aarch64 CPython 2.7.18 environment and
+29-Bot Great Wall combat scene described above. All three variants run on the
+same production baseline, sequentially in rotating order, with seven processes
+per variant and no stage instrumentation. Timing includes ordinary FFI
+marshalling and per-frame snapshot capture; initialization is separate.
+All 21 snapshots match in complete messages, native-query geometry/order,
+logical probes, decisions, per-frame navigation state, and visibility fairness
+diagnostics. Equality does not round values or use a numerical tolerance.
+
+A separate three-round instrumented comparison also preserves every snapshot.
+Its median loop reduction is 8.34%; the observer wraps roughly 53,000 native
+dispatches, so it is not the primary speed estimate. Selected inclusive stage
+medians explain where the uninstrumented gain comes from:
+
+| Stage | Python | Expanded native variant |
+| --- | ---: | ---: |
+| A* batch | 0.703828 s | 0.166939 s |
+| Ballistic stage, including retained gunnery/muzzle work | 1.140016 s | 0.790529 s |
+| Gun aiming | 0.510161 s | 0.234527 s |
+| Contacts, including adapter and message materialization | 1.114098 s | 1.262330 s |
+| Driving and route work, including the A* row above | 1.619781 s | 1.199476 s |
+
+These rows are not additive because driving includes A*. In particular, the
+contact stage becomes more expensive; the native fair scheduler also saves
+work outside that scope, so the row alone is not a total-perception estimate.
+Driver/route work outside A* remains expensive too. All native dispatches
+together take 0.475700 s, including the C++ core but excluding Python-side
+marshalling and object materialization. Remaining Python gunnery, descriptor
+projection, world-query seams and publication still execute in the loop.
+Moving these three areas therefore does not turn their entire Python parent
+stages into native computation, and calling only the fast C++ kernels a
+whole-stage speedup would be misleading.
+
+The differential checks also compare 1,200 random intercepts, 1,200 full gun
+updates and low-arc/physical-reach solves across 12 descriptor profiles, and
+3,600 driver steps with every state field and query sequence checked. They
+cover all six drive modes, hydraulic/static/missing pitch limits, critical
+module and siege states, anonymous blocker result types, and rejected opcode
+or reset packets preserving an existing owner. Perception checks cover 1,080
+Bot contact batches and 180 human observer slices with a two-probe budget:
+human/selected/fire priorities, parked debt, fire-sequence reset, pre/post-motion
+poses, hidden memory expiry, native-probe failure and round reset. These are
+synthetic contract cases, not coverage of every client descriptor or a native
+Windows acceptance session.
+
+All expanded differential checks pass against CPython 2.7.18, including the
+new aiming/driving/perception core built with AddressSanitizer and
+UndefinedBehaviorSanitizer (`detect_leaks=0`). The 236-case A* sanitizer suite
+passes with the Python 3 host bridge. A* and perception also pass ordinary
+Python 3.12.3 differential checks. Random gun updates expose one-ULP
+reference differences under Python 3.12's changed floating-point `sum`;
+restoring only Python 2's left-to-right sum in a diagnostic run removes all
+those differences. The committed core and primary measurements retain the
+unmodified Python 2 contract; Python 3 aiming is not an acceptance reference.
+Five-second full-component checks on Karelia at 30 callbacks/second and
+Prohorovka at 10 callbacks/second match every snapshot family. All 97 client
+modules and nine portable experiment modules compile with CPython 2.7 without
+writing adjacent bytecode. Host bridges build for Python 2.7 and 3, and the
+unshipped x86 PE still imports only `KERNEL32.dll` and `msvcrt.dll`.
+
+The prototype requires normalized finite numeric inputs, valid descriptor
+curves and at most 30 actors per room. It explicitly rejects unsupported
+unbounded identity streams instead of approximating the Python cache's
+over-capacity pruning order. It does not replace all `BotRuntime` logic or
+the whole hidden-worker process. The Windows bridge remains unexecuted here;
+x86 loading, floating-point parity, actual native query costs, frame pacing,
+projectile terminals, gameplay feel and process memory remain unmeasured.
+The result therefore establishes neither a 90% whole-loop CPU reduction nor
+any Windows FPS/RAM improvement.
+
+Reproduce the expanded comparison after the fixture and host build commands
+above, using fresh output directories:
+
+```bash
+"$FFI_PY27" tools/ffi_experiment/check_core_parity.py \
+  --module /tmp/ffi-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_perception_parity.py \
+  --module /tmp/ffi-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-core-comparison \
+  --components aiming,driver,contacts --include-astar-control --rounds 7
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --output /tmp/ffi-core-stages \
+  --components aiming,driver,contacts --rounds 3 --stage-timing
+```
+
+A third experiment targets the heaviest remaining bounded calculation class:
+the horizontal world-collision controller inside `_resolve_bot_motion`. It
+ports `_check_horizontal_collision` and its numeric helpers, including pitched
+and rolled hull lanes, diagonal sweeps, clamped ray endpoints, terrain support
+and directional profiles, independent raised-wall checks, and ordered hit
+resolution. Python retains descriptor projection, actual engine queries,
+collision filters and destruction/recast operations. This is the inner sweep,
+not the entire motion resolver or a replacement for BigWorld physics.
+
+Two measurements separate computation throughput from the cost of that live
+boundary. Both retain the preceding production baseline and host environment.
+The computation measurement records the original Python controller's ordered
+engine/destruction leaves for the same 30-second scene: 5,038 sweeps and 82,273
+leaf requests. Each native tape is checked for exact query geometry, order and
+terminal result before registration. Python replay is also checked once before
+timing; C++ retains those checks during timing. The complete trace capture
+preserves all six workload snapshot families.
+
+| Recorded computation | Median CPU per 5,038-sweep pass |
+| --- | ---: |
+| Original Python controller with recorded leaf answers | 0.902043 s |
+| C++ controller with persistent numeric tapes, one bulk call | 0.002550 s |
+
+This is a 353.72x speedup and 99.72% reduction for the recorded controller.
+Five alternating pairs run in one CPython 2.7.18 process, with three corpus
+passes per Python sample and 300 per native sample, normalized per pass.
+Native timed samples last 0.763–0.792 s, avoiding a sub-millisecond timer claim.
+One-time native tape transfer, copy and validation costs another 0.124456 s.
+Both variants use preprojected descriptor extents. Python uses host
+`Math.Vector3` fakes; this measures controller logic and object plumbing,
+not isolated scalar arithmetic or exact Windows vector-object costs.
+Preknown leaf answers and persistent native tapes make this an optimistic
+computation estimate. It excludes live engine cost and ongoing marshalling;
+these tapes must never supply cached physics to a live battle.
+
+The actual adapter instead yields each original query to Python, retains hit
+objects and filters only on the Python stack, and resumes with owned numeric
+answers. Like the earlier driver prototype, continuation recomputes the C++
+prefix from saved answers without repeating engine calls. Every sweep drops
+its native job in `finally`. It neither removes collision checks nor changes
+destruction order. A three-round, rotating-order comparison, with nine fresh
+processes and no instrumentation, measures that integration separately:
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 11.236298 s | 11.138337–11.446382 s | 0.00% |
+| Previous A* + contacts + driving + aiming | 10.103238 s | 10.001199–10.181124 s | 10.08% |
+| Previous components + world controller | 10.650484 s | 10.629813–10.657850 s | 5.21% |
+
+All nine complete snapshots match exactly. The new boundary therefore adds
+about 0.55 s relative to the previous native control; its kernel throughput
+does not translate into an integration win. A separate one-round instrumented
+comparison also matches. The world stage grows from 1.344940 s in Python to
+2.196308 s with the adapter. Total native dispatches grow from 52,943 to
+145,292: 82,273 query continuations plus two owner calls per sweep. C++ prefix
+recomputation, Python object conversion, dispatch and retained leaves all remain
+costs. Instrumented totals include observer overhead and are not the primary
+speed estimate.
+
+In that instrumented Python run, the whole world stage takes 11.54% of loop
+CPU, including its leaves. Even making that entire stage free would save only
+that share. Making it free on top of the previous native control gives an
+optimistic 22.39% total reduction in this fixture. That bound includes removing
+leaf costs which the numeric port cannot actually remove. A 99.72% kernel
+reduction establishes adequate calculation throughput, but a 90% whole-loop
+target requires a much larger fraction of state and loop work to stay native
+with sufficiently cheap engine and publication boundaries. This experiment
+does not establish that such a complete migration reaches the target.
+
+The existing physical scenarios, executed by a Python 3 host runner, provide
+145 exact shadow traces and 75 tests passing through both the shadow and actual
+adapter. One additional source test
+replaces the entire terrain-profile helper with invented heights, so it remains
+source-only; it does not provide native leaf-contract evidence. The new world
+core also passes those checks with AddressSanitizer and UndefinedBehaviorSanitizer
+(`detect_leaks=0`, halt on error). The host bridges and unshipped x86 bridge
+build; the latter still imports only `KERNEL32.dll` and `msvcrt.dll`. Production
+source and shipping entry points remain unchanged. CPython 2.7 compiles all 97
+client modules and 12 portable experiment modules. The shared dispatcher's
+56-case A* regression also passes exact path and completion comparisons.
+Exact Windows #1513 loading,
+floating-point parity, real native-query cost and frame pacing remain unproved.
+
+Reproduce the new measurements after building the fixture and host module above:
+
+```bash
+"$FFI_PY27" tools/ffi_experiment/portable_workload.py \
+  --fixture /tmp/ffi-fixture.json --backend python \
+  --output /tmp/ffi-world-recording.json --world-trace-output /tmp/ffi-world-tapes.json
+"$FFI_PY27" tools/ffi_experiment/benchmark_world.py \
+  --fixture /tmp/ffi-fixture.json --module /tmp/ffi-host/offline_astar_native.so \
+  --trace /tmp/ffi-world-tapes.json --output /tmp/ffi-world-kernel.json \
+  --rounds 5 --loops 3 --native-loops 300
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json \
+  --components aiming,driver,contacts,world --control-components aiming,driver,contacts \
+  --rounds 3 --output /tmp/ffi-world-comparison
+tools/ffi_experiment/build_host.sh python3 /tmp/ffi-world-host3
+python3 tools/ffi_experiment/check_world_parity.py \
+  --module /tmp/ffi-world-host3/offline_astar_native.so
+```
+
+A subsequent opt-in motion/navigation experiment (2026-09-08) replaces the
+persistent route controller and the copied-physics motion flow, retaining the
+same production source baseline (`900744ce`) and fixture as the core/world
+experiments. An earlier instrumented, exclusive-time attribution assigned
+49.4% of this fixture's loop CPU to motion, navigation and their safety checks.
+That is the affected workflow's original cost, not a promised saving or a claim
+that all its code has now become native.
+
+C++ now owns the baked grid geometry, navigation paths and search jobs, fair
+expansion credits, expiry and cancellation, direct-route progress leases,
+lookahead and smoothing, shallow-water recovery and blocked-edge memory.
+Driving, the horizontal motion preparation/integration block and its probe-cache
+decisions execute on uninterrupted native stacks. Driver and motion safety
+checks share the native navigator directly. Descriptor-derived physics profiles
+are registered once per numeric profile. The copied vertical-motion controller,
+slope calculation, complete coast-to-stop integration, final pose hazard guard
+and contact impulse/push response also run in C++. Each Bot still commits its
+pose before the next Bot observes it; batching all Bot poses at the end would
+change this source contract.
+
+A synchronous borrowed callback bridge replaces prefix replay in driving and
+world sweeps. It holds the GIL, returns to the same C++ stack after each engine
+query, and releases every Python callback result. It retains no Python pointer
+across dispatches. Only reviewed geometry/expiry queries and stack-owned world
+queries may nest, on the original caller thread, using non-overlapping borrowed
+buffers. Reset/reentrant mutation and buffer aliasing are rejected before
+mutation; callback exceptions retain their Python identity and unwind the owner.
+The x86 experiment adds an exact function/tuple layout and function-call
+signature preflight, with a callback self-test before this new ABI is enabled.
+Static inspection and a successful cross-build do not establish that this ABI
+loads or behaves correctly inside Windows #1513.
+
+Opaque motion probes and receipts stay Python-owned, referenced by bounded
+numeric identities in C++. Callback-visible yaw, speed, diagnostic and cache
+updates follow source order, including a failed engine query. A blocked motion
+step can cancel a pending navigation search on the same C++ stack; its identity
+retirement is routed to the navigation owner. Retired cache identities are
+removed once no path, search or fairness cursor owns them.
+
+Python still produces tactical/macro route goals and radio/lane adjustments,
+projects descriptor and critical-device state, owns the fair native-receipt
+queue, and performs the actual engine/destruction queries. The outer
+`BattleRuntime._resolve_bot_motion` catalog adapter, tank-pair SAT/ram solver and
+destructible catalog remain source-owned. Weapon/perception orchestration and
+publication also remain Python. The optional ten-spring suspension trial is
+explicitly counted as `suspension_source`; this fixture exercises the migrated
+copied vertical controller. The experiment neither ports every branch included
+in the 49.4% attribution nor changes the product's physical authority path.
+
+The final uninstrumented comparison runs nine fresh CPython 2.7.18 processes
+in rotating order on the same shared Linux aarch64 host: Great Wall combat,
+29 Bots, 30 simulated seconds, 15 frame callbacks/second. It includes adapter
+marshalling and normal snapshot capture, excludes process/fixture startup and
+JSON serialization, and reports native initialization separately.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 11.046064 s | 10.999241–11.174757 s | 0.00% |
+| Previous A* + contacts + driving + aiming | 9.866947 s | 9.781824–9.931816 s | 10.67% |
+| Persistent navigation + motion + synchronous driver/world, with aiming/contacts | 8.859842 s | 8.820707–8.943107 s | 19.79% |
+
+The new variant saves another 10.21% against the preceding best integrated
+variant. Median initialization is 0.098311 s and the median loop-plus-native-init
+total is 8.958153 s. All nine snapshots match exactly across messages, ordered
+native queries, probe counters, decision counters, navigation progress and
+diagnostics. The fixture acknowledges launches without simulating projectile
+terminals, and uses deterministic engine-query fakes; these are complete
+snapshots of this bounded fixture, not complete real-battle acceptance.
+The measured whole-loop gain is 19.79%, far below a 90% reduction. Neither the
+49.4% original workflow attribution nor isolated native kernel throughput
+predicts the gain after retained Python state and engine boundaries.
+
+A separate instrumented pair also preserves the complete snapshots. Inclusive
+route/driving time falls from 1.6982 s to 0.5463 s, while the world sweep with
+its retained query leaves falls only from 1.3802 s to 1.2382 s. Motion preparation
+with its callback/state conversion grows from 0.3626 s to 0.6317 s. These scoped
+measurements include observer overhead and are explanatory, not replacements
+for the nine uninstrumented samples. They show why migrating controller logic
+does not remove the Python callback and shared-state boundary cost. Each native
+sample records 6,166 migrated vertical updates and zero suspension-source updates.
+
+Focused differential validation covers 150,000 copied-physics results; 3,000
+horizontal-motion cases with ordered callback-visible state, injected query
+failures and bounded opaque caches; 21,000 vertical/slope/coast/final-guard/contact
+checks; and 115,200 navigation operations with 3,600 complete frame-state
+comparisons. The horizontal suite also exercises 37 pending-search retirements
+from within motion and compares final navigation state. The shared dispatcher
+passes 86 exact A* cases and 1,200 aiming/driver cases (3,600 driver steps).
+World validation retains 145 exact query/result traces and 75 physical scenarios
+through both shadow and synchronous adapters; its internal-helper mock remains
+source-only. The bridge suite checks exception identity, result release,
+reset, nested queries, overlapping buffers and cross-thread rejection.
+
+AddressSanitizer and UndefinedBehaviorSanitizer pass the bridge, horizontal and
+vertical motion, navigation and world suites on the Python 3 host, with leak
+detection disabled and halt-on-error enabled. CPython 2.7 compiles all 97 client
+modules and 20 portable experiment modules. Both host ABIs and the unshipped
+x86 bridge build; the PE inspection reports only `KERNEL32.dll` and `msvcrt.dll`
+imports. No production entry point, launcher or shipping package installs the
+experiment. Exact Windows loading, x86 floating-point parity, native query
+latency, frame pacing and gameplay remain unproved.
+
+Reproduce the flow comparison and focused contracts using the fixture creation
+command from the preceding experiment:
+
+```bash
+tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-flow-host
+"$FFI_PY27" tools/ffi_experiment/check_query_bridge.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so
+"$FFI_PY27" tools/ffi_experiment/check_motion_physics.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_navigation_grid.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so
+"$FFI_PY27" tools/ffi_experiment/check_navigation_flow.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so --cases 12 --frames 200
+"$FFI_PY27" tools/ffi_experiment/check_motion_flow.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --cases 3000
+"$FFI_PY27" tools/ffi_experiment/check_motion_vertical.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --cases 3000
+"$FFI_PY27" tools/ffi_experiment/check_core_parity.py \
+  --module /tmp/ffi-flow-host/offline_astar_native.so \
+  --fixture /tmp/ffi-fixture.json --sync-driver
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-flow-host/offline_astar_native.so --fixture /tmp/ffi-fixture.json \
+  --components aiming,driver-flow,contacts,world-sync,navigation-flow,motion-flow \
+  --control-components aiming,driver,contacts --seconds 30 --rounds 3 \
+  --output /tmp/ffi-flow-comparison
+tools/ffi_experiment/build_1513.sh /tmp/ffi-flow-1513
+```
+
+A subsequent owned-Bot-kernel experiment replaces `BotRuntime.update` itself,
+using the same production baseline (`900744ce`) and the unchanged 29-Bot fixture.
+The `kernel,world-sync` runner initializes descriptor coefficients once, then
+C++ owns the mutable Bot roster, decision and perception caches, route/lane
+assignment, traffic leases, fair motion-receipt queue, horizontal and vertical
+motion, tank contact episodes, weapon/ammunition/burst clocks, health/equipment,
+Siege descriptor transitions, and wire publication. Server-order revisions
+invalidate the same decision, motion and route-binding state as Python. Late
+callbacks consume their banked elapsed time in the source's bounded slice order;
+shots remain in the ordered launch outbox until acknowledged.
+
+The native update composes the existing navigation, driver, motion and combat
+cores directly. Numeric borrowed callbacks carry the current actor pose and
+slice clocks to Python only for engine/catalog queries. State-dependent native
+callbacks observe each Bot's committed pose before the next Bot advances. The
+Python adapter does not execute a per-Bot simulation or publication loop.
+MT19937 integer seeding, Gaussian pair caching, dispersion and the Python 2
+rounding contract have independent differential checks. Optional aim/cover
+receipts keep opaque Python values behind numeric tokens, reclaimed when no
+native cache, intent, pending launch or current output references them. Packed
+JSON output is copied into a capacity-checked caller-owned buffer; native code
+retains neither that buffer nor a Python callback result.
+
+This remains a bounded, unshipped experiment. It requires complete server Bot
+orders and the copied vertical controller; native-motion and the optional
+ten-spring trial are explicitly rejected at construction. Local tactical
+fallback, `BattleRuntime` damage/reconciliation ingress, authority takeover,
+real native-query implementations, destructible catalog ownership and
+projectile terminal processing are not replaced by this adapter. It is created
+at fixture startup and destroyed at teardown, not installed into a running
+battle. The original `fabc7e6e` kernel kept mutable state in dynamic field maps
+alongside typed weapon/physics records. The fixed-field follow-up below removes
+part of that cost; C++ ownership alone does not eliminate field lookup,
+allocation, marshalling or retained Python engine-query cost.
+
+The original owned-kernel comparison ran nine independent CPython 2.7.18
+processes in rotating order on the shared Linux aarch64 host, after all validation/build
+processes finish. Each variant uses Great Wall combat, 29 Bots, 30 simulated
+seconds and 15 frame callbacks/second. Loop CPU includes marshalling and
+per-frame snapshot/navigation capture; process/fixture startup and final JSON
+file serialization are excluded, and native initialization is reported
+separately.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 10.993966 s | 10.935670–11.028345 s | 0.00% |
+| Previous persistent motion/navigation with aiming, contacts and synchronous world queries | 8.848982 s | 8.783967–8.865380 s | 19.51% |
+| Owned Bot kernel with synchronous world queries | 7.637579 s | 7.601436–7.659896 s | 30.53% |
+
+The owned kernel saves another 13.69% against the previous variant. Its median
+initialization is 0.162707 s and median loop-plus-initialization CPU is
+7.800404 s. Recorded Python-to-FFI dispatches fall from 91,697 to 7,600; these
+include owner setup and diagnostic readbacks, not only update calls. All nine
+complete snapshots match across messages, ordered engine queries, probe and
+decision counters, navigation progress and diagnostics. The 77,172 recorded
+engine queries remain identical: reducing FFI entry count does not remove the
+retained Python query leaves. The fixture acknowledges launches without
+simulating projectile terminals and uses deterministic native-query fakes.
+This 30.53% host-workload reduction remains far below 90% (about 1.10 s in this
+comparison); it is neither a Windows FPS measurement nor a whole-game saving.
+
+Focused CPython 2.7.18 checks compare 13,632 weapon transitions, 2,097 launch
+transactions, 3,165 gunner actions, 2,320 aim transitions, 6,488 perception/lane
+actions, 2,480 motion transitions, 1,956 route/driver/traffic transitions across
+three maps, 612 contact/ram lifecycle transitions, 2,015 health/publication
+transitions, equipment and wire rows. Whole-update comparisons cover ordinary
+combat, Siege, human targets, queued cover work, order revisions and delayed
+callbacks, both separately and together. A second whole-update scene checks
+Himmelsdorf navigation. All compared messages, complete owned state, ordered
+engine leaves, control slices, probes and diagnostic counters match the
+unchanged Python 2 source. The deliberately opaque Python descriptor cache is
+excluded from state equality; its consumed aim results are compared.
+
+Both host ABIs and the x86 prototype build with warnings treated as errors.
+PE inspection reports only `KERNEL32.dll` and `msvcrt.dll` imports. CPython 2.7
+compiles all 97 client and 34 experiment modules without writing adjacent
+bytecode. Python 3.12 passes the weapon/health/wire and buffer-ownership checks,
+but additional whole-loop comparisons expose last-bit floating-point differences
+in aim and navigation; it is not used as the exact-client numerical oracle.
+AddressSanitizer and UndefinedBehaviorSanitizer pass the packed-buffer and
+owner-lifecycle guards, weapon/health/wire suite, callback bridge, and bounded
+motion, aim, perception, route/traffic, contact, gunner/launch and combined
+whole-update suites on the CPython 2.7 host. Both halt on error; leak detection
+is disabled. The harness preloads both the sanitizer and C++ runtimes before
+loading the instrumented extension, so C++ exception interception is active.
+No production entry point, launcher or package imports the kernel. Exact
+Windows loading, x86 floating-point parity, callback/native memory ownership,
+real frame pacing and gameplay remain unproved.
+
+Reproduce the owned-kernel comparison:
+
+```bash
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-kernel-host
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-kernel-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_state.py \
+  --module /tmp/ffi-kernel-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-kernel-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --frames 80 --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-kernel-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --components kernel,world-sync \
+  --control-components aiming,driver-flow,contacts,world-sync,navigation-flow,motion-flow \
+  --seconds 30 --rounds 3 --output /tmp/ffi-kernel-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-kernel-1513
+```
+
+The fixed-field follow-up keeps that same production baseline and frozen
+`fabc7e6e` implementation as controls. Profiling the original measured loop
+counted 53,854 kernel bridge callbacks plus 82,273 nested world callbacks:
+136,127 C++-to-Python calls, distinct from the 7,600 forward FFI entries.
+The kernel total includes 134 navigation notifications and 53,720 engine leaves.
+It also counted 107,440 actor reads and 32,941 full actor decodes. Native stack
+sampling identified hash-table lookup, destruction and allocation among the
+remaining hot operations. These are deterministic fixture counts and sampled
+host evidence, not measurements of BigWorld's real implementation.
+
+`kernel_fields.h` now assigns 139 compile-time slots to the reviewed state and
+projection fields. Bot state and perception/aim pose projections store values
+contiguously, with explicit presence flags; missing and present-null fields
+remain distinct. Descriptor coefficients and irregular ledger keys retain
+mapping storage. Publication columns, perception projections and callback
+columns bind their field names once. Slot values still use the tagged `Value`
+representation: this is not a fully typed rewrite of every native subsystem.
+Shared container allocation and three-component vectors also avoid redundant
+allocations. Shallow copies preserve nested ownership, deep copies detach it,
+and serialization visits both fixed slots and irregular keys.
+
+Primitive motion, ground, water, destructible-scan and cancellation leaves
+project and consume only their actual inputs. Callbacks that consume vehicle
+mappings still receive fresh dictionary copies, including the synchronous
+motion resolver's callback-visible pose. Exact numeric projection variants can
+share a decoded template within one owned update. Writes to decoded top-level
+fields cannot change that template; nested ownership follows the original
+shallow-copy contract. The cache clears at each update and teardown, while
+standalone leaf audits keep only one entry per actor. Required scan fields
+still fail when absent; a water probe still reads BotRuntime's x/y/z contract,
+not a separately projected target position. Siege descriptor selection and
+ordered engine calls are unchanged.
+
+The final nine fresh-process, three-round rotating comparison uses the same
+29-Bot Great Wall combat scene, 30 simulated seconds, 15 callbacks/second and
+CPython 2.7.18 Linux aarch64 host. All build and validation processes have
+finished before timing. All nine full snapshots match the unmodified Python
+oracle, including messages, ordered queries, probes, decisions, navigation and
+diagnostics. Initialization and final file output remain outside loop CPU.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 11.244537 s | 11.238067–11.332941 s | 0.00% |
+| Frozen `fabc7e6e` kernel and Python adapters | 7.974894 s | 7.949418–8.031234 s | 29.08% |
+| Fixed fields and narrower callback projections | 6.491684 s | 6.489070–6.549257 s | 42.27% |
+
+The follow-up reduces loop CPU another 18.60% against the frozen kernel. Its
+median initialization is 0.165740 s; median loop-plus-initialization CPU is
+6.657545 s. Actor reads fall from 107,440 to 44,678, and full decodes from 32,941
+to 22,924. There are still 53,720 engine leaves and 77,172 recorded fake collision
+rays. The runner reports engine-leaf callback counts separately from actor work;
+nested world calls and navigation notifications are not included in that count.
+A separate final profile reconfirms 53,854 kernel-bridge and 82,273 nested-world
+callbacks (136,127 total); its instrumented CPU time is not used in the table.
+No probe cadence, collision work, control slice or accepted shot is removed.
+These results remain far below a 90% reduction and do not predict Windows FPS.
+
+A separate six-process, alternating-order storage ablation keeps the final
+Python adapters, field bindings and allocation improvements in both variants.
+Only `Value::record()`/`as_record()` are changed in a temporary source copy to
+retain dictionary storage. Its median is 7.362928 s versus 6.485199 s with slots:
+fixed storage saves 11.92% in this comparison. All six full snapshots match.
+Fixed capacity trades some memory for fewer hash nodes: median whole-process
+peak RSS is 90,000 KiB with slots versus 88,696 KiB with dictionaries, an increase
+of 1,304 KiB. This includes fixture startup and serialization; it is not a
+measurement of native kernel heap usage or Windows memory consumption.
+
+The new focused checks exercise 20,000 storage mutations against an independent
+mapping oracle, missing/null distinctions, embedded-NUL irregular keys, stable
+references, alias/copy/clone semantics, merges and JSON round trips. Python 2.7
+leaf tests cover projection variants, caller mutation and retained dictionaries,
+actor identity, bounded standalone caches and primitive leaf contracts. The
+whole-update and subsystem differential checks use the unchanged Python 2.7
+implementation as their oracle. The final host module passes all kernel
+subsystem checks and six 80-frame whole-update variants. ASan/UBSan pass the
+storage oracle and a 40-frame combined Siege/human/cover/order scene; native
+extension leak detection is disabled and both sanitizers halt on errors.
+Existing production CI does not execute this opt-in experiment; its local checks and host benchmark are the relevant evidence.
+The x86 build is unshipped, and Windows loading, floating-point parity, native
+ownership and real frame pacing remain unproved.
+
+Reproduce the frozen-source comparison (the control runner must come from
+`fabc7e6e`, so Python adapters are frozen along with its native module):
+
+```bash
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-hot-host
+sh "$FFI_KERNEL_CONTROL/tools/ffi_experiment/build_host.sh" "$FFI_PY27" /tmp/ffi-old-host
+PYTHONDONTWRITEBYTECODE=1 "$FFI_PY27" tools/ffi_experiment/check_kernel_engine.py
+c++ -std=c++11 -O1 -g -Wall -Wextra -Werror \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  tools/ffi_experiment/check_kernel_fields.cpp -o /tmp/ffi-fields-check
+/tmp/ffi-fields-check
+PYTHONDONTWRITEBYTECODE=1 "$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-hot-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --frames 80 --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-hot-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --components kernel,world-sync --control-components kernel,world-sync \
+  --control-module /tmp/ffi-old-host/offline_astar_native.so \
+  --control-runner "$FFI_KERNEL_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --seconds 30 --rounds 3 --output /tmp/ffi-hot-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-hot-1513
+```
+
+The next experiment composes collision arbitration and the world sweep directly
+inside the owned motion kernel (`kernel,world-sync,world-resolver`). Its review
+still belongs to the complete experimental PR against `main`. The frozen
+`fb2ba3cf` kernel, adapters and production source remain the previous-performance
+control; the Python oracle remains production source `900744ce`.
+
+The resolver reads current native Bot state, computes corridor eligibility and
+directional kinetic admission, runs the C++ world sweep, and combines its result
+with the source catalog's exact contact receipt. Collision extents and the
+unmodified descriptor's forward/backward limits are compiled once per vehicle
+mode. They are distinct from crew/equipment-adjusted driving parameters. Siege
+transitions select the corresponding compiled profile. Missing collision
+extents reject construction; partially installed adapters are restored on
+failure. No production entry point or package installs this experiment.
+
+The exported fixture exposes its existing battle owner explicitly; it retains
+the source resolver for Python and frozen-control runs. Native callbacks use a
+64-double packet for begin, scalar query, completion and paired query operations.
+Python owns fresh operation-local native hit/filter references and every actual
+engine/catalog call. Native code retains none of those Python objects. Both
+normal completion and failed updates clear the operation; repeated teardown is
+safe. Callback entry checks the Bot runtime, round, space and catalog owner, and
+paired queries recheck those identities between their two native calls.
+Reuse and completion also check ownership after the catalog callback returns.
+
+Only queries already unconditional in the source are paired: the two initial
+under-hull ground columns and the two ordinary upper collision rays. Their
+engine calls still run sequentially in the original order. Ground-dependent
+geometry, midpoint/profile probes, slope-branch early exits, destruction/recast
+and catalog commits remain barriers. A first-query exception or non-finite
+answer stops the second query. The source catalog continues to own spatial
+indexes, live destruction, delayed skins, filters and canonical publication.
+This change does not claim migration of that catalog or projectile terminals.
+
+Expanded variable-step whole-update coverage found an existing C++ arithmetic
+mismatch in the previously isolated world core: optimizing `pow(x, 2)` to `x*x`
+changed an inside-hull length from `4.000000000000032` to
+`4.0000000000000329`, then changed a ray endpoint from `0.9719008512196334` to
+`0.9719008512196335`. Replaying the source's single-sweep trace reproduced it
+without batching. All source power expressions in the world core now retain
+the libm call used by CPython 2, including constant exponents. A regression uses
+that exact pose and ground transition; comparisons still require exact equality.
+
+On the final source, 480 focused source comparisons cover resolver branches,
+query exceptions, malformed receipts, varied extents/speed caps, and populated
+fragile/structure catalogs. The latter compare ordered native destruction,
+canonical publications, pending skins and subsequent filter decisions. Separate
+lifetime checks retire the round during an upper ray or catalog completion,
+reject an unrelated world owner after partial startup, and verify restoration.
+Seven 80-frame whole-update variants pass: six with this resolver (including
+combined Siege/human/cover/order changes and Himmelsdorf navigation), plus the
+previous callback path. New-path checks also inject a failed engine leaf and
+verify update cleanup and repeated teardown. The state, gunnery/launch,
+perception/lane, motion, aim, route/driver/traffic, contact and borrowed-buffer
+suites pass. Both scalar and synchronous world adapters pass 75 physical tests
+and 145 recorded query/result traces; one internal-helper mock remains a
+source-only test. ASan/UBSan pass the 480-case audit, borrowed callbacks and an
+80-frame combined update, with errors fatal and extension leak detection
+disabled. Host and x86 builds pass with warnings as errors; the x86 PE imports
+only `KERNEL32.dll` and `msvcrt.dll`. Client and changed runtime-side experiment
+sources compile under CPython 2.7.
+
+Three rotating rounds (nine fresh processes) on the same Linux aarch64 host
+under CPython 2.7.18 use Great Wall combat, 29 Bots and 30 simulated seconds at
+15 callbacks/second. The previous kernel and runner are frozen at `fb2ba3cf`;
+all nine complete snapshots match, including messages, ordered engine queries,
+motion probes, decisions, navigation progress and diagnostics.
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Unmodified production Python | 11.130556 s | 11.066111–11.145113 s | 0.00% |
+| Frozen kernel and adapters (`fb2ba3cf`) | 6.462702 s | 6.357355–6.573080 s | 41.94% |
+| Direct collision flow and paired queries | 6.244988 s | 6.156629–6.256726 s | 43.89% |
+
+The incremental median reduction is 3.37%, not another 43.89%. Median native
+initialization is 0.167170 s (control: 0.164288 s). Loop timing includes ordinary
+callback marshalling and per-frame snapshot/navigation capture, but excludes
+fixture/process startup and final file serialization. Earlier measurements use
+their own controls; their savings must not be added to this result.
+
+Forward dispatches fall from 7,600 to 2,562. Native-to-Python callbacks fall from
+136,127 to 111,533: 48,682 engine leaves, 134 navigation notifications and 62,717
+world callbacks. The latter comprise 5,038 begins, 5,038 completions, 23,009 scalar
+queries and 29,632 query pairs. They still execute 82,273 ordered world leaves
+and exactly 77,172 fake collision rays. Actor reads fall from 44,678 to 39,640
+and decodes from 22,924 to 17,955. A separate final-source loop profile confirms
+those counts and its snapshot also matches; its instrumented timings are not
+included above. It still records 241,222 vector constructions, 3,830
+`_fell_trees_near` calls and 8,516 spatial-signature calls. These are remaining
+allocation/catalog costs, not evidence that all of them can be removed.
+
+This modest gain supports direct composition but does not establish a route to
+90% CPU savings. The measured registry is empty and projectile launches are
+acknowledged without terminal simulation. Populated catalog checks prove local
+ordering and outcome parity, not representative catalog performance. Further
+allocation work should identify redundant object construction and measure
+populated scenes before changing ownership. The oracle remains source
+`900744ce`, not the newer `main`. Host fake-query CPU is not Windows FPS;
+#1513 loading, x86 numerical parity, native ownership and frame pacing still
+require the exact Windows client. The extension remains unshipped.
+
+Reproduce this stage with a fresh fixture and separately built frozen control
+(set `FFI_PY27` to the CPython 2.7.18 executable):
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+FFI_WORLD_CONTROL=/tmp/ffi-world-control
+git worktree add --detach "$FFI_WORLD_CONTROL" fb2ba3cf
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-world-fixture.json
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-world-host
+(cd "$FFI_WORLD_CONTROL" && sh tools/ffi_experiment/build_host.sh \
+  "$FFI_PY27" /tmp/ffi-world-control-host)
+"$FFI_PY27" tools/ffi_experiment/check_kernel_world.py \
+  --module /tmp/ffi-world-host/offline_astar_native.so --fixture /tmp/ffi-world-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-world-host/offline_astar_native.so --fixture /tmp/ffi-world-fixture.json \
+  --frames 80 --native-world --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-world-host/offline_astar_native.so --fixture /tmp/ffi-world-fixture.json \
+  --components kernel,world-sync,world-resolver --control-components kernel,world-sync \
+  --control-module /tmp/ffi-world-control-host/offline_astar_native.so \
+  --control-runner "$FFI_WORLD_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --seconds 30 --rounds 3 --output /tmp/ffi-world-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-world-1513
+```
+
+The boundary-cost follow-up separates remaining native execution from Python
+callbacks instead of treating all time inside `dispatch_sync` as C++. The
+earlier full cProfile observer increased a roughly 6.2 s loop to 12.168 s;
+its call counts are useful, but its percentages cannot be applied to the
+uninstrumented loop. The optional host-only `build_host.sh --profile` build
+instead partitions process CPU at synchronous dispatch/callback boundaries.
+Its four zones restore their previous owner across nested dispatch and failure.
+Observation starts after owner setup and stops before final report-file serialization.
+It is absent from normal builds and the #1513 bridge.
+
+The Python aim adapter also copied the unused tail of its 32,768-double shared
+buffer on every request. The native producer lends a 256-double packet, and
+the widest aim request uses 17 parameters. Bounding that copy to those 17
+parameters reduces the 8,914 aim slices in this workload from 2,329,691,728 to
+1,212,304 bytes. The native packets, actor projections, callback order, query
+count and gameplay results are unchanged. A guarded borrowed-packet regression
+fails on the original adapter's out-of-request read and passes after the fix.
+
+Fifteen fresh processes in three rotating rounds compare the unchanged Python,
+frozen `49c03342` runner/binary, final normal binary, and a profiling binary with
+observation disabled/enabled. The scene, interpreter and source oracle remain
+as above. All fifteen complete snapshots match. Primary timings exclude the
+optional observer:
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Unmodified production Python | 11.165138 s | 11.060664–11.253421 s | 0.00% |
+| Frozen collision-flow kernel (`49c03342`) | 6.255879 s | 6.241917–6.267949 s | 43.97% |
+| Bounded Python aim arguments | 6.001333 s | 5.971952–6.022205 s | 46.25% |
+
+This removes another 4.07% of loop CPU without moving another gameplay algorithm
+to C++. Median initialization is 0.166846 s. The profiling binary takes 6.088295 s
+with observation off and 6.366738 s with it on: observed deltas are 1.45% for
+compiled-in instrumentation and another 4.57% when enabled, with overlapping
+run ranges. These are observer-effect measurements, not performance gains.
+
+Mean ownership attribution across the three observed loops is:
+
+| CPU owner | Mean observed CPU | Share |
+| --- | ---: | ---: |
+| Native dispatch body, excluding callbacks | 2.485329 s | 39.13% |
+| Python callbacks, including call entry and ordinary callees | 3.265702 s | 51.41% |
+| Python outer loop, input/output conversion and snapshot capture | 0.483124 s | 7.61% |
+| C callback-buffer copies and result release | 0.117789 s | 1.85% |
+
+These are ownership zones, not irreducible costs or opcode-level language
+timings. Clock overhead remains included. In particular, the 1.85% C bridge
+zone is not all FFI overhead: Python argument decoding, actor dictionaries,
+vector construction and call entry are charged to Python callbacks. The latter
+also include builtin operations and deterministic engine fakes, so 51.41%
+cannot be advertised as removable production Python. Inclusive callback rows
+can overlap during nesting; only the four zones form a partition. For hotspot
+orientation, observed world-query leaves total about 1.307 s, catalog completion
+plus body scanning 0.810 s, and aim/origin/friendly-lane callbacks 0.351 s.
+
+A separate 200 Hz native stack sample of the final normal binary selects 1,726
+samples whose workload frame is inside the measured loop. The deepest Python
+frame attributes 669 samples to native dispatch/bridge, 484 to callback
+adapters, 191 to the Python catalog, 137 to fixture fakes, and 245 to other
+Python work. Of the 669 native-side samples, 133 end in allocation/free, 40 in
+shared-container destruction, and 100 in hash-table operations. Those 273
+samples (40.8% of the native-side sample) identify remaining representation and
+allocation costs; they do not establish that these costs can all be removed.
+Inlining, sampling error and one failed unwind limit attribution precision.
+The sampler wrote its result before a post-exit `No child process` error; the
+sampled workload completed and its entire snapshot matches the Python oracle.
+Its timing is excluded from the primary comparison.
+
+Thus about 39% of the observed loop is already native, but no measured share
+has been proved an optimization floor. Python adapters and catalog work remain
+specific candidates, and the bounded-copy fix demonstrates one removable cost.
+The native container/lookup sample argues for further native representation
+work too. Empty-catalog/fake-engine results do not quantify a populated Windows
+battle, and no percentage of remaining Python is promised removable.
+
+Both normal and profiling CPython 2.7 host builds pass with warnings as errors.
+The bridge audit passes with and without profiling, including nested buffers,
+230 callbacks during observation, original exception identity, result release,
+profile ownership guards and repeated start/stop. Seven Python leaf tests pass
+on Python 2.7 and Python 3; 2,320 aim transitions and 1,410 ordered queries pass,
+as does the 80-frame combined Siege/human/cover/order native-world comparison.
+Client and changed runtime-side experiment sources compile under Python 2.7.
+This stage changes no C++ gameplay core or #1513 bridge; their previous native
+acceptance limitations still apply.
+
+Reproduce the boundary comparison using `FFI_PY27` as above:
+
+```bash
+FFI_BOUNDARY_CONTROL=/tmp/ffi-boundary-control
+git worktree add --detach "$FFI_BOUNDARY_CONTROL" 49c03342
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-boundary-host
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-boundary-profile --profile
+(cd "$FFI_BOUNDARY_CONTROL" && sh tools/ffi_experiment/build_host.sh \
+  "$FFI_PY27" /tmp/ffi-boundary-control-host)
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-boundary-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_host_profile.py \
+  --module /tmp/ffi-boundary-profile/offline_astar_native.so
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --fixture /tmp/ffi-boundary-fixture.json --seconds 30 --rounds 3 \
+  --module /tmp/ffi-boundary-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver \
+  --control-components kernel,world-sync,world-resolver \
+  --control-module /tmp/ffi-boundary-control-host/offline_astar_native.so \
+  --control-runner "$FFI_BOUNDARY_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --profile-module /tmp/ffi-boundary-profile/offline_astar_native.so \
+  --output /tmp/ffi-boundary-comparison
+py-spy record --native --rate 200 --format raw --full-filenames \
+  --output /tmp/ffi-boundary-stacks.txt -- "$FFI_PY27" \
+  tools/ffi_experiment/portable_workload.py --fixture /tmp/ffi-boundary-fixture.json \
+  --backend native --module /tmp/ffi-boundary-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver --seconds 30 \
+  --output /tmp/ffi-boundary-sampled.json
+```
+
+The historical publication follow-up replaces the nested temporary signature
+with two reusable native buffers. Bound scalar fields retain explicit presence
+and `Value` equality; ordered Bot, ammunition, equipment, shot, launch and ram
+records retain the previous shallow ownership. Equipment readiness changes
+only at the same cooldown boundary, while inactive pending timestamps and
+ordinary pose/time changes do not create durable events. Wire rows reserve
+their fixed and optional widths once, and optional groups bind field slots at
+configuration. No publication cadence, event ordering or engine query changes.
+
+Fifteen fresh processes in three rotating rounds repeat the same 29-Bot,
+30-second Great Wall scene on CPython 2.7.18, with frozen `3c9bc7d7` as the
+previous runner/binary and production `900744ce` as the Python oracle:
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Unmodified production Python | 10.881820 s | 10.798626–10.969403 s | 0.00% |
+| Frozen bounded-argument kernel (`3c9bc7d7`) | 5.737643 s | 5.694688–5.755725 s | 47.27% |
+| Reusable C++ publication records | 5.547883 s | 5.479581–5.568934 s | 49.02% |
+
+The new native representation removes another 3.31% of loop CPU against the
+control measured in these same rounds. Median initialization is 0.167041 s.
+All fifteen complete snapshots match, including 225 state publications,
+77,172 fake collision rays, 111,533 reverse callbacks and 2,562 forward
+dispatches. No whole-update thread pool is enabled. The distinct profiling
+binary takes 5.520867 s with observation disabled and 5.875001 s enabled
+(observed deltas of -0.49% against the normal binary and +6.41% for enabling
+the observer). These are observer controls, not additional optimizations.
+Its mean zones are 2.209018 s native body (37.02%), 3.172138 s Python callbacks
+(53.16%), 0.468830 s Python outer/conversion work (7.86%), and 0.116917 s C
+bridge copying/release (1.96%). The preceding ownership and fake-engine
+limitations still apply; none of these shares is an optimization floor.
+
+The native-thread probe is deliberately a separate host executable,
+`benchmark_codec_threads.cpp`. It compares one calling thread with the caller
+plus one persistent helper, using disjoint halves of the same immutable
+29-row publication fixture. The fixture is reconstructed from final Python
+wire rows, with the source equipment contracts; it is not a live native-engine
+snapshot. Each batch waits for both halves and retains original row order.
+Both modes verify Python row equality and recovery after simultaneous first-
+and last-row failures. No Python object, query bridge or engine call is
+reachable from the helper. Each mode runs in a fresh process because creating
+a thread can change the standard library's shared-reference implementation.
+Timing includes repeated row allocation/release and, in the parallel mode,
+dispatch and completion barriers; thread startup and 20 warmup batches are excluded.
+This intentionally favorable fixed-input probe does not establish Windows
+thread performance or justify parallelizing the stateful Bot loop.
+
+Seven alternating rounds (14 fresh processes, 10,000 batches each) on this
+two-CPU Linux aarch64 host give the following uninstrumented results:
+
+| Encoding workers | Median wall time per batch | Wall range per batch | Median total CPU per batch |
+| --- | ---: | ---: | ---: |
+| Caller only | 66.954 us | 66.755–67.764 us | 66.934 us |
+| Caller plus persistent helper | 44.238 us | 43.050–45.044 us | 77.897 us |
+
+The two-thread batch finishes 33.93% sooner while using 16.38% more aggregate
+CPU. Thus this pure C++ stage does benefit from parallelism; its absolute saving
+is only 22.716 us per 29-row batch. This measures encoding alone, excluding
+equipment-state construction, edge comparison, JSON serialization and callbacks.
+Applying that isolated difference to 225 publications would save about 5.1 ms
+of encoding wall time; that extrapolation is not an end-to-end measurement.
+The helper remains a benchmark, rather than a thread pool in the Bot kernel;
+end-to-end benefit and the Windows ownership/lifecycle cost have not been
+established. A larger independent computation stage is the next candidate for
+parallel execution.
+
+The existing Bot loop commits each actor's motion before later actors consume
+it, and shares perception caches, query budgets and event ledgers. Its borrowed
+query route also has caller-thread/GIL ownership and process-global active
+buffers. Parallelizing that loop requires a separately proved immutable
+computation stage with ordered commits; putting its current callbacks on
+worker threads would violate those contracts.
+
+The publication record audit passes 884 comparisons with the previous nested
+signature oracle, including isolated field, ammunition, shot, equipment and
+cooldown changes, missing/null values, empty/shrinking/reordered rosters, launches
+and ram events. Normal and ASan/UBSan runs also pass 13,632 weapon transitions,
+311 wire/invalid rows, 900 equipment transitions, 4,256 decimal cases, 2,015
+health/publication transitions and 13 packed-output/lifecycle checks. The
+combined 80-frame native-world Siege/human/cover/order comparison passes in
+both builds; normal checks also cover 80-frame Himmelsdorf navigation and the
+original Python world-callback path. Bridge ownership and host-profile checks
+pass. Host and x86 builds treat warnings as errors; the `.pyd` still imports
+only `KERNEL32.dll` and `msvcrt.dll`. Sanitizers halt on error with leak checking
+disabled. Production CI does not compile or run this opt-in experiment, and
+the standalone thread probe is not linked into either bridge.
+
+These publication/thread measurements use the pre-rebase source oracle. To
+reproduce this historical stage, check out `47b444561aecfb821b727a55fdebb32aa1521ee7`
+and use `FFI_PY27` and the exported fixture from above:
+
+```bash
+FFI_PUBLICATION_CONTROL=/tmp/ffi-publication-control
+git worktree add --detach "$FFI_PUBLICATION_CONTROL" 3c9bc7d7
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-publication-host
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-publication-profile --profile
+(cd "$FFI_PUBLICATION_CONTROL" && sh tools/ffi_experiment/build_host.sh \
+  "$FFI_PY27" /tmp/ffi-publication-control-host)
+c++ -std=c++11 -O2 -Wall -Wextra -Werror \
+  tools/ffi_experiment/check_kernel_publication.cpp -o /tmp/ffi-check-publication
+/tmp/ffi-check-publication
+"$FFI_PY27" tools/ffi_experiment/check_kernel_state.py \
+  --module /tmp/ffi-publication-host/offline_astar_native.so --fixture /tmp/ffi-boundary-fixture.json
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-publication-host/offline_astar_native.so --fixture /tmp/ffi-boundary-fixture.json \
+  --frames 80 --native-world --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --fixture /tmp/ffi-boundary-fixture.json --seconds 30 --rounds 3 \
+  --module /tmp/ffi-publication-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver \
+  --control-components kernel,world-sync,world-resolver \
+  --control-module /tmp/ffi-publication-control-host/offline_astar_native.so \
+  --control-runner "$FFI_PUBLICATION_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --profile-module /tmp/ffi-publication-profile/offline_astar_native.so \
+  --output /tmp/ffi-publication-comparison
+"$FFI_PY27" tools/ffi_experiment/portable_workload.py \
+  --fixture /tmp/ffi-boundary-fixture.json --backend python --seconds 30 \
+  --output /tmp/ffi-codec-source.json --codec-fixture-output /tmp/ffi-codec-fixture.json
+c++ -std=c++11 -O2 -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math -pthread \
+  tools/ffi_experiment/benchmark_codec_threads.cpp -o /tmp/ffi-codec-threads
+# Repeat these fresh processes in alternating order for seven rounds.
+/tmp/ffi-codec-threads /tmp/ffi-codec-fixture.json 1 10000
+/tmp/ffi-codec-threads /tmp/ffi-codec-fixture.json 2 10000
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-publication-1513
+```
+
+The complete experiment has subsequently been rebased onto production
+`c6b2d373847254b140531213fcd3b7bab91c1195`. The original nine experiment commits
+remain in review scope, followed by a runtime-contract reconciliation commit.
+The diff remains confined to this document and `tools/ffi_experiment/`.
+Production source, installation and packages retain the fetched main tree.
+
+Three rotating rounds use six fresh CPython 2.7.18 processes on the Linux
+aarch64 host, the same 29-Bot Great Wall combat scene, and 30 simulated seconds
+at 15 callbacks/second. Both variants now use this production source oracle:
+
+| Variant | Median loop CPU | Observed range | Reduction vs Python |
+| --- | ---: | ---: | ---: |
+| Current-main Python | 11.025851 s | 10.986024–11.071962 s | 0.00% |
+| Reconciled C++ kernel | 5.666254 s | 5.625207–5.685573 s | 48.61% |
+
+All six complete snapshots match, including 225 state publications, 77,944
+fake engine queries, decision counts, probes, navigation and diagnostics.
+Median native initialization is 0.169759 s; the hot-loop speedup is 1.95x.
+The uninstrumented native build uses `-O2`, `-ffp-contract=off` and
+`-fno-fast-math`. Timing includes ordinary callbacks and per-frame capture,
+excluding process/fixture startup and final report serialization. The previous
+ownership and thread measurements were not rerun, and no earlier-stage savings
+are added to this current-source comparison. This scene still acknowledges
+launches without simulating terminals and uses deterministic query fakes.
+
+The rebase required semantic updates even though Git reported no conflicts:
+
+- Consumed repair/medical kits lose their passive bonus; repair duration uses
+  the current crew/loadout calculation and refreshes after consumption. Bot
+  kit selection and fallback crew terminal state match the current source.
+- Spotting uses the actual additive/multiplicative camouflage profile in its
+  upper bound and maintains all live targets' stationary clocks before the
+  bounded observation pass.
+- Navigation combines local and macro hard-edge penalties consistently in
+  searches, caches, direct escapes and path following. Generic probe failures
+  mark the adjacent edge in the pre-turn direction; resolved collisions use
+  the actual post-turn yaw and signed speed for edge and driver memory.
+  Chassis support checks span narrow gaps; lower discontinuous ground does not
+  pull down an occupied hull sweep. The first 30-second differential run exposed
+  a copied rise allowance of 0.60 m instead of `SUPPORT_STRADDLE_RISE`'s 0.12 m: Bot 33
+  incorrectly remained supported at frame 239. Nine deterministic boundary
+  cases now cover accepted/rejected rises, both chassis axes, maximum drops
+  and missing opposing support. The per-frame checker also accepts `--fps`
+  to reproduce the workload clock independently of its irregular-update cases.
+- Dead Bots accept contact displacement and use the current held-track
+  friction and support resettlement. Dead human bodies remain immovable.
+  Contact diagnostics retain the current impact positions.
+- A failed wire projection retains an identity-only row for that Bot, defers
+  its dependent events and suppresses new fire admission until recovery.
+  Other Bots continue publishing. The differential fixture corrupts one
+  actor's shot-angle pair, observes failure publications, repairs it and
+  observes full-row recovery.
+- Both native world adapters now preserve optional collision trace witnesses.
+  The sync route owns its trace on the stack; the stepped route reads its
+  existing job. Neither diagnostic path adds engine queries.
+
+Current-main human weapon behavior, server orders, vehicle attribute access
+and destructible sweep caching remain in their Python owners. The prototype
+still requires complete server orders and its copied vertical controller.
+It now rejects detached-turret motion/hull callbacks explicitly, alongside
+native motion and the optional ten-spring suspension; startup guards are
+checked before any native allocation. Detached-turret collision has not been
+ported. BattleRuntime damage/reconciliation ingress, authority takeover,
+projectile terminal processing and active-battle installation remain outside
+the adapter. The prior thread and CPU-ownership measurements above are
+historical, not fresh measurements against this rebase.
+
+Focused reconciliation checks pass 21,009 vertical/motion checks with 19,968
+ordered ground observations; 46,080 navigation operations and 2,160 frame states;
+2,480 motion transitions with 5,463 ordered queries; 80 perception frames;
+480 owned-world cases; and 612 contact/lifecycle transitions. The combined
+80-frame native-world Siege/human/cover/order/projection-failure scene and
+the 80-frame Himmelsdorf navigation scene match the Python oracle. ASan/UBSan
+also pass the combined scene, contacts, and the complete state suite (13,632
+weapon, 311 wire/invalid-row, 900 equipment, 4,256 decimal, 2,015 health and
+13 packed-output/lifecycle checks). Both world adapters pass all 78 physical
+source scenarios and 160 exact query/result traces under sanitizers; one
+internal-helper mock remains source-only. Sanitizers use `-O1 -g`, halt on
+errors and disable leak detection. The normal build passes 884 publication
+edge comparisons; Python 2.7 compilation covers all client files and the
+changed experiment Python files. The final `-O2` x86 build imports only
+`KERNEL32.dll` and `msvcrt.dll`. No Windows loading, x86 numerical parity,
+native engine timing or gameplay acceptance is claimed.
+
+After correcting the two late-scene differences, a 450-frame comparison at
+15 FPS passes with per-frame actor state, messages, probes and counters plus
+the complete ordered query history. The motion-flow fixture now holds one
+blocked heading long enough to exercise the current local-edge rule:
+1,000 cases pass with 3,229 ordered callback/state observations and an observed
+pending-search retirement. Randomly changing headings are not evidence of a
+repeated blocker. Nine focused straddle boundaries pass 45 ground observations.
+The final sanitized binary repeats both motion regressions and the combined
+80-frame Siege/human/cover/order/projection-failure scene successfully.
+
+Reproduce the current-source workload with a freshly exported fixture; do
+not use the historical control runner against this changed source oracle:
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+python3 tools/ffi_experiment/export_fixture.py /tmp/ffi-rebase-fixture.json
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-rebase-host
+"$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-rebase-host/offline_astar_native.so \
+  --fixture /tmp/ffi-rebase-fixture.json --frames 80 \
+  --native-world --siege --human --cover --orders --projection-failure
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --fixture /tmp/ffi-rebase-fixture.json --seconds 30 --rounds 3 \
+  --module /tmp/ffi-rebase-host/offline_astar_native.so \
+  --components kernel,world-sync,world-resolver --output /tmp/ffi-rebase-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-rebase-1513
+```
+
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined
 runtime slots by native filename taken from the chunk list. A slot may be
 present as `''`, while an unresolved, handlerless or NULL-name slot is absent;
