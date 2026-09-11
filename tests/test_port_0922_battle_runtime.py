@@ -2528,6 +2528,263 @@ def _runtime():
                 }})))
 
 
+class RemotePresentationWriteTests(unittest.TestCase):
+
+    class CountingMatrix(_Matrix):
+        def __init__(self, other=None):
+            self.rotation_writes = 0
+            self.translation_writes = 0
+            super().__init__(other)
+
+        def setRotateYPR(self, value):
+            self.rotation_writes += 1
+            super().setRotateYPR(value)
+            # A rotation setter may replace the complete transform. The
+            # adapter must restore translation whenever it writes rotation.
+            object.__setattr__(self, 'translation', _Vector())
+
+        def __setattr__(self, name, value):
+            if name == 'translation':
+                if getattr(self, 'fail_translation', False):
+                    self.fail_translation = False
+                    raise RuntimeError('translation failed')
+                self.translation_writes += 1
+            object.__setattr__(self, name, value)
+
+        def reset_counts(self):
+            self.rotation_writes = self.translation_writes = 0
+
+    def _vehicles(self):
+        runtime = _runtime()
+        runtime.math.Matrix = self.CountingMatrix
+        native = _NativeRemoteState(
+            runtime.bigworld, runtime.math, runtime.compatibility, None,
+            _Vector(), (0.0, 0.0, 0.0), interpolate_motion=False)
+        fallback = RemoteVehicle(
+            1000, _Descriptor(), {'publicInfo': {'team': 2}, 'health': 500},
+            _Vector(), (0.0, 0.0, 0.0), runtime.math)
+        return native, fallback
+
+    def test_direct_moving_poses_write_only_changed_matrix_components(self):
+        for vehicle in self._vehicles():
+            with self.subTest(adapter=type(vehicle).__name__):
+                for matrix in (vehicle.matrix, vehicle._key_from,
+                               vehicle._key_to):
+                    matrix.reset_counts()
+                for frame in range(60):
+                    vehicle.set_pose(
+                        _Vector(0.0, 0.0, (frame + 1) / 6.0),
+                        (0.0, 0.0, 0.0), now=1.0 + frame / 60.0)
+                self.assertEqual(0, vehicle.matrix.rotation_writes)
+                self.assertEqual(60, vehicle.matrix.translation_writes)
+                for key in (vehicle._key_from, vehicle._key_to):
+                    self.assertEqual(
+                        (0, 0), (key.rotation_writes, key.translation_writes))
+                speed = (vehicle.speed if isinstance(vehicle, _NativeRemoteState)
+                         else vehicle.filter.speed)
+                self.assertAlmostEqual(10.0, speed)
+
+                # Turning at the same world position must restore translation
+                # after setRotateYPR, even though XYZ itself did not change.
+                vehicle.set_pose(
+                    _Vector(0.0, 0.0, 10.0), (0.1, 0.2, 0.3), now=2.0)
+                self.assertEqual(
+                    (0.0, 0.0, 10.0), tuple(vehicle.matrix.translation))
+                self.assertEqual((0.3, 0.2, 0.1),
+                                 (vehicle.matrix.yaw, vehicle.matrix.pitch,
+                                  vehicle.matrix.roll))
+                self.assertEqual((1, 61), (vehicle.matrix.rotation_writes,
+                                          vehicle.matrix.translation_writes))
+                vehicle.set_pose(
+                    _Vector(0.0, 0.0, 10.0), (0.1, 0.2, 0.3), now=2.1)
+                self.assertEqual((1, 61), (vehicle.matrix.rotation_writes,
+                                          vehicle.matrix.translation_writes))
+
+                # A replaced provider cannot inherit another matrix's cache.
+                vehicle.matrix = self.CountingMatrix()
+                vehicle.set_pose(
+                    _Vector(0.0, 0.0, 10.0), (0.1, 0.2, 0.3), now=2.2)
+                self.assertEqual(
+                    (0.0, 0.0, 10.0), tuple(vehicle.matrix.translation))
+                self.assertEqual(0.3, vehicle.matrix.yaw)
+
+    def test_interpolation_seeds_keys_from_the_latest_direct_pose(self):
+        for vehicle in self._vehicles():
+            with self.subTest(adapter=type(vehicle).__name__):
+                vehicle.set_pose(
+                    _Vector(10.0, 2.0, 3.0), (0.1, 0.2, 0.3), now=1.0)
+                if isinstance(vehicle, _NativeRemoteState):
+                    self.assertTrue(vehicle.set_interpolate_motion(True))
+                    animation = vehicle.animation
+                else:
+                    vehicle.attach_visual(
+                        types.SimpleNamespace(model=None), 7, _Model())
+                    animation = vehicle._animation
+                for key in (vehicle._key_from, vehicle._key_to):
+                    self.assertEqual((10.0, 2.0, 3.0), tuple(key.translation))
+                    self.assertEqual(
+                        (0.3, 0.2, 0.1), (key.yaw, key.pitch, key.roll))
+                vehicle.set_pose(_Vector(20.0, 2.0, 3.0), (0.1, 0.2, 0.3),
+                                 relax_time=0.1, now=2.0)
+                vehicle.set_pose(_Vector(30.0, 2.0, 3.0), (0.1, 0.2, 0.3),
+                                 relax_time=0.1, now=2.05)
+                self.assertAlmostEqual(15.0, vehicle._key_from.translation[0])
+                self.assertAlmostEqual(30.0, vehicle._key_to.translation[0])
+                self.assertIs(vehicle._key_to, animation.keyframes[1][1])
+
+    def test_failed_matrix_write_does_not_cache_a_partial_transform(self):
+        for vehicle in self._vehicles():
+            with self.subTest(adapter=type(vehicle).__name__):
+                vehicle.matrix.fail_translation = True
+                with self.assertRaisesRegex(RuntimeError, 'translation failed'):
+                    vehicle.set_pose(_Vector(1.0, 2.0, 3.0), (0.1, 0.2, 0.3))
+                vehicle.set_pose(_Vector(1.0, 2.0, 3.0), (0.1, 0.2, 0.3))
+                self.assertEqual(
+                    (1.0, 2.0, 3.0), tuple(vehicle.matrix.translation))
+                self.assertEqual((0.3, 0.2, 0.1),
+                                 (vehicle.matrix.yaw, vehicle.matrix.pitch,
+                                  vehicle.matrix.roll))
+
+    def test_failed_matrix_write_can_return_to_the_previous_pose(self):
+        for vehicle in self._vehicles():
+            with self.subTest(adapter=type(vehicle).__name__):
+                original = _Vector(4.0, 2.0, 8.0)
+                vehicle.set_pose(original, (0.1, 0.2, 0.3))
+                vehicle.matrix.fail_translation = True
+                with self.assertRaisesRegex(RuntimeError, 'translation failed'):
+                    vehicle.set_pose(_Vector(1.0, 2.0, 3.0), (0.4, 0.5, 0.6))
+                vehicle.set_pose(original, (0.1, 0.2, 0.3))
+                self.assertEqual(tuple(original), tuple(vehicle.matrix.translation))
+                self.assertEqual((0.3, 0.2, 0.1),
+                                 (vehicle.matrix.yaw, vehicle.matrix.pitch,
+                                  vehicle.matrix.roll))
+
+    def test_failed_record_pose_can_return_to_the_previous_sample(self):
+        native, unused_fallback = self._vehicles()
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._binding.set_vehicle_pose.side_effect = (
+            lambda unused_id, position, rotation, **kwargs:
+            native.set_pose(position, rotation, **kwargs))
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        record = {'engine_id': 11, 'kind': 'bot', 'state': {'speed': 8.0}}
+        original = dict(x=4.0, y=2.0, z=8.0, yaw=0.3, pitch=0.2, roll=0.1)
+        battle._apply_record_pose(record, original)
+        native.matrix.fail_translation = True
+        with self.assertRaisesRegex(RuntimeError, 'translation failed'):
+            battle._apply_record_pose(record, dict(original, x=9.0, yaw=0.6))
+        battle._apply_record_pose(record, original)
+        self.assertEqual(3, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual((4.0, 2.0, 8.0), tuple(native.matrix.translation))
+        self.assertEqual(0.3, native.matrix.yaw)
+
+    def test_failed_record_aim_can_return_to_the_previous_sample(self):
+        native, unused_fallback = self._vehicles()
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._binding.update_vehicle_aim.side_effect = (
+            lambda unused_id, *angles: native.set_aim(*angles))
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        record = {'engine_id': 11, 'kind': 'bot', 'state': {'speed': 8.0}}
+        original = dict(x=4.0, y=2.0, z=8.0, yaw=0.0,
+                        aim_yaw=0.3, gun_pitch=0.1)
+        battle._apply_record_pose(record, original)
+        with mock.patch.object(native.aim.gunMatrix, 'setRotateYPR',
+                               side_effect=RuntimeError('gun aim failed')):
+            with self.assertRaisesRegex(RuntimeError, 'gun aim failed'):
+                battle._apply_record_pose(
+                    record, dict(original, aim_yaw=0.6, gun_pitch=0.2))
+        battle._apply_record_pose(record, original)
+        self.assertEqual(3, battle._binding.update_vehicle_aim.call_count)
+        self.assertAlmostEqual(0.3, native.aim.turretMatrix.yaw)
+        self.assertEqual(0.1, native.aim.gunMatrix.pitch)
+
+    def test_aim_writes_follow_component_inputs_and_record_lifecycle(self):
+        original = dict(x=4.0, y=2.0, z=8.0, yaw=0.3, pitch=0.1, roll=0.2,
+                        aim_yaw=0.7, gun_pitch=-0.1)
+        for kind in ('bot', 'player'):
+            for field, aim_changed in (
+                    ('x', False), ('y', False), ('z', False), ('roll', False),
+                    ('yaw', True), ('pitch', True), ('aim_yaw', True),
+                    ('gun_pitch', True), ('siege', True), ('generation', True),
+                    ('engine_id', True), ('record', True)):
+                with self.subTest(kind=kind, field=field):
+                    battle = BattleRuntime(_runtime())
+                    battle._binding = mock.Mock()
+                    battle._update_bot_tracks = mock.Mock(return_value=True)
+                    record = {'engine_id': 11, 'kind': kind,
+                              'state': {'speed': 8.0}}
+                    battle._apply_record_pose(record, original)
+                    battle._binding.reset_mock()
+                    pose = dict(original)
+                    if field == 'siege':
+                        record['presented_siege_state'] = 2
+                    elif field == 'generation':
+                        battle._generation += 1
+                    elif field == 'engine_id':
+                        record['engine_id'] = 12
+                    elif field == 'record':
+                        record = dict(record)
+                    else:
+                        pose[field] += 1.0e-12
+                    battle._apply_record_pose(record, pose)
+                    self.assertEqual(
+                        int(aim_changed),
+                        battle._binding.update_vehicle_aim.call_count)
+                    self.assertEqual(
+                        pose['x'], record['projectile_collision_pose']['x'])
+
+    def test_failed_aim_retries_without_replaying_a_successful_pose(self):
+        battle = BattleRuntime(_runtime())
+        battle._binding = mock.Mock()
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        record = {'engine_id': 11, 'kind': 'bot', 'state': {'speed': 8.0}}
+        pose = dict(x=0.0, y=0.0, z=1.0, yaw=0.0, aim_yaw=0.2, gun_pitch=0.1)
+        battle._binding.update_vehicle_aim.side_effect = (
+            RuntimeError('aim failed'), None)
+        with self.assertRaisesRegex(RuntimeError, 'aim failed'):
+            battle._apply_record_pose(record, pose)
+        self.assertNotIn('_remote_aim_signature', record)
+        battle._apply_record_pose(record, pose)
+        self.assertEqual(1, battle._binding.set_vehicle_pose.call_count)
+        self.assertEqual(2, battle._binding.update_vehicle_aim.call_count)
+
+    def test_aim_only_samples_keep_motion_clock_without_hull_matrix_writes(self):
+        native, unused_fallback = self._vehicles()
+        battle = BattleRuntime(_runtime())
+        now = [1.0]
+        battle._clock = lambda: now[0]
+        battle._binding = mock.Mock()
+        battle._binding.set_vehicle_pose.side_effect = (
+            lambda unused_id, position, rotation, **kwargs:
+            native.set_pose(position, rotation, **kwargs))
+        battle._binding.update_vehicle_aim.side_effect = (
+            lambda unused_id, *angles: native.set_aim(*angles))
+        battle._update_bot_tracks = mock.Mock(return_value=True)
+        record = {'engine_id': 11, 'kind': 'bot', 'state': {'speed': 10.0}}
+        pose = dict(x=0.0, y=0.0, z=0.0, yaw=0.0, pitch=0.0, roll=0.0,
+                    aim_yaw=0.0, gun_pitch=0.0)
+        battle._apply_record_pose(record, pose)
+        now[0] = 1.1
+        pose['z'] = 1.0
+        battle._apply_record_pose(record, pose)
+        self.assertAlmostEqual(10.0, native.speed)
+        native.matrix.reset_counts()
+        for frame in range(60):
+            now[0] = 1.1 + (frame + 1) / 60.0
+            pose['aim_yaw'] = (frame + 1) / 60.0
+            battle._apply_record_pose(record, pose)
+        self.assertEqual((0, 0), (native.matrix.rotation_writes,
+                                  native.matrix.translation_writes))
+        self.assertEqual(0.0, native.speed)
+        self.assertEqual(now[0], native._last_pose_time)
+        self.assertEqual(1.0, record['projectile_collision_pose']['turret_yaw'])
+        now[0] += 0.1
+        pose['z'] = 2.0
+        battle._apply_record_pose(record, pose)
+        self.assertAlmostEqual(10.0, native.speed)
+
+
 class NativeRemoteVehicleFactoryTests(unittest.TestCase):
     def _failing_registration_factory(self, arena_side_effect):
         runtime = _runtime()
@@ -3158,6 +3415,7 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         binding.set_vehicle_pose(
             vehicle_id, _Vector(2.0, 0.0, 4.0), (0.0, 0.0, 0.4),
             now=10.1)
+        binding.update_vehicle_aim(vehicle_id, 0.4, 0.9, -0.1)
         self.assertIs(provider, vehicle.model.matrix)
 
         vehicle._offlineNativeDrawVisible = False
@@ -3181,6 +3439,8 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         for handler in tuple(vehicle.appearance.onModelChanged.handlers):
             handler()
         self.assertIs(provider, vehicle.model.matrix)
+        self.assertAlmostEqual(0.5, state.aim.turretMatrix.yaw)
+        self.assertAlmostEqual(-0.1, state.aim.gunMatrix.pitch)
         self.assertFalse(vehicle.model.visible)
         self.assertEqual([], vehicle.targetCaps)
         self.assertEqual(old_attach_count, len(old_hull.attach_calls))
@@ -27317,11 +27577,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
                     'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
                     'aim_yaw': 0.0, 'gun_pitch': 0.0}})
 
-        # Hull and aim remain render-rate smooth; only the native 20 Hz belt
-        # controller is rate limited, and no pose-only sample walks the full
-        # state/materialization path.
+        # Every changing hull sample reaches presentation; constant aim needs
+        # one feed. The native belt controller retains its existing 20 Hz
+        # cadence and pose-only samples bypass state/materialization work.
         self.assertEqual(fps, battle._binding.set_vehicle_pose.call_count)
-        self.assertEqual(fps, battle._binding.update_vehicle_aim.call_count)
+        self.assertEqual(1, battle._binding.update_vehicle_aim.call_count)
         self.assertEqual(20, vehicle.update_tracks.call_count)
         battle._materialize_record.assert_not_called()
         self.assertIs(state, record['state'])
@@ -27342,7 +27602,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0,
                 'aim_yaw': 0.0, 'gun_pitch': 0.0}})
         self.assertEqual(fps, battle._binding.set_vehicle_pose.call_count)
-        self.assertEqual(fps, battle._binding.update_vehicle_aim.call_count)
+        self.assertEqual(1, battle._binding.update_vehicle_aim.call_count)
         self.assertEqual(previous_track_calls + 1,
                          vehicle.update_tracks.call_count)
         vehicle.settle_motion.assert_not_called()

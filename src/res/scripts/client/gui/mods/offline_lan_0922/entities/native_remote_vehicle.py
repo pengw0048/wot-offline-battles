@@ -15,6 +15,7 @@ import sys
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _RemoteShotPresenter, _blend_angle, _component_aim_angles,
+    _write_changed_pose,
     clear_ground_decal_visibility_state, close_stock_presentation_extras,
     set_model_attachment_visibility)
 
@@ -171,8 +172,13 @@ class _NativeRemoteState(object):
         self._capabilities_changed = False
 
     def _write_matrix(self, matrix):
-        matrix.setRotateYPR((self.yaw, self.pitch, self.roll))
-        matrix.translation = self.position
+        previous = getattr(self, '_matrix_pose', None)
+        # A failed rotation/translation pair may have changed the provider.
+        # The next sample must repair it even if it returns to the old pose.
+        self._matrix_pose = None
+        self._matrix_pose = _write_changed_pose(
+            matrix, self.position, (self.yaw, self.pitch, self.roll),
+            previous)
 
     def _matrix_product(self, first, second=None):
         product_type = getattr(self._math, 'MatrixProduct', None)
@@ -381,7 +387,7 @@ class _NativeRemoteState(object):
         relax_time = float(relax_time or 0.0)
         if self.animation is None:
             self._render_pose = target
-            self._write_pose(self._key_to, target)
+            # set_interpolate_motion seeds both keys on the enable edge.
             return False
         current = self._mirror_pose(now)
         if relax_time <= 0.0 or current is None:
