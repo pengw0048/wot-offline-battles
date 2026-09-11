@@ -42,14 +42,21 @@ try {
     }
     $wpr = (Get-Command wpr.exe -ErrorAction Stop).Source
     $source = $session.sources.'visible-client'
+    if ($null -eq $source -or $source.kind -ne 'game' -or
+        [string]::IsNullOrWhiteSpace($session.gameRoot)) {
+        throw 'Session visible-client log checkpoint or gameRoot is missing.'
+    }
     if ($source.blocked) { throw 'Session client log is blocked.' }
+    # Checkpoints contain metadata only. Match error_reports._source_path.
+    $sourcePath = Join-Path $session.gameRoot 'offline-player-python.log'
     $position = [long]$source.offset
     $carry = ''
     $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
     $live = $false
+    Write-Status "waiting_for_live: log=$sourcePath timeout_seconds=$WaitSeconds"
     while ([DateTime]::UtcNow -lt $deadline -and (Same-Session)) {
-        if (Test-Path -LiteralPath $source.path) {
-            $stream = [IO.File]::Open($source.path, [IO.FileMode]::Open,
+        if (Test-Path -LiteralPath $sourcePath) {
+            $stream = [IO.File]::Open($sourcePath, [IO.FileMode]::Open,
                 [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
             try {
                 if ($stream.Length -lt $position) { $position = 0 }
@@ -99,7 +106,8 @@ try {
     Move-Item -LiteralPath $pending -Destination $final
     Write-Status "complete: $final"
 } catch {
-    Write-Status ('unavailable: ' + $_.Exception.Message)
+    Write-Status ('unavailable: line={0} {1}' -f
+        $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
 } finally {
     if ($started) {
         # This instance was successfully started by this invocation only.
