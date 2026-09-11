@@ -2859,10 +2859,9 @@ def _tree_xz_zonotope_hull_1513(sweep_box):
 	return tuple(lower[:-1] + upper[:-1])
 
 
-def _point_near_tree_sweep_1513(x, z, sweep_box,
+def _point_near_tree_hull_1513(x, z, hull,
 		contact_radius=_SOLID_CONTACT_RADIUS_1513):
-	"""Test a tree origin against a swept zonotope plus its circular skin."""
-	hull = _tree_xz_zonotope_hull_1513(sweep_box)
+	"""Test a tree origin against a prepared sweep polygon and circular skin."""
 	if not hull:
 		return False
 	point = (float(x), float(z))
@@ -2902,13 +2901,13 @@ def _point_near_tree_sweep_1513(x, z, sweep_box,
 
 @observed('destructible.tree_candidates')
 def _tree_candidates_for_sweeps_1513(
-		chunk_id, registry, sweep_boxes, tree_type,
+		chunk_id, registry, sweep_boxes, tree_type, sweep_hulls,
 		contact_radius=_SOLID_CONTACT_RADIUS_1513):
-	"""Return exact named tree records and known isolated contacts."""
+	"""Find exact tree contacts, sharing polygons within this motion query."""
 	candidates = {}
 	isolated_hits = set()
 	seen = set()
-	for sweep_box in sweep_boxes:
+	for sweep_index, sweep_box in enumerate(sweep_boxes):
 		minimum_x, maximum_x, minimum_z, maximum_z = (
 			_box_xz_bounds(sweep_box))
 		minimum_x -= contact_radius
@@ -2925,8 +2924,15 @@ def _tree_candidates_for_sweeps_1513(
 				if (item[4] != tree_type or
 						not _normalized_filename(item[5])):
 					continue
-				if not _point_near_tree_sweep_1513(
-						item[1], item[3], sweep_box, contact_radius):
+				# The polygon depends only on this immutable sweep slice, not
+				# the tree or chunk. Build it only when a candidate needs it;
+				# empty bins must not pay for an unused convex hull.
+				hull = sweep_hulls.get(sweep_index)
+				if hull is None:
+					hull = _tree_xz_zonotope_hull_1513(sweep_box)
+					sweep_hulls[sweep_index] = hull
+				if not _point_near_tree_hull_1513(
+						item[1], item[3], hull, contact_radius):
 					continue
 				seen.add(identity)
 				if _destructible_isolated_1513(chunk_id, item_index):
@@ -4824,12 +4830,16 @@ def _tree_motion_resolution_1513(
 		return 'hard', {}, set(), chunk_status, set()
 	candidates = {}
 	isolated_hits = set()
+	# Geometry reuse ends with this query. A later proposal/commit, vehicle,
+	# pose or round always builds its own polygons and checks live tree state.
+	sweep_hulls = {}
 	for chunk_id in sorted(scan_chunks):
 		if chunk_status.get(chunk_id) != 'ready':
 			continue
 		chunk_candidates, chunk_isolated_hits = (
 			_tree_candidates_for_sweeps_1513(
-				chunk_id, state['chunks'][chunk_id], sweep_boxes, tree_type))
+				chunk_id, state['chunks'][chunk_id], sweep_boxes, tree_type,
+				sweep_hulls))
 		candidates.update(chunk_candidates)
 		isolated_hits.update(chunk_isolated_hits)
 	if len(candidates) > _TREE_CONTACT_TOKEN_LIMIT_1513:
@@ -5355,6 +5365,8 @@ def _fell_trees_near(
 				1 if cid == _current_cid else 2,
 				-_prewarm_priority.get(cid, (0.0, 0.0))[0],
 				-_prewarm_priority.get(cid, (0.0, 0.0))[1], cid))
+		_tree_vehicle_box = None
+		_tree_sweep_hulls = {}
 		for cid in _cid_order:
 			combat_count('destructible_body_chunks')
 			if _destructible_isolated_1513(cid):
@@ -5782,16 +5794,17 @@ def _fell_trees_near(
 				continue
 			if not registry['count']:
 				continue
-			_tree_vehicle_box = vehicle_box
-			if vel < 0.0:
-				# Preserve the legacy scanner's fixed 0.8 m reverse reach.  Its
-				# velocity-scaled look-ahead historically applied only forwards.
-				_tree_vehicle_box = _vehicle_swept_box(
-					pos, yaw, vel, bbox, travel_reach=0.8)
+			if _tree_vehicle_box is None:
+				_tree_vehicle_box = vehicle_box
+				if vel < 0.0:
+					# Preserve the legacy scanner's fixed 0.8 m reverse reach.
+					# Prepare this query's geometry once across all chunks.
+					_tree_vehicle_box = _vehicle_swept_box(
+						pos, yaw, vel, bbox, travel_reach=0.8)
 			_tree_candidates, unused_tree_isolated_hits = (
 				_tree_candidates_for_sweeps_1513(
 					cid, registry, (_tree_vehicle_box,),
-					AreaDestructibles.DESTR_TYPE_TREE, 0.0))
+					AreaDestructibles.DESTR_TYPE_TREE, _tree_sweep_hulls, 0.0))
 			_tree_candidate_keys = set(_tree_candidates)
 			for (_ti, _tx, _ty, _tz, _ttyp, _tfn, _thp, _tmass,
 					_world_boxes, _contact_radius) in _nearby_destructibles(
