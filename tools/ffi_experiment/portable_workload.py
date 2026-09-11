@@ -94,7 +94,7 @@ def load_fixture(path):
     scope = dict(math=math, types=types, sys=sys, json=json, mock=mock,
                  contextlib=contextlib)
     order = ('_Strict1513Component', '_HitTester1513', '_combat_descriptor',
-             '_bot_equipment_contracts', '_Vector', '_Manager', '_catalog',
+             '_bot_equipment_contracts', '_Vector', '_Manager', '_ItemMatrix', '_catalog',
              '_empty_catalog_scan_fixture', 'crew_factors_module', 'make_runtime',
              'combat_native_queries')
     for name in order:
@@ -120,13 +120,16 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--output', required=True)
     parser.add_argument('--stage-timing', action='store_true')
-    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow,kernel')
+    parser.add_argument('--components', default='', help='Additional native components: aiming,driver,driver-flow,contacts,world,world-sync,navigation-flow,motion-flow,kernel,world-resolver')
     parser.add_argument('--world-trace-output', help='record ordered collision leaves for a separate computation estimate')
     args = parser.parse_args()
     if args.seconds <= 0 or args.fps <= 0 or (args.backend != 'python' and not args.module):
         parser.error('positive duration/cadence and a native module are required')
     if args.world_trace_output and args.backend != 'python':
         parser.error('--world-trace-output requires the unmodified Python backend')
+    if 'world-resolver' in args.components.split(',') and (
+            'kernel' not in args.components.split(',') or args.scenario != 'combat'):
+        parser.error('world-resolver requires the kernel and combat owner fixture')
     backend = None
     stage_recorder = None
     components = []
@@ -182,7 +185,10 @@ def main():
                 if 'kernel' in args.components.split(','):
                     from kernel_adapter import KernelBackend
                     kernel_started = CLOCK()
-                    kernel_component = KernelBackend(backend, runtime, fixture['fixtures']._load()).install()
+                    world_owner = (runtime._ffi_world_owner
+                                   if 'world-resolver' in args.components.split(',') else None)
+                    kernel_component = KernelBackend(backend, runtime, fixture['fixtures']._load(),
+                                                     world_owner=world_owner).install()
                     components.append(kernel_component)
                     init_seconds += CLOCK() - kernel_started
                 if args.stage_timing:
@@ -230,6 +236,9 @@ def main():
         report['motion_vertical_coverage'] = motion_component.vertical_counts
     if kernel_component is not None:
         leaves = kernel_component.engine
+        if leaves.world is not None:
+            report['world_resolver_callbacks'] = dict(zip(
+                ('begin', 'query', 'finish', 'query_pair'), leaves.world.calls))
         report['kernel_callback_counts'] = dict(
             engine_leaves_cpp_to_python=sum(count for kind, count in leaves.calls.items() if kind >= 750),
             actor_reads=leaves.actor_calls, actor_decodes=leaves.actor_decodes,

@@ -3,6 +3,7 @@
 #include "kernel_engine.h"
 #include "kernel_diagnostics.h"
 #include "kernel_factors.h"
+#include "kernel_world.h"
 #include "motion_vertical.h"
 #include "navigation_flow.h"
 
@@ -157,8 +158,6 @@ struct Motion {
             ++probe_totals[3];
         if (kind == 615) {
             int id = static_cast<int>(packet[1]);
-            source = source.copy();
-            source[sf::_kernel_turn_speed] = Value(bots.at(id)->turn_speed);
             auto cache = flow.caches.find(id);
             bool corridor = false, receipt = false;
             double yaw = packet[5], speed = packet[6], dt = packet[7], now = packet[8];
@@ -180,6 +179,15 @@ struct Motion {
             }
             packet[20] = corridor;
             packet[21] = receipt;
+            const Bot &bot = *bots.at(id);
+            const Value &world = bot.config.get("motion").get("world");
+            if (world.truth()) {
+                WorldResolver resolver(engine, source);
+                packet[0] = resolver.resolve(source, world, bot.turn_speed, packet);
+                return 0;
+            }
+            source = source.copy();
+            source[sf::_kernel_turn_speed] = Value(bot.turn_speed);
         }
         std::vector<double> args(packet, packet + count);
         auto answer = engine.query(760, source, Value::object(), args);

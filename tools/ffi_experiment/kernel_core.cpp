@@ -587,6 +587,19 @@ extern "C" int offline_kernel_dispatch(double *b, int count) {
                     result = Value(m.slope(bot, integer(v, "tier"), flag(v, "allow_ungrounded")));
                 else if (method == "landing")
                     result = Value(m.landing(bot, field(v, sf::speed)));
+                else if (method == "world") {
+                    const Value &values = v.get("query");
+                    if (values.kind != Value::Array || values.size() != 22)
+                        throw std::invalid_argument("kernel world audit request");
+                    std::array<double, 22> query{};
+                    for (size_t i = 0; i < query.size(); ++i)
+                        query[i] = values[i].number();
+                    if (query[0] != 615 || query[1] != id)
+                        throw std::invalid_argument("kernel world audit actor");
+                    WorldResolver resolver(*k.engine, bot.state);
+                    result = Value(resolver.resolve(bot.state, bot.config.get("motion").get("world"),
+                                                    bot.turn_speed, query.data()));
+                }
                 else
                     throw std::invalid_argument("kernel motion operation");
             }

@@ -12,7 +12,7 @@ from navigation_adapter import Backend
 from portable_workload import load_fixture, Path, ROOT, redirected, patch_dict
 
 
-def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, cover=False, fixture_source=None, orders=False):
+def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, cover=False, fixture_source=None, orders=False, native_world=False):
     with redirected():
         random.seed(17)
         source, source_ground = fixture['make_runtime'](Path(ROOT), map_name, scenario)
@@ -70,7 +70,8 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                     return probe
                 source.cover_probe = cover_probe(cover_calls[0])
                 native.cover_probe = cover_probe(cover_calls[1])
-            kernel = KernelBackend(backend, native, rt)
+            kernel = KernelBackend(backend, native, rt,
+                                   world_owner=native._ffi_world_owner if native_world else None)
             try:
                 enabled_seen = False
                 for frame in range(frames):
@@ -108,6 +109,11 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                             json.dump(dump, stream, default=repr, indent=2)
                         raise
                     compare(plain(source_queries), plain(native_queries), (map_name, scenario, frame, 'queries'))
+                    if native_world:
+                        compare(source._ffi_world_owner._bot_motion_kinds,
+                                native._ffi_world_owner._bot_motion_kinds,
+                                (map_name, scenario, frame, 'world_kinds'))
+                        assert kernel.engine.world.context is None
                     compare(source._last_update_control_steps, native._last_update_control_steps,
                             (map_name, scenario, frame, 'control_steps'))
                     compare(source._last_update_max_control_step, native._last_update_max_control_step,
@@ -142,7 +148,28 @@ def run(backend, fixture, map_name, scenario, frames, siege=False, human=False, 
                     assert len(kernel.engine.tokens) < 30, "Retired cover receipts leaked"
                 if siege and frames >= 30:
                     assert enabled_seen, "Siege fixture never completed its transition"
+                if native_world:
+                    class WorldFailure(Exception):
+                        pass
+                    original_query = kernel.engine.world.query
+                    def fail_world(*unused):
+                        raise WorldFailure('injected owned world leaf failure')
+                    kernel.engine.world.query = fail_world
+                    failed = False
+                    try:
+                        for retry in range(30):
+                            try:
+                                with patch_dict(sys.modules, native_env):
+                                    kernel.update(.13, now + (retry + 1) * .13, players)
+                            except WorldFailure:
+                                failed = True
+                                assert kernel.engine.world.context is None
+                                break
+                        assert failed, 'World failure fixture issued no collision query'
+                    finally:
+                        kernel.engine.world.query = original_query
             finally:
+                kernel.close()
                 kernel.close()
     return frames
 
@@ -156,11 +183,12 @@ def main():
     parser.add_argument('--human', action='store_true')
     parser.add_argument('--siege', action='store_true')
     parser.add_argument('--orders', action='store_true')
+    parser.add_argument('--native-world', action='store_true')
     parser.add_argument('--map', default='59_asia_great_wall')
     parser.add_argument('--scenario', default='combat')
     args = parser.parse_args()
     fixture = load_fixture(args.fixture)
-    count = run(Backend(args.module), fixture, args.map, args.scenario, args.frames, args.siege, args.human, args.cover, args.fixture, args.orders)
+    count = run(Backend(args.module), fixture, args.map, args.scenario, args.frames, args.siege, args.human, args.cover, args.fixture, args.orders, args.native_world)
     print('Native whole Bot update parity: %d complete callbacks.' % count)
 
 

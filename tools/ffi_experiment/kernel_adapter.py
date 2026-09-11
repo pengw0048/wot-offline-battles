@@ -321,7 +321,16 @@ def simulation_config(rt, runtime):
 
 class KernelBackend(object):
     """One native update call owns all mutable Bot simulation phases."""
-    def __init__(self, backend, runtime, rt):
+    def __init__(self, backend, runtime, rt, world_owner=None):
+        self.runtime, self.parts, self.kernel, self.engine = runtime, [], None, None
+        self.originals = {}
+        try:
+            self._initialize(backend, runtime, rt, world_owner)
+        except Exception:
+            self.close()
+            raise
+
+    def _initialize(self, backend, runtime, rt, world_owner):
         from combat_adapter import CombatBackend
         from driver_adapter import DriverBackend
         from navigation_flow_adapter import NavigationFlowBackend
@@ -330,8 +339,8 @@ class KernelBackend(object):
         if runtime.native_motion or runtime._suspension_ground_probe is not None:
             raise ValueError('Owned kernel experiment requires the copied vertical controller')
         self.backend, self.runtime, self.module = backend, runtime, rt
-        self.parts = [NavigationFlowBackend(backend, runtime, navigation),
-                      DriverBackend(backend, runtime, True)]
+        self.parts.append(NavigationFlowBackend(backend, runtime, navigation))
+        self.parts.append(DriverBackend(backend, runtime, True))
         combat = CombatBackend(backend, rt)
         self.parts.append(combat)
         bots = []
@@ -353,9 +362,13 @@ class KernelBackend(object):
                                 vision=runtime._vision_ranges.get(identity)),
                 motion=dict(physics=runtime._physics_params_for(identity),
                             yaw_limits=rt.ai_driver.gun_yaw_limits(descriptor)))
+            if world_owner is not None:
+                from kernel_world import descriptor_profile
+                value['config']['motion']['world'] = descriptor_profile(descriptor)
             pair = runtime._descriptor_pairs.get(identity)
             if pair is not None and pair[1] is not None:
-                value['config']['siege_modes'] = [descriptor_mode(rt, runtime, identity, mode, combat)
+                value['config']['siege_modes'] = [descriptor_mode(rt, runtime, identity, mode, combat,
+                                                                 world_owner is not None)
                                                   for mode in (0, 2)]
                 value['config']['siege_params'] = rt.siege_mechanics.params(pair[0])
             bots.append(value)
@@ -371,6 +384,9 @@ class KernelBackend(object):
             simulation=simulation_config(rt, runtime))
         self.engine = EngineLeaves(rt, runtime)
         self.engine.owned = True
+        if world_owner is not None:
+            from kernel_world import WorldLeaves
+            self.engine.world = WorldLeaves(world_owner, self.engine)
         self.originals = {}
         self.order_revision = runtime._order_revision
         self.query = array('d', [0]) * 32768
@@ -390,7 +406,11 @@ class KernelBackend(object):
             inputs['orders'] = [[identity, dict(order, _kernel_token=self.runtime._server_order_tokens.get(identity, 0))]
                                 for identity, order in self.runtime._server_orders.items()]
         command = packet([723, self.kernel.handle], self.engine.prepare(inputs))
-        result = self.backend.call_sync(command, self.query, lambda: self.engine(self.query))
+        try:
+            result = self.backend.call_sync(command, self.query, lambda: self.engine(self.query))
+        finally:
+            if self.engine.world is not None:
+                self.engine.world.clear()
         output = self.kernel.output(result[0])
         self.order_revision = self.runtime._order_revision
         messages = output['messages']
@@ -443,13 +463,19 @@ class KernelBackend(object):
     def close(self):
         for name, original in self.originals.items():
             setattr(self.runtime, name, original)
-        self.engine.actor_cache.clear()
-        self.kernel.close()
+        self.originals.clear()
+        if self.engine is not None:
+            self.engine.actor_cache.clear()
+            if self.engine.world is not None:
+                self.engine.world.clear()
+        if self.kernel is not None:
+            self.kernel.close()
         for part in reversed(self.parts):
             part.close()
+        self.parts = []
 
 
-def descriptor_mode(rt, runtime, identity, mode, combat):
+def descriptor_mode(rt, runtime, identity, mode, combat, native_world=False):
     """Read both immutable stock descriptor modes once at owner construction."""
     import copy
     shadow = copy.copy(runtime)
@@ -466,7 +492,7 @@ def descriptor_mode(rt, runtime, identity, mode, combat):
     descriptor = shadow._descriptors[identity]
     target = dict(state, kind='bot', network_id=identity)
     names = ('move_speed', 'view_range', 'half_length', 'half_width', 'collision_shape', 'mass', 'ram_profile')
-    return dict(gun=shadow._gun_states[identity].__dict__,
+    result = dict(gun=shadow._gun_states[identity].__dict__,
                 critical=critical_config(rt, shadow, identity),
                 health=health_config(rt, descriptor),
                 state=dict((name, state[name]) for name in names),
@@ -476,3 +502,7 @@ def descriptor_mode(rt, runtime, identity, mode, combat):
                 motion=dict(physics=shadow._physics_params_for(identity),
                             yaw_limits=rt.ai_driver.gun_yaw_limits(descriptor),
                             siege_limit=rt.siege_mechanics.enabled_speed_limit(descriptor)))
+    if native_world:
+        from kernel_world import descriptor_profile
+        result['motion']['world'] = descriptor_profile(descriptor)
+    return result

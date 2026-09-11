@@ -70,6 +70,7 @@ class EngineLeaves(object):
         self.actor_cache = {}
         self.actor_calls = 0
         self.actor_decodes = 0
+        self.world = None
 
     @classmethod
     def freeze(cls, value):
@@ -154,6 +155,10 @@ class EngineLeaves(object):
 
     def __call__(self, query):
         kind = int(query[0])
+        if kind == 772:
+            if self.world is None:
+                raise RuntimeError('Native world callback has no battle owner')
+            return self.world(query)
         if 500 <= kind <= 504:
             self.runtime.navigator._publish_event(query)
             return 0
