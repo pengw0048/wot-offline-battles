@@ -13,7 +13,11 @@ struct Codec {
     };
     struct Group {
         int flag;
-        std::vector<std::string> names;
+        struct Name {
+            std::string text;
+            int slot;
+        };
+        std::vector<Name> names;
     };
     std::vector<Column> columns;
     std::vector<Group> groups;
@@ -34,7 +38,7 @@ struct Codec {
             Group g;
             g.flag = static_cast<int>(raw[0].exact());
             for (const Value &name : elements(raw[1]))
-                g.names.push_back(name.text());
+                g.names.push_back(Group::Name{name.text(), field_slot(name.text())});
             groups.push_back(g);
         }
         for (const Value &raw : elements(config.get("devices")))
@@ -132,8 +136,8 @@ struct Codec {
             flags |= 64;
         for (const Group &g : groups) {
             size_t count = 0;
-            for (const std::string &name : g.names)
-                if (state.has(name))
+            for (const Group::Name &name : g.names)
+                if (state.has(Field{name.slot, name.text.c_str(), name.text.size()}))
                     ++count;
             if (count == g.names.size())
                 flags |= g.flag;
@@ -149,7 +153,16 @@ struct Codec {
             flags |= 4096;
         else if (rotation < -.01)
             flags |= 8192;
-        Value out = Value::array();
+        // Reserve the fixed columns and exact optional payload widths. Invalid
+        // nested values are still rejected by the same checks below.
+        size_t width = columns.size();
+        if (flags & 512)
+            width += 1 + ammo.size();
+        if (critical.kind == Value::Object)
+            width += 3 + 4 * critical.get("devices").size();
+        if (equipment.kind != Value::Null)
+            width += 1 + 5 * equipment.size();
+        Value out = Value::array(width);
         for (const Column &c : columns) {
             if (c.name == "_flags") {
                 out.append(Value(flags));

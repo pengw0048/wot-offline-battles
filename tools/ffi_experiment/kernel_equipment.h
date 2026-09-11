@@ -162,17 +162,6 @@ struct Equipment {
         v["aiPendingElapsed"] = ai_pending ? Value(std::max(0.0, now - ai_since)) : Value();
         return v;
     }
-    Value edge(double now) const {
-        Value v = Value::array();
-        v.append(contract);
-        v.append(Value(uses));
-        v.append(Value(active));
-        v.append(Value(ready_at));
-        v.append(Value(now >= ready_at));
-        v.append(auto_pending ? Value(auto_since) : Value());
-        v.append(ai_pending ? Value(ai_since) : Value());
-        return v;
-    }
 };
 inline Value equipment_passives(const std::vector<Equipment> &equipment) {
     double fire = 1, repair = 0, medkit = 0, crew = 0, power = 1, turret = 1, hp = 0;
