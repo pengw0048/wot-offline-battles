@@ -1681,42 +1681,67 @@ class OfflineCompatibility(object):
             return compatibility._original_projectile_segment_may_hit(
                 entity, startPoint, endPoint)
 
+        vehicle_overlay_names = frozenset((
+            'health', 'isCrewActive', 'position', 'yaw', 'matrix'))
+        vehicle_special_names = vehicle_overlay_names.union((
+            'filter', 'cell', 'show', 'guiSessionProvider'))
+
         def vehicle_getattribute(vehicle, name):
+            # Stock callbacks also read ordinary Vehicle attributes through
+            # this hook. Only the names below need offline state or callers.
+            if (name not in vehicle_special_names or
+                    not compatibility._battle_active):
+                return compatibility._original_vehicle_getattribute(
+                    vehicle, name)
+            if name in vehicle_overlay_names:
+                overlay = compatibility._vehicle_property_overlays.get(
+                    id(vehicle))
+                if overlay is not None and name in overlay:
+                    if name == 'position':
+                        caller_code = None
+                        try:
+                            caller_code = sys._getframe(1).f_code
+                        except (AttributeError, ValueError):
+                            pass
+                        if (caller_code is
+                                compatibility._gun_rotator_predict_locked_target_code):
+                            try:
+                                native_remote = bool(
+                                    compatibility._original_vehicle_getattribute(
+                                        vehicle, '_offlineNativeRemote'))
+                            except AttributeError:
+                                native_remote = False
+                            if native_remote:
+                                return runtime.math.Matrix(
+                                    overlay['matrix']).translation
+                    return overlay[name]
+                return compatibility._original_vehicle_getattribute(
+                    vehicle, name)
+            if name == 'cell':
+                try:
+                    return compatibility._original_vehicle_getattribute(
+                        vehicle, 'fakeCell')
+                except AttributeError:
+                    player = runtime.bigworld.player()
+                    if isinstance(player, avatar_type):
+                        try:
+                            return compatibility._original_avatar_getattribute(
+                                player, 'fakeServer')
+                        except AttributeError:
+                            pass
+                return compatibility._original_vehicle_getattribute(
+                    vehicle, name)
             caller_code = None
-            locked_target_code = \
-                compatibility._gun_rotator_predict_locked_target_code
-            if (compatibility._vehicle_starting_visual is not None or
-                    compatibility._vehicle_starting_wg_physics is not None or
-                    compatibility._vehicle_syncing_gun_angles is not None or
-                    compatibility._avatar_syncing_aux_physics is not None or
-                    compatibility._avatar_entering_vehicle is not None or
-                    name in ('filter', 'position')):
+            if (name == 'filter' or
+                    compatibility._vehicle_starting_visual is vehicle):
                 try:
                     caller_code = sys._getframe(1).f_code
                 except (AttributeError, ValueError):
                     pass
-            if (compatibility._battle_active and
-                    name in ('health', 'isCrewActive',
-                             'position', 'yaw', 'matrix')):
-                overlay = compatibility._vehicle_property_overlays.get(
-                    id(vehicle))
-                if overlay is not None and name in overlay:
-                    if (name == 'position' and
-                            caller_code is locked_target_code):
-                        try:
-                            native_remote = bool(
-                                compatibility._original_vehicle_getattribute(
-                                    vehicle, '_offlineNativeRemote'))
-                        except AttributeError:
-                            native_remote = False
-                        if native_remote:
-                            return runtime.math.Matrix(
-                                overlay['matrix']).translation
-                    return overlay[name]
             direct_start_visual = (
                 compatibility._vehicle_starting_visual is vehicle and
                 caller_code is compatibility._vehicle_start_visual_code)
-            if (direct_start_visual and compatibility._battle_active and
+            if (direct_start_visual and
                     name in ('show', 'guiSessionProvider')):
                 try:
                     marker_visible = bool(
@@ -1744,6 +1769,9 @@ class OfflineCompatibility(object):
                         compatibility._original_vehicle_getattribute(
                             vehicle, name)
                     return _OfflineInitialVehicleVisualProvider(provider)
+            if name != 'filter':
+                return compatibility._original_vehicle_getattribute(
+                    vehicle, name)
             direct_start_filter = (
                 compatibility._vehicle_starting_wg_physics is vehicle and
                 caller_code is compatibility._vehicle_start_wg_physics_code)
@@ -1779,8 +1807,7 @@ class OfflineCompatibility(object):
                 caller_code is
                 compatibility._projectile_segment_may_hit_code and
                 overlay is not None and overlay.get('_pose_active'))
-            if (name == 'filter' and compatibility._battle_active and
-                    direct_visible_collision):
+            if direct_visible_collision:
                 try:
                     native_remote = bool(
                         compatibility._original_vehicle_getattribute(
@@ -1801,11 +1828,10 @@ class OfflineCompatibility(object):
                         velocity = runtime.math.Vector3(0.0, 0.0, 0.0)
                     collision_filter.update(visible_position, velocity)
                     return collision_filter
-            if (name == 'filter' and compatibility._battle_active and
-                    (direct_start_filter or direct_gun_sync or
-                     direct_avatar_aux_sync or direct_avatar_pose_init or
-                     direct_fixed_turret_pose or direct_camera_motion or
-                     direct_crashed_track_pose)):
+            if (direct_start_filter or direct_gun_sync or
+                    direct_avatar_aux_sync or direct_avatar_pose_init or
+                    direct_fixed_turret_pose or direct_camera_motion or
+                    direct_crashed_track_pose):
                 vehicle_filter = (
                     compatibility._original_vehicle_getattribute(
                         vehicle, name))
@@ -1819,18 +1845,6 @@ class OfflineCompatibility(object):
                                 if direct_camera_motion else None)
                 return _OfflineVehicleFilterSyncProxy(
                     vehicle_filter, pose_matrix, velocity, acceleration)
-            if name == 'cell' and compatibility._battle_active:
-                try:
-                    return compatibility._original_vehicle_getattribute(
-                        vehicle, 'fakeCell')
-                except AttributeError:
-                    player = runtime.bigworld.player()
-                    if isinstance(player, avatar_type):
-                        try:
-                            return compatibility._original_avatar_getattribute(
-                                player, 'fakeServer')
-                        except AttributeError:
-                            pass
             return compatibility._original_vehicle_getattribute(vehicle, name)
 
         def vehicle_setattr(vehicle, name, value):
