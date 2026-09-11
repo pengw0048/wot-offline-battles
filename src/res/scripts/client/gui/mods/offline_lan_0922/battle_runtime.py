@@ -22701,7 +22701,22 @@ class BattleRuntime(object):
             alive = bool(state.get('alive', True)) and int(
                 state.get('health', 1) or 0) > 0
             signature = (x, y, z, yaw, pitch, roll, aim_yaw, gun_pitch)
-            if signature == record.get('_remote_pose_signature'):
+            lifecycle = (self._generation, record['engine_id'], id(record))
+            pose_changed = (
+                signature != record.get('_remote_pose_signature') or
+                lifecycle != record.get('_remote_pose_lifecycle'))
+            if pose_changed:
+                # Keep each changed presentation sample's motion timestamp.
+                # The matrix owner deduplicates unchanged hull components,
+                # including an aim-only sample, without dropping velocity or
+                # acceleration settlement from the original pose stream.
+                self._binding.set_vehicle_pose(
+                    record['engine_id'], self._vector((x, y, z)),
+                    _engine_rotation(yaw, pitch, roll), now=now)
+                record['_remote_pose_signature'] = signature
+                record['_remote_pose_lifecycle'] = lifecycle
+                record.pop('_remote_motion_settled_signature', None)
+            else:
                 motion_intended = bool(
                     abs(_number(state.get('speed'))) > BOT_MOVING_SPEED or
                     abs(_number(state.get('movement_dir'))) > 0.5 or
@@ -22717,43 +22732,32 @@ class BattleRuntime(object):
                         if settled:
                             record['_remote_motion_settled_signature'] = \
                                 signature
-                if record.get('kind') in ('bot', 'player'):
-                    # Keep the zero-turn sample fresh so the first real pivot
-                    # after a long stop is measured over one render interval,
-                    # not diluted across the whole stationary period.
-                    turn = self._remember_remote_track_turn(record, yaw, now)
-                    track_signature = (
-                        _number(state.get('speed')), alive, turn)
-                    if (record.get('_remote_track_pending') or
-                            track_signature != record.get(
-                                '_remote_track_state_signature')):
-                        updated = self._run_optional_feature(
-                            'remote track animation', self._update_bot_tracks,
-                            (record, state, now, turn))
-                        record['_remote_track_pending'] = not updated
-                        if updated:
-                            record['_remote_track_state_signature'] = \
-                                track_signature
-                return False
-            self._binding.set_vehicle_pose(
-                record['engine_id'], self._vector((x, y, z)),
-                _engine_rotation(yaw, pitch, roll),
-                now=now)
-            self._binding.update_vehicle_aim(
-                record['engine_id'], yaw, aim_yaw, gun_pitch)
-            record['_remote_pose_signature'] = signature
-            record.pop('_remote_motion_settled_signature', None)
+            # XYZ/roll do not change the aim input. Pitch remains an input
+            # for a worker's hydraulic geometry, and an applied Siege edge
+            # can replace the installed gun's static component angles.
+            aim_signature = (
+                lifecycle, yaw, pitch, aim_yaw, gun_pitch,
+                record.get('presented_siege_state'))
+            aim_changed = aim_signature != record.get('_remote_aim_signature')
+            if aim_changed:
+                self._binding.update_vehicle_aim(
+                    record['engine_id'], yaw, aim_yaw, gun_pitch)
+                record['_remote_aim_signature'] = aim_signature
             if record.get('kind') in ('bot', 'player'):
+                # Keep the zero-turn sample fresh through playback holds.
                 turn = self._remember_remote_track_turn(record, yaw, now)
                 track_signature = (
                     _number(state.get('speed')), alive, turn)
-                updated = self._run_optional_feature(
-                    'remote track animation', self._update_bot_tracks,
-                    (record, state, now, turn))
-                record['_remote_track_pending'] = not updated
-                if updated:
-                    record['_remote_track_state_signature'] = track_signature
-            return True
+                if (pose_changed or record.get('_remote_track_pending') or
+                        track_signature != record.get(
+                            '_remote_track_state_signature')):
+                    updated = self._run_optional_feature(
+                        'remote track animation', self._update_bot_tracks,
+                        (record, state, now, turn))
+                    record['_remote_track_pending'] = not updated
+                    if updated:
+                        record['_remote_track_state_signature'] = track_signature
+            return bool(pose_changed or aim_changed)
 
     def _flush_pending_entities(self, now):
         for unused_key, record in list(self._records.items()):

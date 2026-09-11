@@ -1428,6 +1428,24 @@ def turret_is_attached(vehicle):
     return not bool(getattr(vehicle, 'isTurretDetached', False))
 
 
+def _write_changed_pose(matrix, position, rotation, previous):
+    """Write changed components of one persistent presentation matrix.
+
+    A rotation setter can reset translation, so every rotation write restores
+    XYZ as well. Publish the cache only after both native writes succeed, and
+    fence it by matrix identity so a replacement provider starts uncached.
+    Motion timestamps and velocity samples remain owned by the caller.
+    """
+    xyz = (float(position.x), float(position.y), float(position.z))
+    same_matrix = previous is not None and previous[0] is matrix
+    rotated = not same_matrix or previous[2] != rotation
+    if rotated:
+        matrix.setRotateYPR(rotation)
+    if rotated or previous[1] != xyz:
+        matrix.translation = position
+    return matrix, xyz, rotation
+
+
 def _pose_components(vehicle, math_module):
     """Build descriptor-local hit-test transforms below the body pose.
 
@@ -1942,8 +1960,9 @@ class RemoteVehicle(object):
         self._update_matrix()
 
     def _update_matrix(self):
-        self.matrix.setRotateYPR((self.yaw, self.pitch, self.roll))
-        self.matrix.translation = self.position
+        self._matrix_pose = _write_changed_pose(
+            self.matrix, self.position, (self.yaw, self.pitch, self.roll),
+            getattr(self, '_matrix_pose', None))
 
     def attach_visual(self, entity, entity_id, model):
         self.bw_entity = entity
@@ -2221,7 +2240,7 @@ class RemoteVehicle(object):
         animation = self._animation
         if animation is None:
             self._render_pose = target
-            self._write_pose(self._key_to, target)
+            # _new_animation seeds both keys when they acquire a consumer.
             return False
         current = self._mirror_pose(now)
         if relax_time <= 0.0 or current is None:
