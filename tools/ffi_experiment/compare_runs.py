@@ -34,7 +34,12 @@ def main():
     parser.add_argument('--components', default='')
     parser.add_argument('--control-components', default='',
                         help='also run a native variant with this component subset')
+    parser.add_argument('--control-module', help='frozen module for native-control')
+    parser.add_argument('--control-runner', type=Path,
+                        help='frozen portable_workload.py, including its adapters and source root')
     args = parser.parse_args()
+    if (args.control_module or args.control_runner) and not args.control_components:
+        parser.error('--control-module/--control-runner require --control-components')
     if args.include_astar_control and not args.components:
         parser.error('--include-astar-control requires --components')
     args.output.mkdir(parents=True, exist_ok=False)
@@ -51,10 +56,14 @@ def main():
         order = backends[repeat % len(backends):] + backends[:repeat % len(backends)]
         for backend in order:
             output = args.output / ('%02d-%s.json' % (repeat, backend))
-            command = [args.python, str(HERE / 'portable_workload.py'),
+            runner = (args.control_runner if backend == 'native-control' and args.control_runner
+                      else HERE / 'portable_workload.py')
+            module = (args.control_module if backend == 'native-control' and args.control_module
+                      else args.module)
+            command = [args.python, str(runner),
                        '--fixture', args.fixture, '--backend',
                        'native' if backend in ('native-astar', 'native-control') else backend,
-                       '--module', args.module, '--map', args.map,
+                       '--module', module, '--map', args.map,
                        '--scenario', args.scenario, '--seconds', str(args.seconds),
                        '--fps', str(args.fps), '--output', str(output)]
             if args.stage_timing:
@@ -68,6 +77,8 @@ def main():
                 raise RuntimeError(result.stdout + result.stderr)
             report = json.loads(output.read_text())
             report['backend'] = backend
+            report['runner'] = str(runner.resolve())
+            report['module'] = str(Path(module).resolve()) if backend != 'python' else None
             snapshot = report.pop('snapshot')
             if backend == 'python' and reference is None:
                 reference = snapshot

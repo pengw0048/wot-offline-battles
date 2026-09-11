@@ -48,18 +48,19 @@ struct Aim {
         return shell >= 0 && shell < static_cast<int>(shells.size()) ? shells[shell] : Value();
     }
     static void pose(std::vector<double> &out, const Value &s) {
-        std::set<std::string> destroyed = names(s.get("critical").get("destroyed"));
+        std::set<std::string> destroyed = names(s.get(sf::critical).get("destroyed"));
         for (const char *name : {"yaw", "pitch", "roll"})
             out.push_back(field(s, name));
-        out.push_back(field(s, "terrain_pitch", field(s, "pitch") - field(s, "suspension_pitch")));
+        out.push_back(
+            field(s, sf::terrain_pitch, field(s, sf::pitch) - field(s, sf::suspension_pitch)));
         for (const char *name : {"suspension_pitch", "turret_yaw", "gun_pitch"})
             out.push_back(field(s, name));
-        out.push_back(field(s, "aim_yaw", field(s, "yaw")));
-        out.push_back(integer(s, "movement_dir") != 0);
+        out.push_back(field(s, sf::aim_yaw, field(s, sf::yaw)));
+        out.push_back(integer(s, sf::movement_dir) != 0);
         out.push_back(destroyed.count("engineHealth"));
         out.push_back(destroyed.count("leftTrackHealth") || destroyed.count("rightTrackHealth"));
-        out.push_back(flag(s, "_overturned"));
-        out.push_back(integer(s, "siege_state"));
+        out.push_back(flag(s, sf::_overturned));
+        out.push_back(integer(s, sf::siege_state));
     }
     static void point(std::vector<double> &out, const Value &v) {
         for (size_t i = 0; i < 3; ++i)
@@ -70,9 +71,9 @@ struct Aim {
             return Value();
         Value v = Value::object();
         v["aim_position"] = vector3(result[1], result[2], result[3]);
-        v["pitch"] = Value(result[4]);
+        v[sf::pitch] = Value(result[4]);
         v["flight_time"] = Value(result[5]);
-        v["yaw"] = Value(result[6]);
+        v[sf::yaw] = Value(result[6]);
         v["arc"] = Value(arc);
         return v;
     }
@@ -86,7 +87,7 @@ struct Aim {
         Value d = world_barrel(bot.state);
         double horizontal =
             std::sqrt(d[0].number() * d[0].number() + d[2].number() * d[2].number());
-        return origin(bot, shell, integer(bot.state, "fire_seq") + 1,
+        return origin(bot, shell, integer(bot.state, sf::fire_seq) + 1,
                       std::atan2(d[0].number(), d[2].number()),
                       -std::atan2(d[1].number(), std::max(1e-12, horizontal)), 0);
     }
@@ -149,18 +150,18 @@ struct Aim {
     }
     Value signature(const Bot &bot, const Value &target, int shell) {
         Value v = Value::array();
-        v.append(Value(target.get("kind").text()));
-        v.append(target.has("network_id") ? target.get("network_id") : target.get("id"));
-        v.append(Value(flag(target, "alive", true)));
+        v.append(Value(target.get(sf::kind).text()));
+        v.append(target.has(sf::network_id) ? target.get(sf::network_id) : target.get(sf::id));
+        v.append(Value(flag(target, sf::alive, true)));
         v.append(Value(shell));
         v.append(profile(bot).get("handle"));
-        v.append(Value(integer(bot.state, "siege_state")));
-        v.append(Value(integer(bot.state, "fire_seq")));
+        v.append(Value(integer(bot.state, sf::siege_state)));
+        v.append(Value(integer(bot.state, sf::fire_seq)));
         return v;
     }
     std::pair<Value, bool> cadenced(Bot &bot, const Value &target, int shell, double now,
                                     bool refresh, bool force = false) {
-        int id = integer(bot.state, "id");
+        int id = integer(bot.state, sf::id);
         Value key = signature(bot, target, shell);
         auto at = cache.find(id);
         bool fresh = force || at == cache.end() || at->second.signature != key ||
@@ -168,7 +169,7 @@ struct Aim {
         if (!fresh)
             return {at->second.solution, false};
         Value aimed = gunners.at(id).aimed(bot.state, target, now, round, bot.gun);
-        Value result = bot.state.get("profile").get("class_tag").text() == "SPG"
+        Value result = bot.state.get(sf::profile).get(sf::class_tag).text() == "SPG"
                            ? artillery(bot, aimed, shell, now)
                            : local(bot, aimed, shell);
         cache[id] =
@@ -179,7 +180,7 @@ struct Aim {
     Value slew(Bot &bot, const Value &command, const Value &target, double dt) {
         Value &s = bot.state;
         const Value &solution = command.get("_ballistic_solution");
-        double desired = field(s, "aim_yaw", field(s, "yaw")), pitch = 0, horizontal = 0;
+        double desired = field(s, sf::aim_yaw, field(s, sf::yaw)), pitch = 0, horizontal = 0;
         if (target.kind != Value::Null || solution.kind == Value::Object) {
             Value fallback = target.kind != Value::Null ? target_position(target) : position(s),
                   aim = solution.kind == Value::Object ? solution.get("aim_position")
@@ -188,22 +189,22 @@ struct Aim {
                 aim = fallback;
             Value origin = solution.get("_origin");
             if (origin.kind != Value::Array || origin.size() != 3)
-                origin = exact_origin(bot, integer(s, "shell_index"));
+                origin = exact_origin(bot, integer(s, sf::shell_index));
             if (origin.kind == Value::Null) {
-                s["gun_aligned"] = Value(false);
+                s[sf::gun_aligned] = Value(false);
                 Value result = Value::array();
-                result.append(Value(field(s, "aim_yaw")));
+                result.append(Value(field(s, sf::aim_yaw)));
                 result.append(Value(0.0));
                 return result;
             }
             double dx = aim[0].number() - origin[0].number(),
                    dz = aim[2].number() - origin[2].number();
             horizontal = std::sqrt(dx * dx + dz * dz);
-            desired = solution.kind == Value::Object ? field(solution, "yaw")
+            desired = solution.kind == Value::Object ? field(solution, sf::yaw)
                       : horizontal > .1              ? std::atan2(dx, dz)
-                                                     : field(s, "yaw");
+                                                     : field(s, sf::yaw);
             pitch = solution.kind == Value::Object
-                        ? field(solution, "pitch")
+                        ? field(solution, sf::pitch)
                         : -std::atan2((aim[1].number() + 1) - origin[1].number(),
                                       std::max(.5, horizontal));
         }
@@ -221,7 +222,7 @@ struct Aim {
                                "gun_pitch",     "desired_gun_pitch", "aim_yaw"};
         for (size_t i = 0; i < 7; ++i)
             s[names[i]] = Value(packet[offset + i]);
-        s["gun_aligned"] = Value(packet[offset + 7] != 0);
+        s[sf::gun_aligned] = Value(packet[offset + 7] != 0);
         Value result = Value::array();
         result.append(Value(desired));
         result.append(Value(horizontal));
@@ -234,7 +235,7 @@ struct Aim {
         bool matches = selected.kind == Value::Object && solution.kind == Value::Object &&
                        selected.get("aim_token") == solution.get("_aim_token");
         if (!matches)
-            cache.erase(integer(bot.state, "id"));
+            cache.erase(integer(bot.state, sf::id));
         return matches;
     }
     Value preview(const Bot &bot, int shell, const Value &solution, const Subshot *edge = nullptr) {
@@ -249,17 +250,17 @@ struct Aim {
         }
         if (!std::isfinite(time) || time <= 0 || time > field(config, "maximum_time"))
             return Value();
-        int seq = integer(bot.state, "fire_seq") + 1, group = seq, index = 0;
+        int seq = integer(bot.state, sf::fire_seq) + 1, group = seq, index = 0;
         if (edge) {
             seq = edge->seq;
             group = edge->group;
             index = edge->index;
-            if (seq != integer(bot.state, "fire_seq") + 1)
+            if (seq != integer(bot.state, sf::fire_seq) + 1)
                 return Value();
         }
         Value angles = dispersed(
-            integer(bot.state, "id"), round, seq, field(bot.state, "aim_yaw"),
-            field(bot.state, "gun_pitch"),
+            integer(bot.state, sf::id), round, seq, field(bot.state, sf::aim_yaw),
+            field(bot.state, sf::gun_pitch),
             std::max(bot.gun.dispersion,
                      bot.gun.fully_aimed * factors.stat(bot.state, *bot.critical, "dispersion")),
             index, group, dispersal_base(bot.state));
@@ -267,22 +268,22 @@ struct Aim {
         if (start.kind == Value::Null)
             return Value();
         Value result = Value::object();
-        result["fire_seq"] = Value(seq);
-        result["shell_index"] = Value(shell);
-        result["shot_yaw"] = angles[0];
-        result["shot_pitch"] = angles[1];
+        result[sf::fire_seq] = Value(seq);
+        result[sf::shell_index] = Value(shell);
+        result[sf::shot_yaw] = angles[0];
+        result[sf::shot_pitch] = angles[1];
         result["flight_time"] = Value(time);
         result["origin"] = start;
         return result;
     }
     static Value target_identity(const Value &target) {
-        if (target.kind != Value::Object || (!target.has("network_id") && !target.has("id")))
+        if (target.kind != Value::Object || (!target.has(sf::network_id) && !target.has(sf::id)))
             return Value();
-        Value id = target.has("network_id") ? target.get("network_id") : target.get("id");
+        Value id = target.has(sf::network_id) ? target.get(sf::network_id) : target.get(sf::id);
         if (id.kind == Value::Null)
             return Value();
         Value v = Value::array();
-        v.append(Value(target.get("kind").text()));
+        v.append(Value(target.get(sf::kind).text()));
         v.append(Value(id.exact()));
         return v;
     }
@@ -293,7 +294,7 @@ struct Aim {
         return v;
     }
     bool cancel(Bot &bot, bool preserve = false) {
-        int id = integer(bot.state, "id");
+        int id = integer(bot.state, sf::id);
         bool had = intents.erase(id) > 0, proof = reproofs.count(id) > 0;
         if (!preserve)
             reproofs.erase(id);
@@ -302,7 +303,7 @@ struct Aim {
         return had || proof;
     }
     Value active_reproof(Bot &bot, const Value &target, int shell, double now) {
-        int id = integer(bot.state, "id");
+        int id = integer(bot.state, sf::id);
         auto at = reproofs.find(id);
         if (at == reproofs.end())
             return Value();
@@ -317,11 +318,11 @@ struct Aim {
         moved = std::sqrt(moved);
         for (size_t i = 3; i < std::min(pose.size(), before.size()); ++i)
             turned = turned || std::abs(angle_delta(pose[i].number() - before[i].number())) > .001;
-        bool invalid = target.kind != Value::Object || !flag(target, "alive", true) ||
-                       (target.has("health") && field(target, "health") <= 0) ||
+        bool invalid = target.kind != Value::Object || !flag(target, sf::alive, true) ||
+                       (target.has(sf::health) && field(target, sf::health) <= 0) ||
                        target_identity(target) != proof.get("target_identity") ||
-                       shell != integer(proof, "shell_index") ||
-                       integer(bot.state, "fire_seq") + 1 != integer(proof, "fire_seq") ||
+                       shell != integer(proof, sf::shell_index) ||
+                       integer(bot.state, sf::fire_seq) + 1 != integer(proof, sf::fire_seq) ||
                        physical(bot, shell) != proof.get("physical") || moved > .05 || turned;
         if (invalid || now > field(proof, "deadline") + 1e-9) {
             cancel(bot);
@@ -330,42 +331,42 @@ struct Aim {
         return proof;
     }
     Value active_intent(Bot &bot, const Value &target, int shell, double now) {
-        auto at = intents.find(integer(bot.state, "id"));
+        auto at = intents.find(integer(bot.state, sf::id));
         if (at == intents.end())
             return Value();
         Value intent = at->second;
         return active_reproof(bot, target, shell, now).kind == Value::Null ? Value() : intent;
     }
     static bool aligned(const Bot &bot, const Value &solution) {
-        if (!flag(bot.state, "gun_aligned") || solution.kind != Value::Object)
+        if (!flag(bot.state, sf::gun_aligned) || solution.kind != Value::Object)
             return false;
         Value d = world_barrel(bot.state);
         double yaw = std::atan2(d[0].number(), d[2].number()),
                pitch = -std::atan2(d[1].number(),
                                    std::max(1e-12, std::sqrt(d[0].number() * d[0].number() +
                                                              d[2].number() * d[2].number())));
-        return std::abs(angle_delta(field(solution, "yaw") - yaw)) <= 1e-7 &&
-               std::abs(field(solution, "pitch") - pitch) <= 1e-7;
+        return std::abs(angle_delta(field(solution, sf::yaw) - yaw)) <= 1e-7 &&
+               std::abs(field(solution, sf::pitch) - pitch) <= 1e-7;
     }
     Value create_intent(Bot &bot, const Value &target, int shell, const Value &solution,
                         double now) {
         Value physics = physical(bot, shell), identity = target_identity(target);
         if (physics.kind == Value::Null || identity.kind == Value::Null ||
-            !flag(target, "alive", true) ||
-            (target.has("health") && field(target, "health") <= 0) ||
-            std::abs(field(bot.state, "speed")) > .05 || !aligned(bot, solution))
+            !flag(target, sf::alive, true) ||
+            (target.has(sf::health) && field(target, sf::health) <= 0) ||
+            std::abs(field(bot.state, sf::speed)) > .05 || !aligned(bot, solution))
             return Value();
-        int id = integer(bot.state, "id"), seq = integer(bot.state, "fire_seq") + 1;
+        int id = integer(bot.state, sf::id), seq = integer(bot.state, sf::fire_seq) + 1;
         Value proof = active_reproof(bot, target, shell, now);
         if (proof.kind == Value::Null) {
             proof = Value::object();
             Value source = Value::object();
-            source["id"] = Value(id);
+            source[sf::id] = Value(id);
             proof["source"] = source;
             proof["source_pose"] = source_pose(bot.state);
             proof["target_identity"] = identity;
-            proof["shell_index"] = Value(shell);
-            proof["fire_seq"] = Value(seq);
+            proof[sf::shell_index] = Value(shell);
+            proof[sf::fire_seq] = Value(seq);
             proof["physical"] = physics;
             proof["proof_latency"] = Value(0.0);
             proof["attempts"] = Value(0);
@@ -378,7 +379,7 @@ struct Aim {
                 Value(std::min(field(proof, "absolute_deadline", field(proof, "deadline")),
                                now + field(config, "reproof_seconds")));
         Value angles = dispersed(
-            id, round, seq, field(bot.state, "aim_yaw"), field(bot.state, "gun_pitch"),
+            id, round, seq, field(bot.state, sf::aim_yaw), field(bot.state, sf::gun_pitch),
             std::max(bot.gun.dispersion,
                      bot.gun.fully_aimed * factors.stat(bot.state, *bot.critical, "dispersion")),
             0, seq, dispersal_base(bot.state));
@@ -389,8 +390,8 @@ struct Aim {
                                  "fire_seq", "physical", "deadline"})
             intent[name] = proof.get(name);
         intent["solution"] = frozen;
-        intent["shot_yaw"] = angles[0];
-        intent["shot_pitch"] = angles[1];
+        intent[sf::shot_yaw] = angles[0];
+        intent[sf::shot_pitch] = angles[1];
         intent["created"] = Value(now);
         intents[id] = intent;
         return intent;
@@ -451,14 +452,14 @@ struct Aim {
                 return Value();
         Value result = Value::object();
         result["origin"] = vector3(r[1], r[2], r[3]);
-        result["velocity"] = vector3(r[4], r[5], r[6]);
-        result["shot_yaw"] = Value(r[7]);
-        result["shot_pitch"] = Value(r[8]);
+        result[sf::velocity] = vector3(r[4], r[5], r[6]);
+        result[sf::shot_yaw] = Value(r[7]);
+        result[sf::shot_pitch] = Value(r[8]);
         result["gravity"] = Value(r[9]);
         result["max_distance"] = Value(r[10]);
         result["max_time_ms"] = Value(max_ms);
-        result["fire_seq"] = Value(seq);
-        result["shell_index"] = Value(shell);
+        result[sf::fire_seq] = Value(seq);
+        result[sf::shell_index] = Value(shell);
         result["flight_time"] = Value(r[14]);
         result["proof_key"] = engine_token(r[15]);
         result["_engine_payload"] = engine_token(r[16]);
@@ -511,8 +512,8 @@ struct Aim {
             intent = create_intent(bot, target, shell, solution, now);
         if (intent.kind == Value::Null || !aligned(bot, intent.get("solution")))
             return Value();
-        int seq = integer(intent, "fire_seq");
-        double yaw = field(intent, "shot_yaw"), pitch = field(intent, "shot_pitch"),
+        int seq = integer(intent, sf::fire_seq);
+        double yaw = field(intent, sf::shot_yaw), pitch = field(intent, sf::shot_pitch),
                time = field(intent.get("solution"), "flight_time");
         auto answer = engine.query(
             764, bot.state, target,
@@ -524,11 +525,11 @@ struct Aim {
     }
     Value friendly(Bot &bot, const Value &target, int shell, const Value &launch, bool artillery) {
         std::vector<double> args = {static_cast<double>(artillery), static_cast<double>(shell),
-                                    field(launch, "fire_seq"),      field(launch, "shot_yaw"),
-                                    field(launch, "shot_pitch"),    field(launch, "flight_time")};
+                                    field(launch, sf::fire_seq),    field(launch, sf::shot_yaw),
+                                    field(launch, sf::shot_pitch),  field(launch, "flight_time")};
         point(args, launch.get("origin"));
         if (artillery) {
-            point(args, launch.get("velocity"));
+            point(args, launch.get(sf::velocity));
             args.push_back(field(launch, "gravity"));
             args.push_back(field(launch, "max_distance"));
             args.push_back(field(launch, "max_time_ms"));

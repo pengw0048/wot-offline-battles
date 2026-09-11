@@ -6,32 +6,32 @@
 namespace offline_kernel {
 inline void publish_ammo(Bot &bot) {
     Value &s = bot.state;
-    s["shell_index"] = Value(bot.ammo.loaded);
-    s["next_shell_index"] = Value(bot.ammo.next);
-    s["ammo_reload_pending"] = Value(bot.ammo.reload_pending);
+    s[sf::shell_index] = Value(bot.ammo.loaded);
+    s[sf::next_shell_index] = Value(bot.ammo.next);
+    s[sf::ammo_reload_pending] = Value(bot.ammo.reload_pending);
     Value q = Value::array();
     for (int n : bot.ammo.quantities)
         q.append(Value(n));
-    s["ammo_remaining"] = q;
+    s[sf::ammo_remaining] = q;
 }
 inline void publish_burst(Bot &bot) {
     Value &s = bot.state;
     const Burst &b = bot.burst;
-    s["burst_active"] = Value(b.active);
-    s["burst_group_seq"] = Value(b.group);
-    s["burst_count"] = Value(b.count);
-    s["burst_next_index"] = Value(b.next);
-    s["burst_interval"] = Value(rounded(b.interval, 6));
-    s["burst_time_left"] = Value(rounded(std::max(0.0, b.left), 6));
-    s["burst_shell_index"] = Value(b.shell);
+    s[sf::burst_active] = Value(b.active);
+    s[sf::burst_group_seq] = Value(b.group);
+    s[sf::burst_count] = Value(b.count);
+    s[sf::burst_next_index] = Value(b.next);
+    s[sf::burst_interval] = Value(rounded(b.interval, 6));
+    s[sf::burst_time_left] = Value(rounded(std::max(0.0, b.left), 6));
+    s[sf::burst_shell_index] = Value(b.shell);
 }
 inline void publish_reload(Bot &bot, double factor) {
-    bot.state["clip"] = Value(bot.gun.clip);
-    bot.state["reload_time"] = Value(bot.gun.remaining(factor));
-    bot.state["reload_duration"] = Value(bot.gun.duration(factor));
+    bot.state[sf::clip] = Value(bot.gun.clip);
+    bot.state[sf::reload_time] = Value(bot.gun.remaining(factor));
+    bot.state[sf::reload_duration] = Value(bot.gun.duration(factor));
 }
 inline Value launch_record(const Value &s, int64_t time) {
-    if (!s.has("shot_yaw") || !s.has("shot_pitch") || time < 0)
+    if (!s.has(sf::shot_yaw) || !s.has(sf::shot_pitch) || time < 0)
         return Value();
     Value row = Value::object(), pose = Value::array();
     for (const char *name : {"x", "y", "z", "yaw", "pitch", "roll"}) {
@@ -44,11 +44,11 @@ inline Value launch_record(const Value &s, int64_t time) {
         row[name] = Value(integer(s, name));
     for (const char *name : {"shot_yaw", "shot_pitch"})
         row[name] = s.get(name);
-    std::string type = s.get("profile").get("class_tag").text();
-    row["class_tag"] = Value(type);
-    row["burst_group_seq"] = Value(integer(s, "burst_group_seq", integer(s, "fire_seq")));
-    row["burst_index"] = Value(integer(s, "burst_index"));
-    row["burst_count"] = Value(integer(s, "burst_count", 1));
+    std::string type = s.get(sf::profile).get(sf::class_tag).text();
+    row[sf::class_tag] = Value(type);
+    row[sf::burst_group_seq] = Value(integer(s, sf::burst_group_seq, integer(s, sf::fire_seq)));
+    row[sf::burst_index] = Value(integer(s, sf::burst_index));
+    row[sf::burst_count] = Value(integer(s, sf::burst_count, 1));
     row["launch_time_us"] = Value(time);
     row["launch_pose"] = pose;
     for (const char *name : {"shot_origin", "shells_before_shot"})
@@ -66,7 +66,7 @@ struct Launches {
     std::map<std::pair<int, int>, Value> keys;
     std::map<int, std::vector<std::pair<int, int>>> by_bot;
     bool queue(const Value &launch) {
-        std::pair<int, int> key(integer(launch, "id"), integer(launch, "fire_seq"));
+        std::pair<int, int> key(integer(launch, sf::id), integer(launch, sf::fire_seq));
         if (key.first <= 0 || key.second <= 0)
             throw std::invalid_argument("kernel launch identity");
         auto before = keys.find(key);
@@ -88,7 +88,7 @@ struct Launches {
             return false;
         auto &rows = pending.data->array;
         auto row = std::find_if(rows.begin(), rows.end(), [&](const Value &v) {
-            return integer(v, "id") == id && integer(v, "fire_seq") == seq;
+            return integer(v, sf::id) == id && integer(v, sf::fire_seq) == seq;
         });
         if (row == rows.end())
             return false;
@@ -104,7 +104,8 @@ struct Launches {
         Gun &g = bot.gun;
         if (!b.active && g.burst_remaining <= 0)
             return false;
-        int launched = b.group > 0 ? std::max(0, integer(bot.state, "fire_seq") - b.group + 1) : 0;
+        int launched =
+            b.group > 0 ? std::max(0, integer(bot.state, sf::fire_seq) - b.group + 1) : 0;
         launched = std::min(launched, b.next);
         b.cancel(launched);
         g.cancel_burst();
@@ -114,16 +115,16 @@ struct Launches {
         return true;
     }
     static Value preview_angles(const Value &preview, int seq) {
-        if (integer(preview, "fire_seq", -1) != seq)
+        if (integer(preview, sf::fire_seq, -1) != seq)
             return Value();
         const Value &origin = preview.get("origin");
-        if (origin.kind != Value::Array || origin.size() != 3 || !preview.has("shot_yaw") ||
-            !preview.has("shot_pitch"))
+        if (origin.kind != Value::Array || origin.size() != 3 || !preview.has(sf::shot_yaw) ||
+            !preview.has(sf::shot_pitch))
             return Value();
         for (const Value &n : elements(origin))
             if (n.kind == Value::Null || !std::isfinite(n.number()))
                 return Value();
-        double yaw = field(preview, "shot_yaw"), pitch = field(preview, "shot_pitch");
+        double yaw = field(preview, sf::shot_yaw), pitch = field(preview, sf::shot_pitch);
         if (!std::isfinite(yaw) || !std::isfinite(pitch))
             return Value();
         Value result = Value::array();
@@ -137,36 +138,36 @@ struct Launches {
         Value &s = bot.state;
         Gun &g = bot.gun;
         Ammo &a = bot.ammo;
-        if (flag(s, "_drowning") || flag(s, "_overturned"))
+        if (flag(s, sf::_drowning) || flag(s, sf::_overturned))
             return false;
-        if (edge.seq != integer(s, "fire_seq") + 1 || edge.seq != edge.group + edge.index ||
+        if (edge.seq != integer(s, sf::fire_seq) + 1 || edge.seq != edge.group + edge.index ||
             edge.index < 0 || edge.index >= edge.count || edge.shell != a.loaded)
             return false;
         Value angles;
         if (receipt.kind != Value::Null) {
             if (preview.kind != Value::Null || edge.count != 1 ||
-                integer(receipt, "fire_seq", -1) != edge.seq)
+                integer(receipt, sf::fire_seq, -1) != edge.seq)
                 return false;
         } else if (preview.kind != Value::Null) {
             angles = preview_angles(preview, edge.seq);
             if (angles.kind == Value::Null)
                 return false;
         } else if (base.kind == Value::Null &&
-                   (std::abs(field(s, "pitch")) > 1e-12 || std::abs(field(s, "roll")) > 1e-12))
+                   (std::abs(field(s, sf::pitch)) > 1e-12 || std::abs(field(s, sf::roll)) > 1e-12))
             return false;
         bool continuing = edge.index > 0;
         if (!a.can_fire(continuing) || !g.fire_round(edge.final))
             return false;
         if (!a.consume(continuing))
             throw std::runtime_error("kernel atomic ammunition changed");
-        s["shells_before_shot"] =
+        s[sf::shells_before_shot] =
             Value(std::accumulate(a.quantities.begin(), a.quantities.end(), 1));
         if (edge.final && a.requires_full())
             g.require_full();
-        s["fire_seq"] = Value(edge.seq);
-        s["burst_group_seq"] = Value(edge.group);
-        s["burst_index"] = Value(edge.index);
-        s["burst_count"] = Value(edge.count);
+        s[sf::fire_seq] = Value(edge.seq);
+        s[sf::burst_group_seq] = Value(edge.group);
+        s[sf::burst_index] = Value(edge.index);
+        s[sf::burst_count] = Value(edge.count);
         for (const char *name : {"shot_origin", "shot_velocity", "shot_gravity",
                                  "shot_max_distance", "shot_max_time_ms", "shot_proof_key"})
             s.erase(name);
@@ -177,16 +178,16 @@ struct Launches {
                  {"origin", "velocity", "gravity", "max_distance", "max_time_ms", "proof_key"})
                 s[std::string("shot_") + name] = receipt.get(name);
         } else if (angles.kind != Value::Null) {
-            s["shot_yaw"] = angles[0];
-            s["shot_pitch"] = angles[1];
-            s["shot_origin"] = angles[2];
+            s[sf::shot_yaw] = angles[0];
+            s[sf::shot_pitch] = angles[1];
+            s[sf::shot_origin] = angles[2];
         } else {
-            Value ray = dispersed(integer(s, "id"), round, edge.seq, field(s, "aim_yaw"),
-                                  field(s, "gun_pitch"),
+            Value ray = dispersed(integer(s, sf::id), round, edge.seq, field(s, sf::aim_yaw),
+                                  field(s, sf::gun_pitch),
                                   std::max(g.dispersion, g.fully_aimed * dispersion_factor),
                                   edge.index, edge.group, base);
-            s["shot_yaw"] = ray[0];
-            s["shot_pitch"] = ray[1];
+            s[sf::shot_yaw] = ray[0];
+            s[sf::shot_pitch] = ray[1];
         }
         g.shot_bloom(dispersion_factor, edge.final);
         publish_reload(bot, factor);
@@ -199,7 +200,8 @@ struct Launches {
     }
     bool fire(Bot &bot, int round, double factor, double dispersion_factor, const Value &receipt,
               const Value &preview, int64_t time, const Value &base) {
-        if (flag(bot.state, "_drowning") || flag(bot.state, "_overturned") || !bot.ammo.can_fire())
+        if (flag(bot.state, sf::_drowning) || flag(bot.state, sf::_overturned) ||
+            !bot.ammo.can_fire())
             return false;
         Gun &g = bot.gun;
         Ammo &a = bot.ammo;
@@ -212,7 +214,7 @@ struct Launches {
             count = 1;
             interval = 0;
         }
-        if (!b.start(integer(bot.state, "fire_seq") + 1, count, interval, a.loaded) ||
+        if (!b.start(integer(bot.state, sf::fire_seq) + 1, count, interval, a.loaded) ||
             !g.begin_burst(count, factor)) {
             b.cancel(0);
             return false;

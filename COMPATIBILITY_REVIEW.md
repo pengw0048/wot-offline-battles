@@ -1320,12 +1320,13 @@ fallback, `BattleRuntime` damage/reconciliation ingress, authority takeover,
 real native-query implementations, destructible catalog ownership and
 projectile terminal processing are not replaced by this adapter. It is created
 at fixture startup and destroyed at teardown, not installed into a running
-battle. The mutable native state still uses dynamic field maps alongside typed
-weapon/physics records; C++ ownership does not eliminate field lookup,
+battle. The original `fabc7e6e` kernel kept mutable state in dynamic field maps
+alongside typed weapon/physics records. The fixed-field follow-up below removes
+part of that cost; C++ ownership alone does not eliminate field lookup,
 allocation, marshalling or retained Python engine-query cost.
 
-The final comparison runs nine independent CPython 2.7.18 processes in
-rotating order on the shared Linux aarch64 host, after all validation/build
+The original owned-kernel comparison ran nine independent CPython 2.7.18
+processes in rotating order on the shared Linux aarch64 host, after all validation/build
 processes finish. Each variant uses Great Wall combat, 29 Bots, 30 simulated
 seconds and 15 frame callbacks/second. Loop CPU includes marshalling and
 per-frame snapshot/navigation capture; process/fixture startup and final JSON
@@ -1394,6 +1395,110 @@ python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
   --control-components aiming,driver-flow,contacts,world-sync,navigation-flow,motion-flow \
   --seconds 30 --rounds 3 --output /tmp/ffi-kernel-comparison
 sh tools/ffi_experiment/build_1513.sh /tmp/ffi-kernel-1513
+```
+
+The fixed-field follow-up keeps that same production baseline and frozen
+`fabc7e6e` implementation as controls. Profiling the original measured loop
+counted 53,854 kernel bridge callbacks plus 82,273 nested world callbacks:
+136,127 C++-to-Python calls, distinct from the 7,600 forward FFI entries.
+The kernel total includes 134 navigation notifications and 53,720 engine leaves.
+It also counted 107,440 actor reads and 32,941 full actor decodes. Native stack
+sampling identified hash-table lookup, destruction and allocation among the
+remaining hot operations. These are deterministic fixture counts and sampled
+host evidence, not measurements of BigWorld's real implementation.
+
+`kernel_fields.h` now assigns 139 compile-time slots to the reviewed state and
+projection fields. Bot state and perception/aim pose projections store values
+contiguously, with explicit presence flags; missing and present-null fields
+remain distinct. Descriptor coefficients and irregular ledger keys retain
+mapping storage. Publication columns, perception projections and callback
+columns bind their field names once. Slot values still use the tagged `Value`
+representation: this is not a fully typed rewrite of every native subsystem.
+Shared container allocation and three-component vectors also avoid redundant
+allocations. Shallow copies preserve nested ownership, deep copies detach it,
+and serialization visits both fixed slots and irregular keys.
+
+Primitive motion, ground, water, destructible-scan and cancellation leaves
+project and consume only their actual inputs. Callbacks that consume vehicle
+mappings still receive fresh dictionary copies, including the synchronous
+motion resolver's callback-visible pose. Exact numeric projection variants can
+share a decoded template within one owned update. Writes to decoded top-level
+fields cannot change that template; nested ownership follows the original
+shallow-copy contract. The cache clears at each update and teardown, while
+standalone leaf audits keep only one entry per actor. Required scan fields
+still fail when absent; a water probe still reads BotRuntime's x/y/z contract,
+not a separately projected target position. Siege descriptor selection and
+ordered engine calls are unchanged.
+
+The final nine fresh-process, three-round rotating comparison uses the same
+29-Bot Great Wall combat scene, 30 simulated seconds, 15 callbacks/second and
+CPython 2.7.18 Linux aarch64 host. All build and validation processes have
+finished before timing. All nine full snapshots match the unmodified Python
+oracle, including messages, ordered queries, probes, decisions, navigation and
+diagnostics. Initialization and final file output remain outside loop CPU.
+
+| Variant | Median loop CPU | Min–max loop CPU | Reduction against Python |
+| --- | ---: | ---: | ---: |
+| Unmodified Python | 11.244537 s | 11.238067–11.332941 s | 0.00% |
+| Frozen `fabc7e6e` kernel and Python adapters | 7.974894 s | 7.949418–8.031234 s | 29.08% |
+| Fixed fields and narrower callback projections | 6.491684 s | 6.489070–6.549257 s | 42.27% |
+
+The follow-up reduces loop CPU another 18.60% against the frozen kernel. Its
+median initialization is 0.165740 s; median loop-plus-initialization CPU is
+6.657545 s. Actor reads fall from 107,440 to 44,678, and full decodes from 32,941
+to 22,924. There are still 53,720 engine leaves and 77,172 recorded fake collision
+rays. The runner reports engine-leaf callback counts separately from actor work;
+nested world calls and navigation notifications are not included in that count.
+A separate final profile reconfirms 53,854 kernel-bridge and 82,273 nested-world
+callbacks (136,127 total); its instrumented CPU time is not used in the table.
+No probe cadence, collision work, control slice or accepted shot is removed.
+These results remain far below a 90% reduction and do not predict Windows FPS.
+
+A separate six-process, alternating-order storage ablation keeps the final
+Python adapters, field bindings and allocation improvements in both variants.
+Only `Value::record()`/`as_record()` are changed in a temporary source copy to
+retain dictionary storage. Its median is 7.362928 s versus 6.485199 s with slots:
+fixed storage saves 11.92% in this comparison. All six full snapshots match.
+Fixed capacity trades some memory for fewer hash nodes: median whole-process
+peak RSS is 90,000 KiB with slots versus 88,696 KiB with dictionaries, an increase
+of 1,304 KiB. This includes fixture startup and serialization; it is not a
+measurement of native kernel heap usage or Windows memory consumption.
+
+The new focused checks exercise 20,000 storage mutations against an independent
+mapping oracle, missing/null distinctions, embedded-NUL irregular keys, stable
+references, alias/copy/clone semantics, merges and JSON round trips. Python 2.7
+leaf tests cover projection variants, caller mutation and retained dictionaries,
+actor identity, bounded standalone caches and primitive leaf contracts. The
+whole-update and subsystem differential checks use the unchanged Python 2.7
+implementation as their oracle. The final host module passes all kernel
+subsystem checks and six 80-frame whole-update variants. ASan/UBSan pass the
+storage oracle and a 40-frame combined Siege/human/cover/order scene; native
+extension leak detection is disabled and both sanitizers halt on errors.
+Existing production CI does not execute this opt-in experiment; its local checks and host benchmark are the relevant evidence.
+The x86 build is unshipped, and Windows loading, floating-point parity, native
+ownership and real frame pacing remain unproved.
+
+Reproduce the frozen-source comparison (the control runner must come from
+`fabc7e6e`, so Python adapters are frozen along with its native module):
+
+```bash
+sh tools/ffi_experiment/build_host.sh "$FFI_PY27" /tmp/ffi-hot-host
+sh "$FFI_KERNEL_CONTROL/tools/ffi_experiment/build_host.sh" "$FFI_PY27" /tmp/ffi-old-host
+PYTHONDONTWRITEBYTECODE=1 "$FFI_PY27" tools/ffi_experiment/check_kernel_engine.py
+c++ -std=c++11 -O1 -g -Wall -Wextra -Werror \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  tools/ffi_experiment/check_kernel_fields.cpp -o /tmp/ffi-fields-check
+/tmp/ffi-fields-check
+PYTHONDONTWRITEBYTECODE=1 "$FFI_PY27" tools/ffi_experiment/check_kernel_update.py \
+  --module /tmp/ffi-hot-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --frames 80 --siege --human --cover --orders
+python3 tools/ffi_experiment/compare_runs.py --python "$FFI_PY27" \
+  --module /tmp/ffi-hot-host/offline_astar_native.so --fixture /tmp/ffi-kernel-fixture.json \
+  --components kernel,world-sync --control-components kernel,world-sync \
+  --control-module /tmp/ffi-old-host/offline_astar_native.so \
+  --control-runner "$FFI_KERNEL_CONTROL/tools/ffi_experiment/portable_workload.py" \
+  --seconds 30 --rounds 3 --output /tmp/ffi-hot-comparison
+sh tools/ffi_experiment/build_1513.sh /tmp/ffi-hot-1513
 ```
 
 The previous 0.3.65 schema-v2 catalog supplied transformed OBBs but joined

@@ -67,7 +67,7 @@ struct Motion {
         return p;
     }
     static offline_nav::Point point(const Value &v) {
-        return offline_nav::Point(field(v, "x"), field(v, "y"), field(v, "z"));
+        return offline_nav::Point(field(v, sf::x), field(v, sf::y), field(v, sf::z));
     }
     static offline_nav::Point point(const Value &v, offline_nav::Point fallback) {
         return v.kind == Value::Array && v.size() == 3
@@ -82,15 +82,15 @@ struct Motion {
         return v;
     }
     static void assign(Value &s, offline_nav::Point p) {
-        s["x"] = Value(p.x);
-        s["y"] = Value(p.y);
-        s["z"] = Value(p.z);
+        s[sf::x] = Value(p.x);
+        s[sf::y] = Value(p.y);
+        s[sf::z] = Value(p.z);
     }
     static void destructible(Value &s, bool has, double speed) {
         if (has)
-            s["destructible_contact_speed"] = Value(speed);
+            s[sf::destructible_contact_speed] = Value(speed);
         else
-            s.erase("destructible_contact_speed");
+            s.erase(sf::destructible_contact_speed);
     }
     void begin() {
         frame_waiting.clear();
@@ -98,7 +98,7 @@ struct Motion {
         for (const auto &v : waiting) {
             auto at = bots.find(v.first);
             if (!seen.count(v.first) && at != bots.end() &&
-                flag(at->second->state, "alive", true)) {
+                flag(at->second->state, sf::alive, true)) {
                 frame_waiting.push_back(v);
                 seen.insert(v.first);
             }
@@ -158,7 +158,7 @@ struct Motion {
         if (kind == 615) {
             int id = static_cast<int>(packet[1]);
             source = source.copy();
-            source["_kernel_turn_speed"] = Value(bots.at(id)->turn_speed);
+            source[sf::_kernel_turn_speed] = Value(bots.at(id)->turn_speed);
             auto cache = flow.caches.find(id);
             bool corridor = false, receipt = false;
             double yaw = packet[5], speed = packet[6], dt = packet[7], now = packet[8];
@@ -253,7 +253,7 @@ struct Motion {
         if (kind == 613) {
             int phase = static_cast<int>(packet[2]);
             if (phase == 0) {
-                s["hull_aiming"] = Value(packet[3] != 0);
+                s[sf::hull_aiming] = Value(packet[3] != 0);
                 attempted[id] = packet[5];
                 if (packet[4] != 0) {
                     if (command) {
@@ -264,15 +264,15 @@ struct Motion {
                     }
                     for (const char *name : {"speed", "push_x", "push_z"})
                         s[name] = Value(0.0);
-                    s["movement_dir"] = Value(0);
-                    s["rotation_dir"] = Value(0);
+                    s[sf::movement_dir] = Value(0);
+                    s[sf::rotation_dir] = Value(0);
                     bot.turn_speed = 0;
-                    locked[id] =
-                        value(offline_nav::Point(field(s, "x"), field(s, "z"), field(s, "yaw")));
+                    locked[id] = value(
+                        offline_nav::Point(field(s, sf::x), field(s, sf::z), field(s, sf::yaw)));
                 }
             } else if (phase == 1) {
-                s["movement_dir"] = Value(static_cast<int>(packet[3]));
-                s["rotation_dir"] = Value(static_cast<int>(packet[4]));
+                s[sf::movement_dir] = Value(static_cast<int>(packet[3]));
+                s[sf::rotation_dir] = Value(static_cast<int>(packet[4]));
                 attempted[id] = packet[9];
                 if (diagnostics && command) {
                     offline_motion::Values values{packet, 10};
@@ -290,11 +290,11 @@ struct Motion {
                                        grinds.count(id) ? grinds.at(id) : 0);
                 }
             } else if (phase == 2) {
-                s["yaw"] = Value(packet[3]);
+                s[sf::yaw] = Value(packet[3]);
                 bot.turn_speed = packet[4];
-                s["rotation_dir"] = Value(static_cast<int>(packet[5]));
-                s["movement_dir"] = Value(static_cast<int>(packet[6]));
-                s["last_drive_pitch"] = Value(packet[7]);
+                s[sf::rotation_dir] = Value(static_cast<int>(packet[5]));
+                s[sf::movement_dir] = Value(static_cast<int>(packet[6]));
+                s[sf::last_drive_pitch] = Value(packet[7]);
                 attempted[id] = packet[13];
                 destructible(s, packet[14] != 0, packet[15]);
             } else
@@ -303,14 +303,14 @@ struct Motion {
         }
         if (kind == 614) {
             invalidated.insert(id);
-            s.erase("destructible_contact_speed");
+            s.erase(sf::destructible_contact_speed);
             return 0;
         }
         if (kind == 615) {
             Value source = s;
             if (packet[9] != 0) {
                 source = s.copy();
-                source["movement_dir"] = Value(0);
+                source[sf::movement_dir] = Value(0);
             }
             return engine_event(packet, count, source);
         }
@@ -321,7 +321,7 @@ struct Motion {
             return engine_event(packet, count, s);
         }
         if (kind == 617) {
-            Value trace = s.get("_motion_stall_pending");
+            Value trace = s.get(sf::_motion_stall_pending);
             if (trace.kind == Value::Object) {
                 const char *status[] = {"clear", "crushed", "soft", "cap_crushed", "hard"};
                 trace["world_status"] = Value(status[static_cast<int>(packet[2])]);
@@ -332,7 +332,7 @@ struct Motion {
             return 0;
         }
         if (kind == 631) {
-            Value trace = s.get("_motion_stall_pending");
+            Value trace = s.get(sf::_motion_stall_pending);
             if (trace.kind == Value::Object) {
                 if (packet[2] == 0) {
                     trace["support_highest"] = packet[3] ? Value(packet[4]) : Value();
@@ -347,7 +347,7 @@ struct Motion {
             return 0;
         }
         if (kind == 635) {
-            s["speed"] = Value(packet[9]);
+            s[sf::speed] = Value(packet[9]);
             return engine_event(packet, count, s);
         }
         return route ? route->forward(packet, count) : 18;
@@ -375,27 +375,27 @@ struct Motion {
         current_now = now;
         Value &s = bot.state;
         const Value &c = bot.config.get("motion");
-        int id = integer(s, "id");
+        int id = integer(s, sf::id);
         offline_motion::Input in;
         in.bot = id;
         in.navigation = navigation;
         in.driver = driver;
         in.position = point(s);
-        in.aim = point(order.get("aim_position"), point(target.get("position"), in.position));
+        in.aim = point(order.get("aim_position"), point(target.get(sf::position), in.position));
         if (order.get("move_position").kind != Value::Null)
             in.move = point(order.get("move_position"), in.position);
-        in.yaw = field(s, "yaw");
-        in.speed = field(s, "speed");
+        in.yaw = field(s, sf::yaw);
+        in.speed = field(s, sf::speed);
         in.turn_speed = bot.turn_speed;
-        in.half_length = field(s, "half_length", 3.5);
-        in.half_width = field(s, "half_width", 1.7);
+        in.half_length = field(s, sf::half_length, 3.5);
+        in.half_width = field(s, sf::half_width, 1.7);
         in.throttle = field(order, "throttle");
         in.turn = field(order, "turn");
         const Value &limits = c.get("yaw_limits");
         in.minimum_yaw = limits[0].number();
         in.maximum_yaw = limits[1].number();
-        std::set<std::string> destroyed = names(s.get("critical").get("destroyed"));
-        in.mobility_blocked = flag(s, "_overturned") || destroyed.count("engineHealth") ||
+        std::set<std::string> destroyed = names(s.get(sf::critical).get("destroyed"));
+        in.mobility_blocked = flag(s, sf::_overturned) || destroyed.count("engineHealth") ||
                               destroyed.count("leftTrackHealth") ||
                               destroyed.count("rightTrackHealth");
         in.mobility = !in.mobility_blocked && std::abs(in.throttle) > .01
@@ -403,7 +403,7 @@ struct Motion {
                           : 1;
         in.step = dt;
         in.now = now;
-        in.water = field(s, "_water_depth", -1);
+        in.water = field(s, sf::_water_depth, -1);
         in.tick_siege_yaw = siege_yaw;
         const std::string recovery = order.get("recovery_mode").text("drive");
         in.recovery = recovery == "drive"            ? 0
@@ -418,8 +418,8 @@ struct Motion {
         in.has_target =
             target.kind != Value::Null && order.get("combat_mode").text() != "base_defense";
         in.movement = flag(order, "movement_intent", true);
-        in.airborne = flag(s, "airborne");
-        in.grounded = flag(s, "grounded_once");
+        in.airborne = flag(s, sf::airborne);
+        in.grounded = flag(s, sf::grounded_once);
         in.siege_locked = siege_lock;
         in.bake_admitted = flag(config, "bake_admitted");
         in.baked_escape = baked_escape;
@@ -427,11 +427,11 @@ struct Motion {
         in.refresh = refresh;
         in.has_resolver = flag(config, "has_resolver");
         in.has_report = flag(config, "has_report");
-        if (integer(s, "siege_state") == integer(config, "siege_enabled") &&
+        if (integer(s, sf::siege_state) == integer(config, "siege_enabled") &&
             c.get("siege_limit").kind != Value::Null)
             in.siege_limit = c.get("siege_limit").number();
-        if (s.has("destructible_contact_speed"))
-            in.destructible_speed = field(s, "destructible_contact_speed");
+        if (s.has(sf::destructible_contact_speed))
+            in.destructible_speed = field(s, sf::destructible_contact_speed);
         Scope scope(*this);
         Value *previous = command;
         command = &order;
@@ -445,80 +445,80 @@ struct Motion {
         }
         command = previous;
         assign(s, out.position);
-        s["yaw"] = Value(out.yaw);
-        s["speed"] = Value(out.speed);
+        s[sf::yaw] = Value(out.yaw);
+        s[sf::speed] = Value(out.speed);
         bot.turn_speed = out.turn_speed;
-        s["last_drive_pitch"] = Value(out.drive_pitch);
+        s[sf::last_drive_pitch] = Value(out.drive_pitch);
         attempted[id] = out.attempted_yaw;
-        s["movement_dir"] = Value(out.movement);
-        s["rotation_dir"] = Value(out.rotation);
+        s[sf::movement_dir] = Value(out.movement);
+        s[sf::rotation_dir] = Value(out.rotation);
         if (out.grind_present)
             grinds[id] = out.grind;
         destructible(s, out.destructible_speed.has, out.destructible_speed.value);
     }
     int landing(Bot &bot, double speed) {
         Value &s = bot.state;
-        double lx = field(s, "air_lateral_x"), lz = field(s, "air_lateral_z"),
+        double lx = field(s, sf::air_lateral_x), lz = field(s, sf::air_lateral_z),
                lateral = std::sqrt(lx * lx + lz * lz);
         if (lateral > .01)
-            s["slide_speed"] = Value(std::max(field(s, "slide_speed"), lateral));
-        s["air_lateral_x"] = Value(0.0);
-        s["air_lateral_z"] = Value(0.0);
+            s[sf::slide_speed] = Value(std::max(field(s, sf::slide_speed), lateral));
+        s[sf::air_lateral_x] = Value(0.0);
+        s[sf::air_lateral_z] = Value(0.0);
         speed = std::sqrt(speed * speed + lateral * lateral);
-        int maximum = std::max(1, integer(s, "max_health", integer(s, "health", 1)));
+        int maximum = std::max(1, integer(s, sf::max_health, integer(s, sf::health, 1)));
         int damage = speed <= tuning.FALL_SAFE_SPEED
                          ? 0
                          : static_cast<int>(maximum * (speed - tuning.FALL_SAFE_SPEED) *
                                             tuning.FALL_DMG_PER_MS);
         if (damage <= 0)
             return 0;
-        int health = std::max(0, integer(s, "health", maximum) - damage);
-        s["health"] = Value(health);
-        s["display_health"] = Value(health);
-        s["alive"] = Value(health > 0);
+        int health = std::max(0, integer(s, sf::health, maximum) - damage);
+        s[sf::health] = Value(health);
+        s[sf::display_health] = Value(health);
+        s[sf::alive] = Value(health > 0);
         if (health > 0)
             return damage;
-        Critical terminal(s.get("critical"), *bot.critical);
-        s["critical"] = terminal.terminal();
-        s["combat_fire_elapsed"] = Value(0.0);
-        s["combat_fire_timer"] = Value(0.0);
+        Critical terminal(s.get(sf::critical), *bot.critical);
+        s[sf::critical] = terminal.terminal();
+        s[sf::combat_fire_elapsed] = Value(0.0);
+        s[sf::combat_fire_timer] = Value(0.0);
         bot.death(3, 0);
-        s["push_x"] = Value(0.0);
-        s["push_z"] = Value(0.0);
+        s[sf::push_x] = Value(0.0);
+        s[sf::push_z] = Value(0.0);
         bot.turn_speed = 0;
         return damage;
     }
     bool vertical(Bot &bot, double dt, const Value &tick = Value(), double yaw = 0) {
         Value &s = bot.state;
         offline_motion::Vertical v;
-        v.bot = integer(s, "id");
+        v.bot = integer(s, sf::id);
         v.position = point(s);
-        v.yaw = field(s, "yaw");
-        v.speed = field(s, "speed");
-        v.half_length = std::max(1.5, field(s, "half_length", 3.5));
+        v.yaw = field(s, sf::yaw);
+        v.speed = field(s, sf::speed);
+        v.half_length = std::max(1.5, field(s, sf::half_length, 3.5));
         v.step = dt;
-        v.vertical = field(s, "vertical_speed");
-        v.pitch = field(s, "last_drive_pitch");
-        v.airborne = flag(s, "airborne");
-        v.grounded = flag(s, "grounded_once");
-        v.trace = s.get("_motion_stall_pending").kind == Value::Object;
+        v.vertical = field(s, sf::vertical_speed);
+        v.pitch = field(s, sf::last_drive_pitch);
+        v.airborne = flag(s, sf::airborne);
+        v.grounded = flag(s, sf::grounded_once);
+        v.trace = s.get(sf::_motion_stall_pending).kind == Value::Object;
         if (v.trace)
-            s["_motion_stall_pending"]["suspension"] = Value(false);
+            s[sf::_motion_stall_pending]["suspension"] = Value(false);
         if (tick.kind != Value::Null)
             v.tick = point(tick, v.position);
         Scope scope(*this);
         auto result = offline_motion::vertical_step(flow, tuning, v);
         assign(s, result.position);
-        s["speed"] = Value(result.speed);
-        s["vertical_speed"] = Value(result.vertical);
-        s["airborne"] = Value(result.airborne);
-        s["grounded_once"] = Value(result.grounded);
+        s[sf::speed] = Value(result.speed);
+        s[sf::vertical_speed] = Value(result.vertical);
+        s[sf::airborne] = Value(result.airborne);
+        s[sf::grounded_once] = Value(result.grounded);
         if (result.blocked) {
-            s["movement_dir"] = Value(0);
-            s["rotation_dir"] = Value(0);
-            s["push_x"] = Value(0.0);
-            s["push_z"] = Value(0.0);
-            s.erase("destructible_contact_speed");
+            s[sf::movement_dir] = Value(0);
+            s[sf::rotation_dir] = Value(0);
+            s[sf::push_x] = Value(0.0);
+            s[sf::push_z] = Value(0.0);
+            s.erase(sf::destructible_contact_speed);
             bot.turn_speed = 0;
             invalidate(v.bot, yaw);
             return true;
@@ -541,47 +541,47 @@ struct Motion {
         if (!navigation)
             return false;
         Value &s = bot.state;
-        double yaw = field(s, "yaw");
+        double yaw = field(s, sf::yaw);
         auto &grid = *offline_runtime_navigation(navigation).grid;
         offline_nav::Point current = point(s);
-        if (offline_motion::boundary(grid, tick, yaw, current, yaw, field(s, "half_length", 3.5),
-                                     field(s, "half_width", 1.7)) &&
+        if (offline_motion::boundary(grid, tick, yaw, current, yaw, field(s, sf::half_length, 3.5),
+                                     field(s, sf::half_width, 1.7)) &&
             (!was_safe || safe(current)))
             return false;
         assign(s, tick);
         for (const char *name : {"speed", "push_x", "push_z", "vertical_speed"})
             s[name] = Value(0.0);
-        s["movement_dir"] = Value(0);
-        s["rotation_dir"] = Value(0);
-        s["airborne"] = Value(false);
-        invalidate(integer(s, "id"), attempted_yaw);
+        s[sf::movement_dir] = Value(0);
+        s[sf::rotation_dir] = Value(0);
+        s[sf::airborne] = Value(false);
+        invalidate(integer(s, sf::id), attempted_yaw);
         return true;
     }
     bool slope(Bot &bot, int tier, bool allow_ungrounded = false) {
         Value &s = bot.state;
-        if (flag(s, "airborne") || (!allow_ungrounded && !flag(s, "grounded_once")))
+        if (flag(s, sf::airborne) || (!allow_ungrounded && !flag(s, sf::grounded_once)))
             return false;
-        const Value &prior = s.get("pose_sample");
-        double yaw = field(s, "yaw"), x = field(s, "x"), z = field(s, "z");
+        const Value &prior = s.get(sf::pose_sample);
+        double yaw = field(s, sf::yaw), x = field(s, sf::x), z = field(s, sf::z);
         if (prior.kind == Value::Array && prior.size() == 3 &&
             std::abs(x - prior[0].number()) < config.get("slope_metres")[tier].number() &&
             std::abs(z - prior[1].number()) < config.get("slope_metres")[tier].number() &&
             std::abs(yaw - prior[2].number()) < config.get("slope_radians")[tier].number())
             return false;
-        double suspension = field(s, "suspension_pitch"),
-               pitch = field(s, "terrain_pitch", field(s, "pitch") - suspension);
+        double suspension = field(s, sf::suspension_pitch),
+               pitch = field(s, sf::terrain_pitch, field(s, sf::pitch) - suspension);
         Scope scope(*this);
-        auto result = offline_motion::slope(flow, integer(s, "id"), point(s), yaw,
-                                            field(s, "half_length", 3.5),
-                                            field(s, "half_width", 1.7), pitch, field(s, "roll"));
-        s["terrain_pitch"] = Value(result.first);
-        s["pitch"] = Value(result.first + suspension);
-        s["roll"] = Value(result.second);
+        auto result = offline_motion::slope(
+            flow, integer(s, sf::id), point(s), yaw, field(s, sf::half_length, 3.5),
+            field(s, sf::half_width, 1.7), pitch, field(s, sf::roll));
+        s[sf::terrain_pitch] = Value(result.first);
+        s[sf::pitch] = Value(result.first + suspension);
+        s[sf::roll] = Value(result.second);
         Value marker = Value::array();
         marker.append(Value(x));
         marker.append(Value(z));
         marker.append(Value(yaw));
-        s["pose_sample"] = marker;
+        s[sf::pose_sample] = marker;
         return true;
     }
 };

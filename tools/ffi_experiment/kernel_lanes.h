@@ -25,7 +25,7 @@ struct Lanes {
     int incoming_budget = 0, completed = 0, deferred = 0, probes = 0;
     Lanes(const Value &v, Perception &p, Engine &e) : config(v), perception(p), engine(e) {}
     static LaneKey key(const Value &source, const Value &target) {
-        return LaneKey{{integer(source, "id"), Perception::kind(target), Perception::id(target)}};
+        return LaneKey{{integer(source, sf::id), Perception::kind(target), Perception::id(target)}};
     }
     double phase(LaneKey key) const {
         int bucket = (std::abs(key[0]) * 31 + std::abs(key[2]) * 17 + (key[1] == 1 ? 11 : 0)) %
@@ -33,8 +33,9 @@ struct Lanes {
         return static_cast<double>(bucket) / field(config, "phases") * field(config, "refresh");
     }
     double distance_limit(const Value &source) const {
-        return field(config, source.get("profile").get("class_tag").text() == "SPG" ? "spg_distance"
-                                                                                    : "distance");
+        return field(config, source.get(sf::profile).get(sf::class_tag).text() == "SPG"
+                                 ? "spg_distance"
+                                 : "distance");
     }
     static double distance(const Value &source, const Value &target) {
         Value a = position(source), b = target_position(target);
@@ -62,8 +63,8 @@ struct Lanes {
         std::array<std::vector<int>, 2> live;
         for (int id : ordered) {
             const Value &s = perception.bots.at(id)->state;
-            int team = integer(s, "team");
-            if ((team == 1 || team == 2) && flag(s, "alive", true))
+            int team = integer(s, sf::team);
+            if ((team == 1 || team == 2) && flag(s, sf::alive, true))
                 live[team - 1].push_back(id);
         }
         if (!has_sources || sources != live) {
@@ -95,7 +96,7 @@ struct Lanes {
         }
         auto cached = samples.find(k);
         if (!force && cached != samples.end() &&
-            now - cached->second.time <= field(config, "seconds") + 1e-9)
+            now - cached->second.time <= field(config, sf::seconds) + 1e-9)
             return Value(cached->second.clear);
         if (budget) {
             if (*budget <= 0)
@@ -143,16 +144,16 @@ struct Lanes {
     }
     bool live(LaneKey key, Value &source, size_t &target_index, TeamKey &tk) {
         auto s = perception.bots.find(key[0]);
-        if (s == perception.bots.end() || !flag(s->second->state, "alive", true))
+        if (s == perception.bots.end() || !flag(s->second->state, sf::alive, true))
             return false;
         source = s->second->state;
-        int team = integer(source, "team");
+        int team = integer(source, sf::team);
         auto at = perception.indices.find(ActorKey{{key[1], key[2]}});
         if (at == perception.indices.end())
             return false;
         target_index = at->second;
         const Value &t = perception.roster[target_index].raw;
-        if (!flag(t, "alive", true) || integer(t, "team") == team)
+        if (!flag(t, sf::alive, true) || integer(t, sf::team) == team)
             return false;
         tk = TeamKey{{team, key[1], key[2]}};
         return true;
@@ -267,10 +268,10 @@ struct Lanes {
         double age = field(config, "refresh") + field(config, "control") + 1e-9;
         for (const auto &v : samples) {
             auto source = perception.bots.find(v.first[0]);
-            if (source == perception.bots.end() || !flag(source->second->state, "alive", true) ||
+            if (source == perception.bots.end() || !flag(source->second->state, sf::alive, true) ||
                 !v.second.clear || now - v.second.time > age)
                 continue;
-            TeamKey key = {{integer(source->second->state, "team"), v.first[1], v.first[2]}};
+            TeamKey key = {{integer(source->second->state, sf::team), v.first[1], v.first[2]}};
             auto at = perception.observations.find(key);
             if (perception.team_visible[key] && at != perception.observations.end())
                 at->second.shootable.insert(v.first[0]);
@@ -281,14 +282,14 @@ struct Lanes {
         double age = field(config, "refresh") + field(config, "control");
         for (auto at = incoming.begin(); at != incoming.end();) {
             auto source = perception.bots.find(at->first[0]);
-            if (source == perception.bots.end() || !flag(source->second->state, "alive", true) ||
+            if (source == perception.bots.end() || !flag(source->second->state, sf::alive, true) ||
                 now - at->second.time > age) {
                 at = incoming.erase(at);
                 continue;
             }
             if (at->second.clear)
                 threats[TeamKey{
-                            {integer(source->second->state, "team"), at->first[1], at->first[2]}}]
+                            {integer(source->second->state, sf::team), at->first[1], at->first[2]}}]
                     .insert(at->first[0]);
             ++at;
         }
@@ -300,11 +301,11 @@ struct Lanes {
             if (e == perception.bots.end() || o == perception.bots.end())
                 continue;
             const Value &enemy = e->second->state, &own = o->second->state;
-            if (!flag(enemy, "alive", true) || !flag(own, "alive", true) ||
-                integer(enemy, "team") == integer(own, "team") ||
-                enemy.get("profile").get("class_tag").text() == "SPG")
+            if (!flag(enemy, sf::alive, true) || !flag(own, sf::alive, true) ||
+                integer(enemy, sf::team) == integer(own, sf::team) ||
+                enemy.get(sf::profile).get(sf::class_tag).text() == "SPG")
                 continue;
-            TeamKey tk = {{integer(own, "team"), 0, key[0]}};
+            TeamKey tk = {{integer(own, sf::team), 0, key[0]}};
             if (perception.observations.count(tk))
                 threats[tk].insert(key[2]);
         }
@@ -323,10 +324,10 @@ struct Lanes {
             bool fresh = visible && (!o.humans.empty() || !o.bots.empty());
             Value row = Value::object();
             row["observing_team"] = Value(key[0]);
-            row["target_kind"] = Value(key[1] == 1 ? "human" : "bot");
-            row["target_id"] = Value(key[2]);
-            row["target_team"] = Value(integer(o.target, "team"));
-            row["visible"] = Value(visible);
+            row[sf::target_kind] = Value(key[1] == 1 ? "human" : "bot");
+            row[sf::target_id] = Value(key[2]);
+            row["target_team"] = Value(integer(o.target, sf::team));
+            row[sf::visible] = Value(visible);
             row["fresh"] = Value(fresh);
             row["time_left"] = Value(rounded(visible ? left : 0, 6));
             auto ids = [](const std::set<int> &ids, bool allowed) {
@@ -342,14 +343,14 @@ struct Lanes {
             row["threatened_bot_ids"] = ids(threats[key], fresh);
             for (const char *name : {"x", "y", "z"})
                 row[name] = Value(field(o.target, name));
-            row["health"] = Value(std::max(0, integer(o.target, "health", 1)));
-            row["max_health"] = Value(std::max(1, integer(o.target, "max_health", 1)));
-            row["class_tag"] =
-                o.target.has("class_tag")
-                    ? o.target.get("class_tag")
-                    : Value(o.target.get("profile").get("class_tag").text("unknown"));
+            row[sf::health] = Value(std::max(0, integer(o.target, sf::health, 1)));
+            row[sf::max_health] = Value(std::max(1, integer(o.target, sf::max_health, 1)));
+            row[sf::class_tag] =
+                o.target.has(sf::class_tag)
+                    ? o.target.get(sf::class_tag)
+                    : Value(o.target.get(sf::profile).get(sf::class_tag).text("unknown"));
             row["armor"] = Value(
-                std::max(0.0, field(o.target, "armor", field(o.target.get("profile"), "armor"))));
+                std::max(0.0, field(o.target, "armor", field(o.target.get(sf::profile), "armor"))));
             out.append(row);
         }
         return out;

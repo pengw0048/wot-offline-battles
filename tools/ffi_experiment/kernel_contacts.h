@@ -10,12 +10,12 @@ struct TankBody {
     double x, y, z, yaw, pitch, roll, mass, vx, vy, vz;
     std::array<double, 4> shape;
     explicit TankBody(const Value &v)
-        : raw(v), id(integer(v, "id", -1)), team(integer(v, "team")), alive(flag(v, "alive", true)),
-          impulse(flag(v, "impulse", true)), has_y(v.get("y").kind != Value::Null),
-          x(field(v, "x")), y(field(v, "y")), z(field(v, "z")), yaw(field(v, "yaw")),
-          pitch(field(v, "pitch")), roll(field(v, "roll")),
-          mass(std::max(1.0, field(v, "mass", 1))), vx(field(v, "vx")), vy(field(v, "vy")),
-          vz(field(v, "vz")) {
+        : raw(v), id(integer(v, sf::id, -1)), team(integer(v, sf::team)),
+          alive(flag(v, sf::alive, true)), impulse(flag(v, "impulse", true)),
+          has_y(v.get(sf::y).kind != Value::Null), x(field(v, sf::x)), y(field(v, sf::y)),
+          z(field(v, sf::z)), yaw(field(v, sf::yaw)), pitch(field(v, sf::pitch)),
+          roll(field(v, sf::roll)), mass(std::max(1.0, field(v, sf::mass, 1))), vx(field(v, "vx")),
+          vy(field(v, "vy")), vz(field(v, "vz")) {
         const Value &s = v.get("shape");
         if (s.kind != Value::Array || s.size() != 4)
             throw std::invalid_argument("kernel tank shape producer");
@@ -173,12 +173,12 @@ struct TankContacts {
     static offline_nav::Optional<Contact> ram_inputs(const TankBody &body,
                                                      const Value &provided = Value()) {
         const Value &armor =
-            provided.kind != Value::Null ? provided : body.raw.get("contact_armor");
+            provided.kind != Value::Null ? provided : body.raw.get(sf::contact_armor);
         if (armor.kind == Value::Null)
             return {};
         double nominal = armor.number(-1),
-               spall = field(body.raw.get("ram_profile"), "spall_coefficient", 1),
-               bonus = field(body.raw.get("ram_profile"), "ramming_bonus");
+               spall = field(body.raw.get(sf::ram_profile), "spall_coefficient", 1),
+               bonus = field(body.raw.get(sf::ram_profile), "ramming_bonus");
         if (nominal < 0 || !std::isfinite(nominal) || spall < 1 || !std::isfinite(spall) ||
             bonus < 0 || bonus > .15 || !std::isfinite(bonus))
             throw std::runtime_error("kernel contact armor producer");
@@ -186,11 +186,11 @@ struct TankContacts {
     }
     static void encode_body(std::vector<double> &args, const TankBody &b) {
         args.insert(args.end(), {static_cast<double>(b.id),
-                                 static_cast<double>(b.raw.get("kind").text() == "player"),
+                                 static_cast<double>(b.raw.get(sf::kind).text() == "player"),
                                  static_cast<double>(b.impulse), b.mass, b.vx, b.vy, b.vz});
         args.insert(args.end(), b.shape.begin(), b.shape.end());
-        args.push_back(field(b.raw.get("ram_profile"), "spall_coefficient", 1));
-        args.push_back(field(b.raw.get("ram_profile"), "ramming_bonus"));
+        args.push_back(field(b.raw.get(sf::ram_profile), "spall_coefficient", 1));
+        args.push_back(field(b.raw.get(sf::ram_profile), "ramming_bonus"));
     }
     Value armor_probe(const TankBody &a, const TankBody &b, Contact contact) {
         Pair pair(std::min(a.id, b.id), std::max(a.id, b.id));
@@ -288,8 +288,8 @@ struct TankContacts {
             event["pair"] = tuple_value({Value(pair.first), Value(pair.second)});
             event["self_id"] = Value(own.id);
             event["other_id"] = Value(other.id);
-            event["self_vehicle"] = Value(own.raw.get("vehicle").text());
-            event["other_vehicle"] = Value(other.raw.get("vehicle").text());
+            event["self_vehicle"] = Value(own.raw.get(sf::vehicle).text());
+            event["other_vehicle"] = Value(other.raw.get(sf::vehicle).text());
             event["mass_self"] = Value(own.mass);
             event["mass_other"] = Value(other.mass);
             event["velocity_self"] = array(own.velocity());
@@ -325,41 +325,47 @@ struct TankContacts {
     void apply(Bot &bot, const Response &result, double step, bool advance = true,
                bool correct = true) {
         Value &s = bot.state;
-        double yaw = field(s, "yaw"), speed = field(s, "speed"),
+        double yaw = field(s, sf::yaw), speed = field(s, sf::speed),
                forward = result.delta[0] * std::sin(yaw) + result.delta[1] * std::cos(yaw),
                applied = 0;
         if (forward * speed < 0) {
             applied = std::abs(forward) >= std::abs(speed) ? -speed : forward;
-            s["speed"] = Value(speed + applied);
+            s[sf::speed] = Value(speed + applied);
         }
-        double px = field(s, "push_x") + result.delta[0] - applied * std::sin(yaw),
-               pz = field(s, "push_z") + result.delta[1] - applied * std::cos(yaw),
+        double px = field(s, sf::push_x) + result.delta[0] - applied * std::sin(yaw),
+               pz = field(s, sf::push_z) + result.delta[1] - applied * std::cos(yaw),
                mx = (correct ? result.correction[0] : 0) + (advance ? px * step : 0),
                mz = (correct ? result.correction[1] : 0) + (advance ? pz * step : 0),
                distance = std::sqrt(mx * mx + mz * mz);
         if (distance > .0001) {
             double direction = std::atan2(mx, mz), velocity = distance / std::max(step, 1.0 / 120),
-                   relative = direction - yaw, length = std::max(.5, field(s, "half_length", 3.5)),
-                   width = std::max(.3, field(s, "half_width", 1.7)),
+                   relative = direction - yaw,
+                   length = std::max(.5, field(s, sf::half_length, 3.5)),
+                   width = std::max(.3, field(s, sf::half_width, 1.7)),
                    support =
                        length * std::abs(std::cos(relative)) + width * std::abs(std::sin(relative)),
                    half_width =
                        length * std::abs(std::sin(relative)) + width * std::abs(std::cos(relative));
-            double packet[128] = {635,           static_cast<double>(integer(s, "id")),
-                                  field(s, "x"), field(s, "y"),
-                                  field(s, "z"), direction,
-                                  velocity,      std::max(1.0, distance + support),
-                                  half_width,    field(s, "speed")};
+            double packet[128] = {635,
+                                  static_cast<double>(integer(s, sf::id)),
+                                  field(s, sf::x),
+                                  field(s, sf::y),
+                                  field(s, sf::z),
+                                  direction,
+                                  velocity,
+                                  std::max(1.0, distance + support),
+                                  half_width,
+                                  field(s, sf::speed)};
             motion.engine_event(packet, 128, s);
             if (!packet[0]) {
                 mx = mz = px = pz = 0;
             }
         }
-        s["x"] = Value(field(s, "x") + mx);
-        s["z"] = Value(field(s, "z") + mz);
+        s[sf::x] = Value(field(s, sf::x) + mx);
+        s[sf::z] = Value(field(s, sf::z) + mz);
         double decay = advance ? std::pow(.90, std::max(0.0, step) * 60) : 1;
-        s["push_x"] = Value(px * decay);
-        s["push_z"] = Value(pz * decay);
+        s[sf::push_x] = Value(px * decay);
+        s[sf::push_z] = Value(pz * decay);
     }
     Value report(int id, int other, int self_damage, int other_damage, int player = 0,
                  int seq = 0) {
@@ -367,8 +373,8 @@ struct TankContacts {
         int base = integer(config, "human_base");
         v["type"] = Value("bot_ram");
         v["bot_id"] = Value(id);
-        v["target_kind"] = Value(other >= base ? "human" : "bot");
-        v["target_id"] = Value(other >= base ? other - base : other);
+        v[sf::target_kind] = Value(other >= base ? "human" : "bot");
+        v[sf::target_id] = Value(other >= base ? other - base : other);
         v["ram_seq"] = Value(++sequence);
         v["damage_to_bot"] = Value(self_damage);
         v["damage_to_target"] = Value(other_damage);
@@ -390,28 +396,28 @@ struct TankContacts {
         return true;
     }
     static Value body(const Value &s, bool human, int base, const Value &collision) {
-        int id = integer(s, "id");
+        int id = integer(s, sf::id);
         Value result = Value::object();
-        result["id"] = Value(id + (human ? base : 0));
-        result["network_id"] = Value(id);
-        result["kind"] = Value(human ? "player" : "bot");
-        result["alive"] = Value(flag(s, "alive", true));
-        result["team"] = Value(integer(s, "team"));
-        result["vehicle"] = Value(s.get("vehicle").text());
+        result[sf::id] = Value(id + (human ? base : 0));
+        result[sf::network_id] = Value(id);
+        result[sf::kind] = Value(human ? "player" : "bot");
+        result[sf::alive] = Value(flag(s, sf::alive, true));
+        result[sf::team] = Value(integer(s, sf::team));
+        result[sf::vehicle] = Value(s.get(sf::vehicle).text());
         if (human)
             result["impulse"] = Value(false);
         for (const char *key : {"x", "y", "z", "yaw"})
             result[key] = Value(field(s, key));
-        result["mass"] = Value(human ? field(collision, "mass") : field(s, "mass", 25000));
-        result["shape"] = human ? collision.get("shape") : s.get("collision_shape");
-        result["ram_profile"] = human ? collision.get("ram_profile") : s.get("ram_profile");
-        double speed = flag(s, "alive", true) ? field(s, "speed") : 0, yaw = field(s, "yaw");
-        result["vx"] = Value(std::sin(yaw) * speed + (human ? 0 : field(s, "push_x")));
-        result["vz"] = Value(std::cos(yaw) * speed + (human ? 0 : field(s, "push_z")));
+        result[sf::mass] = Value(human ? field(collision, sf::mass) : field(s, sf::mass, 25000));
+        result["shape"] = human ? collision.get("shape") : s.get(sf::collision_shape);
+        result[sf::ram_profile] = human ? collision.get(sf::ram_profile) : s.get(sf::ram_profile);
+        double speed = flag(s, sf::alive, true) ? field(s, sf::speed) : 0, yaw = field(s, sf::yaw);
+        result["vx"] = Value(std::sin(yaw) * speed + (human ? 0 : field(s, sf::push_x)));
+        result["vz"] = Value(std::cos(yaw) * speed + (human ? 0 : field(s, sf::push_z)));
         if (!human) {
-            result["vy"] = Value(field(s, "ram_vy", field(s, "vertical_speed")));
-            result["pitch"] = Value(field(s, "pitch"));
-            result["roll"] = Value(field(s, "roll"));
+            result["vy"] = Value(field(s, sf::ram_vy, field(s, sf::vertical_speed)));
+            result[sf::pitch] = Value(field(s, sf::pitch));
+            result[sf::roll] = Value(field(s, sf::roll));
         }
         return result;
     }
@@ -420,18 +426,18 @@ struct TankContacts {
         std::map<int, std::vector<Value>> entries;
         int base = integer(config, "human_base");
         for (const Value &raw : elements(players)) {
-            if (raw.kind != Value::Object || !raw.has("id"))
+            if (raw.kind != Value::Object || !raw.has(sf::id))
                 continue;
-            int id = integer(raw, "id"), resolved = integer(raw, "ram_contact_resolved_seq");
+            int id = integer(raw, sf::id), resolved = integer(raw, sf::ram_contact_resolved_seq);
             if (resolved > 0)
                 ack(id, resolved);
-            if (raw.get("ram_contacts").kind == Value::Array) {
-                for (const Value &receipt : elements(raw.get("ram_contacts"))) {
+            if (raw.get(sf::ram_contacts).kind == Value::Array) {
+                for (const Value &receipt : elements(raw.get(sf::ram_contacts))) {
                     if (receipt.kind != Value::Object)
                         continue;
                     Value row = raw.copy();
-                    row["ram_contact"] = receipt;
-                    row["_ram_contact_bot_state"] = receipt.get("_ram_contact_bot_state");
+                    row[sf::ram_contact] = receipt;
+                    row[sf::_ram_contact_bot_state] = receipt.get(sf::_ram_contact_bot_state);
                     entries[id].push_back(row);
                 }
             } else
@@ -442,12 +448,12 @@ struct TankContacts {
             int player = group.first;
             auto &rows = group.second;
             std::stable_sort(rows.begin(), rows.end(), [](const Value &a, const Value &b) {
-                return integer(a.get("ram_contact"), "seq", 2147483647) <
-                       integer(b.get("ram_contact"), "seq", 2147483647);
+                return integer(a.get(sf::ram_contact), "seq", 2147483647) <
+                       integer(b.get(sf::ram_contact), "seq", 2147483647);
             });
             for (const Value &raw : rows) {
-                const Value &r = raw.get("ram_contact"),
-                            &historical = raw.get("_ram_contact_bot_state");
+                const Value &r = raw.get(sf::ram_contact),
+                            &historical = raw.get(sf::_ram_contact_bot_state);
                 if (r.kind != Value::Object || r.get("seq").kind == Value::Null ||
                     r.get("bot_id").kind == Value::Null)
                     continue;
@@ -468,7 +474,7 @@ struct TankContacts {
                 Bot &current = *bots.at(id);
                 Value receipt_reports = Value::array();
                 bool valid =
-                    flag(current.state, "alive", true) && integer(historical, "id", -1) == id;
+                    flag(current.state, sf::alive, true) && integer(historical, sf::id, -1) == id;
                 for (const char *name : {"x", "y", "z", "yaw", "vx", "vy", "vz", "bot_vx", "bot_vy",
                                          "bot_vz", "presentation_time_us", "contact_x", "contact_y",
                                          "contact_z", "contact_armor_player", "contact_armor_bot",
@@ -477,14 +483,14 @@ struct TankContacts {
                         valid && r.get(name).kind != Value::Null && std::isfinite(field(r, name));
                 if (valid) {
                     Value own = body(historical, false, base, Value());
-                    own.erase("kind");
-                    own.erase("network_id");
+                    own.erase(sf::kind);
+                    own.erase(sf::network_id);
                     own["vx"] = r.get("bot_vx");
                     own["vy"] = r.get("bot_vy");
                     own["vz"] = r.get("bot_vz");
-                    Value other = body(raw, true, base, raw.get("_kernel").get("collision"));
-                    other.erase("kind");
-                    other.erase("network_id");
+                    Value other = body(raw, true, base, raw.get(sf::_kernel).get("collision"));
+                    other.erase(sf::kind);
+                    other.erase(sf::network_id);
                     other.erase("impulse");
                     for (const char *name :
                          {"x", "y", "z", "yaw", "vx", "vy", "vz", "pitch", "roll"})
@@ -504,8 +510,8 @@ struct TankContacts {
                             alignment > 1e-6 && !flag(r, "contact_screened_player") &&
                             !flag(r, "contact_screened_bot") && a.contains(hit, .75) &&
                             b.contains(hit, .75);
-                    double own_spall = field(own.get("ram_profile"), "spall_coefficient", -1),
-                           own_bonus = field(own.get("ram_profile"), "ramming_bonus", -1);
+                    double own_spall = field(own.get(sf::ram_profile), "spall_coefficient", -1),
+                           own_bonus = field(own.get(sf::ram_profile), "ramming_bonus", -1);
                     valid = valid && own_spall >= 1 && own_spall <= 1.5 && own_bonus >= 0 &&
                             own_bonus <= .15;
                     if (valid) {
@@ -517,12 +523,13 @@ struct TankContacts {
                                                own_spall, spall, own_bonus, bonus,
                                                a.vx || a.vy || a.vz, b.vx || b.vy || b.vz);
                         Response response = resolve(a, std::vector<TankBody>{b}, {}, {}, false);
-                        V before{{field(current.state, "push_x"), field(current.state, "push_z")}};
-                        double previous_speed = field(current.state, "speed");
+                        V before{
+                            {field(current.state, sf::push_x), field(current.state, sf::push_z)}};
+                        double previous_speed = field(current.state, sf::speed);
                         apply(current, response, step, false, false);
-                        if (std::abs(field(current.state, "speed") - previous_speed) > .0001 ||
-                            std::abs(field(current.state, "push_x") - before[0]) > .0001 ||
-                            std::abs(field(current.state, "push_z") - before[1]) > .0001)
+                        if (std::abs(field(current.state, sf::speed) - previous_speed) > .0001 ||
+                            std::abs(field(current.state, sf::push_x) - before[0]) > .0001 ||
+                            std::abs(field(current.state, sf::push_z) - before[1]) > .0001)
                             contacted.insert(id);
                         if (hp.first || hp.second)
                             receipt_reports.append(
@@ -552,10 +559,10 @@ struct TankContacts {
             insertions.push_back(id);
         }
         for (const Value &raw : elements(players)) {
-            if (raw.kind != Value::Object || !raw.has("id"))
+            if (raw.kind != Value::Object || !raw.has(sf::id))
                 continue;
-            Value v = body(raw, true, base, raw.get("_kernel").get("collision"));
-            int id = integer(v, "id");
+            Value v = body(raw, true, base, raw.get(sf::_kernel).get("collision"));
+            int id = integer(v, sf::id);
             bodies.erase(id);
             bodies.emplace(id, TankBody(v));
             insertions.push_back(id);
@@ -579,7 +586,7 @@ struct TankContacts {
         frame_armors.clear();
         for (int id : ordered) {
             Bot &bot = *bots.at(id);
-            if (!flag(bot.state, "alive", true))
+            if (!flag(bot.state, sf::alive, true))
                 continue;
             const TankBody &own = bodies.at(id);
             int x = static_cast<int>(std::floor(own.x / size)),
@@ -602,7 +609,7 @@ struct TankContacts {
                     }
                 }
             if (others.empty()) {
-                if (field(bot.state, "push_x") || field(bot.state, "push_z"))
+                if (field(bot.state, sf::push_x) || field(bot.state, sf::push_z))
                     apply(bot, Response(), elapsed);
                 continue;
             }

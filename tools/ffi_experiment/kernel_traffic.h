@@ -21,22 +21,22 @@ struct Traffic {
     static double cross(V a, V b) { return a[0] * b[1] - a[1] * b[0]; }
     static V sub(V a, V b) { return {{a[0] - b[0], a[1] - b[1]}}; }
     static V pos(const Value &v) {
-        auto p = Routes::point(v.get("position"));
+        auto p = Routes::point(v.get(sf::position));
         return {{p.x, p.z}};
     }
     static V vel(const Value &v) {
-        const Value &p = v.get("velocity");
+        const Value &p = v.get(sf::velocity);
         return {{p[0].number(), p[2].number()}};
     }
     static std::array<V, 2> axes(const Value &v) {
-        double s = std::sin(field(v, "yaw")), c = std::cos(field(v, "yaw"));
+        double s = std::sin(field(v, sf::yaw)), c = std::cos(field(v, sf::yaw));
         return {{{{c, -s}}, {{s, c}}}};
     }
     static double radius(const Value &v, V axis) {
         const Value &shape = v.get("shape");
         auto a = axes(v);
-        double width = shape.kind == Value::Null ? field(v, "half_width") : shape[0].number(),
-               length = shape.kind == Value::Null ? field(v, "half_length") : shape[1].number();
+        double width = shape.kind == Value::Null ? field(v, sf::half_width) : shape[0].number(),
+               length = shape.kind == Value::Null ? field(v, sf::half_length) : shape[1].number();
         return std::abs(dot(a[0], axis)) * width + std::abs(dot(a[1], axis)) * length;
     }
     static std::pair<V, double> travel(const Value &v) {
@@ -49,7 +49,7 @@ struct Traffic {
         const Value &x = a.get("shape"), &y = b.get("shape");
         if (x.kind == Value::Null || y.kind == Value::Null)
             return true;
-        double ay = a.get("position")[1].number(), by = b.get("position")[1].number();
+        double ay = a.get(sf::position)[1].number(), by = b.get(sf::position)[1].number();
         return std::min(ay + x[3].number(), by + y[3].number()) >
                std::max(ay + x[2].number(), by + y[2].number());
     }
@@ -83,18 +83,18 @@ struct Traffic {
         return V{{p[0] + axis_a[0] * distance, p[1] + axis_a[1] * distance}};
     }
     bool holding(const Value &v, double now) const {
-        auto at = held.find(integer(v, "id"));
+        auto at = held.find(integer(v, sf::id));
         return at != held.end() && now - at->second <= 1.5;
     }
     static std::tuple<int, double, int> arrival(const Value &v, V axis, double speed, V gate,
                                                 double reference) {
         double front = dot(sub(gate, pos(v)), axis) - radius(v, axis);
         if (front <= 0)
-            return std::make_tuple(0, front, integer(v, "id"));
+            return std::make_tuple(0, front, integer(v, sf::id));
         double pace = speed > 1e-9 ? speed : reference;
         return std::make_tuple(1,
                                pace > 1e-9 ? front / pace : std::numeric_limits<double>::infinity(),
-                               integer(v, "id"));
+                               integer(v, sf::id));
     }
     offline_nav::Optional<Lease> begin(const Value &a, const Value &b, double now) {
         if (dot(vel(a), axes(a)[1]) < -1e-9 || dot(vel(b), axes(b)[1]) < -1e-9)
@@ -115,8 +115,8 @@ struct Traffic {
                 return {};
             lease.head = true;
             lease.axis = first.first;
-            lease.targets[integer(a, "id")] = field(a, "yaw") + .42;
-            lease.targets[integer(b, "id")] = field(b, "yaw") + .42;
+            lease.targets[integer(a, sf::id)] = field(a, sf::yaw) + .42;
+            lease.targets[integer(b, sf::id)] = field(b, sf::yaw) + .42;
             return lease;
         }
         if (!contact.has)
@@ -131,7 +131,7 @@ struct Traffic {
         bool won = rank_a <= rank_b;
         const Value &winner = won ? a : b, &loser = won ? b : a;
         V axis = won ? first.first : second.first;
-        lease.winner = integer(winner, "id");
+        lease.winner = integer(winner, sf::id);
         lease.axis = axis;
         lease.clear_after = dot(gate.value, axis) + radius(winner, axis) + radius(loser, axis);
         lease.until = now + 1.5;
@@ -139,7 +139,7 @@ struct Traffic {
     }
     static bool cleared(const Lease &lease, const Value &a, const Value &b) {
         if (!lease.head)
-            return dot(pos(integer(a, "id") == lease.winner ? a : b), lease.axis) >
+            return dot(pos(integer(a, sf::id) == lease.winner ? a : b), lease.axis) >
                    lease.clear_after;
         V delta = sub(pos(b), pos(a)), side{{lease.axis[1], -lease.axis[0]}};
         return dot(delta, lease.axis) <= 0 ||
@@ -149,15 +149,15 @@ struct Traffic {
                  double now, const std::function<bool(double)> &clear) {
         Value result = command.copy();
         std::string mode = command.get("combat_mode").text("route");
-        if (!flag(body, "alive", true) || command.get("recovery_mode").text("drive") != "drive" ||
+        if (!flag(body, sf::alive, true) || command.get("recovery_mode").text("drive") != "drive" ||
             (mode != "route" && mode != "advance") || field(command, "throttle") <= 0 ||
             dot(vel(body), axes(body)[1]) < -1e-9)
             return result;
         std::map<int, Value> peers;
         for (const Value &peer : elements(neighbours)) {
-            int other = integer(peer, "id");
-            if (other != id && flag(peer, "alive", true) &&
-                integer(peer, "team") == integer(body, "team") && level(body, peer))
+            int other = integer(peer, sf::id);
+            if (other != id && flag(peer, sf::alive, true) &&
+                integer(peer, sf::team) == integer(body, sf::team) && level(body, peer))
                 peers[other] = peer;
         }
         for (auto at = pairs.begin(); at != pairs.end();) {
@@ -170,7 +170,7 @@ struct Traffic {
         for (const auto &peer : peers) {
             const Value &first = id < peer.first ? body : peer.second,
                         &second = id < peer.first ? peer.second : body;
-            Pair pair(integer(first, "id"), integer(second, "id"));
+            Pair pair(integer(first, sf::id), integer(second, sf::id));
             auto at = pairs.find(pair);
             if (at != pairs.end() && cleared(at->second, first, second)) {
                 pairs.erase(at);
@@ -208,13 +208,13 @@ struct Traffic {
                     continue;
                 result["throttle"] = Value(0.0);
                 result["turn"] = Value(0.0);
-                result["target_yaw"] = body.get("yaw");
+                result["target_yaw"] = body.get(sf::yaw);
                 result["traffic_mode"] = Value("head_on_blocked");
                 held[id] = now;
                 continue;
             }
             lease.blocked.reset();
-            result["turn"] = Value(clamp(angle(target - field(body, "yaw")) / .58, -1, 1));
+            result["turn"] = Value(clamp(angle(target - field(body, sf::yaw)) / .58, -1, 1));
             result["target_yaw"] = Value(target);
             result["traffic_mode"] = Value("head_on");
         }

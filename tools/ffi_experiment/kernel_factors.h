@@ -14,7 +14,7 @@ struct Factors {
     }
     double stat(const Value &state, const CriticalConfig &config, const std::string &name,
                 bool include_crew = true) const {
-        const Value &critical = state.get("critical");
+        const Value &critical = state.get(sf::critical);
         if (!critical.truth())
             return 1;
         std::set<std::string> knocked = names(critical.get("crew_ko")),
@@ -33,7 +33,7 @@ struct Factors {
         const Value &devices = critical.get("devices");
         if (devices.kind != Value::Null)
             for (const Value &v : elements(devices))
-                records[v.get("name").text()] = &v;
+                records[v.get(sf::name).text()] = &v;
         double factor = 1;
         for (const Value &v : elements(spec[0])) {
             std::string device = v.text();
@@ -55,21 +55,22 @@ struct Factors {
     double vision(double value) const { return clamp(value, minimum_vision, 1); }
 };
 inline Value point(double x, double y, double z) {
-    Value v = Value::array();
+    Value v = Value::array(3);
     v.append(Value(x));
     v.append(Value(y));
     v.append(Value(z));
     return v;
 }
-inline Value position(const Value &v) { return point(field(v, "x"), field(v, "y"), field(v, "z")); }
+inline Value position(const Value &v) {
+    return point(field(v, sf::x), field(v, sf::y), field(v, sf::z));
+}
 inline Value target_position(const Value &v) {
-    const Value &p = v.get("position");
+    const Value &p = v.get(sf::position);
     return p.kind == Value::Array && p.size() == 3 ? p : position(v);
 }
-inline Value select_fields(const Value &source, const Value &keys) {
-    Value v = Value::object();
-    for (const Value &key : elements(keys)) {
-        std::string name = key.text();
+inline Value select_fields(const Value &source, const std::vector<Field> &keys) {
+    Value v = Value::record();
+    for (Field name : keys) {
         if (source.has(name))
             v[name] = source.get(name);
     }
@@ -78,8 +79,7 @@ inline Value select_fields(const Value &source, const Value &keys) {
 inline void update(Value &target, const Value &source) {
     if (source.kind != Value::Object)
         throw std::invalid_argument("kernel mapping update");
-    for (const auto &v : source.data->object)
-        target[v.first] = v.second;
+    target.assign_fields(source);
 }
 inline double angle(double v) {
     const double pi = 3.14159265358979323846;

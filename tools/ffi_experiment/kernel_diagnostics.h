@@ -12,17 +12,17 @@ struct Diagnostics {
     Diagnostics(const Value &c, std::map<int, std::unique_ptr<Bot>> &b) : config(c), bots(b) {}
     void emit(const std::string &kind, const Value &payload) {
         Value row = Value::object();
-        row["kind"] = Value(kind);
+        row[sf::kind] = Value(kind);
         row["payload"] = payload;
         records.append(row);
     }
     void begin(Bot &bot, const Value &command, double throttle, double turn, bool clear,
                bool frozen, const Value &probe, double now, int grind) {
         Value &s = bot.state;
-        int id = integer(s, "id");
+        int id = integer(s, sf::id);
         Value p = position(s);
         if (flag(config, "debug")) {
-            int direction = integer(s, "movement_dir");
+            int direction = integer(s, sf::movement_dir);
             auto at = flips.find(id);
             if (at == flips.end())
                 flips[id] = {{static_cast<double>(direction), now, -10}};
@@ -33,18 +33,18 @@ struct Diagnostics {
                 if (direction && prior[0] && now - prior[1] <= 2 && now - prior[2] >= 1) {
                     at->second[2] = now;
                     Value row = Value::object();
-                    row["id"] = Value(id);
+                    row[sf::id] = Value(id);
                     row["from"] = Value(static_cast<int>(prior[0]));
                     row["to"] = Value(direction);
                     row["elapsed"] = Value(now - prior[1]);
-                    row["position"] = p;
+                    row[sf::position] = p;
                     row["path_clear"] = Value(clear);
                     row["probe"] = probe;
                     emit("BOT FLIP", row);
                 }
             }
         }
-        const Value &prior = s.get("_motion_stall_log");
+        const Value &prior = s.get(sf::_motion_stall_log);
         bool moved = false;
         if (prior.kind == Value::Array) {
             double dx = p[0].number() - prior[0][0].number(),
@@ -55,7 +55,7 @@ struct Diagnostics {
             Value row = Value::array();
             row.append(p);
             row.append(Value(now));
-            s["_motion_stall_log"] = row;
+            s[sf::_motion_stall_log] = row;
             return;
         }
         if (now - prior[1].number() < 3)
@@ -63,26 +63,26 @@ struct Diagnostics {
         Value marker = Value::array();
         marker.append(prior[0]);
         marker.append(Value(now));
-        s["_motion_stall_log"] = marker;
+        s[sf::_motion_stall_log] = marker;
         Value trace = Value::object();
-        trace["id"] = Value(id);
-        trace["vehicle"] = s.get("vehicle");
+        trace[sf::id] = Value(id);
+        trace[sf::vehicle] = s.get(sf::vehicle);
         trace["native_motion"] = Value(flag(config, "native_motion"));
         trace["start"] = p;
-        trace["speed_before"] = Value(field(s, "speed"));
+        trace["speed_before"] = Value(field(s, sf::speed));
         trace["requested_throttle"] = Value(throttle);
         trace["turn"] = Value(turn);
         for (const char *key : {"yaw", "pitch", "roll"})
             trace[key] = s.get(key);
-        trace["shape"] = s.get("collision_shape");
-        s["_motion_stall_pending"] = trace;
+        trace["shape"] = s.get(sf::collision_shape);
+        s[sf::_motion_stall_pending] = trace;
         Value row = trace.copy();
         row["command"] = command.copy();
-        row["water_depth"] = Value(field(s, "_water_depth", -1));
+        row["water_depth"] = Value(field(s, sf::_water_depth, -1));
         row["path_clear"] = Value(clear);
         row["probe"] = probe;
         row["frozen"] = Value(frozen);
-        row["hull_aiming"] = Value(flag(s, "hull_aiming"));
+        row[sf::hull_aiming] = Value(flag(s, sf::hull_aiming));
         row["grind"] = Value(grind);
         row["planner_age"] = Value(planner_age);
         emit("BOT STALL", row);
@@ -90,27 +90,28 @@ struct Diagnostics {
     void finish(Bot &bot, bool support, bool rollback, const Value &settled,
                 const std::set<std::pair<int, int>> &contacts) {
         Value &s = bot.state;
-        Value trace = s.get("_motion_stall_pending");
+        Value trace = s.get(sf::_motion_stall_pending);
         if (trace.kind == Value::Null)
             return;
-        s.erase("_motion_stall_pending");
+        s.erase(sf::_motion_stall_pending);
         Value p = position(s), nearby = Value::array(), pairs = Value::array(),
               delta = Value::array();
-        int id = integer(s, "id");
+        int id = integer(s, sf::id);
         for (const auto &v : bots) {
             if (v.first == id)
                 continue;
             const Value &other = v.second->state;
-            double dx = field(other, "x") - p[0].number(), dz = field(other, "z") - p[2].number();
+            double dx = field(other, sf::x) - p[0].number(),
+                   dz = field(other, sf::z) - p[2].number();
             if (dx * dx + dz * dz > 144)
                 continue;
             Value row = Value::object();
-            row["id"] = Value(v.first);
-            row["position"] = position(other);
+            row[sf::id] = Value(v.first);
+            row[sf::position] = position(other);
             for (const char *key : {"yaw", "speed"})
                 row[key] = other.get(key);
-            row["alive"] = Value(flag(other, "alive", true));
-            row["shape"] = other.get("collision_shape");
+            row[sf::alive] = Value(flag(other, sf::alive, true));
+            row["shape"] = other.get(sf::collision_shape);
             nearby.append(row);
         }
         for (const auto &pair : contacts) {
@@ -125,10 +126,10 @@ struct Diagnostics {
         delta.append(Value(p[2].number() - settled[2].number()));
         trace["nearby"] = nearby;
         trace["final"] = p;
-        trace["speed_final"] = Value(field(s, "speed"));
+        trace["speed_final"] = Value(field(s, sf::speed));
         trace["support_rollback"] = Value(support);
         trace["pose_rollback"] = Value(rollback);
-        trace["airborne"] = Value(flag(s, "airborne"));
+        trace[sf::airborne] = Value(flag(s, sf::airborne));
         trace["post_settle_delta"] = delta;
         trace["contact_pairs"] = pairs;
         emit("BOT MOTION", trace);
