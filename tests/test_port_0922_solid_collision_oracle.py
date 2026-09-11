@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -378,6 +379,182 @@ class SolidCollisionOracleTests(unittest.TestCase):
             expected.append((length * fractions[index], cosine,
                              materials[index], name))
         return sorted(expected, key=lambda item: item[0])
+
+    def test_live_hydraulic_critical_rays_and_cones_use_the_armour_frames(self):
+        from test_port_0922_battle_projectiles import _battle, _event, _Vector
+        from gui.mods.offline_lan_0922 import (
+            combat_rules, critical_damage, internal_geometry,
+            internal_hit_layouts)
+
+        body_pose = (0.63, -0.31, 0.22, (13.0, -4.0, 8.0))
+        chassis_pose = (-0.23, 0.16, -0.19, (11.0, -4.7, 7.5))
+        chain = _component_oracle(
+            _oracle_pose(*body_pose), _oracle_pose(*chassis_pose),
+            HULL_OFFSET, TURRET_OFFSET, GUN_OFFSET,
+            STATIC_TURRET_YAW, STATIC_GUN_PITCH)
+        descriptor, expected_rays, unused_materials = _descriptor_for_ray(
+            chain, START, END, FRACTIONS)
+        descriptor.isPitchHullAimingAvailable = True
+        layout = {'valid': True, 'targets': [
+            {'parent': name, 'entity': name}
+            for name in ('chassis', 'hull', 'turret', 'gun')]}
+
+        for mode, local in (('ap', False), ('ap', True),
+                            ('he_direct', False), ('he_direct', True),
+                            ('he_splash', False)):
+            with self.subTest(mode=mode, local=local):
+                battle, unused_bigworld = _battle()
+                battle._worker_mode = True
+                battle._runtime.math.Matrix = Matrix
+                source = battle._server_entity(41)
+                target = types.SimpleNamespace(
+                    id=55, health=1000, isStarted=True,
+                    isAlive=lambda: True, isTurretDetached=False,
+                    typeDescriptor=descriptor, position=_Vector((11., -4.7, 7.5)),
+                    matrix=self._matrix(0., 0., 0., (150., 0., 0.)),
+                    model=types.SimpleNamespace(
+                        matrix=self._matrix(0., 0., 0., (75., 0., 0.))),
+                    appearance=types.SimpleNamespace(
+                        turretMatrix=self._matrix(STATIC_TURRET_YAW, 0., 0., (0., 0., 0.)),
+                        gunMatrix=self._matrix(0., STATIC_GUN_PITCH, 0., (0., 0., 0.))))
+                # A stock component chain lives below its native model/filter
+                # basis. Neither is the LAN body used by the armour query.
+                target.getComponents = lambda: tuple(
+                    (getattr(descriptor, name), Matrix(), True)
+                    for name in ('chassis', 'hull', 'turret', 'gun'))
+                record = {'engine_id': 55, 'network_id': 17, 'kind': 'bot',
+                          'native_remote': not local, 'local': local,
+                          'ready': True,
+                          'state': {'health': 1000, 'alive': True}}
+                battle._records = {'bot:17': record}
+                battle._server_entity = lambda entity_id: (
+                    target if entity_id == 55 else source)
+                battle._remote_factory = types.SimpleNamespace(
+                    projectile_collision_matrices=lambda *unused: (
+                        self._matrix(*body_pose), self._matrix(*chassis_pose)))
+                if local:
+                    battle._local_matrix = self._matrix(*chassis_pose)
+                    battle._local_body_pose = lambda: self._matrix(*body_pose)
+                event = _event()
+                if mode != 'ap':
+                    event['source_shot']['shell'].update(
+                        kind='HIGH_EXPLOSIVE', explosionRadius=5.)
+                    event.update(is_he=True, splash_radius=5.)
+                meta = battle._projectile_wire_meta(event)
+                collision = types.SimpleNamespace(
+                    dist=5., hitAngleCos=1., matInfo=object(), compName='vehicleHull')
+                terminal = {'target_key': 'bot:17', 'collisions': [collision],
+                            'query': (_Vector(START), _Vector(END)),
+                            'impact': START, 'piercing_loss': 0.,
+                            'penetration_factor': 1.}
+                captured = {}
+
+                def ray_interval(start, end, part):
+                    captured[part['parent']] = (start, end)
+                    return None
+
+                def cone_hits(unused_layout, contexts, *args, **kwargs):
+                    captured.update(contexts)
+                    return ()
+
+                def critical(vehicle, unused_layers, *args, **kwargs):
+                    # Run the real proposal snapshot and interior transform
+                    # consumers at the point the live fallback hands them off.
+                    shadow = critical_damage._CriticalProposalVehicle(vehicle)
+                    if mode == 'ap':
+                        critical_damage._offh_internal_ray_hits(
+                            shadow, descriptor, _Vector(START), _Vector(END))
+                    else:
+                        critical_damage._offh_internal_cone_hits(
+                            shadow, descriptor, _Vector(START),
+                            _Vector(END) - _Vector(START), {'caliber': 100.})
+                    for name, unused_root, unused_component in chain:
+                        parent = name[len('vehicle'):].lower()
+                        expected_start, expected_end = expected_rays[name]
+                        if mode == 'ap':
+                            _near_point(self, captured[parent][0], expected_start)
+                            _near_point(self, captured[parent][1], expected_end)
+                        else:
+                            _near_point(self, captured[parent]['point'], expected_start)
+                            delta = _oracle_subtract(expected_end, expected_start)
+                            length = _oracle_length(delta)
+                            _near_point(self, captured[parent]['direction'],
+                                        tuple(value / length for value in delta))
+                    return 390, None, None
+
+                math_module = types.SimpleNamespace(Matrix=Matrix, Vector3=Vector)
+                with mock.patch.dict(sys.modules, {'Math': math_module}), \
+                        mock.patch.object(critical_damage, '_offh_internal_layout', return_value=layout), \
+                        mock.patch.object(internal_geometry, 'target_interval', side_effect=ray_interval), \
+                        mock.patch.object(internal_hit_layouts, 'resolve_explosion', side_effect=cone_hits), \
+                        mock.patch.object(combat_rules, 'resolve_armor_contact', return_value={'result': 2}), \
+                        mock.patch.object(combat_rules, 'damage', return_value=390), \
+                        mock.patch.object(critical_damage, 'propose_direct', side_effect=critical), \
+                        mock.patch.object(critical_damage, 'propose_explosion', side_effect=critical):
+                    if mode == 'he_splash':
+                        battle._projectile_historic_pose = lambda *unused: {'x': 11., 'y': -4.7, 'z': 7.5}
+                        battle._projectile_he_blast_contact = lambda *args, **kwargs: {
+                            'damage': 390, 'collisions': [collision],
+                            'point': START, 'direction': _oracle_subtract(END, START)}
+                        effects = battle._projectile_splash_effects(
+                            meta, START, None, state={'cursor_time': 0.})
+                        self.assertEqual(1, len(effects))
+                    else:
+                        effect = battle._projectile_direct_effect(
+                            meta, {'start': START, 'distance': 5.}, terminal)
+                        self.assertEqual(390, effect['damage'])
+
+    def test_missing_live_critical_body_does_not_invent_interior_geometry(self):
+        from test_port_0922_battle_projectiles import _battle, _Vector
+        from gui.mods.offline_lan_0922 import critical_damage
+
+        battle, unused_bigworld = _battle()
+        battle._runtime.math.Matrix = mock.Mock(
+            side_effect=AssertionError('missing body must not become identity'))
+        battle._projectile_vehicle_matrices = lambda *unused: (None, None)
+        target = types.SimpleNamespace(
+            id=55, health=500, position=_Vector(), matrix=object(),
+            typeDescriptor=types.SimpleNamespace(),
+            getComponents=mock.Mock(side_effect=AssertionError('stale native frame')))
+        layout = {'valid': True, 'targets': [{'parent': 'hull'}]}
+        for record in ({'native_remote': True}, {'local': True}):
+            with self.subTest(record=record):
+                proxy = battle._projectile_live_critical_target(record, target)
+                shadow = critical_damage._CriticalProposalVehicle(proxy)
+                with mock.patch.object(critical_damage, '_offh_internal_layout', return_value=layout):
+                    self.assertEqual([], critical_damage._offh_internal_ray_hits(
+                        shadow, target.typeDescriptor, _Vector(), _Vector((1., 0., 0.))))
+                    self.assertEqual([], critical_damage._offh_internal_cone_hits(
+                        shadow, target.typeDescriptor, _Vector(), _Vector((1., 0., 0.)),
+                        {'caliber': 100.}))
+
+    def test_historical_critical_chassis_keeps_its_frozen_body_frame(self):
+        from test_port_0922_battle_projectiles import _battle
+
+        battle, unused_bigworld = _battle()
+        battle._runtime.math.Matrix = Matrix
+        pose_args = (0.63, -0.31, 0.22, (13.0, -4.0, 8.0))
+        body = _oracle_pose(*pose_args)
+        chain = _component_oracle(
+            body, body, HULL_OFFSET, TURRET_OFFSET, GUN_OFFSET,
+            STATIC_TURRET_YAW, STATIC_GUN_PITCH)
+        descriptor, expected_rays, unused_materials = _descriptor_for_ray(
+            chain, START, END, FRACTIONS)
+        source = types.SimpleNamespace(
+            typeDescriptor=descriptor, isTurretDetached=False,
+            matrix=self._matrix(0., 0., 0., (150., 0., 0.)))
+        pose = dict(zip(('yaw', 'pitch', 'roll'), pose_args[:3]))
+        pose.update(zip(('x', 'y', 'z'), pose_args[3]))
+        frozen = battle._projectile_frozen_target(source, pose)
+        inverse = Matrix(frozen.matrix)
+        inverse.invert()
+        for component, matrix, attached in frozen.getComponents():
+            self.assertTrue(attached)
+            start = matrix.applyPoint(inverse.applyPoint(Vector(START)))
+            end = matrix.applyPoint(inverse.applyPoint(Vector(END)))
+            expected_start, expected_end = expected_rays[component.itemTypeName]
+            _near_point(self, tuple(start), expected_start)
+            _near_point(self, tuple(end), expected_end)
 
     def test_collision_uses_row_vector_component_chain_and_separate_chassis(self):
         body = _oracle_pose(0.63, -0.31, 0.22, (13.0, -4.0, 8.0))

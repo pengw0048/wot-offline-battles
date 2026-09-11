@@ -1155,19 +1155,31 @@ class _ProjectileCollisionTarget(object):
     """Read-only target view shared by armour and critical-hit geometry."""
 
     def __init__(self, source, descriptor, matrix, position, appearance,
-                 math_module):
+                 math_module, chassis_matrix=None):
         self._source = source
         self.typeDescriptor = descriptor
         self.matrix = matrix
         self.position = position
         self.appearance = appearance
         self._math = math_module
+        self._chassis_matrix = chassis_matrix
 
     def __getattr__(self, name):
         return getattr(self._source, name)
 
     def getComponents(self):
-        return _pose_components(self, self._math)
+        if self.matrix is None:
+            return ()
+        components = _pose_components(self, self._math)
+        if self._chassis_matrix is not None:
+            # Interior consumers enter through inverse(body). The chassis
+            # alone belongs to the separate hydraulic ground frame, just as
+            # the exterior armour query does.
+            to_chassis = self._math.Matrix(self._chassis_matrix)
+            to_chassis.invert()
+            to_chassis.preMultiply(self.matrix)
+            components[0][1].preMultiply(to_chassis)
+        return components
 
 
 def _field(value, name, default=None):
@@ -13626,6 +13638,30 @@ class BattleRuntime(object):
             return (tuple(item.collision for item in evidence), evidence)
         return (tuple(target.collideSegmentExt(start, end) or ()), ())
 
+    def _projectile_live_critical_target(self, record, target):
+        """Pair live interior components with the exterior collision owner.
+
+        Stock getComponents contains model-to-native-filter transforms. LAN
+        native vehicles use a separately driven body/chassis, so borrowing
+        stock components would put interior modules back at the filter pose.
+        Historical targets already own their component frame and bypass this.
+        """
+        if not (record.get('local') or record.get('native_remote')):
+            return target
+        body = chassis = None
+        if record.get('local'):
+            if self._local_matrix is not None:
+                body, chassis = self._local_body_pose(), self._local_matrix
+        else:
+            body, chassis = self._projectile_vehicle_matrices(record, target)
+        matrix = self._runtime.math.Matrix
+        return _ProjectileCollisionTarget(
+            target, target.typeDescriptor,
+            matrix(body) if body is not None else None,
+            target.position, getattr(target, 'appearance', None),
+            self._runtime.math,
+            matrix(chassis) if chassis is not None else None)
+
     @timed('projectile.chord')
     def _projectile_chord(self, state, start, end,
                           absolute_start, absolute_end):
@@ -14402,6 +14438,9 @@ class BattleRuntime(object):
                 target, collision_pose)
             if critical_target is None:
                 return None
+        else:
+            critical_target = self._projectile_live_critical_target(
+                record, target)
         collisions, trace_start, trace_end = self._vehicle_trace(
             shot, query[0], query[1], collisions)
         if not combat_rules.is_he(shot):
@@ -14674,6 +14713,9 @@ class BattleRuntime(object):
                                 meta, state, 'he_splash_pose', key,
                                 'historic_component_matrix_unavailable')
                             continue
+                if pose is None:
+                    critical_target = self._projectile_live_critical_target(
+                        record, target)
                 # One victim roll is shared by all candidate directions.
                 rolled_damage = combat_rules.damage(shot, 2, 0.0)
                 contact = self._projectile_he_blast_contact(

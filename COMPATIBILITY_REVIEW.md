@@ -2504,6 +2504,14 @@ budget, an undrawn target or a failed `createEntity` therefore costs the
 *flight*, never the detachment: retail has no `DetachedTurret` in AOI for a
 vehicle never spotted, but its wreck is turretless for everyone regardless.
 
+Live interior probes use the same LAN body and chassis matrices as exterior
+armour queries. Stock `getComponents` includes transforms through the native
+model/filter frame, which the LAN adapter does not drive. Reusing that frame
+after accepting its attachment triples displaced AP rays and HE cones on
+hydraulic vehicles. The live proxy now retains the separate chassis frame;
+historical proxies keep their frozen frame, and missing geometry produces no
+interior hit. Directed local/remote AP and HE tests reproduce the old mismatch.
+
 The synchronous constructor handshake is separate from asynchronous world
 entry. Exact `DetachedTurret.prerequisites` returns a `CompoundAssembler` and
 the vehicle descriptor's resources; `onEnterWorld(prereqs)` installs the
