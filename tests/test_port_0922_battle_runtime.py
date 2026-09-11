@@ -5891,44 +5891,21 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         turrets.prepare.assert_not_called()
         turrets.launch.assert_not_called()
 
-    def test_the_worker_retains_the_landed_turret_as_an_obstacle(self):
-        """The room's only collision authority owns the thrown turret.
-
-        Retail's ``DetachedTurret`` is a real entity with its own
-        ``collideSegment``; the hidden worker draws nothing and can hold no
-        compound, so it keeps the same geometry from the same arc instead.
-        """
+    def test_the_worker_detaches_without_resolving_a_visual_arc(self):
         battle, record, vehicle = self._ammo_bay_death_battle()
         battle._worker_mode = True
-        obstacles = mock.Mock()
-        obstacles.add.return_value = True
-        battle._detached_turret_obstacles = obstacles
+        battle._turret_detachment_pose = mock.Mock(
+            side_effect=AssertionError('worker must not plan a visual arc'))
+        battle._collide_detached_turret = mock.Mock(
+            side_effect=AssertionError('worker must not query a visual arc'))
 
+        battle._apply_health(record, self._ammo_bay_death_state())
         battle._apply_health(record, self._ammo_bay_death_state())
 
         self.assertEqual(vehicle.health, _TURRET_DETACHED)
         self.assertTrue(vehicle.isTurretDetached)
-        obstacles.add.assert_called_once()
-        plan, seed, unused_now = obstacles.add.call_args[0]
-        self.assertEqual(plan['entity_id'], vehicle.id)
-        self.assertEqual(
-            seed, battle._turret_detachment_seed(record['engine_id']))
-        # The ring is hullPosition + hull.turretPositions[0] over the
-        # authoritative pose, not this peer's render compound.
-        self.assertAlmostEqual(plan['launch'][1], 3.6)
-
-    def test_a_visible_client_owns_no_turret_obstacle(self):
-        """One owner: the worker resolves collision, the client presents."""
-        battle, record, unused_vehicle = self._ammo_bay_death_battle()
-        turrets = mock.Mock()
-        turrets.prepare.return_value = {'plan': True}
-        turrets.launch.return_value = True
-        battle._detached_turrets = turrets
-
-        battle._apply_health(record, self._ammo_bay_death_state())
-
-        self.assertIsNone(battle._detached_turret_obstacles)
-        turrets.launch.assert_called_once()
+        battle._turret_detachment_pose.assert_not_called()
+        battle._collide_detached_turret.assert_not_called()
 
     def test_a_plain_death_never_touches_the_detachment_flag(self):
         battle, record, vehicle = self._ammo_bay_death_battle()

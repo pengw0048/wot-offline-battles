@@ -31,7 +31,7 @@ from gui.mods.offline_lan_0922.entities.avatar_server import AvatarServerBridge
 from gui.mods.offline_lan_0922.entities.bigworld_binding import \
     BigWorldVehicleBinding
 from gui.mods.offline_lan_0922.entities.detached_turret import \
-    DetachedTurretObstacles, DetachedTurretPresentation, detachment_plan
+    DetachedTurretPresentation
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory, present_shot_impulse, set_draw_visibility
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
@@ -1591,7 +1591,6 @@ class BattleRuntime(object):
         self._server = None
         self._remote_factory = None
         self._detached_turrets = None
-        self._detached_turret_obstacles = None
         self._descriptor_cache = {}
         self._prepared_vehicle_names = []
         self._unusable_vehicles_reported = set()
@@ -3091,14 +3090,6 @@ class BattleRuntime(object):
                 self._detached_turrets = DetachedTurretPresentation(
                     self._runtime.bigworld, self._runtime.math, self._avatar,
                     self._collide_detached_turret, log=turret_log)
-            else:
-                # The worker draws nothing, but it is the only collision
-                # authority in the room, so it owns the landed turret every
-                # visible client presents.  Geometry only: no compound, no
-                # entity, no model.
-                self._detached_turret_obstacles = DetachedTurretObstacles(
-                    self._runtime.math, self._collide_detached_turret,
-                    log=turret_log)
             builder = EntityPropertyBuilder(
                 BigWorldVehicleBinding.PROPERTY_NAMES)
             self._sender = _LANInputSender(self)
@@ -4901,11 +4892,9 @@ class BattleRuntime(object):
         """Segment query used to walk a detached turret's arc to the ground.
 
         Flag 128 is the same terrain-and-static mask every motion probe in
-        this port uses, and the same per-column broken-skin filter: the arc's
-        end pose is the worker's obstacle, so a turret must not come to rest
-        on the skin of a fence the room has already accepted as broken and
-        leave an invisible wall in the air.  Each step covers well under a
-        metre, so one column filter matches the segment it filters.
+        this port uses, and the same per-column broken-skin filter.  The
+        cosmetic arc must not rest on a fence skin the room has already
+        accepted as broken.
         """
         ground_filter = self._ground_filter(float(start[0]), float(start[2]))
         collision = self._collide_down(
@@ -4914,29 +4903,6 @@ class BattleRuntime(object):
             return None
         point = collision[0]
         return (float(point.x), float(point.y), float(point.z))
-
-    def _detached_turret_block_distance(self, start, end):
-        """Return how far along a shot a landed detached turret stops it.
-
-        Retail resolves this through the ``DetachedTurret`` entity's own
-        ``collideSegment``; this port has no such entity in the worker, so the
-        authority tests the identical turret and gun hit testers at the
-        frozen rest pose.  ``None`` means nothing settled is in the way.
-        """
-        obstacles = self._detached_turret_obstacles
-        if obstacles is None or not obstacles.active():
-            # Every projectile chord asks this. Most rounds never throw a
-            # turret, so cost nothing before the first one lands.
-            return None
-        try:
-            return obstacles.block_distance(
-                self._vector(start), self._vector(end), self._clock())
-        except Exception as error:
-            # A shot already resolved against the world and every vehicle must
-            # not be lost to a turret obstacle query.
-            self._warn_optional_failure(
-                'detached turret collision', error, disable=False)
-            return None
 
     def _collide_down(self, start, end, ground_filter):
         """Vertical probe that skips the skin of an already broken item."""
@@ -13981,16 +13947,6 @@ class BattleRuntime(object):
         meta['penetration_factor'] = scene.get(
             'penetration_factor', meta.get('penetration_factor'))
         world_distance = scene['world_distance']
-        turret_distance = self._detached_turret_block_distance(
-            start, scene_end_tuple)
-        if turret_distance is not None and turret_distance < world_distance:
-            # A landed turret is an obstacle, not a target: retail's
-            # ``DetachedTurret`` answers ``collideSegment`` out of its own
-            # turret and gun hit testers, but the hidden worker owns no
-            # entity to damage here.  Terminating the shell on it is the same
-            # terminal path a wall takes, with its own stop reason.
-            world_distance = turret_distance
-            scene['stop_reason'] = 'detached_turret'
         cap_distance = chord_length * nearest_fraction
         world_blocks = (
             world_distance < 99999.0 and
@@ -23810,13 +23766,11 @@ class BattleRuntime(object):
     def _turret_detachment_pose(self, record, state, entity):
         """Return the authoritative terminal pose one detachment starts from.
 
-        Reading the room's own pose instead of this peer's interpolated
-        render pose is what makes the arc reproducible: the hidden worker and
-        every visible client feed identical inputs to the same deterministic
-        flight, so the obstacle the worker keeps sits where each client draws
-        the turret, with no wire field for it.  A health-only combat event
+        Use the latest admitted pose instead of a compound that may already
+        have been replaced by the death callback.  A health-only combat event
         carries no pose of its own, so fall back to the record and finally to
-        the entity itself rather than skipping the detachment.
+        the entity itself.  The arc is cosmetic: different snapshot arrival
+        times can still leave peers with different admitted poses.
         """
         for source in (state, record.get('state')):
             if not isinstance(source, dict):
@@ -23836,9 +23790,8 @@ class BattleRuntime(object):
                     _angle_delta(yaw, _number(source.get('aim_yaw'), yaw))),
             }
         if record.get('local') and self._local_position is not None:
-            # The admitted state above is preferred even for the local
-            # player: it is the one pose the worker also has, so the obstacle
-            # it keeps and the turret drawn here start from the same ring.
+            # Prefer admitted state even for the local player so the launch
+            # ring follows the terminal record when that record has a pose.
             return {
                 'x': float(self._local_position[0]),
                 'y': float(self._local_position[1]),
@@ -23884,20 +23837,21 @@ class BattleRuntime(object):
         The detachment itself is not optional and not presentation: retail
         encodes it in the vehicle's own ALL_CLIENTS health, so the hull is
         turretless -- and its turret and gun hit testers are gone -- on every
-        peer.  The hidden worker additionally retains the landed turret as the
-        room's only authoritative obstacle, exactly the role retail's
-        ``DetachedTurret`` entity plays with its own ``collideSegment``.  Only
-        the flying entity is AOI-gated, and only a visible client draws one.
+        peer.  The flying entity remains cosmetic and is AOI-gated; the
+        hidden worker must not resolve an arc or create an obstacle for a
+        turret that a visible client may never draw.
         """
         if bool(getattr(entity, 'isTurretDetached', False)):
             return False
-        seed = self._turret_detachment_seed(record['engine_id'])
-        now = self._clock()
-        pose = self._turret_detachment_pose(record, state, entity)
         # Creation can synchronously enter stock SynchronousDetachment, and a
         # marked-but-unconfirmed wreck would assemble its turret back on.
         # Install the whole terminal identity before anything else runs.
         self._mark_turret_detached(entity)
+        if self._worker_mode:
+            return True
+        seed = self._turret_detachment_seed(record['engine_id'])
+        now = self._clock()
+        pose = self._turret_detachment_pose(record, state, entity)
         plan = None
         if (pose is not None and self._detached_turrets is not None and
                 not record.get('_ammo_turret_attempted') and
@@ -23913,13 +23867,6 @@ class BattleRuntime(object):
             self._run_optional_feature(
                 'ammo-bay turret detachment', self._detached_turrets.launch,
                 (plan, seed, now), disable=False)
-        if self._detached_turret_obstacles is not None and pose is not None:
-            obstacle_plan = detachment_plan(entity, pose)
-            if obstacle_plan is not None:
-                self._run_optional_feature(
-                    'detached turret collision',
-                    self._detached_turret_obstacles.add,
-                    (obstacle_plan, seed, now), disable=False)
         return True
 
     def _detach_late_ammo_turret(self, record, entity, state=None):
@@ -23935,8 +23882,8 @@ class BattleRuntime(object):
 
         Retail's ``DetachedTurret`` is a cell entity, so an unspotted enemy
         simply never has one in AOI.  Our replicas never leave AOI, so reuse
-        the same team-knowledge gate the retail dead marker uses: an unseen
-        death keeps exactly the wreck it has today.
+        the same team-knowledge gate the retail dead marker uses. An unseen
+        death still removes the wreck's turret without creating a flight.
         """
         if record.get('local'):
             return True
@@ -24094,8 +24041,7 @@ class BattleRuntime(object):
             if ammo_rack_death:
                 # The worker draws nothing and must never load a second
                 # compound, but it owns every hit tester in the room.  Publish
-                # the same attachment fact its collision reads, and retain the
-                # landed turret it throws.
+                # the same attachment fact its collision reads.
                 self._apply_turret_detachment(record, entity, state)
             notifier = getattr(entity, 'set_health', None)
             if callable(notifier):
@@ -24784,14 +24730,6 @@ class BattleRuntime(object):
             except Exception as error:
                 if cleanup_error is None:
                     cleanup_error = error
-        if self._detached_turret_obstacles is not None:
-            # Pure geometry: dropping it releases the last reference this
-            # round holds to a dead vehicle's descriptor components.
-            try:
-                self._detached_turret_obstacles.clear()
-            except Exception as error:
-                if cleanup_error is None:
-                    cleanup_error = error
         if self._detached_turrets is not None:
             # Detached turrets are separate client-created entities holding a
             # compound each.  Retire them at the synchronous leaveArena
@@ -24998,7 +24936,6 @@ class BattleRuntime(object):
         self._server = None
         self._remote_factory = None
         self._detached_turrets = None
-        self._detached_turret_obstacles = None
         self._sender = None
         self._sync = None
         self._bots = None

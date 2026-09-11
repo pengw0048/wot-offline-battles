@@ -17,33 +17,26 @@ switches to ``turret_touchdown_*`` / ``flamingOnGround`` when
 ``onStaticCollision`` reports the landing, and ``VehicleStickers`` reattaches
 the vehicle's own marks and damage decals.
 
-Collision is owned separately, by ``DetachedTurretObstacles`` below.  Retail's
-``DetachedTurret`` is a real entity -- its ``.def`` publishes ``receiveShot``
-and ``onDamageVehicle``, and its client half answers ``collideSegment`` out of
-the turret and gun hit testers -- but in this port the hidden worker is the
-only collision authority in the room, and it draws nothing.  Both halves
-therefore resolve the *same* deterministic arc from the same replicated
-inputs: the worker keeps the landed turret's geometry, every visible client
-keeps its presentation, and neither has to replicate the other.
+The vehicle's detachment flag removes the turret and gun from the source
+wreck's collision on every peer, including the hidden worker.  The flying
+entity remains presentation only: clients can omit it for an unseen vehicle,
+a full model budget, or a failed asynchronous model load.  A worker obstacle
+would therefore block shots at a turret that some clients never draw.
 
 Two deliberate differences from retail remain:
 
-* the entity this class creates is excluded from the visible client's own
-  dynamic collision through the same ``_offlineNativeRemote`` draw gate the
-  port already uses for a LAN remote the client must not collide against.  It
-  keeps its stock ``ProjectileAwareEntities`` membership so ``onLeaveWorld``
-  stays intact.  Shots are stopped by the worker's obstacle instead, so the
-  client's aim marker does not colour on a landed turret even though a shell
-  fired at one terminates on it.
+* the flying and landed turret is not shootable and does not block a shot.
+  It keeps its stock ``ProjectileAwareEntities`` membership so
+  ``onLeaveWorld`` stays intact, and is excluded from dynamic collision
+  through the port's existing ``_offlineNativeRemote`` draw gate.
 * ``isCollidingWithWorld`` stays false for its whole life.  It is the only
   gate that makes ``__checkIsBeingPulled`` read native ``Entity.velocity``
   off the unfed ``WGTurretFilter``, and the property drives nothing but the
   drag/pull effect this version does not produce.  Retail's turret is also a
-  cell-physics body that a tank can push and be crushed by; nothing here
-  reproduces that, so a landed turret blocks shots but not vehicles.
+  cell-physics body that a tank can push and be crushed by; this port does
+  not reproduce that body.
 """
 
-import math
 import sys
 
 from gui.mods.offline_lan_0922 import shot_geometry
@@ -53,7 +46,7 @@ from gui.mods.offline_lan_0922 import turret_detachment
 # One detached turret owns a turret plus gun compound for the rest of the
 # round.  The client is 32-bit and has run out of address space on a single
 # large texture reservation before, so bound how many can be resident at
-# once; beyond the cap the vehicle keeps its burn-off wreck and turret.
+# once; beyond the cap the wreck still detaches, but its flying turret is omitted.
 MAX_ACTIVE_TURRETS = 12
 
 _ENTITY_TYPE = 'DetachedTurret'
@@ -88,13 +81,11 @@ class DetachedTurretPresentation(object):
 
         Returns ``None`` whenever this exact target cannot carry the stock
         detachment.  A missing exploded model is not an error to escalate:
-        the vehicle keeps the plain wreck it has today.
+        the vehicle still becomes a turretless wreck without a flying entity.
 
-        ``pose`` is the authoritative terminal pose the whole room agreed on,
-        not this client's interpolated render pose.  Every peer therefore
-        starts the identical arc from the identical turret ring, which is what
-        lets the hidden worker own the landed turret's collision while a
-        visible client owns only its presentation.
+        ``pose`` is the latest admitted terminal state available on this
+        client.  The descriptor places the launch ring without relying on a
+        compound that a health callback may already have replaced.
         """
         if self._closed or len(self._turrets) >= self._max_active:
             return None
@@ -373,8 +364,8 @@ def turret_mount_offset(descriptor):
     ``chassis.hullPosition`` places the hull under the model matrix and
     ``hull.turretPositions[0]`` places the ring inside the hull.  Reading it
     from the descriptor rather than from ``compoundModel.node('turret')``
-    makes the launch point a pure function of replicated state, so a hidden
-    worker and every visible client agree on it without a wire field.
+    makes the launch point a pure function of the admitted state available
+    on this client, independent of its interpolated render compound.
     """
     chassis = getattr(descriptor, 'chassis', None)
     hull = getattr(descriptor, 'hull', None)
@@ -439,203 +430,3 @@ def detachment_plan(entity, pose):
         'attitude': (yaw + turret_yaw, pitch, roll),
         'clearance': _turret_clearance(turret),
     }
-
-
-class DetachedTurretObstacles(object):
-    """Authoritative collision for turrets an ammo-bay kill threw off.
-
-    Retail's ``DetachedTurret`` is a real entity, not a decoration: its
-    ``.def`` publishes ``receiveShot`` and ``onDamageVehicle``, and the client
-    half answers ``collideSegment(start, end, skipGun)`` out of the turret and
-    gun hit testers exactly the way ``Vehicle`` does.  This port cannot
-    replicate the cell-side arc, so the hidden worker -- the only collision
-    authority in the room -- resolves the same deterministic arc from the same
-    replicated inputs and owns the landed turret as an obstacle.
-
-    Nothing here draws, loads or owns a model, so the worker's address space
-    is untouched.  A turret is an obstacle only once its frozen arc has ended:
-    while it is still in the air it has no owner able to move a hit tester
-    with it, and inventing a mid-flight sweep would be a fabricated physical
-    result rather than a replicated one.
-    """
-
-    def __init__(self, math_module, collide, log=None,
-                 max_active=MAX_ACTIVE_TURRETS):
-        self._math = math_module
-        self._collide = collide
-        self._log = log
-        self._max_active = int(max_active)
-        self._turrets = []
-
-    def active(self):
-        return len(self._turrets)
-
-    def add(self, plan, seed, now):
-        """Resolve one arc and retain its landed turret as an obstacle."""
-        if plan is None or len(self._turrets) >= self._max_active:
-            return False
-        vehicle_id = int(plan['entity_id'])
-        for existing in self._turrets:
-            if existing['vehicle_id'] == vehicle_id:
-                # One vehicle throws one turret.  A replayed terminal event
-                # must not stack a second obstacle on the same wreck.
-                return False
-        try:
-            impulse = turret_detachment.launch_impulse(seed)
-            flight = turret_detachment.resolve_flight(
-                plan['launch'], impulse['velocity'], self._collide,
-                clearance=plan['clearance'])
-            attitude = turret_detachment.rest_attitude(
-                plan['attitude'], impulse['spin'], flight['duration'])
-            body = self._rest_frame(flight['rest'], attitude)
-        except Exception as error:
-            self._note('detached turret obstacle unavailable', error)
-            return False
-        if body is None:
-            return False
-        descriptor = plan['descriptor']
-        components, radius = self._components(descriptor, body['to_turret'])
-        body.update({
-            'vehicle_id': vehicle_id,
-            'settles_at': float(now) + float(flight['duration']),
-            'components': components,
-            'rest': tuple(float(value) for value in flight['rest']),
-            'radius': radius,
-        })
-        self._turrets.append(body)
-        return True
-
-    def _rest_frame(self, rest, attitude):
-        try:
-            matrix = self._math.Matrix()
-            matrix.setRotateYPR(
-                (float(attitude[0]), float(attitude[1]), float(attitude[2])))
-            matrix.translation = self._math.Vector3(
-                float(rest[0]), float(rest[1]), float(rest[2]))
-            to_turret = self._math.Matrix(matrix)
-            to_turret.invert()
-        except Exception as error:
-            self._note('detached turret rest frame unavailable', error)
-            return None
-        return {'matrix': matrix, 'to_turret': to_turret}
-
-    def _components(self, descriptor, to_turret):
-        """Build the turret/gun pair stock ``collideSegment`` tests, and the
-        bounding sphere about the turret origin that contains both."""
-        components = []
-        radius = 0.0
-        turret = getattr(descriptor, 'turret', None)
-        if turret is not None:
-            components.append((turret, to_turret))
-            radius = max(radius, _component_radius(turret, (0.0, 0.0, 0.0)))
-        gun = getattr(descriptor, 'gun', None)
-        gun_position = getattr(turret, 'gunPosition', None)
-        if gun is not None and gun_position is not None:
-            try:
-                to_gun = self._math.Matrix()
-                to_gun.setTranslate(-gun_position)
-                to_gun.preMultiply(to_turret)
-            except Exception as error:
-                self._note('detached turret gun frame unavailable', error)
-            else:
-                components.append((gun, to_gun))
-                radius = max(radius, _component_radius(
-                    gun, _xyz(gun_position) or (0.0, 0.0, 0.0)))
-        return tuple(components), radius
-
-    def block_distance(self, start, end, now):
-        """Return how far along ``start``..``end`` a landed turret stops it.
-
-        ``None`` means no settled turret is in the way.  The distance is
-        measured on the world segment: every frame below is a rigid transform
-        of it, so a local hit distance is the world distance.
-        """
-        if not self._turrets:
-            return None
-        nearest = None
-        for turret in self._turrets:
-            if float(now) < turret['settles_at']:
-                continue
-            if _segment_distance_squared(
-                    turret['rest'], start, end) > turret['radius'] ** 2:
-                # Broad phase.  A projectile chord asks this on every step of
-                # every shot, and a native hit test costs about seven
-                # microseconds; a turret nowhere near the ray must not pay it.
-                continue
-            for component, matrix in turret['components']:
-                tester = getattr(component, 'hitTester', None)
-                local_hit_test = getattr(tester, 'localHitTest', None)
-                if not callable(local_hit_test):
-                    continue
-                try:
-                    collisions = local_hit_test(
-                        matrix.applyPoint(start), matrix.applyPoint(end))
-                except Exception as error:
-                    # One unusable hit tester must not stop a shot that the
-                    # world and every vehicle have already resolved.
-                    self._note('detached turret hit test failed', error)
-                    continue
-                for collision in collisions or ():
-                    try:
-                        distance = float(collision[0])
-                    except (IndexError, TypeError, ValueError):
-                        continue
-                    if nearest is None or distance < nearest:
-                        nearest = distance
-        return nearest
-
-    def drop(self, vehicle_id):
-        """Forget one wreck's turret, e.g. when its round identity ends."""
-        vehicle_id = int(vehicle_id)
-        remaining = [turret for turret in self._turrets
-                     if turret['vehicle_id'] != vehicle_id]
-        dropped = len(self._turrets) - len(remaining)
-        self._turrets = remaining
-        return dropped
-
-    def clear(self):
-        """Drop every turret.  Safe after a partial start, and safe twice."""
-        count = len(self._turrets)
-        self._turrets = []
-        return count
-
-    def _note(self, what, error):
-        if callable(self._log):
-            self._log(what, error)
-        return None
-
-
-def _component_radius(component, offset):
-    """Return how far one component reaches from the turret origin.
-
-    ``offset`` is where the component sits in the turret's own frame, so a
-    gun barrel is measured from the ring rather than from its own mount.  An
-    unreadable box widens the sphere to infinity: a broad phase may only
-    reject what the exact hit test would also have rejected.
-    """
-    tester = getattr(component, 'hitTester', None)
-    bounds = getattr(tester, 'bbox', None)
-    radius = 0.0
-    for corner in (0, 1):
-        point = _xyz(bounds[corner]) if bounds is not None else None
-        if point is None:
-            return float('inf')
-        radius = max(radius, math.sqrt(sum(
-            (point[axis] + offset[axis]) ** 2 for axis in range(3))))
-    return radius
-
-
-def _segment_distance_squared(point, start, end):
-    """Squared distance from ``point`` to the ``start``..``end`` segment."""
-    origin = (float(start.x), float(start.y), float(start.z))
-    direction = (float(end.x) - origin[0], float(end.y) - origin[1],
-                 float(end.z) - origin[2])
-    delta = tuple(float(point[axis]) - origin[axis] for axis in range(3))
-    length_squared = sum(value * value for value in direction)
-    if length_squared <= 0.0:
-        return sum(value * value for value in delta)
-    fraction = sum(delta[axis] * direction[axis]
-                   for axis in range(3)) / length_squared
-    fraction = max(0.0, min(1.0, fraction))
-    return sum((delta[axis] - direction[axis] * fraction) ** 2
-               for axis in range(3))

@@ -1499,14 +1499,6 @@ EXPECTED_CODE_NAMES = {
         'DetachedTurret.onEnterWorld': (
             '_DetachedTurret__vehDescr', 'name', 'model', 'matrix',
             '_DetachedTurret__detachConfirmationTimer', 'onEnterWorld'),
-        # Retail's thrown turret is a shootable obstacle, answering the same
-        # collideSegment shape a Vehicle does out of the turret model matrix
-        # and the gun node.  The hidden worker owns no such entity, so it
-        # tests the identical two hit testers at the frozen rest frame.
-        'DetachedTurret.collideSegment': (
-            'filter', 'model', 'matrix', 'node',
-            'TankPartNames', 'GUN', '_DetachedTurret__componentsDesc',
-            'hitTester', 'localHitTest', 'SegmentCollisionResult'),
     },
     'scripts/client/AvatarInputHandler/gun_marker_ctrl.pyc': {
         '_CrosshairShotResults._getAllCollisionDetails': (
