@@ -1236,6 +1236,111 @@ class DetectionTests(unittest.TestCase):
         state._commit_detections()
         self.assertEqual(0, state._statistics_row('player', 1)['spotted'])
 
+    @staticmethod
+    def _detections(state):
+        return [event for event in state.pending_events
+                if event.get('kind') == 'detection']
+
+    def test_a_credited_detection_reaches_its_human_observer(self):
+        state, unused_player = self._battle()
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._commit_detections()
+
+        # #1513 draws the in-battle ribbon from the detection the results
+        # column counts, so the server publishes the one it credited.
+        self.assertEqual([{
+            'kind': 'detection',
+            'observer_kind': 'player', 'observer_id': 1,
+            'target_kind': 'bot', 'target_id': 1,
+        }], self._detections(state))
+
+        # The same enemy is counted once, so it is published once.
+        state._commit_detections()
+        self.assertEqual(1, len(self._detections(state)))
+
+    def test_a_detection_by_a_bot_publishes_nothing(self):
+        state, unused_player = self._battle()
+        state.bot_states[2]['team'] = 1
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._commit_detections()
+
+        self.assertEqual(1, state._statistics_row('bot', 2)['spotted'])
+        self.assertEqual([], self._detections(state))
+
+    def test_full_roster_detections_preserve_the_whole_tick_on_the_wire(self):
+        state, unused_player = self._battle()
+        state.bot_states = {}
+        state.bot_manifest = []
+        state.players = {
+            index: Player(index, _NullSocket(), ('127.0.0.1', index),
+                          team=1 if index <= 15 else 2)
+            for index in range(1, 31)}
+        state.player_spotted = {
+            index: {('player', target_id)
+                    for target_id, target in state.players.items()
+                    if target.team != observer.team}
+            for index, observer in state.players.items()}
+        state._commit_detections()
+        self.assertEqual(450, len(self._detections(state)))
+        # A co-occurring existing event must survive the detection burst too.
+        state.pending_events.append({
+            'kind': 'assist', 'category': 'radio', 'damage': 75,
+            'assister_kind': 'player', 'assister_id': 1,
+            'target_kind': 'player', 'target_id': 16})
+        expected = list(state.pending_events)
+        delivered = {index: [] for index in state.players}
+        for index, endpoint in state.players.items():
+            endpoint.offer_reliable = (
+                lambda message, index=index:
+                delivered[index].append(message) or True)
+            endpoint.offer_snapshot = endpoint.offer_reliable
+
+        state.tick_once(1.0 / 30.0)
+
+        for messages in delivered.values():
+            event_messages = [message for message in messages
+                              if message['type'] == 'events']
+            # Exercise the actual consumer limit instead of restating it.
+            received = []
+            client = lan_client_module.LANClient(
+                '127.0.0.1', 28782, 'Observer', 'ussr:R11_MS-1',
+                on_event=lambda kind, message: received.extend(
+                    message['events']) if kind == 'events' else None)
+            client.round_id = state.round_id
+            client.phase = 'battle'
+            for message in event_messages:
+                client._handle_message(message)
+            self.assertEqual(
+                ['%d:%d:%d' % (state.round_id, state.tick, index)
+                 for index in range(len(expected))],
+                [event['event_id'] for event in received])
+            self.assertEqual(expected, [
+                {key: value for key, value in event.items()
+                 if key != 'event_id'} for event in received])
+            snapshot_index = next(
+                index for index, message in enumerate(messages)
+                if message['type'] == 'snapshot')
+            self.assertTrue(all(
+                message['type'] == 'events'
+                for message in messages[:snapshot_index]))
+            self.assertEqual(len(event_messages), snapshot_index)
+
+    def test_seeing_an_enemy_the_team_already_lit_publishes_nothing(self):
+        state, unused_player = self._battle()
+        state.bot_states[2]['team'] = 1
+        state.bot_spotted = {2: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+
+        # The human now sees the enemy its teammate revealed.  Retail counts
+        # no detection for it, so no ribbon may be drawn either.
+        state.player_spotted = {1: frozenset({('bot', 1)})}
+        state._replace_team_lit({1: {('bot', 1): float('inf')}})
+        state._commit_detections()
+
+        self.assertEqual(0, state._statistics_row('player', 1)['spotted'])
+        self.assertEqual([], self._detections(state))
+
 
 class SpottingAssistTests(unittest.TestCase):
     """A spotting assist needs a blind shooter, and is shared by spotters."""

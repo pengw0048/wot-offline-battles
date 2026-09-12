@@ -1328,7 +1328,25 @@ already revealed adds nothing, while an enemy that goes dark and reappears
 credits whoever finds it that time. This replaces a count of every enemy the
 vehicle had ever directly seen, which had no team fence and could never drop.
 Patrol Duty (`scout`) reads the same number, and earned experience moves with
-it.
+it. `scripts/common/battle_results_shared.py` fixes the per-enemy half of that
+rule exactly: `VEH_INTERACTION_DETAILS` declares `('spotted', 'B', 1, 0)`, so a
+detail row cannot carry a second detection of the same vehicle, and the
+in-battle ribbon agrees because `_MultiVehicleRibbon.getCount` is
+`len(self._hits)` keyed by vehicle id.
+
+The same decision owns the in-battle ribbon. The visible client used to raise
+it from a local presentation edge — the enemy's model appearing while this
+client's own line of sight was clear — but that edge is the 565 m entity AOI,
+which an enemy a teammate revealed across the map crosses long after the team
+detected it. The ribbon therefore appeared for detections the results column
+never counted. A client cannot close that gap alone: it knows its own line of
+sight and the team's merged spot lease, never whether its own sighting is what
+revealed the enemy. `_commit_detections` now publishes a `detection` event to
+the human observer it credited, and the client draws the stock `SPOTTED` and
+`TARGET_VISIBILITY` pair from that event alone. `TARGET_VISIBILITY` reaches
+only `TriggersManager.PLAYER_DETECT_ENEMY` in #1513 — `feedback_adaptor` does
+not forward it to `onPlayerFeedbackReceived` — so no damage-log or ribbon
+consumer loses anything by moving with it.
 
 Ammunition belongs to whoever owns the gun, so Fadin's medal takes the shell
 total from the producer rather than inferring it. The visible client puts

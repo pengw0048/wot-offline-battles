@@ -1426,6 +1426,15 @@ class ServerBotObservationRelayTests(unittest.TestCase):
         self.assertEqual(frozenset((('bot', 11),)),
                          server.player_spotted[1])
         self.assertEqual(1, server._statistics_row('player', 1)['spotted'])
+        # The observer's own client draws the #1513 spotting ribbon from this
+        # event, so one detection is published exactly once, to the observer
+        # the ledger credited.
+        self.assertEqual([{
+            'kind': 'detection',
+            'observer_kind': 'player', 'observer_id': 1,
+            'target_kind': 'bot', 'target_id': 11,
+        }], [event for event in server.pending_events
+             if event.get('kind') == 'detection'])
 
         server._record_damage(('player', 2), ('bot', 11), 75, {})
         self.assertEqual(
