@@ -2960,7 +2960,25 @@ operation is forbidden, not unlimited.
   stock averages and best-vehicle labels. Dossier cache schema changes request
   a full refresh even when the old cache's battle watermark is unchanged.
   Previously discarded results cannot reconstruct an unknown historical
-  maximum. The current receipt does not measure mileage, each vehicle's time
+  maximum.
+- `DossierCache` persists those vehicle rows between sessions. It names its
+  `.dat` file `b32encode('%s;%s;%s' % (BigWorld.server(), accountName,
+  accountClassName))` and uses `accountName` for nothing else; `__readCache`
+  restores `__maxChangeTime` as the highest `changeTime` in that file, and
+  `__sendSyncRequest` then asks `CMD_SYNC_DOSSIERS` only for rows newer than
+  it. Nothing else ever lowers that watermark: a version mismatch in
+  `__onSyncComplete` clears the cached rows but leaves it standing. All three
+  key parts are constant offline, so every save slot and both processes would
+  share one file, and a career whose battle ordinal sits below another's
+  watermark would receive no vehicle row at all while its battles kept
+  settling. `compat.pin_dossier_cache` therefore scopes `accountName` by a
+  fixed-width digest of the save slot, process role and complete post-battle
+  account key before any `PlayerAccount` exists. Hashing the complete identity
+  preserves separate career namespaces without letting a valid 64-character
+  slot push the stock base32 cache path beyond Windows `MAX_PATH` under the
+  normal preferences directory. The account dossier is unaffected:
+  `account_rpc/server.py` pushes it in the post-battle diff rather than through
+  this cache. The current receipt does not measure mileage, each vehicle's time
   alive or stunning-vehicle eligibility; these values are not inferred.
 - Selling and rebuying a vehicle preserves its XP, including across restart.
   Elite vehicles with stored XP remain conversion candidates after sale.

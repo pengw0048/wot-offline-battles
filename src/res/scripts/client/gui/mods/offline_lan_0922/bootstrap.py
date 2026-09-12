@@ -1111,6 +1111,16 @@ def _wait_for_login_space():
             _schedule(0.0, _wait_for_login_space)
             return
         _login_space_seen = False
+        try:
+            # #1513 keys its vehicle dossier cache file on the account name,
+            # and PlayerAccount.__init__ builds that cache before any account
+            # hook of ours runs.  Scope it here, once, for both processes.
+            from gui.mods.offline_lan_0922 import compat as _compat
+            _compat.pin_dossier_cache(_dossier_cache_career)
+        except Exception as error:
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] the vehicle dossier cache was not '
+                'scoped to this career: %s\n' % error)
         if _client_mode == port_config.SIMULATION_WORKER_MODE:
             # The worker needs a native lobby only as a safe map-lifecycle
             # bridge. It owns no Battle button, announcement or preference
@@ -1137,6 +1147,28 @@ def _wait_for_login_space():
         _schedule(0.10, _wait_for_lobby)
     except Exception as error:
         _fail_startup(error)
+
+
+def _dossier_cache_career():
+    """Return the identity that owns this process's vehicle dossier cache.
+
+    #1513 caches vehicle dossiers per account and asks the server only for
+    rows newer than the highest ``changeTime`` it already holds.  Offline
+    every save slot logs in under the same account name, and the hidden
+    worker logs in beside the visible client, so all of them would share one
+    file and one watermark.  The save slot names the career, the role
+    separates the two processes, and the post-battle store's account key
+    separates a career that was recreated in the same slot from the one whose
+    rows the cache still holds.  ``PostBattleStore`` mints a fresh key until a
+    battle persists one, which is correct: there is no record to cache yet.
+    """
+    role = ('worker' if _client_mode == port_config.SIMULATION_WORKER_MODE
+            else 'player')
+    account_key = ''
+    if _postbattle_store is not None:
+        account_key = str(
+            getattr(_postbattle_store, 'account_key', '') or '')
+    return '%s.%s.%s' % (port_config.active_save_slot(), role, account_key)
 
 
 def _wait_for_lobby():

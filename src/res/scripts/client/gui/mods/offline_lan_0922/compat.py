@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import hashlib
 import sys
 import traceback
 
@@ -19,6 +20,7 @@ _OFFLINE_INIT_COMPLETE = '_offlineLANInitComplete'
 _OFFLINE_PLAYER_READY = '_offlineLANPlayerReady'
 _OFFLINE_RETIRE_PENDING = '_offlineLANRetirePending'
 _account_settings_pinned = False
+_dossier_cache_pinned = False
 # AccountSettings.DEFAULT_VALUES keys whose sections this port adopts once.
 _SETTINGS_KEYS = ('settings', 'filters', 'counters', 'notifications')
 
@@ -91,6 +93,82 @@ def _account_settings_module():
     # so resolve the module the way the interpreter recorded it.
     import account_helpers.AccountSettings  # noqa: F401
     return sys.modules['account_helpers.AccountSettings']
+
+
+def _dossier_cache_module():
+    # account_helpers/__init__ shadows the submodule name with the class,
+    # so resolve the module the way the interpreter recorded it.
+    import account_helpers.DossierCache  # noqa: F401
+    return sys.modules['account_helpers.DossierCache']
+
+
+def _dossier_cache_career(career_provider):
+    """Return this process's career id, or ``''`` when it cannot be read.
+
+    An exception here would reach ``PlayerAccount.__init__`` and leave the
+    player with no account at all, which is far worse than a shared cache
+    file, so an unreadable career falls back to the stock name.
+    """
+    try:
+        return str(career_provider() or '')
+    except Exception as error:
+        print('[Offline LAN 0.9.22] the dossier cache career is unavailable: '
+              '%s' % error)
+        return ''
+
+
+def _career_scoped_account(account_name, career):
+    """Return a bounded cache namespace for the complete offline career."""
+    if not career:
+        return account_name
+    # #1513 base32-expands the name beneath the preferences directory. A
+    # valid 64-character slot already exceeds Windows MAX_PATH when copied
+    # into the account name, so hash the complete identity into 128 bits.
+    suffix = hashlib.sha256(career.encode('utf-8')).hexdigest()[:32]
+    return '%s#%s' % (account_name, suffix)
+
+
+def pin_dossier_cache(career_provider, dossier_cache=None):
+    """Give each offline career its own #1513 vehicle dossier cache file.
+
+    ``DossierCache.__init__`` names its ``.dat`` file
+    ``b32encode('%s;%s;%s' % (BigWorld.server(), accountName,
+    accountClassName))`` and uses ``accountName`` for nothing else.  All three
+    are constant offline, so every save slot -- and the hidden worker running
+    beside the visible client -- share one file.  ``__readCache`` restores
+    ``__maxChangeTime`` as the highest ``changeTime`` in that file and
+    ``__sendSyncRequest`` then asks only for rows newer than it, so a career
+    whose battle count sits below another career's watermark receives no
+    vehicle dossier row at all: its garage mastery badges, Marks of Excellence
+    and per-vehicle records freeze while battles keep settling normally.
+    Nothing resets that watermark except building the cache from a file.
+
+    Scoping the name restores the one thing retail relies on, one cache file
+    per account, and stops two processes writing the same pickle.  Like the
+    interface-settings pin this must outlive every connect and disconnect:
+    ``Account.PlayerAccount.__init__`` builds the cache itself, before any
+    account hook of ours can run.
+    """
+    global _dossier_cache_pinned
+    if _dossier_cache_pinned:
+        return False
+    if dossier_cache is None:
+        dossier_cache = _dossier_cache_module()
+    cache_type = dossier_cache.DossierCache
+    original_init = cache_type.__init__
+
+    def scoped_init(self, accountName, accountClassName):
+        original_init(
+            self,
+            _career_scoped_account(
+                accountName, _dossier_cache_career(career_provider)),
+            accountClassName)
+
+    cache_type.__init__ = scoped_init
+    _dossier_cache_pinned = True
+    print('[Offline LAN 0.9.22] vehicle dossier cache scoped to career %r'
+          % _dossier_cache_career(career_provider))
+    return True
 
 
 def _account_sections(settings_type):
