@@ -1421,6 +1421,25 @@ also reads `damageRating` for the badge tooltip.
 hundredths — the same split retail produces, since its dossier updater applies
 `int(results['damageRating'] * 100)` to the unpacked float.
 
+The marks are also drawn in the world, and that path is separate from both
+results and the garage. `vehicle_systems/CompoundAppearance.__createStickers`
+reads `self.__vehicle.publicInfo['marksOnGun']` and passes it to
+`VehicleStickers(typeDescriptor, insigniaRank, outfit)`; the hangar's
+`ClientHangarSpace._VehicleAppearance.__setupEmblems` builds the same object
+from `itemsCache.items.getVehicleDossier(...).getRandomStats().getAchievement(
+MARK_ON_GUN_RECORD).getValue()`, and the carousel card reads the same record
+through `getTotalStats`. This port supplies that field from its account store:
+`PostBattleStore.marks_on_gun`
+returns the row `account_rpc.data.dossiers` already publishes as the garage
+badge, the LAN client carries it in `hello` and `select_vehicle`, and
+`_public_player` republishes it on every roster row — including the lean rows
+that omit the much larger outfit and effective-parameter blocks — so a remote
+human's replica decals the same count. Bots have no account and publish zero.
+The selection is republished immediately before every start request, so a mark
+earned in the previous round reaches the next round's vehicle properties.
+These checks establish the value supplied to the stock sticker constructor;
+the exact Windows client must still verify that the gun decal actually draws.
+
 The rules are the client's own text in `res/text/LC_MESSAGES/achievements.mo`.
 `markOfMasteryContent` gives the mastery classes as more battle XP than 50, 80,
 95 and 99 percent of the players who drove that vehicle in the previous seven

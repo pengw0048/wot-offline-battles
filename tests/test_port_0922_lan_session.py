@@ -99,7 +99,8 @@ class _Client(object):
         return True
 
     def select_vehicle(self, vehicle, max_health, outfits=None,
-                       vehicle_compact_descr=None, effective_params=None):
+                       vehicle_compact_descr=None, effective_params=None,
+                       marks_on_gun=None):
         if not self.ready or self.phase != 'waiting':
             return False
         if vehicle == self.vehicle and max_health == self.max_health:
@@ -336,11 +337,46 @@ class LANSessionTests(unittest.TestCase):
         calls = []
         self.session._effective_params_provider = lambda: {'equipment': [441]}
         self.client.select_vehicle = lambda *args: calls.append(
-            ('select', args[-1])) or True
+            ('select', args[4])) or True
         self.client.request_start = lambda *args: calls.append(('start', args)) or True
         self.assertTrue(self.session.request_start('01_karelia'))
         self.assertEqual(['select', 'start'], [call[0] for call in calls])
         self.assertEqual({'equipment': [441]}, calls[0][1])
+
+    def test_selection_publishes_the_stored_gun_marks_for_the_barrel(self):
+        """The account's own store is the producer of the barrel decal count.
+
+        ``account_rpc.data.dossiers`` publishes the same row value as the
+        garage badge, so one number reaches both surfaces.
+        """
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        self.session._postbattle_store = types.SimpleNamespace(
+            marks_on_gun=lambda vehicle: 2 if vehicle == 'ussr:R11_MS-1'
+            else 0)
+        self.session._effective_params_provider = lambda: {'equipment': []}
+        calls = []
+        self.client.select_vehicle = lambda *args: calls.append(args) or True
+
+        self.assertTrue(self.session._publish_selected_vehicle())
+
+        self.assertEqual(2, calls[0][5])
+
+    def test_an_unreadable_store_publishes_no_gun_marks(self):
+        """A failing read must never block the selection that starts a round."""
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+
+        def explode(unused_vehicle):
+            raise RuntimeError('save slot is unreadable')
+
+        self.session._postbattle_store = types.SimpleNamespace(
+            marks_on_gun=explode)
+        self.session._effective_params_provider = lambda: {'equipment': []}
+        calls = []
+        self.client.select_vehicle = lambda *args: calls.append(args) or True
+
+        self.assertTrue(self.session._publish_selected_vehicle())
+
+        self.assertEqual(0, calls[0][5])
 
     def test_inventory_refresh_blocks_start_then_publishes_completed_loadout(self):
         self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
@@ -356,7 +392,7 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual('waiting', self.session.state)
         self.session.on_inventory_refreshed()
         self.assertEqual({'equipment': [441, 442, 443]},
-                         self.client.select_vehicle.call_args[0][-1])
+                         self.client.select_vehicle.call_args[0][4])
         self.assertTrue(self.session.request_start('01_karelia'))
 
     def test_start_does_not_use_old_loadout_after_projection_failure(self):

@@ -351,6 +351,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'outfits': {},
             'vehicle_compact_descr': 'dGVzdA==',
             'effective_params': effective_params(),
+            'marks_on_gun': 0,
         }, client._hello_payload())
         self.assertNotIn('role', client._hello_payload())
 

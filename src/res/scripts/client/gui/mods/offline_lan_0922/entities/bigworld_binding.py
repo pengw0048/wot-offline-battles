@@ -166,6 +166,11 @@ class BigWorldVehicleBinding(object):
                 'name': _entity_string(name),
                 'team': team,
                 'prebattleID': 0,
+                # #1513 decals the gun barrel from this field
+                # (``CompoundAppearance.__createStickers``, and the stock
+                # ``DetachedTurret``).  Only an account owns marks, so the
+                # caller that knows the owner sets it; a vehicle with no
+                # account keeps none.
                 'marksOnGun': 0,
                 'index': 0,
                 'outfit': _entity_string(self._outfit_provider(descriptor))},
