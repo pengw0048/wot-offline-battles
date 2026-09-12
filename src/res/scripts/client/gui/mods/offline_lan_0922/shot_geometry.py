@@ -101,8 +101,8 @@ def segment_box_entry_distance(start_point, end_point, bounds):
     """Return how far along one segment it first enters an axis-aligned box.
 
     Zero is returned for a segment that starts inside the box, and ``None``
-    when it never reaches it.  The picker compares whole candidates, so an
-    entry distance is the analogue of its ``zDistance`` ordering.
+    when it never reaches it. This is geometric entry distance, not an
+    entity-origin distance or a native targeting score.
     """
     if bounds is None:
         return None

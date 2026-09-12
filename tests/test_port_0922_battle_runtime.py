@@ -5499,7 +5499,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             vehicle, body, math_module)
 
     def test_picker_bounds_compose_every_attached_component(self):
-        """The box must be the compound's, not the chassis' translated box.
+        """The local envelope includes every attached component's extent.
 
         ``_Matrix`` above models translation only, so the composition is
         checked here against a transform that actually rotates: a wrong
@@ -5521,7 +5521,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
             self.assertAlmostEqual(value, expected, places=6)
 
     def test_a_turned_barrel_widens_the_picker_box_until_it_is_thrown(self):
-        """The gun is inside stock's target box and sweeps it with the turret."""
+        """The attached gun widens the local target box as its turret turns."""
         unused_lower, upper = self._picker_bounds(0.0, math.pi / 2.0)
         # The 2.0 m barrel now points along +x, past the 1.7 m hull.
         self.assertAlmostEqual(upper[0], 2.0, places=6)
@@ -5532,13 +5532,22 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         # its gun, and the landed turret becomes its own candidate instead.
         self.assertAlmostEqual(detached[0], 1.7, places=6)
 
-    def test_full_bounds_wreck_blocks_an_outline_an_exact_ray_misses(self):
-        """Stock picks on the compound box, not on hit-test geometry.
+    def test_picker_bounds_skip_an_unavailable_matrix_then_recover(self):
+        for owner, method in ((remote_vehicle_module, '_pose_components'),
+                              (_RigidMatrix, 'applyPoint')):
+            with self.subTest(stage=method):
+                with mock.patch.object(
+                        owner, method,
+                        side_effect=TypeError('matrix provider unavailable')):
+                    self.assertIsNone(self._picker_bounds(0.0, 0.0))
+                self.assertIsNotNone(self._picker_bounds(0.0, 0.0))
 
-        ``EntityPicker::angleTo`` is zero for every candidate whose
-        projected bounding box covers the cursor, so a nearer wreck takes
-        the pick even where a pin-point ray would slip past its hull. The
-        outline must not promise a line the shell does not have.
+    def test_full_bounds_wreck_blocks_an_outline_an_exact_ray_misses(self):
+        """The local outline rule uses the wreck's full descriptor envelope.
+
+        This deliberately suppresses an outline even where a shell's exact
+        hit test passes through a gap. Native picker parity is not established
+        by this pure-data test.
         """
         runtime = _runtime()
         factory = RemoteVehicleFactory(
@@ -5633,7 +5642,7 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         factory.destroy_all()
 
     def test_a_wreck_beyond_the_target_leaves_the_outline_alone(self):
-        """Only a nearer candidate wins ``pickFirst``'s distance tiebreak."""
+        """A bounds entry beyond the live hit cannot suppress its outline."""
         runtime = _runtime()
         factory = RemoteVehicleFactory(
             runtime.bigworld, runtime.math, runtime.model_assembler, 7)

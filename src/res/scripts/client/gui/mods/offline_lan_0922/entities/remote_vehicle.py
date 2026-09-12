@@ -1882,62 +1882,60 @@ def _point_xyz(value):
 
 def vehicle_target_bounds_at_matrix(vehicle, vehicle_matrix, math_module,
                                     chassis_matrix=None):
-    """Return the world box #1513's entity picker targets for one vehicle.
+    """Compose a world AABB over the attached descriptor hit-test boxes.
 
-    ``EntityPicker::getBoundingBox`` reads the primary embodiment's local
-    bounding box and transforms it into world space, so targeting works on
-    the whole compound -- gun included -- and never on the exact hit-test
-    geometry a shell uses.  ``Vehicle.__init__`` sets ``targetFullBounds``,
-    which keeps that box unshrunk.  This runtime owns no BigWorld compound
-    for a replica, so compose the same extent from the attached descriptor
-    hit-test boxes at the supplied body and chassis poses.  Accumulating in
-    world space keeps the result inside the box stock would transform, and
-    it never invents an extent a missing descriptor box cannot supply.
+    #1513 Vehicle.onEnterWorld enables targetFullBounds. The public BigWorld
+    2.0.1 picker uses an embodiment bounding box, which motivates this local
+    full-envelope rule. Descriptor boxes are an approximation of the visual
+    compound's bounds; neither their equality nor the shipped native picker
+    rule has been established on #1513. Missing geometry contributes no box.
     """
     try:
         components = _pose_components(vehicle, math_module)
-    except AttributeError:
+        lower = None
+        upper = None
+        for component_index, entry in enumerate(components):
+            component, component_matrix, is_attached = entry
+            if not is_attached:
+                # A detached turret is a separate picker candidate with its own
+                # landed pose.  This hull must not target the part it threw.
+                continue
+            tester = _component_value(component, 'hitTester')
+            bounds = _blast_bbox_bounds(_component_value(tester, 'bbox'))
+            if bounds is None:
+                continue
+            root_matrix = (chassis_matrix if component_index == 0 and
+                           chassis_matrix is not None else vehicle_matrix)
+            component_to_root = math_module.Matrix(component_matrix)
+            component_to_root.invert()
+            to_world = math_module.Matrix(root_matrix)
+            to_world.preMultiply(component_to_root)
+            for index in range(8):
+                corner = to_world.applyPoint(math_module.Vector3(
+                    bounds[index & 1][0],
+                    bounds[(index >> 1) & 1][1],
+                    bounds[(index >> 2) & 1][2]))
+                point = _point_xyz(corner)
+                if lower is None:
+                    lower = list(point)
+                    upper = list(point)
+                    continue
+                for axis in range(3):
+                    if point[axis] < lower[axis]:
+                        lower[axis] = point[axis]
+                    elif point[axis] > upper[axis]:
+                        upper[axis] = point[axis]
+        if lower is None:
+            return None
+        return tuple(lower), tuple(upper)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+            OverflowError):
         # Stock ``CompoundAppearance.__onModelsRefresh`` detaches before it
         # relinks, so a wreck can be between compounds for one frame. The
-        # picker simply has no candidate then; the next pass reads the
-        # rebound turret and gun matrices.
+        # local query skips this candidate; the next pass reads the rebound
+        # turret and gun matrices. A temporarily unavailable native provider
+        # must not disable all outline presentation for the rest of the round.
         return None
-    lower = None
-    upper = None
-    for component_index, entry in enumerate(components):
-        component, component_matrix, is_attached = entry
-        if not is_attached:
-            # A detached turret is a separate picker candidate with its own
-            # landed pose.  This hull must not target the part it threw.
-            continue
-        tester = _component_value(component, 'hitTester')
-        bounds = _blast_bbox_bounds(_component_value(tester, 'bbox'))
-        if bounds is None:
-            continue
-        root_matrix = (chassis_matrix if component_index == 0 and
-                       chassis_matrix is not None else vehicle_matrix)
-        component_to_root = math_module.Matrix(component_matrix)
-        component_to_root.invert()
-        to_world = math_module.Matrix(root_matrix)
-        to_world.preMultiply(component_to_root)
-        for index in range(8):
-            corner = to_world.applyPoint(math_module.Vector3(
-                bounds[index & 1][0],
-                bounds[(index >> 1) & 1][1],
-                bounds[(index >> 2) & 1][2]))
-            point = _point_xyz(corner)
-            if lower is None:
-                lower = list(point)
-                upper = list(point)
-                continue
-            for axis in range(3):
-                if point[axis] < lower[axis]:
-                    lower[axis] = point[axis]
-                elif point[axis] > upper[axis]:
-                    upper[axis] = point[axis]
-    if lower is None:
-        return None
-    return tuple(lower), tuple(upper)
 
 
 class RemoteVehicle(object):

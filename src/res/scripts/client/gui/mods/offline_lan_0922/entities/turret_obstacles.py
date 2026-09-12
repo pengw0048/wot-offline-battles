@@ -122,7 +122,7 @@ def _world_box(bounds, offset, position, attitude):
 
 
 def _boxes_world_bounds(boxes):
-    """Return the world AABB stock's ``getBoundingBox`` would transform."""
+    """Enclose the supplied component boxes in one world AABB."""
     lower = None
     upper = None
     for center, half_axes in boxes:
@@ -345,10 +345,10 @@ class DetachedTurretObstacles(object):
     def target_entry_distance(self, start, end, server_time_ms):
         """Return where a cursor ray first enters a landed turret's bounds.
 
-        ``DetachedTurret.__init__`` sets ``targetFullBounds`` and
-        ``targetCaps = [1]``, so stock's picker scores a thrown turret on
-        its whole box exactly like a vehicle.  Only a settled turret is a
-        candidate, matching the pose every other query here uses.
+        #1513 DetachedTurret.__init__ enables targetFullBounds and sets
+        targetCaps = [1]. This local bounds approximation uses only settled
+        turrets, matching the accepted pose used by the obstacle queries;
+        it does not establish the shipped native picker's selection rule.
         """
         nearest = None
         for turret in self._ready(server_time_ms):

@@ -215,9 +215,8 @@ _SIMPLE_EVENT_KINDS = (
 _COMBAT_EVENT_KINDS = (
     'health', 'hit', 'bot_hit', 'bot_human_hit', 'bot_bot_hit')
 _SHOT_OCCLUSION_EPSILON = 1.0e-3
-# A vehicle whose origin is further than this from the cursor ray cannot
-# overlap it. Shared with the projectile broad phase so one conservative
-# bound covers every hull this port supports.
+# Reuse the projectile broad phase's conservative vehicle radius before
+# composing descriptor bounds for an outline candidate.
 _TARGET_PICK_BROADPHASE_SQ = PROJECTILE_BROADPHASE_RADIUS ** 2
 # physics_shared.TRACK_SCROLL_LIMITS: the exact #1513 belt-speed wire range.
 TRACK_SCROLL_LIMITS = (-15.0, 30.0)
@@ -14143,11 +14142,9 @@ class BattleRuntime(object):
     def _report_wreck_impact(self, target_kind, target_record, data, impact):
         """Name the wreck part that ended one shell, a few times per round.
 
-        A player only reports that a wreck ate the shell somewhere that
-        looked clear.  The part, the pose that part was tested at and the
-        contact point are the whole diagnosis: a hull contact is retail's
-        own ``getCollidableEntities`` contract, while a gun contact metres
-        off the hull says the drawn wreck and the tested one disagree.
+        The tested part, pose and contact point help correlate a player's
+        report with the authoritative query. They do not establish where
+        Windows drew that part or prove that its collision was correct.
         Bounded, and written only by the process that owns the resolution.
         """
         if not self._worker_mode:
@@ -14156,27 +14153,32 @@ class BattleRuntime(object):
                 self._WRECK_IMPACT_REPORT_LIMIT):
             return False
         self._wreck_impact_reports += 1
-        data = data if isinstance(data, dict) else {}
-        collisions = data.get('collisions') or ()
-        nearest = (min(collisions, key=lambda item: float(item.dist))
-                   if collisions else None)
-        pose = data.get('collision_pose')
-        if not isinstance(pose, dict):
-            pose = target_record.get('projectile_collision_pose')
-        pose = pose if isinstance(pose, dict) else {}
-        sys.stdout.write(
-            '[Offline LAN 0.9.22] WRECK IMPACT %s=%s part=%s '
-            'pose=(%.2f, %.2f, %.2f) yaw=%.3f pitch=%.3f roll=%.3f '
-            'turret=%.3f gun=%.3f at=(%.2f, %.2f, %.2f)\n' % (
-                target_kind, target_record.get('network_id'),
-                'unknown' if nearest is None else
-                getattr(nearest, 'compName', 'unknown'),
-                _number(pose.get('x')), _number(pose.get('y')),
-                _number(pose.get('z')), _number(pose.get('yaw')),
-                _number(pose.get('pitch')), _number(pose.get('roll')),
-                _number(pose.get('turret_yaw')),
-                _number(pose.get('gun_pitch')),
-                _number(impact[0]), _number(impact[1]), _number(impact[2])))
+        try:
+            data = data if isinstance(data, dict) else {}
+            collisions = data.get('collisions') or ()
+            nearest = (min(collisions, key=lambda item: float(item.dist))
+                       if collisions else None)
+            pose = data.get('collision_pose')
+            if not isinstance(pose, dict):
+                pose = target_record.get('projectile_collision_pose')
+            pose = pose if isinstance(pose, dict) else {}
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] WRECK IMPACT %s=%s part=%s '
+                'pose=(%.2f, %.2f, %.2f) yaw=%.3f pitch=%.3f roll=%.3f '
+                'turret=%.3f gun=%.3f at=(%.2f, %.2f, %.2f)\n' % (
+                    target_kind, target_record.get('network_id'),
+                    'unknown' if nearest is None else
+                    getattr(nearest, 'compName', 'unknown'),
+                    _number(pose.get('x')), _number(pose.get('y')),
+                    _number(pose.get('z')), _number(pose.get('yaw')),
+                    _number(pose.get('pitch')), _number(pose.get('roll')),
+                    _number(pose.get('turret_yaw')),
+                    _number(pose.get('gun_pitch')),
+                    _number(impact[0]), _number(impact[1]), _number(impact[2])))
+        except Exception:
+            # Optional diagnostics must not replace a resolved wreck impact
+            # with a no-effect terminal when its fields or log stream fail.
+            return False
         return True
 
     def _report_shot_scene_stop(self, reason, impact):
@@ -16661,20 +16663,14 @@ class BattleRuntime(object):
         return start, direction
 
     def _wreck_blocks_target_outline(self, start, end, target_depth):
-        """Return whether a nearer dead body owns #1513's cursor pick.
+        """Suppress an outline behind a nearer retained wreck's full bounds.
 
-        Stock never occludes targeting with a vehicle: ``pickFirst`` scores
-        every candidate as ``angleTo + 0.001 * zDistance`` and the line of
-        sight ``isEntitySelectable`` runs is ``ChunkSpace::collide``, the
-        static scene alone.  A wreck keeps the ``targetCaps``
-        ``vehicle_onEnterWorld`` gave it and the ``targetFullBounds``
-        ``Vehicle.__init__`` set, so a dead hull under the cursor wins that
-        score purely by being nearer, and ``PlayerAvatar.targetFocus`` then
-        draws no edge at all because the entity it picked is not alive.
-        Reproduce that on the same full bounds rather than on the exact
-        hit-test geometry a shell uses: a pin-point ray slips over a hull
-        roof or between hull and gun where stock has already taken the pick,
-        and the outline then promises a line the shell does not have.
+        #1513 Vehicle.onEnterWorld sets targetFullBounds. Public BigWorld
+        2.0.1 picker source motivates checking the whole compound envelope,
+        but it is not evidence for the shipped #1513 native implementation.
+        This local selection rule uses descriptor bounds and segment-entry
+        order; it is not the public engine's entity-origin zDistance score.
+        Exact Windows picker parity remains unverified.
         """
         ray = (_xyz(start), _xyz(end))
         for record in self._records.values():
@@ -16686,10 +16682,8 @@ class BattleRuntime(object):
                     not getattr(vehicle, 'isStarted', False) or
                     self._record_alive(record, vehicle)):
                 continue
-            # Composing full bounds costs four component transforms, so
-            # reject the wrecks this cursor ray cannot reach first. The
-            # radius is the same conservative vehicle bound the projectile
-            # broad phase uses, and it never rejects a real overlap.
+            # Avoid component transforms for distant wrecks using the same
+            # conservative radius as the projectile broad phase.
             position = _xyz(getattr(
                 vehicle, 'position', record.get('state', {})))
             if point_segment_distance_sq(
@@ -16708,13 +16702,12 @@ class BattleRuntime(object):
         return False
 
     def _thrown_turret_blocks_target_outline(self, start, end, target_depth):
-        """Return whether a landed turret owns the nearer cursor pick.
+        """Return whether a landed turret's full bounds precede the target.
 
         ``DetachedTurret.__init__`` sets ``targetFullBounds`` and
-        ``targetCaps = [1]``, so a thrown turret is an ordinary picker
-        candidate that carries no ``isAlive`` edge.  The same landed pose
-        already stops a shell here, so the outline must not keep promising
-        a line through it.
+        ``targetCaps = [1]``. Use the server-accepted landed geometry for this
+        local selection rule, just as the projectile obstacle query does.
+        Native picker behaviour while the turret is in flight is unverified.
         """
         obstacles = self._detached_turret_obstacles
         if obstacles is None:

@@ -3216,6 +3216,42 @@ class BattleProjectileTests(unittest.TestCase):
         self.assertIn(
             'stage=effects reason=missing_live_direct', output.getvalue())
 
+    def test_wreck_diagnostic_failure_preserves_the_impact_terminal(self):
+        for failure in ('stdout', 'collision_detail'):
+            with self.subTest(failure=failure):
+                battle, unused_bigworld = _battle()
+                self.assertTrue(battle._accept_projectile_event(_event()))
+                battle._worker_mode = True
+                battle._records['bot:8'] = {
+                    'engine_id': 42, 'network_id': 8, 'kind': 'bot',
+                    'local': False, 'ready': True,
+                    'state': {'health': 0, 'alive': False}}
+                battle._projectile_direct_effect = mock.Mock(return_value=None)
+                collision = types.SimpleNamespace(dist=5.0, compName='gun')
+                if failure == 'collision_detail':
+                    collision.dist = None
+                battle._projectile_terminal_data['player:7:1'] = {
+                    'target_key': 'bot:8',
+                    'impact': (5.0, 1.0, 0.0),
+                    'collisions': (collision,),
+                }
+                state = battle._projectiles.get('player:7:1')
+                output = io.StringIO()
+                if failure == 'stdout':
+                    output = mock.Mock()
+                    output.write.side_effect = IOError('log stream closed')
+                with mock.patch('sys.stdout', output):
+                    self.assertTrue(battle._projectile_terminal(
+                        state, {'reason': 'impact'}))
+
+                args, kwargs = battle.client.resolutions[-1]
+                self.assertEqual('impact', args[3])
+                self.assertEqual([5.0, 1.0, 0.0], args[5])
+                self.assertTrue(kwargs['hit_vehicle'])
+                self.assertEqual(
+                    {'target_kind': 'bot', 'target_id': 8},
+                    kwargs['wreck_hit'])
+
     def test_stock_max_29_projectile_debt_bounds_frame_and_reduces_scans(self):
         for warm_history in (False, True):
             with self.subTest(warm_history=warm_history):
