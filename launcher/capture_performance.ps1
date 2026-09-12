@@ -32,6 +32,34 @@ function Same-Session {
     $current = Get-Content -LiteralPath $SessionState -Raw | ConvertFrom-Json
     return ($current.id -eq $SessionId -and -not $current.endedAt)
 }
+function Invoke-Wpr([string[]]$WprArguments) {
+    $process = [Diagnostics.Process]::new()
+    try {
+        $process.StartInfo.FileName = $wpr
+        # Arguments are fixed switches, the validated instance ID, or an ETL
+        # filename. Quote each one so a session directory may contain spaces.
+        $process.StartInfo.Arguments = ($WprArguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
+        $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true
+        $process.StartInfo.RedirectStandardOutput = $true
+        $process.StartInfo.RedirectStandardError = $true
+        Write-Status ('wpr: {0} {1}' -f $wpr, $process.StartInfo.Arguments)
+        [void]$process.Start()
+        # Windows PowerShell 5.1 can turn native stderr into a terminating
+        # error under ErrorActionPreference=Stop. Read both pipes directly
+        # and concurrently, preserving output even when WPR exits nonzero.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        Write-Status "wpr_exit_code=$exitCode"
+        Write-Status ("wpr_stdout:`n" + $stdout.Result)
+        Write-Status ("wpr_stderr:`n" + $stderr.Result)
+        return $exitCode
+    } finally {
+        $process.Dispose()
+    }
+}
 try {
     Write-Status "session=$SessionId requested_seconds=$Seconds"
     Write-Status 'Scope: system-wide CPU scheduling/stacks and GPU events; no heap or network payload capture.'
@@ -77,10 +105,11 @@ try {
         Write-Status 'not_started: no live battle before deadline or session ended.'
         exit 0
     }
-    $output = & $wpr -start CPU -start GPU -filemode -instancename $instance 2>&1
-    Write-Status ($output -join "`n")
-    if ($LASTEXITCODE -ne 0) {
+    $exitCode = Invoke-Wpr @('-start', 'CPU', '-start', 'GPU', '-filemode', '-instancename', $instance)
+    if ($exitCode -ne 0) {
         Write-Status 'unavailable: WPR CPU/GPU start failed; no global recording was stopped.'
+        [void](Invoke-Wpr @('-profiles'))
+        [void](Invoke-Wpr @('-status', '-instancename', $instance))
         exit 0
     }
     $started = $true
@@ -89,9 +118,8 @@ try {
     while ([DateTime]::UtcNow -lt $deadline -and (Same-Session)) {
         Start-Sleep -Milliseconds 500
     }
-    $output = & $wpr -stop $pending -instancename $instance 2>&1
-    Write-Status ($output -join "`n")
-    if ($LASTEXITCODE -ne 0) { throw 'WPR stop failed.' }
+    $exitCode = Invoke-Wpr @('-stop', $pending, '-instancename', $instance)
+    if ($exitCode -ne 0) { throw 'WPR stop failed.' }
     $started = $false
     $current = Get-Content -LiteralPath $SessionState -Raw | ConvertFrom-Json
     if ($current.id -ne $SessionId) {
@@ -106,12 +134,18 @@ try {
     Move-Item -LiteralPath $pending -Destination $final
     Write-Status "complete: $final"
 } catch {
-    Write-Status ('unavailable: line={0} {1}' -f
-        $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
+    Write-Status ('unavailable: line={0} type={1} error_id={2} {3}' -f
+        $_.InvocationInfo.ScriptLineNumber, $_.Exception.GetType().FullName,
+        $_.FullyQualifiedErrorId, $_.Exception.Message)
 } finally {
-    if ($started) {
-        # This instance was successfully started by this invocation only.
-        & $wpr -cancel -instancename $instance 2>&1 | ForEach-Object { Write-Status "$_" }
+    try {
+        if ($started) {
+            # This instance was successfully started by this invocation only.
+            [void](Invoke-Wpr @('-cancel', '-instancename', $instance))
+        }
+    } catch {
+        Write-Status ('cleanup_failed: {0}' -f $_.Exception.ToString())
+    } finally {
+        $log.Dispose()
     }
-    $log.Dispose()
 }
