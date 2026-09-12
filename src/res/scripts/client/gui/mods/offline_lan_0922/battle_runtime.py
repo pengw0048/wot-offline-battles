@@ -1775,6 +1775,7 @@ class BattleRuntime(object):
         self._bot_motion_kinds = {}
         self._crush_reports = 0
         self._next_crush_report = {}
+        self._bot_lane_wreck_rows_cache = None
         self._destructible_verdict_reports = 0
         self._soft_static_recast_budget = [BOT_SOFT_RECAST_BUDGET]
         self._local_vertical_speed = 0.0
@@ -2097,6 +2098,7 @@ class BattleRuntime(object):
         self._bot_motion_kinds = {}
         self._crush_reports = 0
         self._next_crush_report = {}
+        self._bot_lane_wreck_rows_cache = None
         self._destructible_verdict_reports = 0
         self._soft_static_recast_budget = [BOT_SOFT_RECAST_BUDGET]
         self._local_vertical_speed = 0.0
@@ -21484,6 +21486,11 @@ class BattleRuntime(object):
             # the plumbing that scores it went missing.
             ranks = (self._bots is None or
                      self._bots.bot_aim_selection_allowed(source, target))
+            # Neither end of this lane is its own blocker. Both are alive,
+            # so neither is in the wreck view either; keep the exclusion
+            # structural so a later predicate cannot strand every gunner.
+            wreck_rows = self._bot_lane_wreck_rows()
+            lane_ends = (record, entry['record'])
             best = None
             best_score = None
             exposed = None
@@ -21493,6 +21500,9 @@ class BattleRuntime(object):
                     self._avatar.spaceID, self._vector(origin),
                     self._vector(point), 128)
                 if hit is not None:
+                    continue
+                if self._wreck_blocks_bot_lane(
+                        wreck_rows, origin, point, lane_ends):
                     continue
                 score = self._bot_aim_damage_score(
                     descriptor, entry, source, target, origin, point)
@@ -21518,6 +21528,99 @@ class BattleRuntime(object):
             return False
         return False
 
+    def _bot_lane_rows(self, source_id, accept, prefilter=None):
+        """Return the hulls one bot's shell could meet, with their poses.
+
+        Every bot lane question - an ally on the parabola, a wreck across
+        the aim ray - needs the same record skips, so one builder owns them.
+        ``accept(record, state, vehicle)`` selects which hulls the question
+        is about, and an optional ``prefilter(record, state)`` rejects one
+        before its entity is resolved at all.  A ``source_id`` of ``None``
+        keeps every bot, for a view whose consumers apply their own
+        identity exclusions.
+        """
+        rows = []
+        for record in self._records.values():
+            if record.get('tombstone') or not record.get('ready'):
+                continue
+            if self._worker_mode and record.get('local'):
+                continue
+            if source_id is not None and record.get('kind') == 'bot':
+                try:
+                    if int(record.get('network_id')) == source_id:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            state = record.get('state') or {}
+            if prefilter is not None and not prefilter(record, state):
+                continue
+            vehicle = self._server_entity(record.get('engine_id'))
+            if vehicle is None or not getattr(vehicle, 'isStarted', False):
+                continue
+            if not accept(record, state, vehicle):
+                continue
+            position = (tuple(self._local_position)
+                        if record.get('local') else
+                        _xyz(getattr(vehicle, 'position', state)))
+            rows.append((record, vehicle, position))
+        return tuple(rows)
+
+    def _bot_lane_row_contact(self, rows, points, splash_radius=0.0,
+                              exclude=()):
+        """Return the first supplied hull one bot shell path contacts.
+
+        One broad phase and one body/ground pose dispatch, matching the
+        projectile resolver, so a pose contract cannot be corrected for
+        allies and missed for wrecks.  A native collision failure
+        propagates to the caller, which decides what an unproved lane means.
+        """
+        terminal = points[-1]
+        broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
+        for record, vehicle, position in rows:
+            # Identity, never equality: two records with the same fields are
+            # two vehicles, and a dict compare would walk both of them.
+            if any(record is excluded for excluded in exclude):
+                continue
+            blocked = bool(
+                splash_radius > 0.0 and
+                sum((position[index] - terminal[index]) ** 2
+                    for index in range(3)) <= splash_radius ** 2)
+            if not blocked:
+                for first, second in zip(points, points[1:]):
+                    if (not point_in_expanded_segment_bounds(
+                            position, first, second,
+                            PROJECTILE_BROADPHASE_RADIUS) or
+                            point_segment_distance_sq(
+                                position, first, second) > broadphase_sq):
+                        continue
+                    start = self._vector(first)
+                    end = self._vector(second)
+                    if (record.get('local') and
+                            self._local_matrix is not None):
+                        collisions = collide_vehicle_at_matrix(
+                            vehicle, self._local_body_pose(), start, end,
+                            self._runtime.math,
+                            chassis_matrix=self._local_matrix)
+                    elif record.get('native_remote'):
+                        body_matrix, chassis_matrix = \
+                            self._projectile_vehicle_matrices(
+                                record, vehicle)
+                        collisions = collide_vehicle_at_matrix(
+                            vehicle, body_matrix, start, end,
+                            self._runtime.math,
+                            chassis_matrix=chassis_matrix)
+                    else:
+                        collide = getattr(
+                            vehicle, 'collideSegmentExt', None)
+                        collisions = (collide(start, end)
+                                      if callable(collide) else ())
+                    if collisions:
+                        blocked = True
+                        break
+            if blocked:
+                return record, vehicle, position
+        return None
+
     def _bot_friendly_path_verdict(
             self, source, path, splash_radius=0.0):
         """Test live allied hulls against one frozen physical shell path."""
@@ -21535,89 +21638,88 @@ class BattleRuntime(object):
                 any(math.isnan(value) or math.isinf(value)
                     for point in points for value in point)):
             return {'clear': False}
-        terminal = points[-1]
-        broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
-        for record in self._records.values():
-            if record.get('tombstone') or not record.get('ready'):
-                continue
-            if self._worker_mode and record.get('local'):
-                continue
-            if record.get('kind') == 'bot':
-                try:
-                    if int(record.get('network_id')) == source_id:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-            state = record.get('state') or {}
+
+        def is_ally(unused_record, state):
             try:
-                if int(state.get('team')) != source_team:
-                    continue
+                return int(state.get('team')) == source_team
             except (TypeError, ValueError):
-                continue
-            vehicle = self._server_entity(record.get('engine_id'))
-            if (vehicle is None or not getattr(vehicle, 'isStarted', False) or
-                    not self._record_alive(record, vehicle)):
-                continue
-            position = (tuple(self._local_position)
-                        if record.get('local') else
-                        _xyz(getattr(vehicle, 'position', state)))
-            blocked = bool(
-                splash_radius > 0.0 and
-                sum((position[index] - terminal[index]) ** 2
-                    for index in range(3)) <= splash_radius ** 2)
-            if not blocked:
-                for first, second in zip(points, points[1:]):
-                    if (not point_in_expanded_segment_bounds(
-                            position, first, second,
-                            PROJECTILE_BROADPHASE_RADIUS) or
-                            point_segment_distance_sq(
-                                position, first, second) > broadphase_sq):
-                        continue
-                    start = self._vector(first)
-                    end = self._vector(second)
-                    try:
-                        if (record.get('local') and
-                                self._local_matrix is not None):
-                            collisions = collide_vehicle_at_matrix(
-                                vehicle, self._local_body_pose(), start, end,
-                                self._runtime.math,
-                                chassis_matrix=self._local_matrix)
-                        elif record.get('native_remote'):
-                            body_matrix, chassis_matrix = \
-                                self._projectile_vehicle_matrices(
-                                    record, vehicle)
-                            collisions = collide_vehicle_at_matrix(
-                                vehicle, body_matrix, start, end,
-                                self._runtime.math,
-                                chassis_matrix=chassis_matrix)
-                        else:
-                            collide = getattr(
-                                vehicle, 'collideSegmentExt', None)
-                            collisions = (collide(start, end)
-                                          if callable(collide) else ())
-                    except Exception:
-                        return {'clear': False}
-                    if collisions:
-                        blocked = True
-                        break
-            if not blocked:
-                continue
-            try:
-                shape = tank_collision.chassis_shape(
-                    vehicle.typeDescriptor)
-                blocker_radius = math.hypot(shape[0], shape[1])
-            except Exception:
-                fallback = tank_collision.DEFAULT_SHAPE
-                blocker_radius = math.hypot(fallback[0], fallback[1])
-            return {
-                'clear': False,
-                'blocker_kind': record.get('kind'),
-                'blocker_id': record.get('network_id'),
-                'blocker_team': source_team,
-                'blocker_position': position,
-                'blocker_radius': blocker_radius,
-            }
-        return {'clear': True}
+                return False
+
+        def is_live(record, unused_state, vehicle):
+            return self._record_alive(record, vehicle)
+
+        try:
+            contact = self._bot_lane_row_contact(
+                self._bot_lane_rows(source_id, is_live, prefilter=is_ally),
+                points, splash_radius=splash_radius)
+        except Exception:
+            return {'clear': False}
+        if contact is None:
+            return {'clear': True}
+        record, vehicle, position = contact
+        try:
+            shape = tank_collision.chassis_shape(
+                vehicle.typeDescriptor)
+            blocker_radius = math.hypot(shape[0], shape[1])
+        except Exception:
+            fallback = tank_collision.DEFAULT_SHAPE
+            blocker_radius = math.hypot(fallback[0], fallback[1])
+        return {
+            'clear': False,
+            'blocker_kind': record.get('kind'),
+            'blocker_id': record.get('network_id'),
+            'blocker_team': source_team,
+            'blocker_position': position,
+            'blocker_radius': blocker_radius,
+        }
+
+    def _bot_lane_wreck_rows(self):
+        """Materialise this frame's dead hulls once for every lane probe.
+
+        Up to ``MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME`` pairs probe in one
+        frame and every one of them meets the same wrecks, so rebuilding the
+        record view per probe was the whole added cost. ``bot_lane_origin``
+        beside this already reuses one frame the same way. Retiring on the
+        record revision as well keeps a roster edit from being missed, and a
+        death that lands mid-frame is admitted on the next one - far inside
+        the ``SHOT_LANE_SECONDS`` window the verdict itself is cached for.
+        """
+        key = (self._last_frame_time, self._records_revision)
+        cached = self._bot_lane_wreck_rows_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        def is_wreck(record, unused_state, vehicle):
+            return not self._record_alive(record, vehicle)
+
+        rows = self._bot_lane_rows(None, is_wreck)
+        self._bot_lane_wreck_rows_cache = (key, rows)
+        return rows
+
+    def _wreck_blocks_bot_lane(self, rows, origin, point, lane_ends=()):
+        """Return whether a dead hull or landed turret owns this aim ray.
+
+        Nothing on the map stops a shell that the shooter cannot see coming:
+        ``getCollidableEntities`` hands the resolver every ``isStarted``
+        vehicle with no alive filter, so a retained wreck ends a bot's shell
+        exactly as a wall does.  The static mask-128 ray beside this one
+        never sees a wreck, so without this a bot keeps firing whole reloads
+        into a dead hull it has no way to notice.  The geometry is the
+        shell's own, not the picker's bounds: the question here is only
+        whether the round arrives.
+        """
+        points = (tuple(origin), tuple(point))
+        if rows and self._bot_lane_row_contact(
+                rows, points, exclude=lane_ends) is not None:
+            return True
+        obstacles = self._detached_turret_obstacles
+        if obstacles is None:
+            return False
+        # The same accepted rest pose the projectile resolver already stops
+        # a shell on, queried on the same server clock.
+        return obstacles.block_distance(
+            self._vector(points[0]), self._vector(points[1]),
+            self._turret_server_time_ms()) is not None
 
     def _bot_friendly_firing_lane(
             self, source, unused_target, descriptor, shell_index, launch):
