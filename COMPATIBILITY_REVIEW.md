@@ -1984,8 +1984,8 @@ open against a retail cell. The port applies only the rotation half of the
 command, never its `FORWARD` bit, so a parked retail hull may creep forward
 while it aligns where this port pivots, and native track animation sees that
 same bare rotation. A coasting hull under no drive command also autorotates
-here, because the cell can only see flags and not a measured speed. Neither
-difference has been measured on Windows.
+here, because this port gates on input intent rather than measured speed.
+Neither difference has been measured on Windows.
 
 LAN pose samples retain the fractional remainder of the nominal 30 Hz
 publication interval. Clearing the entire accumulator quantised a 40 FPS

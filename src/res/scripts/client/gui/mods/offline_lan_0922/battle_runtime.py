@@ -20471,18 +20471,17 @@ class BattleRuntime(object):
         integrator.  The descriptor, native gun rotator and copied traverse
         physics continue to own the arc, gun speed and resulting dispersion.
 
-        Retail autorotation is the movement command a cell applies while the
-        player issues none.  ``WGGunRotatorImpl`` computes the direction in
+        This port applies autorotation while the player issues no movement
+        command, following the Windows gameplay report.  ``WGGunRotatorImpl``
+        computes the direction in
         ``0x00f5ad40`` from the elapsed time, the desired yaw, the current
         turret yaw, the installed yaw limits and the turret and vehicle
         rotation speeds, then publishes ``_MOVEMENT_FLAGS.FORWARD`` beside one
-        rotation bit and never a bare rotation bit: those flags are shaped like
-        a whole movement command, not a rotation contribution a reverse or
-        braking command could absorb.  Windows play selected that reading, and
-        it is the rule this port shipped before a throttle-independent reading
-        replaced it.  That the direction itself reads no drive input only says
-        where the composition lives; it is not a licence to steer a driving
-        hull with the mouse.
+        rotation bit and never a bare rotation bit.  That shape permits an
+        idle-only cell policy, but does not prove it: the retail server could
+        mask out the forward bit when composing commands.  The client does
+        not ship that server code.  Restore the policy this port used before
+        a throttle-independent reading replaced it.
         """
         turn = float(turn)
         if turn != 0.0:

@@ -16611,9 +16611,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._local_yaw = 0.0
         battle._avatar.inputHandler.getAutorotation = lambda: True
 
-        # #1513's rotator publishes FORWARD beside the rotation bit, so its
-        # flags are the whole movement command a cell applies while the player
-        # issues none.  Any live drive command owns the hull instead.
+        # The Windows gameplay report selects this port's idle-only policy;
+        # the native rotator flags alone do not prove retail cell composition.
+        # Any live drive command owns the hull instead.
         self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
         for throttle in (-1.0, -0.5, 0.25, 1.0):
             self.assertEqual(0.0, battle._local_autorotation_turn(
