@@ -20471,18 +20471,27 @@ class BattleRuntime(object):
         integrator.  The descriptor, native gun rotator and copied traverse
         physics continue to own the arc, gun speed and resulting dispersion.
 
-        The direction is independent of the throttle.  The pinned executable
-        computes it in ``WGGunRotatorImpl`` from the elapsed time, the desired
-        yaw, the current turret yaw, the installed yaw limits and the turret
-        and vehicle rotation speeds; no drive input reaches that routine, and
-        the movement flags it publishes carry ``_MOVEMENT_FLAGS.FORWARD``
-        beside the rotation bit.  The copied cell preserves that desired hull
-        direction when composing it with either forward or reverse driving.
+        This port applies autorotation while the player issues no movement
+        command, following the Windows gameplay report.  ``WGGunRotatorImpl``
+        computes the direction in
+        ``0x00f5ad40`` from the elapsed time, the desired yaw, the current
+        turret yaw, the installed yaw limits and the turret and vehicle
+        rotation speeds, then publishes ``_MOVEMENT_FLAGS.FORWARD`` beside one
+        rotation bit and never a bare rotation bit.  That shape permits an
+        idle-only cell policy, but does not prove it: the retail server could
+        mask out the forward bit when composing commands.  The client does
+        not ship that server code.  Restore the policy this port used before
+        a throttle-independent reading replaced it.
         """
         turn = float(turn)
         if turn != 0.0:
-            # A live A/D command owns the hull.  Only the rotation half of the
-            # retail command is in question here; the throttle keeps driving.
+            # A live A/D command owns the hull.
+            return turn
+        # ``forward`` also carries the native R/F cruise presets, so this
+        # covers keyboard drive and cruise without inferring motion from a
+        # measured speed that reads zero while a physically blocked hull is
+        # still under power.
+        if float(drive_intent) != 0.0:
             return turn
         # CMD_BLOCK_TRACKS is independent from the persistent autorotation
         # setting.  Holding Space does not clear that setting, but the retail
@@ -20520,11 +20529,7 @@ class BattleRuntime(object):
         elif relative_yaw > maximum + GUN_TRAVERSE_LIMIT_EPSILON:
             autorotation_turn = 1.0
         if autorotation_turn:
-            # traverse_step interprets steering as an A/D key and reverses it
-            # under reverse drive. Convert the desired hull yaw direction to
-            # that input convention so autorotation still approaches the aim.
-            return (-autorotation_turn if float(drive_intent) < 0.0 else
-                    autorotation_turn)
+            return autorotation_turn
         return turn
 
     def _local_siege_drive_locked(self, entity):

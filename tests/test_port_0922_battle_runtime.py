@@ -16599,7 +16599,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         handler.switchAutorotation()
         self.assertFalse(handler.getAutorotation())
 
-    def test_limited_traverse_autorotation_composes_with_a_live_throttle(self):
+    def test_limited_traverse_autorotation_yields_to_a_drive_command(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._avatar = runtime.bigworld.avatar
@@ -16611,11 +16611,15 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._local_yaw = 0.0
         battle._avatar.inputHandler.getAutorotation = lambda: True
 
-        # #1513's WGGunRotatorImpl publishes the rotation direction without
-        # reading any drive input, so driving does not suppress the hull turn.
+        # The Windows gameplay report selects this port's idle-only policy;
+        # the native rotator flags alone do not prove retail cell composition.
+        # Any live drive command owns the hull instead.
         self.assertEqual(1.0, battle._local_autorotation_turn(entity, 0.0))
-        # Explicit A/D still owns steering, including its reverse convention.
-        for throttle in (-1.0, 1.0):
+        for throttle in (-1.0, -0.5, 0.25, 1.0):
+            self.assertEqual(0.0, battle._local_autorotation_turn(
+                entity, 0.0, drive_intent=throttle))
+        # Explicit A/D still owns steering at every throttle.
+        for throttle in (-1.0, 0.0, 1.0):
             for turn in (-1.0, 1.0):
                 self.assertEqual(turn, battle._local_autorotation_turn(
                     entity, turn, drive_intent=throttle))
@@ -16651,7 +16655,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime.bigworld.entities[10] = entity
         battle._server = types.SimpleNamespace(vehicle_id=10)
         battle._sender = types.SimpleNamespace(
-            forward=1.0, turn=0.0, aim_yaw=0.75, handbrake=False,
+            forward=0.0, turn=0.0, aim_yaw=0.75, handbrake=False,
             send_current=lambda: client.send_input('current'))
         battle._local_descriptor = descriptor
         battle._attach_local_presentation()
@@ -16664,12 +16668,24 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(1.0, step.call_args.args[2])
         self.assertAlmostEqual(0.05, battle._local_yaw)
         self.assertEqual(0.5, battle._local_turn_speed)
-        # The hull turns while the throttle keeps driving, exactly like the
-        # ``FORWARD | ROTATE_RIGHT`` command #1513's rotator publishes.
-        self.assertEqual((2, 9), entity.engineMode)
+        # A parked hull turns, and native track animation sees the rotation
+        # that copied physics actually consumed rather than keyboard state.
+        self.assertEqual((2, 8), entity.engineMode)
         self.assertEqual(0.5, runtime.bigworld.avatar.positions[-1][3])
 
-    def test_autorotation_tracks_target_while_driving_in_either_direction(self):
+        # The same scene under a live throttle steers nothing.
+        battle._sender.forward = 1.0
+        battle._local_yaw = 0.0
+        battle._local_turn_speed = 0.0
+        with mock.patch(
+                'gui.mods.offline_lan_0922.battle_runtime.'
+                'vehicle_physics.traverse_step', return_value=0.0) as step:
+            battle._drive_local(0.1)
+
+        self.assertEqual(0.0, step.call_args.args[2])
+        self.assertEqual(0.0, battle._local_yaw)
+
+    def test_autorotation_closes_yaw_error_only_without_a_drive_command(self):
         for throttle in (-1.0, -0.25, 0.0, 0.25, 1.0):
             for aim_yaw in (-0.75, 0.75):
                 with self.subTest(throttle=throttle, aim_yaw=aim_yaw):
@@ -16690,15 +16706,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
                     battle._local_descriptor = descriptor
                     battle._attach_local_presentation()
 
-                    # Exercise the real integrator: reverse steering changes
-                    # the input sign, but aiming must still close the yaw error.
+                    # Exercise the real integrator rather than a mocked
+                    # traverse step.
                     battle._drive_local(0.1)
 
-                    self.assertGreater(battle._local_yaw * aim_yaw, 0.0)
-                    self.assertLess(abs(aim_yaw - battle._local_yaw),
-                                    abs(aim_yaw))
                     if throttle:
-                        self.assertGreater(battle._local_speed * throttle, 0.0)
+                        # The driver's heading is preserved and only the
+                        # throttle acts.
+                        self.assertEqual(0.0, battle._local_yaw)
+                        self.assertGreater(
+                            battle._local_speed * throttle, 0.0)
+                    else:
+                        self.assertGreater(battle._local_yaw * aim_yaw, 0.0)
+                        self.assertLess(abs(aim_yaw - battle._local_yaw),
+                                        abs(aim_yaw))
 
     def test_drowning_countdown_keeps_movement_until_the_vehicle_drowns(self):
         runtime = _runtime()
