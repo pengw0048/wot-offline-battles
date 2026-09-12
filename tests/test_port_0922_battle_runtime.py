@@ -12867,6 +12867,240 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(battle._bot_firing_lane(source, target))
         runtime.bigworld.wg_collideSegment.assert_not_called()
 
+    def _bot_lane_wreck(self, runtime, battle, position, collisions):
+        """Put one dead hull into the scene at ``position``.
+
+        The roster view is reused for the whole frame, exactly as
+        ``bot_lane_origin`` beside it is, so advance the frame the way
+        ``_frame`` does before the new wreck is expected to count.
+        """
+        runtime.bigworld.entities[30] = types.SimpleNamespace(
+            isStarted=True, typeDescriptor=_Descriptor(),
+            position=position,
+            collideSegmentExt=lambda start, end: collisions)
+        battle._records['bot:13'] = {
+            'engine_id': 30, 'ready': True, 'kind': 'bot',
+            'network_id': 13,
+            'state': {'alive': False, 'health': 0, 'team': 1},
+        }
+        battle._last_frame_time = (
+            0.0 if battle._last_frame_time is None
+            else battle._last_frame_time) + 0.05
+        return battle._records['bot:13']
+
+    def test_one_frame_reuses_a_single_bot_lane_wreck_view(self):
+        """Sixteen pairs a frame meet the same wrecks; walk them once.
+
+        Rebuilding the record view per probe was the entire added cost of
+        seeing wrecks at all, and a death is admitted on the next frame -
+        far inside the window the lane verdict itself is cached for.
+        """
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: None)
+        battle._last_frame_time = 10.0
+
+        first = battle._bot_lane_wreck_rows()
+        self.assertIs(first, battle._bot_lane_wreck_rows())
+
+        battle._last_frame_time = 10.05
+        second = battle._bot_lane_wreck_rows()
+        self.assertIsNot(first, second)
+
+        battle._last_frame_time = 10.05
+        battle._records_revision += 1
+        self.assertIsNot(second, battle._bot_lane_wreck_rows())
+
+    def test_a_wreck_across_the_aim_ray_closes_the_bot_firing_lane(self):
+        """A retained wreck stops a bot's shell exactly as a wall does.
+
+        ``getCollidableEntities`` hands the resolver every ``isStarted``
+        vehicle with no alive filter, but the static mask-128 ray beside
+        this check never sees one, so a bot kept firing whole reloads into
+        a dead hull it had no way to notice.
+        """
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: None)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+        self._bot_lane_wreck(
+            runtime, battle, _Vector(0.0, 0.0, 50.0),
+            (types.SimpleNamespace(dist=50.0),))
+
+        self.assertFalse(battle._bot_firing_lane(source, target))
+        self.assertIsNone(battle._bot_aim_point(source, target))
+
+    def test_a_wreck_the_exact_ray_clears_keeps_the_lane_open(self):
+        """The broad phase narrows the scan; it never decides the verdict."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: None)
+        # Inside the broad-phase radius of the lane, but the exact hit test
+        # the shell itself would run reports no contact.
+        self._bot_lane_wreck(runtime, battle, _Vector(0.0, 0.0, 50.0), ())
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+    def test_bot_lane_wreck_view_tracks_death_motion_and_entity_retirement(self):
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        record = self._bot_lane_wreck(
+            runtime, battle, _Vector(0.0, 0.0, 50.0),
+            (types.SimpleNamespace(dist=50.0),))
+        record['state'].update(alive=True, health=100)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+        record['state'].update(alive=False, health=0)
+        battle._last_frame_time += 0.05
+        self.assertFalse(battle._bot_firing_lane(source, target))
+
+        entity = runtime.bigworld.entities[30]
+        entity.position = _Vector(100.0, 0.0, 50.0)
+        battle._last_frame_time += 0.05
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+        entity.position = _Vector(0.0, 0.0, 50.0)
+        entity.isStarted = False
+        battle._last_frame_time += 0.05
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+        del runtime.bigworld.entities[30]
+        battle._last_frame_time += 0.05
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+    def test_bot_wreck_lane_uses_canonical_body_and_chassis_matrices(self):
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        record = self._bot_lane_wreck(
+            runtime, battle, _Vector(0.0, 0.0, 50.0), ())
+        record['native_remote'] = True
+        battle._worker_mode = True
+        entity = runtime.bigworld.entities[30]
+        entity.matrix = _Matrix()
+        body, chassis = _Matrix(), _Matrix()
+        factory = types.SimpleNamespace(projectile_collision_matrices=(
+            mock.Mock(return_value=(body, chassis))))
+        # Resolve the test roster normally, while the factory owns only the
+        # unblended physical matrices rather than a stock filter at spawn.
+        battle._remote_factory = factory
+        battle._server_entity = runtime.bigworld.entities.get
+        with mock.patch.object(
+                battle_runtime_module, 'collide_vehicle_at_matrix',
+                return_value=(types.SimpleNamespace(dist=50.0),)) as collide:
+            self.assertFalse(battle._bot_firing_lane(source, target))
+        self.assertTrue(factory.projectile_collision_matrices.called)
+        for call in collide.call_args_list:
+            self.assertIs(entity, call.args[0])
+            self.assertIs(body, call.args[1])
+            self.assertIs(chassis, call.kwargs['chassis_matrix'])
+
+    def test_a_wreck_beyond_the_target_never_closes_the_lane(self):
+        """Only the hulls the shell reaches before its target can stop it."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: None)
+        self._bot_lane_wreck(
+            runtime, battle, _Vector(0.0, 0.0, 150.0),
+            (types.SimpleNamespace(dist=50.0),))
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+    def test_the_targets_own_hull_never_closes_the_lane_to_itself(self):
+        """The aim ray ends on the target, so it is not its own blocker."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: None)
+        entity = runtime.bigworld.entities[20]
+        entity.position = _Vector(0.0, 0.0, 100.0)
+        entity.collideSegmentExt = lambda start, end: (
+            types.SimpleNamespace(dist=100.0),)
+        # Nothing in this port marks a live target dead, but the exclusion
+        # is structural so a later predicate cannot strand every gunner.
+        battle._records['bot:12']['state'] = {
+            'alive': False, 'health': 0, 'team': 1}
+
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+    def test_a_landed_turret_closes_the_bot_firing_lane(self):
+        """The accepted rest pose already ends a shell in the resolver."""
+        runtime, battle, source, target, unused = self._bot_lane_scene()
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: None)
+        self.assertTrue(battle._bot_firing_lane(source, target))
+
+        queries = []
+
+        def block(start, end, server_time_ms):
+            queries.append(server_time_ms)
+            return 40.0
+
+        battle._detached_turret_obstacles = types.SimpleNamespace(
+            block_distance=block)
+
+        self.assertFalse(battle._bot_firing_lane(source, target))
+        self.assertTrue(queries)
+
+    def test_spg_planning_rejects_a_wreck_on_an_arc_chord(self):
+        runtime, battle, unused_source, unused_target, unused = (
+            self._bot_lane_scene())
+        runtime.bigworld.wg_collideSegment = lambda *unused_args: None
+        self._bot_lane_wreck(
+            runtime, battle, _Vector(0.0, 0.0, 50.0),
+            (types.SimpleNamespace(dist=5.0),))
+
+        self.assertIs(False, battle._artillery_arc_probe(
+            (0.0, 3.0, 45.0), (0.0, 1.0, 55.0)))
+        # A high arc over the same hull remains eligible.
+        self.assertIsNone(battle._artillery_arc_probe(
+            (0.0, 100.0, 45.0), (0.0, 100.0, 55.0)))
+
+        # A nearby terrain arrival is allowed by the queue, but it cannot
+        # hide a wreck which the same chord reaches first.
+        runtime.bigworld.wg_collideSegment = (
+            lambda *unused_args: (_Vector(0.0, 0.0, 55.0),))
+        self.assertIs(False, battle._artillery_arc_probe(
+            (0.0, 3.0, 45.0), (0.0, 0.0, 60.0)))
+
+        runtime.bigworld.entities[30].collideSegmentExt = (
+            lambda *unused_args: ())
+        self.assertEqual((0.0, 0.0, 55.0), battle._artillery_arc_probe(
+            (0.0, 3.0, 45.0), (0.0, 0.0, 60.0)))
+
+    def test_frozen_direct_and_spg_paths_reject_a_wreck_without_ally_metadata(self):
+        runtime, battle, source, target, descriptor = self._bot_lane_scene()
+        source.update(team=1, fire_seq=0)
+        self._bot_lane_wreck(
+            runtime, battle, _Vector(0.0, 0.0, 50.0),
+            (types.SimpleNamespace(dist=1.0),))
+        launch = {
+            'fire_seq': 1, 'shell_index': 0,
+            'shot_yaw': 0.0, 'shot_pitch': 0.0,
+            'flight_time': 0.125, 'origin': (0.0, 2.5, 0.0),
+        }
+        receipt = {'path': (
+            (0.0, 20.0, 0.0), (0.0, 2.5, 50.0), (0.0, 0.0, 100.0))}
+
+        for verdict in (
+                battle._bot_friendly_firing_lane(
+                    source, target, descriptor, 0, launch),
+                battle._bot_artillery_friendly_lane(
+                    source, target, descriptor, 0, receipt)):
+            self.assertEqual({'clear': False}, verdict)
+
+    def test_frozen_path_rejects_landed_turret_and_ignores_wreck_splash(self):
+        runtime, battle, source, unused_target, unused = self._bot_lane_scene()
+        source['team'] = 1
+        self._bot_lane_wreck(runtime, battle, _Vector(1.0, 0.0, 100.0), ())
+        path = ((0.0, 2.5, 0.0), (0.0, 0.0, 100.0))
+        self.assertEqual({'clear': True}, battle._bot_friendly_path_verdict(
+            source, path, splash_radius=10.0))
+
+        battle._detached_turret_obstacles = types.SimpleNamespace(
+            block_distance=lambda *unused_args: 40.0)
+        self.assertEqual({'clear': False}, battle._bot_friendly_path_verdict(
+            source, path, splash_radius=10.0))
+
     def test_bot_friendly_lane_uses_the_frozen_dispersed_parabola(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

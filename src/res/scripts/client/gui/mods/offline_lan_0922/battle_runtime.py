@@ -1794,6 +1794,7 @@ class BattleRuntime(object):
         self._bot_motion_kinds = {}
         self._crush_reports = 0
         self._next_crush_report = {}
+        self._bot_lane_wreck_rows_cache = None
         self._destructible_verdict_reports = 0
         self._wreck_impact_reports = 0
         self._soft_static_recast_budget = [BOT_SOFT_RECAST_BUDGET]
@@ -2117,6 +2118,7 @@ class BattleRuntime(object):
         self._bot_motion_kinds = {}
         self._crush_reports = 0
         self._next_crush_report = {}
+        self._bot_lane_wreck_rows_cache = None
         self._destructible_verdict_reports = 0
         self._wreck_impact_reports = 0
         self._soft_static_recast_budget = [BOT_SOFT_RECAST_BUDGET]
@@ -21607,6 +21609,11 @@ class BattleRuntime(object):
             # the plumbing that scores it went missing.
             ranks = (self._bots is None or
                      self._bots.bot_aim_selection_allowed(source, target))
+            # Neither end of this lane is its own blocker. Both are alive,
+            # so neither is in the wreck view either; keep the exclusion
+            # structural so a later predicate cannot strand every gunner.
+            wreck_rows = self._bot_lane_wreck_rows()
+            lane_ends = (record, entry['record'])
             best = None
             best_score = None
             exposed = None
@@ -21616,6 +21623,9 @@ class BattleRuntime(object):
                     self._avatar.spaceID, self._vector(origin),
                     self._vector(point), 128)
                 if hit is not None:
+                    continue
+                if self._wreck_blocks_bot_path(
+                        wreck_rows, (origin, point), lane_ends):
                     continue
                 score = self._bot_aim_damage_score(
                     descriptor, entry, source, target, origin, point)
@@ -21641,49 +21651,59 @@ class BattleRuntime(object):
             return False
         return False
 
-    def _bot_friendly_path_verdict(
-            self, source, path, splash_radius=0.0):
-        """Test live allied hulls against one frozen physical shell path."""
-        try:
-            source_id = int(source.get('id'))
-            source_team = int(source.get('team'))
-            points = tuple(tuple(float(value) for value in point[:3])
-                           for point in path)
-            splash_radius = float(splash_radius)
-        except (AttributeError, TypeError, ValueError, IndexError,
-                OverflowError):
-            return {'clear': False}
-        if (len(points) < 2 or splash_radius < 0.0 or
-                math.isnan(splash_radius) or math.isinf(splash_radius) or
-                any(math.isnan(value) or math.isinf(value)
-                    for point in points for value in point)):
-            return {'clear': False}
-        terminal = points[-1]
-        broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
+    def _bot_lane_rows(self, source_id, accept, prefilter=None):
+        """Return the hulls one bot's shell could meet, with their poses.
+
+        Every bot lane question - an ally on the parabola, a wreck across
+        the aim ray - needs the same record skips, so one builder owns them.
+        ``accept(record, state, vehicle)`` selects which hulls the question
+        is about, and an optional ``prefilter(record, state)`` rejects one
+        before its entity is resolved at all.  A ``source_id`` of ``None``
+        keeps every bot, for a view whose consumers apply their own
+        identity exclusions.
+        """
+        rows = []
         for record in self._records.values():
             if record.get('tombstone') or not record.get('ready'):
                 continue
             if self._worker_mode and record.get('local'):
                 continue
-            if record.get('kind') == 'bot':
+            if source_id is not None and record.get('kind') == 'bot':
                 try:
                     if int(record.get('network_id')) == source_id:
                         continue
                 except (TypeError, ValueError):
                     continue
             state = record.get('state') or {}
-            try:
-                if int(state.get('team')) != source_team:
-                    continue
-            except (TypeError, ValueError):
+            if prefilter is not None and not prefilter(record, state):
                 continue
             vehicle = self._server_entity(record.get('engine_id'))
-            if (vehicle is None or not getattr(vehicle, 'isStarted', False) or
-                    not self._record_alive(record, vehicle)):
+            if vehicle is None or not getattr(vehicle, 'isStarted', False):
+                continue
+            if not accept(record, state, vehicle):
                 continue
             position = (tuple(self._local_position)
                         if record.get('local') else
                         _xyz(getattr(vehicle, 'position', state)))
+            rows.append((record, vehicle, position))
+        return tuple(rows)
+
+    def _bot_lane_row_contact(self, rows, points, splash_radius=0.0,
+                              exclude=()):
+        """Return the first supplied hull one bot shell path contacts.
+
+        One broad phase and one body/ground pose dispatch, matching the
+        projectile resolver, so a pose contract cannot be corrected for
+        allies and missed for wrecks.  A native collision failure
+        propagates to the caller, which decides what an unproved lane means.
+        """
+        terminal = points[-1]
+        broadphase_sq = PROJECTILE_BROADPHASE_RADIUS ** 2
+        for record, vehicle, position in rows:
+            # Identity, never equality: two records with the same fields are
+            # two vehicles, and a dict compare would walk both of them.
+            if any(record is excluded for excluded in exclude):
+                continue
             blocked = bool(
                 splash_radius > 0.0 and
                 sum((position[index] - terminal[index]) ** 2
@@ -21698,53 +21718,132 @@ class BattleRuntime(object):
                         continue
                     start = self._vector(first)
                     end = self._vector(second)
-                    try:
-                        if (record.get('local') and
-                                self._local_matrix is not None):
-                            collisions = collide_vehicle_at_matrix(
-                                vehicle, self._local_body_pose(), start, end,
-                                self._runtime.math,
-                                chassis_matrix=self._local_matrix)
-                        elif record.get('native_remote'):
-                            body_matrix, chassis_matrix = \
-                                self._projectile_vehicle_matrices(
-                                    record, vehicle)
-                            collisions = collide_vehicle_at_matrix(
-                                vehicle, body_matrix, start, end,
-                                self._runtime.math,
-                                chassis_matrix=chassis_matrix)
-                        else:
-                            collide = getattr(
-                                vehicle, 'collideSegmentExt', None)
-                            collisions = (collide(start, end)
-                                          if callable(collide) else ())
-                    except Exception:
-                        return {'clear': False}
+                    if (record.get('local') and
+                            self._local_matrix is not None):
+                        collisions = collide_vehicle_at_matrix(
+                            vehicle, self._local_body_pose(), start, end,
+                            self._runtime.math,
+                            chassis_matrix=self._local_matrix)
+                    elif record.get('native_remote'):
+                        body_matrix, chassis_matrix = \
+                            self._projectile_vehicle_matrices(
+                                record, vehicle)
+                        collisions = collide_vehicle_at_matrix(
+                            vehicle, body_matrix, start, end,
+                            self._runtime.math,
+                            chassis_matrix=chassis_matrix)
+                    else:
+                        collide = getattr(
+                            vehicle, 'collideSegmentExt', None)
+                        collisions = (collide(start, end)
+                                      if callable(collide) else ())
                     if collisions:
                         blocked = True
                         break
-            if not blocked:
-                continue
+            if blocked:
+                return record, vehicle, position
+        return None
+
+    def _bot_friendly_path_verdict(
+            self, source, path, splash_radius=0.0):
+        """Reject shell obstructions, with escape metadata only for allies."""
+        try:
+            source_id = int(source.get('id'))
+            source_team = int(source.get('team'))
+            points = tuple(tuple(float(value) for value in point[:3])
+                           for point in path)
+            splash_radius = float(splash_radius)
+        except (AttributeError, TypeError, ValueError, IndexError,
+                OverflowError):
+            return {'clear': False}
+        if (len(points) < 2 or splash_radius < 0.0 or
+                math.isnan(splash_radius) or math.isinf(splash_radius) or
+                any(math.isnan(value) or math.isinf(value)
+                    for point in points for value in point)):
+            return {'clear': False}
+
+        def is_ally(unused_record, state):
             try:
-                shape = tank_collision.chassis_shape(
-                    vehicle.typeDescriptor)
-                blocker_radius = math.hypot(shape[0], shape[1])
-            except Exception:
-                fallback = tank_collision.DEFAULT_SHAPE
-                blocker_radius = math.hypot(fallback[0], fallback[1])
-            return {
-                'clear': False,
-                'blocker_kind': record.get('kind'),
-                'blocker_id': record.get('network_id'),
-                'blocker_team': source_team,
-                'blocker_position': position,
-                'blocker_radius': blocker_radius,
-            }
-        return {'clear': True}
+                return int(state.get('team')) == source_team
+            except (TypeError, ValueError):
+                return False
+
+        def is_live(record, unused_state, vehicle):
+            return self._record_alive(record, vehicle)
+
+        try:
+            # Candidate lanes may predate a wreck or its final shoved pose.
+            # Recheck the frozen dispersed path for both direct guns and
+            # SPGs. Dead hulls need no splash clearance or ally escape order.
+            source_record = self._records.get('bot:%d' % source_id)
+            if self._wreck_blocks_bot_path(
+                    self._bot_lane_wreck_rows(), points, (source_record,)):
+                return {'clear': False}
+            contact = self._bot_lane_row_contact(
+                self._bot_lane_rows(source_id, is_live, prefilter=is_ally),
+                points, splash_radius=splash_radius)
+        except Exception:
+            return {'clear': False}
+        if contact is None:
+            return {'clear': True}
+        record, vehicle, position = contact
+        try:
+            shape = tank_collision.chassis_shape(
+                vehicle.typeDescriptor)
+            blocker_radius = math.hypot(shape[0], shape[1])
+        except Exception:
+            fallback = tank_collision.DEFAULT_SHAPE
+            blocker_radius = math.hypot(fallback[0], fallback[1])
+        return {
+            'clear': False,
+            'blocker_kind': record.get('kind'),
+            'blocker_id': record.get('network_id'),
+            'blocker_team': source_team,
+            'blocker_position': position,
+            'blocker_radius': blocker_radius,
+        }
+
+    def _bot_lane_wreck_rows(self):
+        """Materialise this frame's dead hulls once for every lane probe.
+
+        Up to ``MAX_WORKER_SHOT_LANE_PAIRS_PER_FRAME`` pairs probe in one
+        frame and every one of them meets the same wrecks, so rebuilding the
+        record view per probe was the whole added cost. ``bot_lane_origin``
+        beside this already reuses one frame the same way. Retiring on the
+        record revision as well keeps a roster edit from being missed, and a
+        death that lands mid-frame is admitted on the next one - far inside
+        the ``SHOT_LANE_SECONDS`` window the verdict itself is cached for.
+        """
+        key = (self._last_frame_time, self._records_revision)
+        cached = self._bot_lane_wreck_rows_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        def is_wreck(record, unused_state, vehicle):
+            return not self._record_alive(record, vehicle)
+
+        rows = self._bot_lane_rows(None, is_wreck)
+        self._bot_lane_wreck_rows_cache = (key, rows)
+        return rows
+
+    def _wreck_blocks_bot_path(self, rows, points, lane_ends=()):
+        """Test dead hulls and landed turrets on supplied shell segments."""
+        if rows and self._bot_lane_row_contact(
+                rows, points, exclude=lane_ends) is not None:
+            return True
+        obstacles = self._detached_turret_obstacles
+        if obstacles is None:
+            return False
+        # Reuse the resolver's accepted rest poses on the current server
+        # clock. A future landing cannot obstruct a present lane proof.
+        server_time_ms = self._turret_server_time_ms()
+        return any(obstacles.block_distance(
+            self._vector(first), self._vector(second), server_time_ms)
+            is not None for first, second in zip(points, points[1:]))
 
     def _bot_friendly_firing_lane(
             self, source, unused_target, descriptor, shell_index, launch):
-        """Reject allies on the exact frozen direct-shell parabola."""
+        """Check hulls and debris on the frozen direct-shell parabola."""
         try:
             source_id = int(source.get('id'))
             fire_seq = int(launch.get('fire_seq'))
@@ -21874,7 +21973,7 @@ class BattleRuntime(object):
 
     def _bot_artillery_friendly_lane(
             self, source, unused_target, descriptor, shell_index, receipt):
-        """Reject allies intersecting the proved SPG path or HE terminal."""
+        """Check SPG shell obstructions and live allies near the HE terminal."""
         try:
             raw_path = receipt.get('path')
             if not isinstance(raw_path, (list, tuple)) or len(raw_path) < 2:
@@ -21908,15 +22007,19 @@ class BattleRuntime(object):
         return bool(self._artillery.cancel_launch(source))
 
     def _artillery_arc_probe(self, start, end):
-        """Return the native world hit point, or None for one clear chord."""
+        """Check one budgeted SPG chord against scenery and retained wrecks."""
         hit = self._runtime.bigworld.wg_collideSegment(
             self._avatar.spaceID, self._vector(start), self._vector(end), 128)
-        if hit is None:
-            return None
         try:
-            return _xyz(hit[0])
+            finish = _xyz(hit[0]) if hit is not None else _xyz(end)
         except Exception:
             return False
+        # A ground hit near the target may be accepted by the arc queue;
+        # a wreck before it must reject this candidate even near the target.
+        if self._wreck_blocks_bot_path(
+                self._bot_lane_wreck_rows(), (_xyz(start), finish)):
+            return False
+        return finish if hit is not None else None
 
     def _advance_artillery_arcs(self, now):
         if self._artillery is None:
