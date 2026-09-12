@@ -393,6 +393,47 @@ class MasteryResultTests(unittest.TestCase):
             restarted = postbattle_store.PostBattleStore(path=path)
             self.assertEqual(result, self._result(restarted, crossing))
 
+    def test_store_publishes_the_earned_marks_to_the_battle_barrel(self):
+        """The account server owns publicInfo['marksOnGun'].
+
+        ``account_rpc.data.dossiers`` publishes this same row value as the
+        garage badge, so the barrel decal in battle and the garage badge read
+        one number rather than two independently derived ones.
+        """
+        curve = mastery_catalog.MARKS_DAMAGE[TYPE_59]
+        one_mark = curve[mastery_catalog.MARKS_PERCENTILES.index(65)]
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'postbattle_state.json')
+            store = postbattle_store.PostBattleStore(path=path)
+            self.assertEqual(0, store.marks_on_gun('china:Ch01_Type59'))
+            self.assertTrue(store.accept(_receipt(
+                store.account_key, damage=one_mark)))
+            self.assertEqual(0, store.marks_on_gun('china:Ch01_Type59'))
+
+            store._progress['vehicles']['china:Ch01_Type59'][
+                'movingAvgDamage'] = one_mark - 1
+            self.assertTrue(store.accept(_receipt(
+                store.account_key, index=2, damage=one_mark * 3)))
+
+            self.assertEqual(1, store.marks_on_gun('china:Ch01_Type59'))
+            self.assertEqual(
+                1, postbattle_store.PostBattleStore(
+                    path=path).marks_on_gun('china:Ch01_Type59'))
+
+    def test_store_reports_no_marks_for_an_unknown_or_damaged_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = postbattle_store.PostBattleStore(
+                path=str(Path(folder) / 'postbattle_state.json'))
+
+            self.assertEqual(0, store.marks_on_gun('ussr:R11_MS-1'))
+            store._progress['vehicles']['ussr:R11_MS-1'] = 'not a row'
+            self.assertEqual(0, store.marks_on_gun('ussr:R11_MS-1'))
+            store._progress['vehicles']['ussr:R11_MS-1'] = {
+                'marksOnGun': 'three'}
+            self.assertEqual(0, store.marks_on_gun('ussr:R11_MS-1'))
+            store._progress['vehicles']['ussr:R11_MS-1'] = {'marksOnGun': 40}
+            self.assertEqual(3, store.marks_on_gun('ussr:R11_MS-1'))
+
     def test_results_carry_the_badge_fields_and_the_new_mark_popup(self):
         curve = mastery_catalog.MARKS_DAMAGE[TYPE_59]
         one_mark = curve[mastery_catalog.MARKS_PERCENTILES.index(65)]

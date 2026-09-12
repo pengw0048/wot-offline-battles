@@ -67,6 +67,8 @@ MAX_OUTBOUND_DEPTH = 16
 MAX_PROJECTILE_BATCH = 30
 MAX_HUMAN_RAM_PROBES = 64
 MAX_PROJECTILE_DESTRUCTIBLES = 64
+# ``dossiers2.custom.records`` stores marksOnGun as a 'B' capped at three.
+MAX_MARKS_ON_GUN = 3
 MAX_PROJECTILE_ID = 2147483647
 MAX_PROJECTILE_DAMAGE_STICKER = (1 << 64) - 1
 PLAYER_LANDING_MAX_IMPACT_SPEED = 200.0
@@ -1467,6 +1469,20 @@ def _canonical_effective_params(value):
     return effective_params_wire.canonical(value)
 
 
+def _canonical_marks_on_gun(value):
+    """Return a gun-mark count inside the #1513 dossier record's range.
+
+    ``dossiers2.custom.records`` caps ``marksOnGun`` at three, and the value
+    only ever describes this client's own account.  A missing or unreadable
+    count is no marks, never a refused selection.
+    """
+    try:
+        marks = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(marks, MAX_MARKS_ON_GUN))
+
+
 def _same_canonical_source(left, right):
     """Compare JSON values without equating bools, integers and floats."""
     if isinstance(left, bool) or isinstance(right, bool):
@@ -1514,7 +1530,8 @@ class LANClient(object):
     def __init__(self, host, port, name, vehicle, max_health=100,
                  on_event=None, bigworld=None, account_key=None,
                  outfits=None, requested_team=0,
-                 vehicle_compact_descr=None, effective_params=None):
+                 vehicle_compact_descr=None, effective_params=None,
+                 marks_on_gun=0):
         self.host = _safe_text(host, '127.0.0.1', 255)
         self.port = int(port or 28782)
         self.name = _safe_text(name, 'Player')
@@ -1526,6 +1543,7 @@ class LANClient(object):
         self.vehicle_compact_descr = (
             _canonical_vehicle_compact_descr(vehicle_compact_descr) or '')
         self.effective_params = _canonical_effective_params(effective_params)
+        self.marks_on_gun = _canonical_marks_on_gun(marks_on_gun)
         self.requested_team = _team_choice(requested_team)
         self._published_player_outfits = {}
         self._published_player_outfit_sources = {}
@@ -1680,6 +1698,7 @@ class LANClient(object):
             'outfits': dict(self.outfits),
             'vehicle_compact_descr': self.vehicle_compact_descr,
             'effective_params': effective_params,
+            'marks_on_gun': _canonical_marks_on_gun(self.marks_on_gun),
         }
         if self.requested_team in (1, 2):
             payload['requested_team'] = self.requested_team
@@ -1788,8 +1807,14 @@ class LANClient(object):
         return self._send(message)
 
     def select_vehicle(self, vehicle, max_health, outfits=None,
-                       vehicle_compact_descr=None, effective_params=None):
-        """Accept the current loadout, sending only a changed selection."""
+                       vehicle_compact_descr=None, effective_params=None,
+                       marks_on_gun=None):
+        """Accept the current loadout, sending only a changed selection.
+
+        The gun-mark count travels with the selection because a battle can
+        earn a mark on the vehicle the player keeps: the count changes while
+        the vehicle, its outfits and its effective parameters do not.
+        """
         if not self.ready or self.phase != 'waiting':
             return False
         vehicle = _safe_text(vehicle, '', 64)
@@ -1805,23 +1830,28 @@ class LANClient(object):
         params = _canonical_effective_params(
             self.effective_params if effective_params is None
             else effective_params)
+        marks = _canonical_marks_on_gun(
+            self.marks_on_gun if marks_on_gun is None else marks_on_gun)
         if outfits is None or compact is None or params is None:
             return False
         if (vehicle == self.vehicle and max_health == self.max_health and
                 outfits == self.outfits and
                 compact == self.vehicle_compact_descr and
-                params == self.effective_params):
+                params == self.effective_params and
+                marks == self.marks_on_gun):
             return True
         message = {'type': 'select_vehicle', 'vehicle': vehicle,
                    'max_health': max_health,
                    'vehicle_compact_descr': compact,
-                   'effective_params': params}
+                   'effective_params': params,
+                   'marks_on_gun': marks}
         if publishes_outfits:
             message['outfits'] = outfits
         if not self._send(message):
             return False
         self.vehicle_compact_descr = compact
         self.effective_params = params
+        self.marks_on_gun = marks
         return True
 
     def select_team(self, team):
@@ -1891,6 +1921,9 @@ class LANClient(object):
             params = entry.get('effective_params')
             if params is not None:
                 self.effective_params = params
+            if 'marks_on_gun' in entry:
+                self.marks_on_gun = _canonical_marks_on_gun(
+                    entry.get('marks_on_gun'))
             return
 
     def _prepare_player_static_inputs(

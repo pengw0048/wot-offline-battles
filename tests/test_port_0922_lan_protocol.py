@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
 sys.path.insert(0, str(ROOT / 'server'))
 
 from gui.mods.offline_lan_0922.lan_client import (
-    HUMAN_RAM_TIMELINE_CAPABILITY, LANClient,
+    CLIENT_CAPABILITIES, HUMAN_RAM_TIMELINE_CAPABILITY, LANClient,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_PROJECTILE_ID,
     _canonical_runtime_vehicle_row,
     _project_human_ram_armors, _projectile_wire_round,
@@ -265,7 +265,8 @@ class LanProtocolTests(unittest.TestCase):
                           'vehicle': 'germany:G01_PzI',
                           'max_health': 150,
                           'vehicle_compact_descr': 'cHpp',
-                          'effective_params': effective_params()},
+                          'effective_params': effective_params(),
+                          'marks_on_gun': 0},
                          self.sent[-1])
         # Only the server-published roster may retire the pending selection,
         # so a rejected update is resent on the next waiting roster.
@@ -286,6 +287,97 @@ class LanProtocolTests(unittest.TestCase):
         self.assertEqual('germany:G01_PzI', self.client.vehicle)
         self.assertEqual(150, self.client.max_health)
         self.assertTrue(self.client.select_vehicle('germany:G01_PzI', 150))
+
+    def _marks_hello(self, **changes):
+        hello = {
+            'client_build': CLIENT_BUILD_0922,
+            'capabilities': list(CLIENT_CAPABILITIES),
+            'account_key': 'b' * 32,
+            'name': 'Marks', 'vehicle': 'ussr:R11_MS-1',
+            'max_health': 100, 'outfits': {},
+            'vehicle_compact_descr': 'dGVzdA==',
+            'effective_params': effective_params(),
+        }
+        hello.update(changes)
+        return hello
+
+    def test_join_publishes_the_owner_gun_marks_on_every_roster_row(self):
+        """#1513 decals a barrel from the roster's marksOnGun, never a guess.
+
+        The lean roster rows drop the large outfit and effective-parameter
+        blocks, but a replica still needs its owner's mark count, so the
+        single integer rides every row.
+        """
+        state = BattleState(map_name='01_karelia')
+        state.client_build = CLIENT_BUILD_0922
+        player, error = state.add_player(
+            _Socket(), ('127.0.0.1', 1),
+            self._marks_hello(marks_on_gun=2))
+
+        self.assertIsNone(error)
+        self.assertEqual(2, player.marks_on_gun)
+        self.assertEqual(2, state._public_player(player)['marks_on_gun'])
+        self.assertEqual(
+            2, state._public_player(player, include_outfits=False)[
+                'marks_on_gun'])
+
+    def test_join_without_a_gun_mark_count_earns_no_marks(self):
+        """An older client that never publishes the count still joins."""
+        state = BattleState(map_name='01_karelia')
+        state.client_build = CLIENT_BUILD_0922
+        player, error = state.add_player(
+            _Socket(), ('127.0.0.1', 1), self._marks_hello())
+
+        self.assertIsNone(error)
+        self.assertEqual(0, player.marks_on_gun)
+
+    def test_join_rejects_a_gun_mark_count_outside_the_dossier_record(self):
+        """``dossiers2.custom.records`` stores marksOnGun as a 'B' max 3."""
+        for name, value in (('float', 2.0), ('bool', True), ('string', '2'),
+                            ('negative', -1), ('overflow', 4)):
+            with self.subTest(name=name):
+                state = BattleState(map_name='01_karelia')
+                state.client_build = CLIENT_BUILD_0922
+                player, error = state.add_player(
+                    _Socket(), ('127.0.0.1', 1),
+                    self._marks_hello(marks_on_gun=value))
+
+                self.assertIsNone(player)
+                self.assertEqual('invalid_marks_on_gun', error)
+
+    def test_a_new_gun_mark_alone_republishes_the_same_vehicle(self):
+        """A battle can earn a mark on the tank the player keeps driving."""
+        state = self._room_with_one_player()
+        player = state.players[1]
+        message = {
+            'vehicle': 'ussr:R11_MS-1',
+            'max_health': 90,
+            'outfits': {},
+            'vehicle_compact_descr': 'dGVzdA==',
+            'effective_params': effective_params(),
+        }
+
+        self.assertFalse(state.select_vehicle(1, message))
+        self.assertTrue(state.select_vehicle(
+            1, dict(message, marks_on_gun=1)))
+        self.assertEqual(1, player.marks_on_gun)
+
+        # An omitted count keeps the marks the server already holds rather
+        # than silently stripping the barrel.
+        self.assertFalse(state.select_vehicle(1, message))
+        self.assertEqual(1, player.marks_on_gun)
+
+    def test_client_publishes_its_own_gun_marks_in_hello(self):
+        client = LANClient('127.0.0.1', 28782, 'Marks', 'ussr:R11_MS-1',
+                           effective_params=effective_params(),
+                           marks_on_gun=3)
+        self.assertEqual(3, client._hello_payload()['marks_on_gun'])
+
+    def test_client_gun_mark_count_is_clamped_to_the_dossier_record(self):
+        client = LANClient('127.0.0.1', 28782, 'Marks', 'ussr:R11_MS-1',
+                           effective_params=effective_params(),
+                           marks_on_gun=99)
+        self.assertEqual(3, client.marks_on_gun)
 
     def test_modern_vehicle_change_rejects_non_exact_health_atomically(self):
         invalid_values = (

@@ -1094,6 +1094,21 @@ def _angle_delta(current, target):
     return (target - current + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _marks_on_gun(value):
+    """Return a Marks of Excellence count #1513 can decal onto a barrel.
+
+    ``CompoundAppearance.__createStickers`` hands ``publicInfo['marksOnGun']``
+    straight to ``VehicleStickers``, and ``dossiers2.custom.records`` caps the
+    record at three.  A roster row from a client that does not publish the
+    count carries no marks rather than failing the entity properties.
+    """
+    try:
+        marks = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(marks, lan_protocol.MAX_MARKS_ON_GUN))
+
+
 class _DestructibleSweepHitTester(object):
     """Expose one conservative interval bbox through the pinned sensor ABI."""
 
@@ -3182,6 +3197,8 @@ class BattleRuntime(object):
             properties = self._binding.properties_from_compact_descr(
                 descriptor.makeCompactDescr(), int(local.get('team', 1)),
                 local.get('name', self._config.get('name', 'Player')))
+            properties['publicInfo']['marksOnGun'] = _marks_on_gun(
+                local.get('marks_on_gun'))
             properties['health'] = max(1, min(
                 int(local.get('health', descriptor.maxHealth)),
                 int(descriptor.maxHealth)))
@@ -3534,7 +3551,8 @@ class BattleRuntime(object):
             'id': self.client.player_id, 'name': self.client.name,
             'vehicle': self.client.vehicle, 'team': self.client.team,
             'slot': self.client.slot, 'health': self.client.max_health,
-            'max_health': self.client.max_health, 'alive': True}
+            'max_health': self.client.max_health, 'alive': True,
+            'marks_on_gun': getattr(self.client, 'marks_on_gun', 0)}
         return result
 
     def _prebattle_seconds(self):
@@ -22566,6 +22584,11 @@ class BattleRuntime(object):
         # garage owner and always receive the stock empty descriptor.
         properties['publicInfo']['outfit'] = self._remote_outfit(
             state, event.get('kind'))
+        # A Bot has no account and therefore no marks; only a human's own
+        # server-published count decals a replica's gun barrel.
+        properties['publicInfo']['marksOnGun'] = (
+            _marks_on_gun(state.get('marks_on_gun'))
+            if event.get('kind') == 'player' else 0)
         properties['health'] = max(0, min(
             int(initial_state.get('health', descriptor.maxHealth)),
             int(descriptor.maxHealth)))

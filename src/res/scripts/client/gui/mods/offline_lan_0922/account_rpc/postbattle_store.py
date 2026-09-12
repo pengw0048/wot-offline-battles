@@ -939,6 +939,21 @@ class PostBattleStore(object):
     def progress(self):
         return json.loads(json.dumps(self._progress))
 
+    def marks_on_gun(self, type_name):
+        """Return the gun marks this account has earned on one vehicle.
+
+        #1513 puts the count in ``Vehicle.publicInfo['marksOnGun']`` so that
+        ``CompoundAppearance.__createStickers`` can decal the barrel, and the
+        account server is the only producer.  This store holds that number:
+        ``_award_badges`` advances it and ``account_rpc.data.dossiers``
+        publishes the same value to the garage.
+        """
+        row = self._progress.get('vehicles', {}).get(type_name)
+        if not isinstance(row, dict):
+            return 0
+        return max(0, min(_int(row.get('marksOnGun')),
+                          battle_mastery.MAX_MARKS_ON_GUN))
+
     def pending_arenas(self):
         return sorted(int(key) for key in self._pending)
 

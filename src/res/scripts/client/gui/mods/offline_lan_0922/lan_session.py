@@ -21,6 +21,9 @@ POSTBATTLE_RETRY_DELAY = 0.10
 # The server returns an abandoned round to its waiting room five seconds after
 # the last participant leaves.  Rejoin if that roster never arrives.
 ROUND_END_TIMEOUT = 12.0
+# ``dossiers2.custom.records`` stores the vehicle marksOnGun record as a 'B'
+# capped at three.  Kept here so this module still loads its LAN client lazily.
+MAX_MARKS_ON_GUN = 3
 VEHICLE_SELECTION_WARNING = (
     'Select a valid vehicle in the garage, then click Battle! again.')
 
@@ -553,6 +556,7 @@ class LANSession(object):
                                  port_config.preferred_team(self._config))
         if self._postbattle_store is not None:
             client.account_key = self._postbattle_store.account_key
+        client.marks_on_gun = self._selected_vehicle_marks(vehicle)
         client.outfits = self._outfit_provider()
         try:
             client.vehicle_compact_descr = self._vehicle_compact_provider()
@@ -567,6 +571,27 @@ class LANSession(object):
                     'failed: %s\n' % error)
                 raise _VehicleSelectionError()
         return client
+
+    def _selected_vehicle_marks(self, vehicle):
+        """Return the gun marks this account holds on the selected vehicle.
+
+        The post-battle store is the account's own producer of the number
+        ``account_rpc.data.dossiers`` publishes to the garage, so the barrel
+        decal in battle and the badge in the garage read one value.  A session
+        without a store (a test seam, an embedder) carries no marks rather
+        than inventing them.
+        """
+        store = self._postbattle_store
+        reader = None if store is None else getattr(store, 'marks_on_gun', None)
+        if not callable(reader):
+            return 0
+        try:
+            return max(0, min(int(reader(vehicle)), MAX_MARKS_ON_GUN))
+        except Exception as error:
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] the gun mark count is unavailable: '
+                '%s\n' % error)
+            return 0
 
     def _publish_postbattle_results(self):
         """Let the stock service request and cache each durable pending row."""
@@ -843,13 +868,14 @@ class LANSession(object):
             return False
         if not vehicle or max_health < 1:
             return False
+        marks_on_gun = self._selected_vehicle_marks(vehicle)
         try:
             if effective_params is None:
                 return bool(select(
                     vehicle, max_health, outfits, vehicle_compact_descr))
             return bool(select(
                 vehicle, max_health, outfits, vehicle_compact_descr,
-                effective_params))
+                effective_params, marks_on_gun))
         except Exception as error:
             # A failed modern projection/send must never fall back to a
             # vehicle-only request that reuses the previous loadout.

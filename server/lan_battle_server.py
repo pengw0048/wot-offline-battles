@@ -455,6 +455,8 @@ CRITICAL_CAUSES = frozenset((
 TRACK_DEVICE_NAMES = frozenset(("leftTrackHealth", "rightTrackHealth"))
 OUTFIT_SEASONS = frozenset((1, 2, 4))
 MAX_OUTFIT_BYTES = 64 * 1024
+# dossiers2.custom.records caps the vehicle marksOnGun record at three.
+MAX_MARKS_ON_GUN = 3
 MAX_VEHICLE_COMPACT_BYTES = 64 * 1024
 
 
@@ -484,6 +486,23 @@ def _validated_outfits(value):
             raise ValueError("outfit catalogue is too large")
         result[str(season)] = base64.b64encode(raw).decode("ascii")
     return result
+
+
+def _validated_marks_on_gun(value):
+    """Return one gun-mark count, or raise ValueError.
+
+    ``dossiers2.custom.records`` stores ``marksOnGun`` as a 'B' capped at
+    three, and the client publishes only its own account's value.  This is
+    presentation bookkeeping on a trusted LAN, not an authority input: a
+    missing field is no marks rather than a refused join.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("invalid gun mark count")
+    if not 0 <= value <= MAX_MARKS_ON_GUN:
+        raise ValueError("invalid gun mark count")
+    return int(value)
 
 
 def _validated_vehicle_compact_descr(value):
@@ -2127,6 +2146,7 @@ class Player(_EndpointSendMixin):
     capabilities: Tuple[str, ...] = field(default_factory=tuple)
     account_key: str = ""
     outfits: dict = field(default_factory=dict)
+    marks_on_gun: int = 0
     vehicle_compact_descr: str = ""
     effective_params: dict = field(default_factory=dict)
     delivered_receipt_id: str = ""
@@ -2829,6 +2849,11 @@ class BattleState:
             except ValueError:
                 return None, "invalid_outfits"
             try:
+                marks_on_gun = _validated_marks_on_gun(
+                    hello.get("marks_on_gun"))
+            except ValueError:
+                return None, "invalid_marks_on_gun"
+            try:
                 vehicle_compact_descr = _validated_vehicle_compact_descr(
                     hello.get("vehicle_compact_descr"))
             except ValueError:
@@ -2902,6 +2927,7 @@ class BattleState:
                 capabilities=capabilities,
                 account_key=account_key,
                 outfits=outfits,
+                marks_on_gun=marks_on_gun,
                 vehicle_compact_descr=vehicle_compact_descr,
                 effective_params=effective_params,
             )
@@ -3151,6 +3177,10 @@ class BattleState:
             vehicle = _safe_vehicle(message.get("vehicle"), player.vehicle)
             try:
                 outfits = _validated_outfits(message.get("outfits"))
+                marks_on_gun = (
+                    player.marks_on_gun
+                    if message.get("marks_on_gun") is None
+                    else _validated_marks_on_gun(message.get("marks_on_gun")))
                 vehicle_compact_descr = \
                     _validated_vehicle_compact_descr(
                         message.get("vehicle_compact_descr"))
@@ -3160,6 +3190,7 @@ class BattleState:
                 return False
             if (vehicle == player.vehicle and max_health == player.max_health
                     and outfits == player.outfits and
+                    marks_on_gun == player.marks_on_gun and
                     vehicle_compact_descr ==
                     player.vehicle_compact_descr and
                     effective_params == player.effective_params):
@@ -3170,6 +3201,7 @@ class BattleState:
             player.siege_state = SIEGE_DISABLED
             player.siege_transition_ticks = 0
             player.outfits = outfits
+            player.marks_on_gun = marks_on_gun
             player.vehicle_compact_descr = vehicle_compact_descr
             player.effective_params = effective_params
             self.state_revision += 1
@@ -13643,6 +13675,10 @@ class BattleState:
             "team": player.team,
             "slot": player.slot,
             "requested_team": BattleState._requested_team_for_player(player),
+            # #1513 decals the gun barrel from publicInfo['marksOnGun'] on
+            # every roster row, so this rides even the lean rows that drop
+            # the much larger outfit and effective-parameter blocks.
+            "marks_on_gun": int(player.marks_on_gun),
             "participating": bool(player.participating),
             "world_pose": player.client_position,
             "spawn_x": (BattleState._spawn_x_for(player.slot)
@@ -14413,6 +14449,7 @@ class ClientHandler(socketserver.BaseRequestHandler):
                     "invalid_account_key": "invalid offline account identity",
                     "duplicate_account_key": "offline account identity is already connected",
                     "invalid_outfits": "invalid vehicle customization data",
+                    "invalid_marks_on_gun": "invalid gun mark count",
                     "invalid_max_health": "invalid vehicle maximum health",
                     "invalid_effective_params":
                         "invalid effective vehicle parameters",

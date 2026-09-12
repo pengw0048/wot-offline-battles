@@ -6846,7 +6846,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual({
             'id': 1, 'name': 'Player', 'vehicle': 'ussr:R11_MS-1',
             'team': 1, 'slot': 0, 'health': 500, 'max_health': 500,
-            'alive': True,
+            'alive': True, 'marks_on_gun': 0,
         }, battle._local_state())
 
     def test_frame_diagnostics_attributes_work_to_the_next_interval(self):
@@ -11194,6 +11194,53 @@ class BattleRuntimeContractTests(unittest.TestCase):
             newer_show_battle_page,
             type(runtime.app_loader).__dict__['showBattlePage'])
         self.assertEqual('newer', runtime.app_loader.showBattlePage())
+
+    def test_player_vehicle_carries_the_account_gun_marks(self):
+        """#1513 decals the barrel from publicInfo['marksOnGun'].
+
+        ``CompoundAppearance.__createStickers`` reads that field and hands it
+        to ``VehicleStickers``, so a Marks of Excellence count that never
+        reaches the entity properties can never be drawn in battle.
+        """
+        runtime = _runtime()
+        runtime.bigworld.defer_vehicle_entry = True
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        start = {
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'players': [{
+                'id': 1, 'team': 1, 'slot': 0, 'name': 'Player',
+                'vehicle': 'ussr:R11_MS-1', 'health': 500,
+                'marks_on_gun': 3}],
+            'bots': []}
+
+        self.assertTrue(battle.start({
+            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+            'name': 'Player'}, start, client))
+
+        entity = runtime.bigworld.pending_entities[battle._server.vehicle_id]
+        self.assertEqual(3, entity.publicInfo['marksOnGun'])
+
+    def test_player_vehicle_clamps_an_out_of_range_gun_mark_count(self):
+        """``dossiers2.custom.records`` caps the marksOnGun record at three."""
+        runtime = _runtime()
+        runtime.bigworld.defer_vehicle_entry = True
+        battle = BattleRuntime(runtime)
+        client = _Client()
+        start = {
+            'round_id': 1, 'map': '01_karelia', 'bot_authority_id': 1,
+            'players': [{
+                'id': 1, 'team': 1, 'slot': 0, 'name': 'Player',
+                'vehicle': 'ussr:R11_MS-1', 'health': 500,
+                'marks_on_gun': 900}],
+            'bots': []}
+
+        self.assertTrue(battle.start({
+            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+            'name': 'Player'}, start, client))
+
+        entity = runtime.bigworld.pending_entities[battle._server.vehicle_id]
+        self.assertEqual(3, entity.publicInfo['marksOnGun'])
 
     def test_map_to_native_vehicle_to_ready_lifecycle(self):
         runtime = _runtime()
@@ -28197,6 +28244,77 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertNotIn('bot:2', battle._records)
         battle._remote_factory.destroy.assert_called_once_with(1000)
         battle._binding.destroy_entity.assert_not_called()
+
+    def test_remote_human_replica_carries_published_gun_marks(self):
+        """A remote human's barrel shows the marks that player's account has.
+
+        ``remote_vehicle._attach_vehicle_stickers`` reads the same
+        ``publicInfo['marksOnGun']`` the stock CompoundAppearance reads, so a
+        replica needs the count the server published for its owner.
+        """
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._config = {
+            'map': '01_karelia',
+            'vehicle': 'ussr:R11_MS-1',
+            'startupTimeoutSeconds': 30.0}
+        battle._server = types.SimpleNamespace()
+        battle._binding = mock.Mock()
+        battle._binding.properties_from_compact_descr.side_effect = (
+            lambda *unused_args: {
+                'publicInfo': {'compDescr': 'ussr:R11_MS-1',
+                               'marksOnGun': 0, 'outfit': ''},
+                'health': 500})
+        battle._remote_factory = mock.Mock()
+        battle._remote_factory.prepare_descriptor.side_effect = (
+            lambda descriptor: descriptor)
+        battle._remote_factory.create.return_value = 1000
+        battle._remote_factory.error.return_value = None
+        battle._remote_factory.is_ready.return_value = False
+
+        battle._create_remote({
+            'type': 'create', 'entity': 'player:7', 'kind': 'player', 'id': 7,
+            'state': {
+                'team': 2, 'slot': 1, 'x': 5.0, 'y': 0.0, 'z': 5.0,
+                'world_pose': True, 'marks_on_gun': 2,
+                'vehicle': 'ussr:R11_MS-1', 'health': 500}})
+
+        properties = battle._records['player:7']['properties']
+        self.assertEqual(2, properties['publicInfo']['marksOnGun'])
+
+    def test_bot_replica_never_carries_gun_marks(self):
+        """A Bot has no account and therefore no Marks of Excellence."""
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._config = {
+            'map': '01_karelia',
+            'vehicle': 'ussr:R11_MS-1',
+            'startupTimeoutSeconds': 30.0}
+        battle._server = types.SimpleNamespace()
+        battle._binding = mock.Mock()
+        battle._binding.properties_from_compact_descr.side_effect = (
+            lambda *unused_args: {
+                'publicInfo': {'compDescr': 'ussr:R11_MS-1',
+                               'marksOnGun': 0, 'outfit': ''},
+                'health': 500})
+        battle._remote_factory = mock.Mock()
+        battle._remote_factory.prepare_descriptor.side_effect = (
+            lambda descriptor: descriptor)
+        battle._remote_factory.create.return_value = 1001
+        battle._remote_factory.error.return_value = None
+        battle._remote_factory.is_ready.return_value = False
+
+        battle._create_remote({
+            'type': 'create', 'entity': 'bot:3', 'kind': 'bot', 'id': 3,
+            'state': {
+                'team': 2, 'slot': 2, 'x': 5.0, 'y': 0.0, 'z': 5.0,
+                'world_pose': True, 'marks_on_gun': 3,
+                'vehicle': 'ussr:R11_MS-1', 'health': 500}})
+
+        properties = battle._records['bot:3']['properties']
+        self.assertEqual(0, properties['publicInfo']['marksOnGun'])
 
     def test_terminal_result_notifies_native_hud_once_with_finish_reason(self):
         runtime = _runtime()
