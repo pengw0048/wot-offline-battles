@@ -90,6 +90,50 @@ def _rotate_z(vector, angle):
             vector[2])
 
 
+def _box_point(value):
+    """Read one native or test point without assuming a single accessor."""
+    if hasattr(value, 'x'):
+        return (float(value.x), float(value.y), float(value.z))
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
+def segment_box_entry_distance(start_point, end_point, bounds):
+    """Return how far along one segment it first enters an axis-aligned box.
+
+    Zero is returned for a segment that starts inside the box, and ``None``
+    when it never reaches it. This is geometric entry distance, not an
+    entity-origin distance or a native targeting score.
+    """
+    if bounds is None:
+        return None
+    lower, upper = bounds
+    start = _box_point(start_point)
+    end = _box_point(end_point)
+    delta = tuple(end[axis] - start[axis] for axis in range(3))
+    length = math.sqrt(sum(value * value for value in delta))
+    if length <= 1.0e-9:
+        return None
+    near = 0.0
+    far = length
+    for axis in range(3):
+        direction = delta[axis] / length
+        if abs(direction) <= 1.0e-9:
+            if (start[axis] < lower[axis] or start[axis] > upper[axis]):
+                return None
+            continue
+        first = (lower[axis] - start[axis]) / direction
+        second = (upper[axis] - start[axis]) / direction
+        if first > second:
+            first, second = second, first
+        if first > near:
+            near = first
+        if second < far:
+            far = second
+        if near > far:
+            return None
+    return near
+
+
 def transform_vehicle_vector(vector, yaw, pitch=0.0, roll=0.0):
     """Apply BigWorld's stabilised yaw/pitch/roll rotation to a vector."""
     vector = _vector3(vector, 'vehicle-local vector')

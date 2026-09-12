@@ -1971,6 +1971,102 @@ class _BigWorld(object):
         self.edge_removes.append(entity)
 
 
+class _RigidMatrix(object):
+    """A composing rigid transform, unlike the translation-only ``_Matrix``.
+
+    ``applyPoint`` follows BigWorld's row-vector convention, matching
+    ``_YawMatrix``: ``x' = cos*x + sin*z``, ``z' = -sin*x + cos*z``.  Only the
+    geometry ``vehicle_target_bounds_at_matrix`` actually composes is
+    modelled, so a wrong ``preMultiply`` direction cannot pass unnoticed.
+    """
+
+    def __init__(self, other=None):
+        self.rows = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        self.offset = (0.0, 0.0, 0.0)
+        if other is not None:
+            self.rows = tuple(other.rows)
+            self.offset = tuple(other.offset)
+
+    @staticmethod
+    def _rotate_y(angle):
+        cosine, sine = math.cos(angle), math.sin(angle)
+        return ((cosine, 0.0, -sine), (0.0, 1.0, 0.0), (sine, 0.0, cosine))
+
+    @staticmethod
+    def _rotate_x(angle):
+        cosine, sine = math.cos(angle), math.sin(angle)
+        return ((1.0, 0.0, 0.0), (0.0, cosine, sine), (0.0, -sine, cosine))
+
+    @staticmethod
+    def _apply(rows, offset, point):
+        return tuple(
+            point[0] * rows[0][axis] + point[1] * rows[1][axis] +
+            point[2] * rows[2][axis] + offset[axis] for axis in range(3))
+
+    def setIdentity(self):
+        self.rows = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        self.offset = (0.0, 0.0, 0.0)
+
+    def setRotateY(self, angle):
+        self.rows = self._rotate_y(float(angle))
+        self.offset = (0.0, 0.0, 0.0)
+
+    def setRotateX(self, angle):
+        self.rows = self._rotate_x(float(angle))
+        self.offset = (0.0, 0.0, 0.0)
+
+    def setRotateYPR(self, value):
+        yaw, pitch, unused_roll = (float(item) for item in value)
+        self.rows = self._rotate_y(yaw)
+        self.offset = (0.0, 0.0, 0.0)
+        pitch_rows = self._rotate_x(pitch)
+        self.rows = tuple(
+            self._apply(self.rows, (0.0, 0.0, 0.0), row)
+            for row in pitch_rows)
+
+    def setTranslate(self, value):
+        self.rows = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        self.offset = tuple(float(item) for item in _xyz_of(value))
+
+    def applyPoint(self, value):
+        return _Vector(*self._apply(self.rows, self.offset, _xyz_of(value)))
+
+    def preMultiply(self, other):
+        """``other`` applies first, then this transform."""
+        rows = tuple(self._apply(self.rows, (0.0, 0.0, 0.0), row)
+                     for row in other.rows)
+        self.offset = self._apply(self.rows, self.offset, other.offset)
+        self.rows = rows
+
+    def postMultiply(self, other):
+        """This transform applies first, then ``other``."""
+        rows = tuple(other._apply(other.rows, (0.0, 0.0, 0.0), row)
+                     for row in self.rows)
+        self.offset = other._apply(other.rows, other.offset, self.offset)
+        self.rows = rows
+
+    def invert(self):
+        rows = tuple(tuple(self.rows[column][row] for column in range(3))
+                     for row in range(3))
+        offset = self._apply(rows, (0.0, 0.0, 0.0), self.offset)
+        self.rows = rows
+        self.offset = tuple(-value for value in offset)
+
+    @property
+    def yaw(self):
+        return math.atan2(self.rows[2][0], self.rows[2][2])
+
+    @property
+    def pitch(self):
+        return math.asin(max(-1.0, min(1.0, self.rows[2][1])))
+
+
+def _xyz_of(value):
+    if hasattr(value, 'x'):
+        return (float(value.x), float(value.y), float(value.z))
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
 class _Client(object):
     def __init__(self):
         self.player_id = 1
@@ -5382,6 +5478,239 @@ class RemoteVehicleFactoryTests(unittest.TestCase):
         self.assertEqual([], runtime.bigworld.edge_adds)
         self.assertIsNone(battle._outlined_engine_id)
         self.assertIn('is behind a wreck', battle._outline_report)
+        factory.destroy_all()
+
+    @staticmethod
+    def _picker_bounds(vehicle_yaw, turret_yaw, detached=False):
+        math_module = types.SimpleNamespace(
+            Matrix=_RigidMatrix, Vector3=_Vector)
+        body = _RigidMatrix()
+        body.setRotateYPR((vehicle_yaw, 0.0, 0.0))
+        turret = _RigidMatrix()
+        turret.setRotateY(turret_yaw)
+        gun = _RigidMatrix()
+        gun.setRotateX(0.0)
+        vehicle = types.SimpleNamespace(
+            typeDescriptor=_Descriptor(),
+            appearance=types.SimpleNamespace(
+                turretMatrix=turret, gunMatrix=gun),
+            isTurretDetached=detached)
+        return remote_vehicle_module.vehicle_target_bounds_at_matrix(
+            vehicle, body, math_module)
+
+    def test_picker_bounds_compose_every_attached_component(self):
+        """The local envelope includes every attached component's extent.
+
+        ``_Matrix`` above models translation only, so the composition is
+        checked here against a transform that actually rotates: a wrong
+        ``preMultiply`` direction or a dropped ``hullPosition`` would leave
+        the descriptor boxes stacked at the origin and still pass.
+        """
+        lower, upper = self._picker_bounds(0.0, 0.0)
+        # chassis y -0.8, hull 1.4 lifted by hullPosition 0.6, hull x 1.7.
+        for value, expected in zip(lower, (-1.7, -0.8, -3.5)):
+            self.assertAlmostEqual(value, expected, places=6)
+        for value, expected in zip(upper, (1.7, 2.0, 3.5)):
+            self.assertAlmostEqual(value, expected, places=6)
+
+        # A hull rotated 90 degrees swaps its own extents.
+        lower, upper = self._picker_bounds(math.pi / 2.0, 0.0)
+        for value, expected in zip(lower, (-3.5, -0.8, -1.7)):
+            self.assertAlmostEqual(value, expected, places=6)
+        for value, expected in zip(upper, (3.5, 2.0, 1.7)):
+            self.assertAlmostEqual(value, expected, places=6)
+
+    def test_a_turned_barrel_widens_the_picker_box_until_it_is_thrown(self):
+        """The attached gun widens the local target box as its turret turns."""
+        unused_lower, upper = self._picker_bounds(0.0, math.pi / 2.0)
+        # The 2.0 m barrel now points along +x, past the 1.7 m hull.
+        self.assertAlmostEqual(upper[0], 2.0, places=6)
+
+        unused_lower, detached = self._picker_bounds(
+            0.0, math.pi / 2.0, detached=True)
+        # getComponents publishes isAttached False for a thrown turret and
+        # its gun, and the landed turret becomes its own candidate instead.
+        self.assertAlmostEqual(detached[0], 1.7, places=6)
+
+    def test_picker_bounds_skip_an_unavailable_matrix_then_recover(self):
+        for owner, method in ((remote_vehicle_module, '_pose_components'),
+                              (_RigidMatrix, 'applyPoint')):
+            with self.subTest(stage=method):
+                with mock.patch.object(
+                        owner, method,
+                        side_effect=TypeError('matrix provider unavailable')):
+                    self.assertIsNone(self._picker_bounds(0.0, 0.0))
+                self.assertIsNotNone(self._picker_bounds(0.0, 0.0))
+
+    def test_full_bounds_wreck_blocks_an_outline_an_exact_ray_misses(self):
+        """The local outline rule uses the wreck's full descriptor envelope.
+
+        This deliberately suppresses an outline even where a shell's exact
+        hit test passes through a gap. Native picker parity is not established
+        by this pure-data test.
+        """
+        runtime = _runtime()
+        factory = RemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7)
+        wreck_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Wreck'},
+            'health': 0, 'isCrewActive': False,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 100.0),
+            (0.0, 0.0, 0.0))
+        target_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Target'},
+            'health': 500, 'isCrewActive': True,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 300.0),
+            (0.0, 0.0, 0.0))
+        wreck = factory.get(wreck_id)
+        target = factory.get(target_id)
+        # The exact descriptor ray misses this wreck entirely; only its
+        # full bounds cover the cursor.
+        wreck.collideSegmentExt = lambda start, end: ()
+        target.collideSegmentExt = lambda start, end: (
+            types.SimpleNamespace(dist=300.0),)
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        battle._records = {
+            'bot:10': {
+                'engine_id': wreck_id, 'local': False, 'ready': True,
+                'state': {'health': 0, 'alive': False}},
+            'bot:11': {
+                'engine_id': target_id, 'local': False, 'ready': True,
+                'spot_visible': True,
+                'state': {'health': 500, 'alive': True}},
+        }
+
+        battle._update_target_outline(1.0)
+
+        self.assertEqual([], runtime.bigworld.edge_adds)
+        self.assertIsNone(battle._outlined_engine_id)
+        self.assertIn('is behind a wreck', battle._outline_report)
+        factory.destroy_all()
+
+    def test_a_block_is_logged_even_when_another_vehicle_missed(self):
+        """A decision about the pointed-at target outranks a cone miss.
+
+        The wreck reason was invisible in field reports whenever any other
+        vehicle happened to be the closest unchosen candidate.
+        """
+        runtime = _runtime()
+        factory = RemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7)
+        wreck_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Wreck'},
+            'health': 0, 'isCrewActive': False,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 100.0),
+            (0.0, 0.0, 0.0))
+        target_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Target'},
+            'health': 500, 'isCrewActive': True,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 300.0),
+            (0.0, 0.0, 0.0))
+        aside_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Aside'},
+            'health': 500, 'isCrewActive': True,
+            'gunAnglesPacked': 0}, _Vector(60.0, 0.0, 200.0),
+            (0.0, 0.0, 0.0))
+        factory.get(target_id).collideSegmentExt = lambda start, end: (
+            types.SimpleNamespace(dist=300.0),)
+        factory.get(aside_id).collideSegmentExt = lambda start, end: ()
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        battle._records = {
+            'bot:10': {
+                'engine_id': wreck_id, 'local': False, 'ready': True,
+                'state': {'health': 0, 'alive': False}},
+            'bot:11': {
+                'engine_id': target_id, 'local': False, 'ready': True,
+                'spot_visible': True,
+                'state': {'health': 500, 'alive': True}},
+            'bot:12': {
+                'engine_id': aside_id, 'local': False, 'ready': True,
+                'spot_visible': True,
+                'state': {'health': 500, 'alive': True}},
+        }
+
+        battle._update_target_outline(1.0)
+
+        self.assertIsNone(battle._outlined_engine_id)
+        self.assertIn('is behind a wreck', battle._outline_report)
+        factory.destroy_all()
+
+    def test_a_wreck_beyond_the_target_leaves_the_outline_alone(self):
+        """A bounds entry beyond the live hit cannot suppress its outline."""
+        runtime = _runtime()
+        factory = RemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7)
+        target_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Target'},
+            'health': 500, 'isCrewActive': True,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 100.0),
+            (0.0, 0.0, 0.0))
+        wreck_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Wreck'},
+            'health': 0, 'isCrewActive': False,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 300.0),
+            (0.0, 0.0, 0.0))
+        target = factory.get(target_id)
+        target.collideSegmentExt = lambda start, end: (
+            types.SimpleNamespace(dist=100.0),)
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        battle._records = {
+            'bot:10': {
+                'engine_id': wreck_id, 'local': False, 'ready': True,
+                'state': {'health': 0, 'alive': False}},
+            'bot:11': {
+                'engine_id': target_id, 'local': False, 'ready': True,
+                'spot_visible': True,
+                'state': {'health': 500, 'alive': True}},
+        }
+
+        battle._update_target_outline(1.0)
+
+        self.assertEqual(
+            [(target.bw_entity, 1, 0, False)], runtime.bigworld.edge_adds)
+        self.assertEqual(target_id, battle._outlined_engine_id)
+        factory.destroy_all()
+
+    def test_a_landed_turret_blocks_an_enemy_outline(self):
+        """A thrown turret is a full-bounds picker candidate of its own."""
+        runtime = _runtime()
+        factory = RemoteVehicleFactory(
+            runtime.bigworld, runtime.math, runtime.model_assembler, 7)
+        target_id = factory.create(_Descriptor(), {
+            'publicInfo': {'team': 2, 'name': 'Target'},
+            'health': 500, 'isCrewActive': True,
+            'gunAnglesPacked': 0}, _Vector(0.0, 0.0, 300.0),
+            (0.0, 0.0, 0.0))
+        target = factory.get(target_id)
+        target.collideSegmentExt = lambda start, end: (
+            types.SimpleNamespace(dist=300.0),)
+        battle = BattleRuntime(runtime)
+        battle.client = _Client()
+        battle._avatar = runtime.bigworld.avatar
+        battle._remote_factory = factory
+        battle._detached_turret_obstacles = types.SimpleNamespace(
+            target_entry_distance=lambda start, end, time_ms: 120.0)
+        battle._records = {
+            'bot:11': {
+                'engine_id': target_id, 'local': False, 'ready': True,
+                'spot_visible': True,
+                'state': {'health': 500, 'alive': True}},
+        }
+
+        battle._update_target_outline(1.0)
+
+        self.assertEqual([], runtime.bigworld.edge_adds)
+        self.assertIsNone(battle._outlined_engine_id)
+        self.assertIn('is behind a thrown turret', battle._outline_report)
         factory.destroy_all()
 
     def test_a_new_target_removes_the_previous_outline_before_adding(self):

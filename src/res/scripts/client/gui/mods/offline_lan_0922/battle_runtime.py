@@ -40,7 +40,8 @@ from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     _collide_vehicle_evidence_at_matrix,
     _component_aim_angles, _pose_components, collide_vehicle_at_matrix,
     encode_damage_sticker, pose_animation_writes,
-    reset_pose_animation_writes, vehicle_blast_probe_points_at_matrix)
+    reset_pose_animation_writes,
+    vehicle_blast_probe_points_at_matrix, vehicle_target_bounds_at_matrix)
 from gui.mods.offline_lan_0922.entities.runtime import EntityPropertyBuilder
 from gui.mods.offline_lan_0922.projectile_manager import InFlightProjectiles
 from gui.mods.offline_lan_0922.projectile_runtime import (
@@ -214,6 +215,9 @@ _SIMPLE_EVENT_KINDS = (
 _COMBAT_EVENT_KINDS = (
     'health', 'hit', 'bot_hit', 'bot_human_hit', 'bot_bot_hit')
 _SHOT_OCCLUSION_EPSILON = 1.0e-3
+# Reuse the projectile broad phase's conservative vehicle radius before
+# composing descriptor bounds for an outline candidate.
+_TARGET_PICK_BROADPHASE_SQ = PROJECTILE_BROADPHASE_RADIUS ** 2
 # physics_shared.TRACK_SCROLL_LIMITS: the exact #1513 belt-speed wire range.
 TRACK_SCROLL_LIMITS = (-15.0, 30.0)
 # Metres of view-range change worth another syncVehicleAttrs push.
@@ -1791,6 +1795,7 @@ class BattleRuntime(object):
         self._crush_reports = 0
         self._next_crush_report = {}
         self._destructible_verdict_reports = 0
+        self._wreck_impact_reports = 0
         self._soft_static_recast_budget = [BOT_SOFT_RECAST_BUDGET]
         self._local_vertical_speed = 0.0
         self._local_airborne = False
@@ -2113,6 +2118,7 @@ class BattleRuntime(object):
         self._crush_reports = 0
         self._next_crush_report = {}
         self._destructible_verdict_reports = 0
+        self._wreck_impact_reports = 0
         self._soft_static_recast_budget = [BOT_SOFT_RECAST_BUDGET]
         self._local_vertical_speed = 0.0
         self._local_airborne = False
@@ -14149,6 +14155,50 @@ class BattleRuntime(object):
             return {'reason': 'impact', 'fraction': nearest_fraction}
         return None
 
+    _WRECK_IMPACT_REPORT_LIMIT = 12
+
+    def _report_wreck_impact(self, target_kind, target_record, data, impact):
+        """Name the wreck part that ended one shell, a few times per round.
+
+        The tested part, pose and contact point help correlate a player's
+        report with the authoritative query. They do not establish where
+        Windows drew that part or prove that its collision was correct.
+        Bounded, and written only by the process that owns the resolution.
+        """
+        if not self._worker_mode:
+            return False
+        if (self._wreck_impact_reports >=
+                self._WRECK_IMPACT_REPORT_LIMIT):
+            return False
+        self._wreck_impact_reports += 1
+        try:
+            data = data if isinstance(data, dict) else {}
+            collisions = data.get('collisions') or ()
+            nearest = (min(collisions, key=lambda item: float(item.dist))
+                       if collisions else None)
+            pose = data.get('collision_pose')
+            if not isinstance(pose, dict):
+                pose = target_record.get('projectile_collision_pose')
+            pose = pose if isinstance(pose, dict) else {}
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] WRECK IMPACT %s=%s part=%s '
+                'pose=(%.2f, %.2f, %.2f) yaw=%.3f pitch=%.3f roll=%.3f '
+                'turret=%.3f gun=%.3f at=(%.2f, %.2f, %.2f)\n' % (
+                    target_kind, target_record.get('network_id'),
+                    'unknown' if nearest is None else
+                    getattr(nearest, 'compName', 'unknown'),
+                    _number(pose.get('x')), _number(pose.get('y')),
+                    _number(pose.get('z')), _number(pose.get('yaw')),
+                    _number(pose.get('pitch')), _number(pose.get('roll')),
+                    _number(pose.get('turret_yaw')),
+                    _number(pose.get('gun_pitch')),
+                    _number(impact[0]), _number(impact[1]), _number(impact[2])))
+        except Exception:
+            # Optional diagnostics must not replace a resolved wreck impact
+            # with a no-effect terminal when its fields or log stream fail.
+            return False
+        return True
+
     def _report_shot_scene_stop(self, reason, impact):
         """Name the scenery contract that ended a shot, once per round.
 
@@ -15131,6 +15181,8 @@ class BattleRuntime(object):
                         'target_kind': target_kind,
                         'target_id': int(target_record.get('network_id')),
                     }
+                    self._report_wreck_impact(
+                        target_kind, target_record, data, impact)
         if hit_vehicle and direct is None and wreck_hit is None:
             # A live vehicle impact must carry the exact armour proposal,
             # including legal zero-damage ricochets and non-penetrations. If
@@ -16629,7 +16681,16 @@ class BattleRuntime(object):
         return start, direction
 
     def _wreck_blocks_target_outline(self, start, end, target_depth):
-        """Return whether a retained wreck owns the nearer cursor hit."""
+        """Suppress an outline behind a nearer retained wreck's full bounds.
+
+        #1513 Vehicle.onEnterWorld sets targetFullBounds. Public BigWorld
+        2.0.1 picker source motivates checking the whole compound envelope,
+        but it is not evidence for the shipped #1513 native implementation.
+        This local selection rule uses descriptor bounds and segment-entry
+        order; it is not the public engine's entity-origin zDistance score.
+        Exact Windows picker parity remains unverified.
+        """
+        ray = (_xyz(start), _xyz(end))
         for record in self._records.values():
             if (record.get('local') or record.get('tombstone') or
                     not record.get('ready')):
@@ -16639,17 +16700,42 @@ class BattleRuntime(object):
                     not getattr(vehicle, 'isStarted', False) or
                     self._record_alive(record, vehicle)):
                 continue
-            if record.get('native_remote'):
-                collisions = collide_vehicle_at_matrix(
-                    vehicle, vehicle.matrix, start, end,
-                    self._runtime.math)
-            else:
-                collide = getattr(vehicle, 'collideSegmentExt', None)
-                collisions = collide(start, end) if callable(collide) else ()
-            if (collisions and min(float(item.dist) for item in collisions) +
-                    _SHOT_OCCLUSION_EPSILON < target_depth):
+            # Avoid component transforms for distant wrecks using the same
+            # conservative radius as the projectile broad phase.
+            position = _xyz(getattr(
+                vehicle, 'position', record.get('state', {})))
+            if point_segment_distance_sq(
+                    position, ray[0],
+                    ray[1]) > _TARGET_PICK_BROADPHASE_SQ:
+                continue
+            matrix = getattr(vehicle, 'matrix', None)
+            if matrix is None:
+                continue
+            distance = shot_geometry.segment_box_entry_distance(
+                start, end, vehicle_target_bounds_at_matrix(
+                    vehicle, matrix, self._runtime.math))
+            if (distance is not None and
+                    distance + _SHOT_OCCLUSION_EPSILON < target_depth):
                 return True
         return False
+
+    def _thrown_turret_blocks_target_outline(self, start, end, target_depth):
+        """Return whether a landed turret's full bounds precede the target.
+
+        ``DetachedTurret.__init__`` sets ``targetFullBounds`` and
+        ``targetCaps = [1]``. Use the server-accepted landed geometry for this
+        local selection rule, just as the projectile obstacle query does.
+        Native picker behaviour while the turret is in flight is unverified.
+        """
+        obstacles = self._detached_turret_obstacles
+        if obstacles is None:
+            return False
+        entry = getattr(obstacles, 'target_entry_distance', None)
+        if not callable(entry):
+            return False
+        distance = entry(start, end, self._turret_server_time_ms())
+        return (distance is not None and
+                distance + _SHOT_OCCLUSION_EPSILON < target_depth)
 
     def _update_target_outline(self, now):
         """Outline the vehicle the cursor ray actually strikes.
@@ -16680,6 +16766,7 @@ class BattleRuntime(object):
         chosen_depth = None
         miss = None
         decline = None
+        blocked = None
         for record in self._records.values():
             if record.get('local'):
                 continue
@@ -16759,18 +16846,26 @@ class BattleRuntime(object):
                 reason = 'is behind scenery'
                 if held_id == blocked_id:
                     held_reason = reason
-                decline = (blocked_id, reason)
+                blocked = (blocked_id, reason)
+                decline = blocked
                 chosen = None
                 chosen_depth = None
-            elif self._wreck_blocks_target_outline(
-                    start, target_end, chosen_depth):
-                blocked_id = chosen
-                reason = 'is behind a wreck'
-                if held_id == blocked_id:
-                    held_reason = reason
-                decline = (blocked_id, reason)
-                chosen = None
-                chosen_depth = None
+            else:
+                reason = None
+                if self._wreck_blocks_target_outline(
+                        start, target_end, chosen_depth):
+                    reason = 'is behind a wreck'
+                elif self._thrown_turret_blocks_target_outline(
+                        start, target_end, chosen_depth):
+                    reason = 'is behind a thrown turret'
+                if reason is not None:
+                    blocked_id = chosen
+                    if held_id == blocked_id:
+                        held_reason = reason
+                    blocked = (blocked_id, reason)
+                    decline = blocked
+                    chosen = None
+                    chosen_depth = None
         # Retail drops the target when it stops being eligible, and a vehicle
         # the round no longer records at all can never be kept.
         if held_id is not None and chosen != held_id and held_reason is None:
@@ -16779,7 +16874,8 @@ class BattleRuntime(object):
         dropped = None
         if held_id is not None and chosen != held_id:
             dropped = (held_id, held_reason)
-        self._report_target_outline(now, chosen, miss, decline, dropped)
+        self._report_target_outline(
+            now, chosen, miss, decline, dropped, blocked)
         if chosen == held_id:
             if chosen is not None:
                 self._refresh_native_target_outline()
@@ -17100,12 +17196,21 @@ class BattleRuntime(object):
                         None) is not None))
         return True
 
-    def _report_target_outline(self, now, chosen, miss, decline, dropped):
-        """Keep a bounded sample of changing outline decisions."""
+    def _report_target_outline(self, now, chosen, miss, decline, dropped,
+                               blocked=None):
+        """Keep a bounded sample of changing outline decisions.
+
+        A vehicle the cursor really struck and something nearer then took
+        outranks a cone miss: it is a decision about the target the player
+        is pointing at, while ``miss`` only names the closest candidate
+        that was never chosen.
+        """
         if chosen is not None:
             message = 'outlined id=%s' % chosen
         elif dropped is not None:
             message = 'none: dropped id=%s, it %s' % dropped
+        elif blocked is not None:
+            message = 'none: id=%s %s' % blocked
         elif miss is not None:
             message = (
                 'none: id=%s is %.1f deg off the cursor at %.0f m'

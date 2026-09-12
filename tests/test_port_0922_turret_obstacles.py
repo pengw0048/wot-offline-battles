@@ -100,6 +100,23 @@ class TurretObstacleTests(unittest.TestCase):
         self.assertIsNone(obstacles.block_distance(start, end, 4000, start_time_ms=2000))
         self.assertAlmostEqual(obstacles.block_distance(start, end, 4000, start_time_ms=3000), 2)
 
+    def test_target_bounds_cover_the_gap_an_exact_ray_slips_through(self):
+        """The landed-turret outline rule uses one full descriptor envelope.
+
+        The shell ray keeps the empty gap between turret and gun open; the
+        local outline query deliberately includes that gap in its one box.
+        This does not establish the shipped native picker's bounds or score.
+        """
+        obstacles = self.obstacle()
+        start, end = _Vector(-3, 1, 2.5), _Vector(3, 1, 2.5)
+        self.assertIsNone(obstacles.block_distance(start, end, 4000))
+        self.assertAlmostEqual(
+            obstacles.target_entry_distance(start, end, 4000), 2)
+        # A turret still in the air is not a candidate, exactly as it is not
+        # an obstacle.
+        self.assertIsNone(
+            obstacles.target_entry_distance(start, end, 2999))
+
     def test_separate_components_leave_the_empty_gap_open(self):
         obstacles = self.obstacle()
         self.assertIsNone(obstacles.block_distance(_Vector(-3, 1, 2.5), _Vector(3, 1, 2.5), 4000))

@@ -121,6 +121,30 @@ def _world_box(bounds, offset, position, attitude):
     return center, tuple(half_axes)
 
 
+def _boxes_world_bounds(boxes):
+    """Enclose the supplied component boxes in one world AABB."""
+    lower = None
+    upper = None
+    for center, half_axes in boxes:
+        for index in range(1 << len(half_axes)):
+            point = center
+            for axis, half in enumerate(half_axes):
+                point = (_add(point, half) if (index >> axis) & 1
+                         else _subtract(point, half))
+            if lower is None:
+                lower = list(point)
+                upper = list(point)
+                continue
+            for axis in range(3):
+                if point[axis] < lower[axis]:
+                    lower[axis] = point[axis]
+                elif point[axis] > upper[axis]:
+                    upper[axis] = point[axis]
+    if lower is None:
+        return None
+    return tuple(lower), tuple(upper)
+
+
 def _segment_distance_squared(point, start, end):
     direction = _subtract(end, start)
     delta = _subtract(point, start)
@@ -270,6 +294,7 @@ class DetachedTurretObstacles(object):
         self._turrets[key] = {
             'row': copy.deepcopy(row), 'components': components, 'rest': rest,
             'attitude': attitude, 'radius': radius, 'boxes': boxes,
+            'target_bounds': _boxes_world_bounds(boxes),
             'hulls': tuple(hulls),
             'settles_at_ms': (_finite(row['created_time_ms']) +
                               1000.0 * _finite(flight['duration'])),
@@ -315,6 +340,23 @@ class DetachedTurretObstacles(object):
                 except Exception as error:
                     if callable(self._log):
                         self._log('detached turret hit test failed', error)
+        return nearest
+
+    def target_entry_distance(self, start, end, server_time_ms):
+        """Return where a cursor ray first enters a landed turret's bounds.
+
+        #1513 DetachedTurret.__init__ enables targetFullBounds and sets
+        targetCaps = [1]. This local bounds approximation uses only settled
+        turrets, matching the accepted pose used by the obstacle queries;
+        it does not establish the shipped native picker's selection rule.
+        """
+        nearest = None
+        for turret in self._ready(server_time_ms):
+            distance = shot_geometry.segment_box_entry_distance(
+                start, end, turret['target_bounds'])
+            if distance is not None and (nearest is None or
+                                         distance < nearest):
+                nearest = distance
         return nearest
 
     def sweep_blocks(self, start_pose, end_pose, descriptor, server_time_ms):
