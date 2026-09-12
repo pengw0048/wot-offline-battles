@@ -21501,8 +21501,8 @@ class BattleRuntime(object):
                     self._vector(point), 128)
                 if hit is not None:
                     continue
-                if self._wreck_blocks_bot_lane(
-                        wreck_rows, origin, point, lane_ends):
+                if self._wreck_blocks_bot_path(
+                        wreck_rows, (origin, point), lane_ends):
                     continue
                 score = self._bot_aim_damage_score(
                     descriptor, entry, source, target, origin, point)
@@ -21623,7 +21623,7 @@ class BattleRuntime(object):
 
     def _bot_friendly_path_verdict(
             self, source, path, splash_radius=0.0):
-        """Test live allied hulls against one frozen physical shell path."""
+        """Reject shell obstructions, with escape metadata only for allies."""
         try:
             source_id = int(source.get('id'))
             source_team = int(source.get('team'))
@@ -21649,6 +21649,13 @@ class BattleRuntime(object):
             return self._record_alive(record, vehicle)
 
         try:
+            # Candidate lanes may predate a wreck or its final shoved pose.
+            # Recheck the frozen dispersed path for both direct guns and
+            # SPGs. Dead hulls need no splash clearance or ally escape order.
+            source_record = self._records.get('bot:%d' % source_id)
+            if self._wreck_blocks_bot_path(
+                    self._bot_lane_wreck_rows(), points, (source_record,)):
+                return {'clear': False}
             contact = self._bot_lane_row_contact(
                 self._bot_lane_rows(source_id, is_live, prefilter=is_ally),
                 points, splash_radius=splash_radius)
@@ -21696,34 +21703,24 @@ class BattleRuntime(object):
         self._bot_lane_wreck_rows_cache = (key, rows)
         return rows
 
-    def _wreck_blocks_bot_lane(self, rows, origin, point, lane_ends=()):
-        """Return whether a dead hull or landed turret owns this aim ray.
-
-        Nothing on the map stops a shell that the shooter cannot see coming:
-        ``getCollidableEntities`` hands the resolver every ``isStarted``
-        vehicle with no alive filter, so a retained wreck ends a bot's shell
-        exactly as a wall does.  The static mask-128 ray beside this one
-        never sees a wreck, so without this a bot keeps firing whole reloads
-        into a dead hull it has no way to notice.  The geometry is the
-        shell's own, not the picker's bounds: the question here is only
-        whether the round arrives.
-        """
-        points = (tuple(origin), tuple(point))
+    def _wreck_blocks_bot_path(self, rows, points, lane_ends=()):
+        """Test dead hulls and landed turrets on supplied shell segments."""
         if rows and self._bot_lane_row_contact(
                 rows, points, exclude=lane_ends) is not None:
             return True
         obstacles = self._detached_turret_obstacles
         if obstacles is None:
             return False
-        # The same accepted rest pose the projectile resolver already stops
-        # a shell on, queried on the same server clock.
-        return obstacles.block_distance(
-            self._vector(points[0]), self._vector(points[1]),
-            self._turret_server_time_ms()) is not None
+        # Reuse the resolver's accepted rest poses on the current server
+        # clock. A future landing cannot obstruct a present lane proof.
+        server_time_ms = self._turret_server_time_ms()
+        return any(obstacles.block_distance(
+            self._vector(first), self._vector(second), server_time_ms)
+            is not None for first, second in zip(points, points[1:]))
 
     def _bot_friendly_firing_lane(
             self, source, unused_target, descriptor, shell_index, launch):
-        """Reject allies on the exact frozen direct-shell parabola."""
+        """Check hulls and debris on the frozen direct-shell parabola."""
         try:
             source_id = int(source.get('id'))
             fire_seq = int(launch.get('fire_seq'))
@@ -21853,7 +21850,7 @@ class BattleRuntime(object):
 
     def _bot_artillery_friendly_lane(
             self, source, unused_target, descriptor, shell_index, receipt):
-        """Reject allies intersecting the proved SPG path or HE terminal."""
+        """Check SPG shell obstructions and live allies near the HE terminal."""
         try:
             raw_path = receipt.get('path')
             if not isinstance(raw_path, (list, tuple)) or len(raw_path) < 2:
@@ -21887,15 +21884,19 @@ class BattleRuntime(object):
         return bool(self._artillery.cancel_launch(source))
 
     def _artillery_arc_probe(self, start, end):
-        """Return the native world hit point, or None for one clear chord."""
+        """Check one budgeted SPG chord against scenery and retained wrecks."""
         hit = self._runtime.bigworld.wg_collideSegment(
             self._avatar.spaceID, self._vector(start), self._vector(end), 128)
-        if hit is None:
-            return None
         try:
-            return _xyz(hit[0])
+            finish = _xyz(hit[0]) if hit is not None else _xyz(end)
         except Exception:
             return False
+        # A ground hit near the target may be accepted by the arc queue;
+        # a wreck before it must reject this candidate even near the target.
+        if self._wreck_blocks_bot_path(
+                self._bot_lane_wreck_rows(), (_xyz(start), finish)):
+            return False
+        return finish if hit is not None else None
 
     def _advance_artillery_arcs(self, now):
         if self._artillery is None:
