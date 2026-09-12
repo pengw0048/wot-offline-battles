@@ -268,6 +268,19 @@ class BootstrapLifecycleTests(unittest.TestCase):
         compat_module = types.ModuleType(
             'gui.mods.offline_lan_0922.compat')
         compat_module.g_compatibility = compatibility
+        # Both pins must be installed before any Account exists, and both
+        # outlive every connect and disconnect, so record them in the same
+        # ordered event list the connection uses.
+        self.dossier_cache_pins = []
+
+        def pin_dossier_cache(career_provider):
+            events.append('pin_dossier_cache')
+            self.dossier_cache_pins.append(career_provider)
+            return True
+
+        compat_module.pin_dossier_cache = pin_dossier_cache
+        compat_module.pin_account_settings = (
+            lambda: events.append('pin_account_settings') or True)
         config_module = types.ModuleType(
             'gui.mods.offline_lan_0922.config')
         config_module.PLAYER_MODE = 'player'
@@ -288,6 +301,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
             100 if earnings_percent is None else earnings_percent)
         config_module.save_slot_initial_wallet = lambda: dict(initial_wallet or {})
         config_module.ACTIVE_SAVE_SLOT = object()
+        config_module.active_save_slot = lambda: 'default'
         # No inbox file exists unless a test writes one, so the launcher
         # delivery path is a no-op for every other test.
         inbox_root = tempfile.mkdtemp()
@@ -652,6 +666,45 @@ class BootstrapLifecycleTests(unittest.TestCase):
                         bootstrap, '_restore_garage', lambda snapshot: False):
                     return bootstrap._selected_vehicle(
                         {'vehicle': 'ussr:R11_MS-1'})
+
+    def test_each_career_and_process_names_its_own_dossier_cache(self):
+        """#1513 caches vehicle dossiers per account name and syncs only rows
+        newer than the highest changeTime that file holds.  Offline the save
+        slot, the two processes and a recreated career all log in under the
+        same name, so the identity has to carry all three.
+        """
+        bootstrap = self._load()[0]
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_MODE
+        bootstrap._postbattle_store = types.SimpleNamespace(
+            account_key='a' * 32)
+
+        player = bootstrap._dossier_cache_career()
+
+        bootstrap._client_mode = bootstrap.port_config.SIMULATION_WORKER_MODE
+        bootstrap._postbattle_store = None
+        worker = bootstrap._dossier_cache_career()
+
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_MODE
+        bootstrap._postbattle_store = types.SimpleNamespace(
+            account_key='b' * 32)
+        rebuilt = bootstrap._dossier_cache_career()
+
+        bootstrap.port_config.active_save_slot = lambda: 'second'
+        other_slot = bootstrap._dossier_cache_career()
+
+        # The hidden worker keeps no career, so it publishes none.
+        self.assertEqual('default.worker.', worker)
+        self.assertEqual('default.player.' + 'a' * 16, player)
+        self.assertEqual('default.player.' + 'b' * 16, rebuilt)
+        self.assertEqual('second.player.' + 'b' * 16, other_slot)
+        self.assertEqual(4, len({player, worker, rebuilt, other_slot}))
+
+    def test_a_store_without_an_account_key_still_names_a_career(self):
+        bootstrap = self._load()[0]
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_MODE
+        bootstrap._postbattle_store = types.SimpleNamespace(account_key=None)
+
+        self.assertEqual('default.player.', bootstrap._dossier_cache_career())
 
     def test_every_crew_price_the_garage_charges_reaches_the_snapshot(self):
         """One missing key would make a paid crew command free and silent.
@@ -1558,8 +1611,9 @@ class BootstrapLifecycleTests(unittest.TestCase):
             callbacks.run_next()
 
         self.assertEqual(
-            ['clear_entities_and_spaces', 'install_announcement_router',
-             'install_battle_router', 'connect'],
+            ['clear_entities_and_spaces', 'pin_dossier_cache',
+             'install_announcement_router', 'install_battle_router',
+             'pin_account_settings', 'connect'],
             events)
         self.assertEqual(1, len(compatibility.connect_calls))
         self.assertTrue(compatibility.connect_calls[0][0])
@@ -1567,6 +1621,56 @@ class BootstrapLifecycleTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, modules):
             self.assertIsNone(bootstrap._cleanup_runtime())
         self.assertEqual('uninstall_announcement_router', events[-1])
+
+    def test_the_dossier_cache_is_scoped_before_any_account_exists(self):
+        """``PlayerAccount.__init__`` builds the cache itself, so the scope
+        has to be installed before the connection that creates the account,
+        and it has to reach the hidden worker too -- both processes otherwise
+        write one pickle.
+        """
+        (bootstrap, callbacks, compatibility, app_loader,
+         spaces, events, modules) = self._load()
+
+        with mock.patch.dict(sys.modules, modules):
+            bootstrap._run_once()
+            app_loader.space_id = spaces.LOGIN
+            callbacks.run_next()
+            callbacks.run_next()
+
+        self.assertEqual(1, len(self.dossier_cache_pins))
+        self.assertEqual(1, len(compatibility.connect_calls))
+        self.assertLess(events.index('pin_dossier_cache'),
+                        events.index('connect'))
+        self.assertTrue(self.dossier_cache_pins[0]())
+
+        with mock.patch.dict(sys.modules, modules):
+            self.assertIsNone(bootstrap._cleanup_runtime())
+
+    def test_the_hidden_worker_scopes_its_dossier_cache_too(self):
+        """The pin sits before the process-mode branch: the worker logs in
+        beside the visible client and would otherwise write the same pickle.
+        """
+        (bootstrap, callbacks, compatibility, app_loader,
+         spaces, events, modules) = self._load()
+        app_loader.space_id = spaces.LOGIN
+        bootstrap._client_mode = bootstrap.port_config.SIMULATION_WORKER_MODE
+        installed = []
+        bootstrap._install_worker_session = (
+            lambda: installed.append('worker_session'))
+
+        with mock.patch.dict(sys.modules, modules):
+            bootstrap._wait_for_login_space()
+            bootstrap._wait_for_login_space()
+
+        self.assertEqual(['worker_session'], installed)
+        self.assertEqual(1, len(self.dossier_cache_pins))
+        self.assertEqual('default.worker.', self.dossier_cache_pins[0]())
+        self.assertLess(events.index('pin_dossier_cache'),
+                        events.index('connect'))
+        self.assertNotIn('pin_account_settings', events)
+
+        with mock.patch.dict(sys.modules, modules):
+            self.assertIsNone(bootstrap._cleanup_runtime())
 
     def test_inventory_refresh_notifies_only_the_current_lan_session(self):
         (bootstrap, unused_callbacks, unused_compatibility,

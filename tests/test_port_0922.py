@@ -5582,6 +5582,68 @@ class OfflineCompatibilityTests(unittest.TestCase):
             original,
             settings_type.__dict__['_AccountSettings__readUserSection'])
 
+    @staticmethod
+    def _fake_dossier_cache():
+        built = []
+
+        class DossierCache(object):
+            def __init__(self, accountName, accountClassName):
+                built.append((accountName, accountClassName))
+
+        module = types.ModuleType('account_helpers.DossierCache')
+        module.DossierCache = DossierCache
+        return module, built
+
+    def test_each_career_owns_its_vehicle_dossier_cache_file(self):
+        # #1513 names the cache file after (server, accountName, class) and
+        # restores its maxChangeTime watermark from it, so a shared name lets
+        # one save slot's battle count hide every row of another's.
+        compatibility_module = _load_port_source('compat')
+        module, built = self._fake_dossier_cache()
+        career = ['alpha.player.1111', 'beta.player.2222']
+
+        self.assertTrue(compatibility_module.pin_dossier_cache(
+            lambda: career[0], module))
+
+        module.DossierCache('offline_account', 'PlayerAccount')
+        career[0] = career[1]
+        module.DossierCache('offline_account', 'PlayerAccount')
+
+        self.assertEqual(
+            [('offline_account#alpha.player.1111', 'PlayerAccount'),
+             ('offline_account#beta.player.2222', 'PlayerAccount')], built)
+
+    def test_the_dossier_cache_scope_is_installed_exactly_once(self):
+        compatibility_module = _load_port_source('compat')
+        module, built = self._fake_dossier_cache()
+
+        self.assertTrue(compatibility_module.pin_dossier_cache(
+            lambda: 'alpha.player.1111', module))
+        self.assertFalse(compatibility_module.pin_dossier_cache(
+            lambda: 'beta.player.2222', module))
+
+        module.DossierCache('offline_account', 'PlayerAccount')
+
+        # A second wrapper would scope the already scoped name again.
+        self.assertEqual(
+            [('offline_account#alpha.player.1111', 'PlayerAccount')], built)
+
+    def test_an_unreadable_career_keeps_the_stock_dossier_cache_name(self):
+        # This runs inside PlayerAccount.__init__: raising here would leave
+        # the player with no account at all.
+        compatibility_module = _load_port_source('compat')
+        module, built = self._fake_dossier_cache()
+
+        def unavailable():
+            raise RuntimeError('the save slot is unreadable')
+
+        self.assertTrue(
+            compatibility_module.pin_dossier_cache(unavailable, module))
+
+        module.DossierCache('offline_account', 'PlayerAccount')
+
+        self.assertEqual([('offline_account', 'PlayerAccount')], built)
+
     def test_fini_does_not_overwrite_later_third_party_wrappers(self):
         compatibility_module = _load_port_source('compat')
         runtime, _ = self._runtime()
