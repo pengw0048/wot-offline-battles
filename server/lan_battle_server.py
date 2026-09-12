@@ -13504,11 +13504,21 @@ class BattleState:
             # loss, or epoch change cannot invalidate this batch between
             # extraction and delivery; the reliable outbox fences its snapshot.
             if events_message is not None:
+                # The client accepts at most 256 events per envelope. A full
+                # human roster can earn 450 detections in one observation,
+                # so preserve every cause across ordered same-tick batches.
+                event_batches = [events_message]
+                if len(events) > 256:
+                    event_batches = [
+                        dict(events_message, events=events[offset:offset + 256])
+                        for offset in range(0, len(events), 256)]
                 for endpoint in recipients:
                     if id(endpoint) in failed_receipt_recipient_ids:
                         continue
-                    if not endpoint.offer_reliable(events_message):
-                        failed_event_recipients.append(endpoint)
+                    for event_batch in event_batches:
+                        if not endpoint.offer_reliable(event_batch):
+                            failed_event_recipients.append(endpoint)
+                            break
             snapshot_round_id = self.round_id
             snapshot_tick = self.tick
             snapshot_state_revision = self.state_revision
