@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import hashlib
 import sys
 import traceback
 
@@ -117,8 +118,14 @@ def _dossier_cache_career(career_provider):
 
 
 def _career_scoped_account(account_name, career):
-    """Return ``account_name`` narrowed to one offline career."""
-    return '%s#%s' % (account_name, career) if career else account_name
+    """Return a bounded cache namespace for the complete offline career."""
+    if not career:
+        return account_name
+    # #1513 base32-expands the name beneath the preferences directory. A
+    # valid 64-character slot already exceeds Windows MAX_PATH when copied
+    # into the account name, so hash the complete identity into 128 bits.
+    suffix = hashlib.sha256(career.encode('utf-8')).hexdigest()[:32]
+    return '%s#%s' % (account_name, suffix)
 
 
 def pin_dossier_cache(career_provider, dossier_cache=None):

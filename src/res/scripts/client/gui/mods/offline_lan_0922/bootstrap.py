@@ -1167,7 +1167,7 @@ def _dossier_cache_career():
     account_key = ''
     if _postbattle_store is not None:
         account_key = str(
-            getattr(_postbattle_store, 'account_key', '') or '')[:16]
+            getattr(_postbattle_store, 'account_key', '') or '')
     return '%s.%s.%s' % (port_config.active_save_slot(), role, account_key)
 
 

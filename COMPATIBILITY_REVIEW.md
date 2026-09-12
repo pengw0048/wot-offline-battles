@@ -2952,11 +2952,14 @@ operation is forbidden, not unlimited.
   key parts are constant offline, so every save slot and both processes would
   share one file, and a career whose battle ordinal sits below another's
   watermark would receive no vehicle row at all while its battles kept
-  settling. `compat.pin_dossier_cache` therefore scopes `accountName` by save
-  slot, process role and the post-battle store's account key before any
-  `PlayerAccount` exists, which is the one-file-per-account isolation retail
-  relies on. The account dossier is unaffected: `account_rpc/server.py`
-  pushes it in the post-battle diff rather than through this cache. The current receipt does not measure mileage, each vehicle's time
+  settling. `compat.pin_dossier_cache` therefore scopes `accountName` by a
+  fixed-width digest of the save slot, process role and complete post-battle
+  account key before any `PlayerAccount` exists. Hashing the complete identity
+  preserves separate career namespaces without letting a valid 64-character
+  slot push the stock base32 cache path beyond Windows `MAX_PATH` under the
+  normal preferences directory. The account dossier is unaffected:
+  `account_rpc/server.py` pushes it in the post-battle diff rather than through
+  this cache. The current receipt does not measure mileage, each vehicle's time
   alive or stunning-vehicle eligibility; these values are not inferred.
 - Selling and rebuying a vehicle preserves its XP, including across restart.
   Elite vehicles with stored XP remain conversion candidates after sale.

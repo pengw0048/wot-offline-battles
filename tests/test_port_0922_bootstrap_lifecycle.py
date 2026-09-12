@@ -694,10 +694,23 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
         # The hidden worker keeps no career, so it publishes none.
         self.assertEqual('default.worker.', worker)
-        self.assertEqual('default.player.' + 'a' * 16, player)
-        self.assertEqual('default.player.' + 'b' * 16, rebuilt)
-        self.assertEqual('second.player.' + 'b' * 16, other_slot)
+        self.assertEqual('default.player.' + 'a' * 32, player)
+        self.assertEqual('default.player.' + 'b' * 32, rebuilt)
+        self.assertEqual('second.player.' + 'b' * 32, other_slot)
         self.assertEqual(4, len({player, worker, rebuilt, other_slot}))
+
+    def test_career_identity_preserves_the_complete_account_key(self):
+        bootstrap = self._load()[0]
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_MODE
+        bootstrap.port_config.active_save_slot = lambda: 's' * 64
+        bootstrap._postbattle_store = types.SimpleNamespace(
+            account_key='a' * 64)
+        original = bootstrap._dossier_cache_career()
+
+        bootstrap._postbattle_store.account_key = 'a' * 63 + 'b'
+        recreated = bootstrap._dossier_cache_career()
+
+        self.assertNotEqual(original, recreated)
 
     def test_a_store_without_an_account_key_still_names_a_career(self):
         bootstrap = self._load()[0]
