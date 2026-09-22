@@ -15,7 +15,7 @@ sys.path.insert(0, str(PORT_ROOT / 'server'))
 
 from lan_battle_server import (  # noqa: E402
     BattleState, CLIENT_BUILD_0922, ClientHandler,
-    MAX_LINE_BYTES, MAX_MOTION_TIME_US,
+    FIRE_INTENT_RESOLVE_TIMEOUT_MS, MAX_LINE_BYTES, MAX_MOTION_TIME_US,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY, PREBATTLE_SECONDS,
     HUMAN_RAM_TIMELINE_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
@@ -548,6 +548,41 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(7, player.death_reason)
         self.assertEqual('environment', state.pending_events[-1]['source'])
         self.assertEqual(7, state.pending_events[-1]['attack_reason'])
+
+    def test_unanswered_fire_intent_expires_into_a_typed_rejection(self):
+        state = _state()
+        player = state.players[1]
+        results = []
+        player.offer_reliable = lambda message: (
+            results.append(dict(message)) or True)
+        self.assertTrue(_update_player_input(state, 1, up_cosine=1.0))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        self.assertEqual(1, len(player.pending_fire_intents))
+
+        # Inside the resolve window the admitted trigger still waits for the
+        # worker's answer.
+        state._expire_pending_fire_intents_locked(state._server_time_ms())
+        self.assertEqual(1, len(player.pending_fire_intents))
+        self.assertEqual([], results)
+
+        # Past it the round terminates the intent instead of letting the
+        # single pending slot deadlock the player's gun for the battle.
+        state.tick += int(round(
+            (FIRE_INTENT_RESOLVE_TIMEOUT_MS / 1000.0 + 1.0) * TICK_HZ))
+        state._expire_pending_fire_intents_locked(state._server_time_ms())
+        self.assertFalse(player.pending_fire_intents)
+        self.assertEqual([{
+            'type': 'fire_intent_result', 'round_id': state.round_id,
+            'intent_seq': 1, 'accepted': False, 'reason': 'worker_timeout',
+        }], results)
+        self.assertEqual((False, 'worker_timeout'),
+                         player.fire_intent_results[1])
+
+        # The slot is free again: the next trigger is admitted, not rejected
+        # as fire_intent_pending.
+        self.assertTrue(_update_player_input(state, 1, up_cosine=1.0))
+        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
+        self.assertEqual(1, len(player.pending_fire_intents))
 
     def test_modern_input_whitelist_rejects_before_state_advances(self):
         state = _state(players=1)

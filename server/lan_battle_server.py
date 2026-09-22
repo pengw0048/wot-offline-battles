@@ -239,6 +239,12 @@ PROJECTILE_MAX_DESTRUCTIBLES = 64
 PROJECTILE_MAX_LIFETIME_MS = 20000
 PLAYER_FIRE_INTENT_MAX_PENDING = 1
 PLAYER_FIRE_INTENT_HISTORY = 64
+# A relayed trigger is answered by the hidden worker in well under a second
+# on a healthy room.  When an overloaded tick loop or a stalled worker leaves
+# one admitted intent unanswered, the single pending slot would otherwise
+# deadlock that player's gun for the rest of the round; expire it into a
+# typed rejection so the trigger edge always reaches a terminal result.
+FIRE_INTENT_RESOLVE_TIMEOUT_MS = 2000
 TEAM_COMMAND_HISTORY = 64
 TEAM_CHAT_HISTORY = 64
 # The exact #1513 stock text limit is measured in UTF-16 code units.  Keep the
@@ -7402,6 +7408,37 @@ class BattleState:
             self.bot_authority_id == SIMULATION_WORKER_AUTHORITY_ID and
             worker is not None and worker.connected)
 
+    def _expire_pending_fire_intents_locked(self, server_time_ms):
+        """Terminate relayed triggers the worker never resolved.
+
+        An admitted intent is terminal only when the worker answers it.  A
+        worker stall or an overloaded tick loop must not leave the single
+        pending slot occupied forever: past the timeout the trigger is
+        rejected back to its shooter, which unblocks the next one.
+        """
+        if self.battle_result is not None:
+            return
+        for player in list(self.players.values()):
+            if not player.pending_fire_intents:
+                continue
+            for intent_seq, relay in list(player.pending_fire_intents.items()):
+                trigger_ms = relay.get("trigger_launch_time_ms")
+                if not isinstance(trigger_ms, int):
+                    continue
+                age_ms = int(server_time_ms) - int(trigger_ms)
+                if age_ms <= FIRE_INTENT_RESOLVE_TIMEOUT_MS:
+                    continue
+                _server_log_limited(
+                    "fire-intent-timeout:%d:%d" % (
+                        int(player.player_id), int(intent_seq)),
+                    "FIRE INTENT timeout player=%d intent=%d age_ms=%d" % (
+                        int(player.player_id), int(intent_seq), age_ms),
+                    interval=1.0)
+                self._commit_fire_intent_rejection_locked(
+                    player, intent_seq,
+                    player.fire_intent_fingerprints.get(intent_seq),
+                    "worker_timeout", already_admitted=True)
+
     def _commit_fire_intent_rejection_locked(
             self, player, intent_seq, fingerprint, reason,
             already_admitted=False):
@@ -13417,6 +13454,7 @@ class BattleState:
             self._resolve_human_rams()
             self._tick_player_critical(dt)
             self._tick_player_fire(dt)
+            self._expire_pending_fire_intents_locked(self._server_time_ms())
             self._tick_player_drowning(dt)
             self._tick_player_overturn(dt)
             self._expire_projectiles()
@@ -13558,10 +13596,30 @@ class BattleState:
             snapshot_authority_epoch = self.authority_epoch
             snapshot_manifest_revision = self.bot_manifest_revision
             snapshot_order_revision = self.bot_orders["revision"]
-            snapshot_orders = copy.deepcopy(self.bot_orders["orders"])
             snapshot_destructible_revision = self.destructible_revision
-            snapshot_destructibles = copy.deepcopy(
-                list(self.destructibles.values()))
+            # The order set and the destructible ledger are the two largest
+            # optional sections, and the ledger grows for the whole battle.
+            # Copy either one only when at least one recipient is actually
+            # due a refresh this tick; an unconditional per-tick deepcopy of
+            # a late-battle ledger is pure lock-held waste.
+            snapshot_orders = None
+            snapshot_destructibles = None
+            for endpoint in recipients:
+                if (endpoint.bot_order_revision_sent !=
+                        snapshot_order_revision or
+                        snapshot_tick - endpoint.bot_order_tick_sent >=
+                        BOT_ORDER_REFRESH_TICKS):
+                    snapshot_orders = copy.deepcopy(
+                        self.bot_orders["orders"])
+                    break
+            for endpoint in recipients:
+                if (endpoint.destructible_revision_sent !=
+                        snapshot_destructible_revision or
+                        snapshot_tick - endpoint.destructible_tick_sent >=
+                        DESTRUCTIBLE_REFRESH_TICKS):
+                    snapshot_destructibles = copy.deepcopy(
+                        list(self.destructibles.values()))
+                    break
         for relay in authority_observation_relays:
             self.broadcast_bot_observation(relay)
         if events:
@@ -13610,24 +13668,41 @@ class BattleState:
             includes_manifest = bool(
                 needs_manifest or not supports_lean_manifest)
             needs_orders = bool(
-                player.bot_order_revision_sent !=
-                snapshot_order_revision or
-                snapshot_tick - player.bot_order_tick_sent >=
-                BOT_ORDER_REFRESH_TICKS)
+                snapshot_orders is not None and (
+                    player.bot_order_revision_sent !=
+                    snapshot_order_revision or
+                    snapshot_tick - player.bot_order_tick_sent >=
+                    BOT_ORDER_REFRESH_TICKS))
             needs_destructibles = bool(
-                player.destructible_revision_sent !=
-                snapshot_destructible_revision or
-                snapshot_tick - player.destructible_tick_sent >=
-                DESTRUCTIBLE_REFRESH_TICKS)
+                snapshot_destructibles is not None and (
+                    player.destructible_revision_sent !=
+                    snapshot_destructible_revision or
+                    snapshot_tick - player.destructible_tick_sent >=
+                    DESTRUCTIBLE_REFRESH_TICKS))
+            # Every destruction already streams to replicas as an ordered
+            # combat event, so the refresh only repairs losses.  Send the
+            # entries this endpoint has not been sent yet instead of the
+            # whole ledger: a late-battle full resend can exceed the wire
+            # line budget, which used to drop the frame and then the
+            # endpoint.  Sent markers advance only after a real socket write,
+            # so a replaced or refused frame simply rejoins the next delta.
+            destructible_delta = None
+            if needs_destructibles:
+                destructible_delta = [
+                    row for row in snapshot_destructibles
+                    if _exact_int(row.get("revision"), 0, PROJECTILE_MAX_ID)
+                    is not None and
+                    int(row["revision"]) > int(
+                        player.destructible_revision_sent)]
             if (not includes_manifest or needs_orders or
-                    needs_destructibles):
+                    destructible_delta):
                 outgoing = dict(snapshot)
             if not includes_manifest:
                 outgoing.pop("bot_manifest", None)
             if needs_orders:
                 outgoing["bot_orders"] = snapshot_orders
-            if needs_destructibles:
-                outgoing["destructibles"] = snapshot_destructibles
+            if destructible_delta:
+                outgoing["destructibles"] = destructible_delta
             # A manifest-bearing snapshot is a rare lineage barrier and must
             # not be replaced. Steady snapshots occupy one latest-only slot.
             with self.lock:
@@ -13657,7 +13732,24 @@ class BattleState:
                         player.bot_manifest_revision_sent = (
                             snapshot_manifest_revision)
             if not offered:
-                self._remove_endpoint(player)
+                if player.connected:
+                    # A frame refused before any socket write (over the wire
+                    # line budget) is replaceable state, not a dead peer.
+                    # No sent-marker advanced, so the next snapshot
+                    # re-offers every due section instead of leaving this
+                    # replica frozen for the rest of the round.
+                    _server_log_limited(
+                        "snapshot-offer-refused:%s" % getattr(
+                            player, "player_id",
+                            getattr(player, "worker_id", "?")),
+                        "SNAPSHOT refused before send endpoint=%s tick=%d; "
+                        "endpoint kept" % (
+                            getattr(player, "player_id",
+                                    getattr(player, "worker_id", "?")),
+                            snapshot_tick),
+                        interval=5.0)
+                else:
+                    self._remove_endpoint(player)
                 continue
             if (isinstance(player, Player) and
                     id(player) not in current_receipt_recipients and
@@ -14879,6 +14971,7 @@ def _run_tick_loop(state, tick_clock=None, sleeper=None,
             # all thirty before waiting again; resetting next_tick here would
             # erase timeout, capture, drowning and movement time from battle.
             while state.running and now + 1e-9 >= next_tick:
+                started = tick_clock()
                 try:
                     state.tick_once(interval)
                 except Exception as error:
@@ -14914,6 +15007,23 @@ def _run_tick_loop(state, tick_clock=None, sleeper=None,
                 # unbounded; the handler publishes the terminal on a new tick.
                 next_tick += interval
                 now = tick_clock()
+                duration = now - started
+                if duration > interval:
+                    _server_log_limited(
+                        "server-tick-slow",
+                        "SERVER TICK slow tick=%s duration_ms=%.0f "
+                        "budget_ms=%.0f" % (
+                            getattr(state, "tick", "?"),
+                            duration * 1000.0, interval * 1000.0),
+                        interval=5.0)
+                if state.running and now + 1e-9 >= next_tick:
+                    # Catch-up ticks run back-to-back.  Each one holds the
+                    # state lock for its whole duration, so without an
+                    # explicit yield the connection handler threads that
+                    # admit inputs and fire intents can starve behind a
+                    # sustained backlog until their work is rejected as stale.
+                    sleeper(0.0)
+                    now = tick_clock()
     except Exception as error:
         _stop_failed_tick_loop(
             state, shutdown_callback, "scheduler", error)

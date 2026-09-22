@@ -9684,6 +9684,33 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIsNone(battle._local_fire_intent)
         battle._avatar.cancelWaitingForShot.assert_called_once_with()
 
+    def test_expired_local_fire_intent_releases_the_trigger(self):
+        # The server terminates an unanswered intent on its own two-second
+        # horizon.  If that result never arrives, the local gate must still
+        # release or the gun stays dead for the rest of the round; a late
+        # result for the expired sequence is ignored on arrival.
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        timeout = battle_runtime_module.LOCAL_FIRE_INTENT_TIMEOUT_SECONDS
+
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        first = dict(battle._local_fire_intent)
+        self.assertFalse(battle.shoot(0.0, 0.0))
+
+        battle._runtime.bigworld.now += timeout + 0.5
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        second = dict(battle._local_fire_intent)
+        self.assertEqual(first['intent_seq'] + 1, second['intent_seq'])
+        battle._avatar.cancelWaitingForShot.assert_called_once_with()
+
+        # The expired intent's late rejection must not consume the new one.
+        self.assertFalse(battle.on_fire_intent_result({
+            'type': 'fire_intent_result', 'round_id': 7,
+            'player_id': 1, 'intent_seq': first['intent_seq'],
+            'accepted': False, 'reason': 'worker_timeout',
+        }))
+        self.assertEqual(second, dict(battle._local_fire_intent))
+
     def test_partial_clip_setting_starts_one_full_native_reload_cycle(self):
         runtime = _runtime()
         descriptor = _two_shell_descriptor()

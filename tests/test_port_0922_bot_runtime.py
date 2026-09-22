@@ -574,6 +574,86 @@ class ServerBotStateRevisionTests(unittest.TestCase):
         server.tick_once(1.0 / 30.0)
         self.assertIn('bot_manifest', sent_snapshots()[-1])
 
+    @staticmethod
+    def _destructible_report(server, chunk_id, item_index):
+        return {
+            'type': 'report_destructible', 'round_id': server.round_id,
+            'destructible_kind': 'fragile', 'chunk_id': chunk_id,
+            'item_index': item_index, 'x': 5.0, 'y': 0.5, 'z': 0.0,
+            'fall_yaw': 0.2, 'speed': 12.0, 'is_shot': True,
+        }
+
+    def test_destructible_refresh_sends_only_the_unsent_delta(self):
+        # The whole ledger is republished on a cadence so one lost frame
+        # heals, but every destruction already streams as an ordered combat
+        # event.  Re-sending the full late-battle ledger can exceed the wire
+        # line budget, so the refresh carries only the rows this endpoint has
+        # not been sent yet.
+        from lan_battle_server import DESTRUCTIBLE_REFRESH_TICKS
+
+        server, unused_manifest_bot, unused_socket = self._server()
+        player = server.players[1]
+
+        def snapshots_with_destructibles():
+            return [
+                json.loads(payload.decode('utf-8'))
+                for payload in player.conn.payloads
+                if json.loads(payload.decode('utf-8')).get(
+                    'type') == 'snapshot' and
+                'destructibles' in json.loads(payload.decode('utf-8'))]
+
+        for index in range(3):
+            self.assertTrue(server.report_destructible(
+                SIMULATION_WORKER_AUTHORITY_ID,
+                self._destructible_report(server, 100 + index, 1)))
+        server.tick_once(1.0 / 30.0)
+        sent = snapshots_with_destructibles()
+        self.assertEqual(3, len(sent[-1]['destructibles']))
+
+        # No new destruction, refresh cadence not due: no new section.
+        server.tick_once(1.0 / 30.0)
+        self.assertEqual(len(sent), len(snapshots_with_destructibles()))
+
+        # Two new destructions ride alone; the already-sent rows do not.
+        for index in range(2):
+            self.assertTrue(server.report_destructible(
+                SIMULATION_WORKER_AUTHORITY_ID,
+                self._destructible_report(server, 200 + index, 1)))
+        server.tick_once(1.0 / 30.0)
+        delta = snapshots_with_destructibles()[-1]['destructibles']
+        self.assertEqual(
+            [200, 201], sorted(row['chunk_id'] for row in delta))
+
+        # A cadence refresh with nothing unsent carries no section.
+        server.tick += DESTRUCTIBLE_REFRESH_TICKS
+        server.tick_once(1.0 / 30.0)
+        self.assertEqual(2, len(snapshots_with_destructibles()))
+
+    def test_a_refused_snapshot_frame_keeps_the_endpoint_connected(self):
+        # A frame that never serialized (over the wire line budget) is
+        # replaceable state.  Removing the endpoint for it froze that replica
+        # for the rest of the round.
+        server, unused_manifest_bot, unused_socket = self._server()
+        player = server.players[1]
+        # Isolate the snapshot offer path: leftover setup events share the
+        # reliable channel, whose refusal legitimately retires an endpoint.
+        server.pending_events = []
+        player.offer_reliable = lambda message: False
+        player.offer_snapshot = lambda message: False
+
+        server.tick_once(1.0 / 30.0)
+        self.assertIn(1, server.players)
+        self.assertTrue(player.connected)
+
+        def dead_offer(message):
+            player.connected = False
+            return False
+
+        player.offer_reliable = dead_offer
+        player.offer_snapshot = dead_offer
+        server.tick_once(1.0 / 30.0)
+        self.assertNotIn(1, server.players)
+
     def test_revision_survives_player_departure_and_resets(self):
         server, manifest_bot, authority_socket = self._server()
         self.assertEqual(0, server.bot_state_revision)
@@ -6724,6 +6804,39 @@ class BotRuntimeTests(unittest.TestCase):
         self.assertEqual([0.2] * 5, steps)
         self.assertAlmostEqual(0.0, runtime._accumulator)
         self.assertEqual(('last-command',), runtime._decision_cache[11])
+
+    def test_worker_pathological_backlog_is_capped_beyond_the_horizon(self):
+        # A saturated frame that takes longer than the time it spends makes
+        # the catch-up debt grow without bound and starves the worker's
+        # message pump.  Past the horizon the oldest debt is dropped so the
+        # process stays responsive; ordinary slow frames still consume every
+        # elapsed second.
+        runtime = self.module.BotRuntime(
+            1, control_seconds=self.module.WORKER_CONTROL_SECONDS)
+        runtime.authority_id = 1
+        runtime.adapter = object()
+        steps = []
+        runtime._run_update_once = \
+            lambda step, *unused: steps.append(step) or []
+
+        horizon = self.module.MAX_FIXED_CONTROL_BACKLOG_SECONDS
+        stream = io.StringIO()
+        with mock.patch.object(self.module.sys, 'stdout', stream):
+            runtime.update(horizon + 4.0, 10.0)
+        self.assertAlmostEqual(horizon, sum(steps))
+        self.assertTrue(all(
+            step <= self.module.MAX_CONTROL_ELAPSED_SECONDS + 1e-12
+            for step in steps))
+        self.assertAlmostEqual(0.0, runtime._accumulator)
+        self.assertIn('WORKER CONTROL backlog dropped', stream.getvalue())
+
+        # Ordinary low-FPS catch-up still consumes every elapsed second.
+        steps[:] = []
+        runtime.update(2.0, 12.0)
+        self.assertAlmostEqual(2.0, sum(steps))
+        steps[:] = []
+        runtime.update(0.6, 12.6)
+        self.assertAlmostEqual(0.6, sum(steps))
 
     def test_worker_subthreshold_callbacks_keep_bounded_control_cadence(self):
         runtime = self.module.BotRuntime(
