@@ -8,6 +8,7 @@ native battle space.  That synthetic identity is projected into this process'
 BattleRuntime messages and is never sent to the LAN server.
 """
 
+import collections
 import math
 import os
 import sys
@@ -24,7 +25,7 @@ from gui.mods.offline_lan_0922.lan_client import (
     SIMULATION_WORKER_CAPABILITY,
     WORKER_AUTHORITY_ID, LANClient,
     _canonical_effective_params, _canonical_vehicle_compact_descr,
-    _exact_int, _projectile_int_range, _safe_text,
+    _exact_int, _monotonic_time, _projectile_int_range, _safe_text,
     _strict_capabilities, _strict_mapping_list)
 
 
@@ -186,6 +187,10 @@ class AuthorityWorkerLANClient(LANClient):
             'x': 0.0, 'y': WORKER_DUMMY_Y, 'z': 0.0, 'yaw': 0.0}
         self._worker_avatar = None
         self.on_batch_drained = None
+        self._frame_intervals = collections.deque()
+        self._frame_seconds = 0.0
+        self._last_frame_stamp = None
+        self._frame_scope = None
 
     def _poll(self):
         """Drain one wire batch before running worker-only urgent work."""
@@ -193,6 +198,32 @@ class AuthorityWorkerLANClient(LANClient):
         callback = self.on_batch_drained
         if callable(callback):
             callback(self)
+
+    def record_frame_interval(self, seconds, now=None):
+        """Measure one hidden render callback, including work between frames."""
+        seconds = float(seconds)
+        if seconds <= 0.0 or math.isnan(seconds) or math.isinf(seconds):
+            return
+        scope = (self.round_id, self.authority_epoch)
+        if scope != self._frame_scope:
+            self._frame_scope = scope
+            self._frame_intervals.clear()
+            self._frame_seconds = 0.0
+        self._frame_intervals.append(seconds)
+        self._frame_seconds += seconds
+        while (len(self._frame_intervals) > 1 and
+               self._frame_seconds - self._frame_intervals[0] >= 1.0):
+            self._frame_seconds -= self._frame_intervals.popleft()
+        self._last_frame_stamp = _monotonic_time() if now is None else float(now)
+
+    def frame_latency_ms(self, now=None):
+        """Return 1000 / hidden FPS; transport RTT is a separate measurement."""
+        if (not self._frame_intervals or
+                self._frame_scope != (self.round_id, self.authority_epoch)):
+            return None
+        now = _monotonic_time() if now is None else float(now)
+        mean = self._frame_seconds / len(self._frame_intervals)
+        return 1000.0 * max(mean, now - self._last_frame_stamp)
 
     def is_bot_authority(self):
         """Only the dedicated worker identity may own bot simulation."""
@@ -233,7 +264,8 @@ class AuthorityWorkerLANClient(LANClient):
                                  human_ram_armors=None,
                                  edge_sample_time_us=None,
                                  edge_revision=None,
-                                 detached_turrets=None):
+                                 detached_turrets=None,
+                                 player_gun_markers=None):
         """Queue BotRuntime's canonical publication as one frozen wire blob."""
         if not self.is_bot_authority():
             return False
@@ -261,6 +293,9 @@ class AuthorityWorkerLANClient(LANClient):
             return False
         if human_ram_armors is not None:
             message['human_ram_armors'] = human_ram_armors
+        if player_gun_markers is not None:
+            message['player_gun_markers'] = player_gun_markers
+            message['authority_epoch'] = self.authority_epoch
         if detached_turrets is not None:
             self._attach_detached_turret_proposals(message, detached_turrets)
         try:
@@ -592,6 +627,18 @@ class AuthorityWorkerLANClient(LANClient):
         if not isinstance(message, dict):
             return
         kind = message.get('type')
+        if kind == 'worker_ping':
+            # _handle_message is drained by BigWorld's main-thread poll,
+            # after any native simulation work that delayed this callback.
+            player_id = _exact_int(message.get('player_id'))
+            seq = _exact_int(message.get('seq'))
+            if player_id is not None and player_id > 0 and seq is not None and seq > 0:
+                self._send({
+                    'type': 'worker_pong', 'player_id': player_id, 'seq': seq,
+                    'frame_ms': self.frame_latency_ms(),
+                    'round_id': message.get('round_id'),
+                    'authority_epoch': message.get('authority_epoch')})
+            return
         trusted_player_static = None
         if kind == 'welcome':
             self._handle_worker_welcome(message)

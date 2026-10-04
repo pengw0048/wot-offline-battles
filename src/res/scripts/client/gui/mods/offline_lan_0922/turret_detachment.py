@@ -66,7 +66,7 @@ LAUNCH_SPIN_MAX_RATE = 2.6
 FLIGHT_STEP_SECONDS = 0.04
 MAX_FLIGHT_SECONDS = 8.0
 
-# ``wg_collideSegment`` reports a point, not a surface normal, so the arc
+# The bootstrap arc adapter retains only the collision point, so the arc
 # classifies a contact by its own motion instead: a turret that is still
 # rising, or descending slower than this, has met a wall face rather than the
 # ground.  Landing there would park it inside a building facade and report a
@@ -311,11 +311,15 @@ def pose_at(flight, launch_attitude, spin, elapsed):
     that has already stopped.
     """
     elapsed = max(0.0, _finite(elapsed))
+    if 'body' in flight:
+        from gui.mods.offline_lan_0922 import rigid_turret
+        return rigid_turret.render_pose(flight['body'], elapsed)
     duration = float(flight['duration'])
     if elapsed >= duration:
         return (
             tuple(flight['rest']),
-            rest_attitude(launch_attitude, spin, duration))
+            tuple(flight.get('rest_attitude') or
+                  rest_attitude(launch_attitude, spin, duration)))
     yaw, pitch, roll = (_finite(value) for value in launch_attitude)
     spin = _vector3(spin)
     segment = flight['segments'][0]

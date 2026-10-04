@@ -1,0 +1,344 @@
+name: Build and publish v0.9.6
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, fix/095-priority-followup-20260927]
+    paths:
+      - '.github/workflows/publish-v0.9.6.yml'
+      - 'docs/releases/v0.9.6.md'
+      - 'docs/releases/WoT-0.9.6-Unresolved-Internal-Modules-English.docx'
+
+concurrency:
+  group: release-096-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows-server:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+      - name: Install pinned Windows server packager
+        run: >-
+          python -m pip install
+          -r server/requirements-windows-build.txt
+      - name: Build Windows LAN server for the manual client overlay
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -File
+          server/build_windows_server.ps1
+      - name: Verify v0.9.6 server executable version
+        shell: pwsh
+        run: |
+          $version = (Get-Item -LiteralPath 'dist/server/WoT-0.9.22-LAN-Server.exe').VersionInfo
+          if ($version.FileVersion -ne '0.9.6' -or
+              $version.ProductVersion -ne '0.9.6') {
+            throw 'Incorrect Windows server executable version'
+          }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'dist/server/WoT-0.9.22-LAN-Server.exe'))
+          $offset = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt16($bytes, $offset + 4) -ne 0x8664) {
+            throw 'Windows server executable must be x64'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-manual-server-input
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  client-payload:
+    needs: windows-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Test launcher and payload staging
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          APPDATA: ${{ runner.temp }}/wot-tests/roaming
+          LOCALAPPDATA: ${{ runner.temp }}/wot-tests/local
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - uses: actions/download-artifact@v4
+        with:
+          name: launcher-manual-server-input
+          path: dist/server
+      - name: Build Python 2.7 0.9.22 client package
+        run: >-
+          docker run --rm --platform linux/amd64 -v "$PWD:/work"
+          -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}"
+          -w /work python:2.7.18
+          python build_wotmod.py
+      - name: Validate 0.9.22 client package
+        run: >-
+          python tools/validate_wotmod.py
+          dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-build-input
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-launcher:
+    runs-on: windows-latest
+    needs: client-payload
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+      - name: Install pinned Windows packager
+        run: >-
+          python -m pip install
+          -r launcher/requirements-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: launcher-build-input
+          path: dist
+      - name: Verify actual Windows starter exit and process handoff
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/test_starter_lifetime.ps1
+      - name: Test launcher on Windows
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          APPDATA: ${{ runner.temp }}/wot-tests/roaming
+          LOCALAPPDATA: ${{ runner.temp }}/wot-tests/local
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Build launcher distribution
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify v0.9.6 launcher and client versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $app = "launcher/dist/wot-0.9.22-offline-battles"
+          $archive = "$app/_internal/client/0.9.22.zip"
+          $version = (Get-Item -LiteralPath "$app/wot-0.9.22-offline-battles.exe").VersionInfo
+          if ($version.FileVersion -ne '0.9.6' -or
+              $version.ProductVersion -ne '0.9.6') {
+            throw 'Incorrect Windows launcher executable version'
+          }
+          @'
+          import io, json, sys, zipfile
+          from xml.etree import ElementTree
+          with zipfile.ZipFile(sys.argv[1]) as client:
+              identity = json.loads(client.read(
+                  'mods/configs/offline_lan_0922/build_identity.json'))
+              assert identity['semanticVersion'] == '0.9.6', identity
+              mods = [name for name in client.namelist() if name.endswith('.wotmod')]
+              assert len(mods) == 1 and mods[0].endswith('_0.9.6.wotmod'), mods
+              with zipfile.ZipFile(io.BytesIO(client.read(mods[0]))) as mod:
+                  assert mod.testzip() is None
+                  assert ElementTree.fromstring(mod.read('meta.xml')).findtext('version') == '0.9.6'
+          print('Verified v0.9.6 client build identity and mod.')
+          '@ | python - $archive
+          if ($LASTEXITCODE -ne 0) { throw "Client release version check failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-offline-battles-windows-${{ github.run_number }}
+          # Upload the runnable folder; Actions supplies the only outer ZIP.
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Extract the actual download once
+        uses: actions/download-artifact@v4
+        with:
+          name: wot-0.9.22-offline-battles-windows-${{ github.run_number }}
+          path: ${{ runner.temp }}/launcher-download
+      - name: Verify payload, fake-client install, and bundled servers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $appName = "wot-0.9.22-offline-battles"
+          $appRoot = Join-Path $env:RUNNER_TEMP "launcher-download"
+          $launcher = Join-Path $appRoot "$appName.exe"
+          $payload = Join-Path $appRoot "_internal"
+          if (-not (Test-Path -LiteralPath $launcher) -or
+                  (Get-ChildItem -LiteralPath $appRoot -Filter *.zip)) {
+              throw "Launcher download must run after one ZIP extraction"
+          }
+          Write-Host "Downloaded launcher is runnable after one ZIP extraction"
+          $fakeRoot = Join-Path $env:RUNNER_TEMP "WoT 假客户端"
+          $fake082 = Join-Path $fakeRoot "0.8.2"
+          $fake0922 = Join-Path $fakeRoot "0.9.22 #1513"
+          New-Item -ItemType Directory -Force -Path $fake082,$fake0922 | Out-Null
+          Set-Content -LiteralPath (Join-Path $fake082 "WorldOfTanks.exe") -Value ""
+          Set-Content -LiteralPath (Join-Path $fake082 "version.xml") `
+              -Value "<version> v.0.8.2 #335 </version>"
+          Set-Content -LiteralPath (Join-Path $fake0922 "WorldOfTanks.exe") -Value ""
+          Set-Content -LiteralPath (Join-Path $fake0922 "version.xml") `
+              -Value "<version> v.0.9.22.0.1 #1513 </version>"
+
+          @'
+          import json
+          import os
+          import sys
+          import zipfile
+
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+
+          payload, fake082, fake0922 = sys.argv[1:4]
+          for port in core.SUPPORTED_PORTS:
+              archive_path = os.path.join(payload, 'client', port + '.zip')
+              with zipfile.ZipFile(archive_path) as archive:
+                  names = archive.namelist()
+              assert not any('__pycache__' in name or name.endswith('.sha256')
+                             for name in names), port
+          assert core.inspect_game_root(fake082)['client'] is None
+          cases = ((core.PORT_0_9_22, fake0922),)
+          for port, game_root in cases:
+              status = core.inspect_game_root(game_root)
+              assert status['client'] == port, status
+              core.install_client_mod(game_root, port, base_dir=payload)
+              assert core._installation_complete(
+                  game_root, port, core._CLIENT_INSTALL[port])
+
+          data_root_0922 = os.path.join(
+              fake0922, 'mods', 'configs', 'offline_lan_0922')
+          inventories = [(os.path.join(data_root_0922, name), 41)
+              for name in
+              ('navgraphs', 'foliage', 'destructibles')]
+          for data_root, expected_count in inventories:
+              manifest_path = os.path.join(data_root, 'manifest.json')
+              with open(manifest_path, 'rb') as stream:
+                  manifest = json.load(stream)
+              records = manifest.get('maps')
+              assert (isinstance(records, list) and
+                      len(records) == expected_count), data_root
+              for record in records:
+                  assert os.path.isfile(os.path.join(
+                      data_root, record['file'])), (data_root, record)
+          '@ | python - $payload $fake082 $fake0922
+          if ($LASTEXITCODE -ne 0) {
+              throw "Bundled client installation verification failed"
+          }
+
+          $ProtocolProbe = @'
+          import os
+          import sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol(
+              sys.argv[1], '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          foreach ($port in @("0.9.22")) {
+              $process = Start-Process -FilePath $launcher `
+                  -ArgumentList "--serve", $port -PassThru -WindowStyle Hidden
+              try {
+                  $deadline = (Get-Date).AddSeconds(60)
+                  $compatible = $false
+                  while ((Get-Date) -lt $deadline) {
+                      if ($process.HasExited) {
+                          throw "$port server exited before its protocol answered"
+                      }
+                      $ProtocolProbe | python - $port
+                      if ($LASTEXITCODE -eq 0) {
+                          $compatible = $true
+                          break
+                      }
+                      Start-Sleep -Milliseconds 250
+                  }
+                  if (-not $compatible) {
+                      throw "$port server did not answer its bundled protocol"
+                  }
+              }
+              finally {
+                  if (-not $process.HasExited) {
+                      & taskkill.exe /PID $process.Id /T /F | Out-Null
+                      $global:LASTEXITCODE = 0
+                  }
+                  Start-Sleep -Seconds 2
+              }
+          }
+
+      - name: Create the verified release ZIP
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import os, struct, zipfile
+          root = Path(os.environ['RUNNER_TEMP']) / 'launcher-download'
+          with zipfile.ZipFile(root / '_internal/client/0.9.22.zip') as client:
+              binaries = [(client.read('offline_worker_starter.exe'), 0x14c)]
+          binaries.append(((root / 'wot-0.9.22-offline-battles.exe').read_bytes(), 0x8664))
+          for data, expected in binaries:
+              offset = struct.unpack_from('<I', data, 0x3c)[0]
+              assert data[offset:offset + 4] == b'PE\0\0'
+              assert struct.unpack_from('<H', data, offset + 4)[0] == expected
+          output = Path('release-assets')
+          output.mkdir()
+          target = output / 'wot-0.9.22-offline-battles-0.9.6-Windows-x64.zip'
+          with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+              for path in sorted(root.rglob('*')):
+                  if path.is_file():
+                      archive.write(path, path.relative_to(root).as_posix())
+          with zipfile.ZipFile(target) as archive:
+              assert archive.testzip() is None
+              assert 'wot-0.9.22-offline-battles.exe' in archive.namelist()
+              assert '_internal/client/0.9.22.zip' in archive.namelist()
+          print('Verified flat release ZIP:', target.name, target.stat().st_size)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Release ZIP verification failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-096-verified
+          path: release-assets/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: windows-launcher
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-096-verified
+          path: release-assets
+      - name: Publish the verified v0.9.6 assets from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.9.6" >/dev/null 2>&1; then
+            echo 'v0.9.6 already exists; refusing to replace a published tag.' >&2
+            exit 1
+          fi
+          archive=release-assets/wot-0.9.22-offline-battles-0.9.6-Windows-x64.zip
+          modules=docs/releases/WoT-0.9.6-Unresolved-Internal-Modules-English.docx
+          gh release create v0.9.6 "$archive" "$modules" --draft --target "$GITHUB_SHA" \
+            --title 'v0.9.6 — Vehicle physics, collisions and gameplay fixes' \
+            --notes-file docs/releases/v0.9.6.md
+          gh release view v0.9.6 --json assets --jq '.assets[] | [.name,.size] | @tsv' > release-assets/manifest.tsv
+          python - <<'PY'
+          from pathlib import Path
+          expected = [Path('release-assets/wot-0.9.22-offline-battles-0.9.6-Windows-x64.zip'),
+                      Path('docs/releases/WoT-0.9.6-Unresolved-Internal-Modules-English.docx')]
+          rows = dict(line.split('\t') for line in Path('release-assets/manifest.tsv').read_text().splitlines())
+          assert set(rows) == {path.name for path in expected}, rows
+          for path in expected:
+              assert int(rows[path.name]) == path.stat().st_size, path
+          PY
+          gh release edit v0.9.6 --draft=false --prerelease=false --latest

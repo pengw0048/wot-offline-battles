@@ -27,6 +27,7 @@ compare, so a row carries them rather than depending on a second message.
 """
 
 import math
+from gui.mods.offline_lan_0922 import tank_contact_ledger
 
 
 # Canonical orders. A row carries slot indices into these tuples, never names.
@@ -52,6 +53,7 @@ FIRE_CLOCK_SCALE = 1000000    # round(v, 6)
 DEVICE_HP_SCALE = 1000        # round(v, 3)
 
 # Flag bits.
+F_SERVICE_BRAKE = 1 << 19
 F_ALIVE = 1 << 0
 F_WORLD_POSE = 1 << 1
 F_AMMO_RELOAD_PENDING = 1 << 2
@@ -69,6 +71,8 @@ F_TURNING_RIGHT = 1 << 13
 F_HAS_BURST = 1 << 14
 F_HAS_CLIP = 1 << 15
 F_HAS_SIEGE = 1 << 16
+F_HAS_CONTACT_MOMENTUM = 1 << 17
+F_AIRBORNE = 1 << 18
 
 # Groups the previous mapping contract could leave out entirely, which meant
 # "keep the state the server already admitted". A positional row always has the
@@ -136,8 +140,6 @@ CLAMPS = {
     'x': (-2000.0, 2000.0),
     'y': (-1000.0, 1000.0),
     'z': (-2000.0, 2000.0),
-    'pitch': (-0.61, 0.61),
-    'roll': (-0.61, 0.61),
     'gun_pitch': (-1.2, 1.2),
     'speed': (-80.0, 80.0),
     'shot_pitch': (-1.2, 1.2),
@@ -172,7 +174,7 @@ def _real(units, scale):
 
 
 def _wrapped_angle(value):
-    """Normalise one shot angle exactly as the previous server contract did."""
+    """Preserve the orientation of periodic body and shot angles."""
     return ((float(value) + math.pi) % (2.0 * math.pi)) - math.pi
 
 
@@ -218,6 +220,10 @@ def encode_row(state):
         flags |= F_ALIVE
     if state.get('world_pose', True):
         flags |= F_WORLD_POSE
+    if state.get('service_brake', False):
+        flags |= F_SERVICE_BRAKE
+    if state.get('airborne', False):
+        flags |= F_AIRBORNE
     if state.get('ammo_reload_pending', False):
         flags |= F_AMMO_RELOAD_PENDING
     if state.get('burst_active', False):
@@ -248,6 +254,9 @@ def encode_row(state):
     elif rotation < -0.01:
         flags |= F_TURNING_RIGHT
 
+    if any(name in state for name in ('push_x', 'push_z', 'push_yaw', 'contact_push_acks')):
+        flags |= F_HAS_CONTACT_MOMENTUM
+
     row = []
     for name, scale in SCALARS:
         if name == '_flags':
@@ -267,6 +276,8 @@ def encode_row(state):
             continue
         value = state.get(name, 0)
         try:
+            if name in ('pitch', 'roll'):
+                value = _wrapped_angle(value)
             if scale is None:
                 row.append(_exact(value))
             else:
@@ -321,6 +332,22 @@ def encode_row(state):
                 elapsed = snapshot.get(field)
                 row.append(MISSING if elapsed is None else
                            _fixed(elapsed, SECONDS_SCALE))
+    if flags & F_HAS_CONTACT_MOMENTUM:
+        row.extend((_fixed(state.get('push_x', 0.0), SPEED_SCALE),
+                    _fixed(state.get('push_z', 0.0), SPEED_SCALE),
+                    _fixed(state.get('push_yaw', 0.0), ANGLE_SCALE)))
+        try:
+            acknowledgements = tank_contact_ledger.normalize(
+                state.get('contact_push_acks', []))
+        except (ValueError, TypeError, OverflowError):
+            raise BotStateCodecError('invalid contact acknowledgement')
+        row.append(len(acknowledgements))
+        for actor in sorted(acknowledgements):
+            entry = acknowledgements[actor]
+            row.extend((actor, entry[1], _fixed(entry[2], SPEED_SCALE),
+                        _fixed(entry[3], SPEED_SCALE),
+                        _fixed(entry[4], POSITION_SCALE),
+                        _fixed(entry[5], POSITION_SCALE), _fixed(entry[6], SPEED_SCALE)))
     return row
 
 
@@ -364,6 +391,8 @@ def decode_row(row, static):
     flags = row[_SCALAR_INDEX['_flags']]
     result['alive'] = bool(flags & F_ALIVE)
     result['world_pose'] = bool(flags & F_WORLD_POSE)
+    result['airborne'] = bool(flags & F_AIRBORNE)
+    result['service_brake'] = bool(flags & F_SERVICE_BRAKE)
     result['ammo_reload_pending'] = bool(flags & F_AMMO_RELOAD_PENDING)
     result['burst_active'] = bool(flags & F_BURST_ACTIVE)
     result['movement_dir'] = (
@@ -452,5 +481,25 @@ def decode_row(row, static):
                 'aiPendingElapsed': pending[1],
             })
         result['equipment_states'] = snapshots
+    if flags & F_HAS_CONTACT_MOMENTUM:
+        result['push_x'] = _real(cursor.take(), SPEED_SCALE)
+        result['push_z'] = _real(cursor.take(), SPEED_SCALE)
+        result['push_yaw'] = _real(cursor.take(), ANGLE_SCALE)
+        count = cursor.take()
+        if not 0 <= count <= tank_contact_ledger.MAX_ACTORS:
+            raise BotStateCodecError('invalid contact acknowledgement count')
+        result['contact_push_acks'] = []
+        for unused in range(count):
+            result['contact_push_acks'].append([
+                cursor.take(), cursor.take(),
+                _real(cursor.take(), SPEED_SCALE),
+                _real(cursor.take(), SPEED_SCALE),
+                _real(cursor.take(), POSITION_SCALE),
+                _real(cursor.take(), POSITION_SCALE),
+                _real(cursor.take(), SPEED_SCALE)])
+        try:
+            tank_contact_ledger.normalize(result['contact_push_acks'])
+        except (ValueError, TypeError, OverflowError):
+            raise BotStateCodecError('invalid contact acknowledgement')
     cursor.finish()
     return result

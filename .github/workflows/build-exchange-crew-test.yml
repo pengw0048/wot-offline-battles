@@ -1,0 +1,213 @@
+name: Build exchange and crew Windows test package
+on:
+  push:
+    branches: [fix/094-exchange-crew-build-20260924]
+    paths: [.github/workflows/build-exchange-crew-test.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: exchange-crew-test-20260924
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/094-exchange-crew-build-20260924'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tests:server:tools
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Apply the pinned combined patch without changing unrelated systems
+        run: |
+          git fetch --prune origin
+          python tools/exchange_crew_test_build.py prepare
+      - name: Test exchange, account transactions, crew and retained battle contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest test_port_0922_account_rpc test_port_0922_economy test_port_0922_economy_payloads test_port_0922_economy_regressions test_port_0922_garage test_port_0922_offline_services test_port_0922_offline_services_ui test_port_0922_effective_params 2>&1 | tee build-evidence/combined-regressions.log
+          python tools/bot077_build.py source-tests 2>&1 | tee build-evidence/historical-driving.log
+          python -m unittest test_bot080_radio_integration test_port_0922_spotting_radio test_port_0922_radio_server.RadioRelayTests.test_radio_links_relay_and_empty_batch_clear_coverage test_port_0922_radio_server.RadioRelayTests.test_invalid_recipient_rejects_whole_batch_without_committing test_port_0922_radio_server.RadioRelayTests.test_unknown_enemy_self_and_duplicate_radio_links_are_rejected test_port_0922_radio_server.RadioRelayTests.test_known_ally_dying_in_flight_is_pruned 2>&1 | tee build-evidence/radio-integration.log
+          python tools/test_bot080_radio_contract.py 2>&1 | tee build-evidence/radio-contract.log
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/startup-contract.log
+          python -m unittest test_bot080_pinned_startup test_port_0922_battle_runtime.BattleRuntimeContractTests.test_bot_roster_uses_complete_catalog_without_persistent_pool test_port_0922_battle_runtime.BattleRuntimeContractTests.test_all_clients_preload_the_same_server_roster test_port_0922_world_collision test_port_0922_vehicle_physics test_port_0922 2>&1 | tee build-evidence/retained-physics-startup.log
+      - name: Commit verified sources only on the test branch
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Integrate verified exchange and crew fixes for Windows testing [skip ci]'
+          git push origin HEAD:refs/heads/fix/094-exchange-crew-build-20260924
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > build-evidence/source-sha.txt
+          git diff 7159332d197a02e7128948c2eed7c3393d8d3db0 -- > build-evidence/final-source.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exchange-crew-source-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exchange-crew-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: exchange-crew-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and compare actual Python 2.7 payload against verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/exchange_crew_test_build.py verify
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-v094-exchange-crew-${{ github.run_id }}-${{ github.run_attempt }}" \
+            python:2.7.18 sh -c 'python build_wotmod.py && python tools/bot077_build.py bytecode && python tools/test_bot080_radio_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod' 2>&1 | tee build-evidence/compiled-tests.log
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exchange-crew-compiled-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exchange-crew-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-package:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-v094-exchange-crew-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: exchange-crew-client-${{ github.run_id }}
+          path: dist
+      - name: Verify source, test launcher and build Windows executable
+        shell: pwsh
+        run: |
+          python tools/exchange_crew_test_build.py verify
+          if ($LASTEXITCODE -ne 0) { throw 'Source verification failed' }
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher core tests failed' }
+          python -m unittest discover -s tests -p 'test_launcher_window.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher window tests failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed' }
+      - name: Verify installed payload, exact bytecode and original maps
+        run: python tools/bot077_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check executable versions
+        shell: pwsh
+        run: |
+          foreach ($exe in @('launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe','dist/server/WoT-0.9.22-LAN-Server.exe')) {
+            $v = (Get-Item $exe).VersionInfo
+            if ($v.FileVersion -ne '0.9.4' -or $v.ProductVersion -ne '0.9.4' -or $v.FileMajorPart -ne 0 -or $v.FileMinorPart -ne 9 -or $v.FileBuildPart -ne 4 -or $v.FilePrivatePart -ne 0) { throw "Incorrect version: $exe" }
+            Write-Host "Verified $exe version 0.9.4"
+          }
+      - name: Start the built executable and verify server readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { throw 'Server exited before readiness' }
+              $probe | python -
+              if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw 'Server readiness test failed' }
+          } finally {
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+            $global:LASTEXITCODE = 0
+          }
+          python -c "import json; from pathlib import Path; Path('build-evidence/server-readiness.json').write_text(json.dumps({'ready': True, 'native_game_tested': False, 'port': 28782}))"
+          if ($LASTEXITCODE -ne 0) { throw 'Readiness receipt failed' }
+      - name: Package clean flat ZIP with test-build identity
+        run: python tools/exchange_crew_test_build.py package launcher/dist/wot-0.9.22-offline-battles
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exchange-crew-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-094-exchange-crew-test-${{ github.run_id }}-Windows
+          path: |
+            wot-0.9.22-offline-battles-0.9.4-exchange-crew-test-20260924-Windows-x64.zip
+            wot-0.9.22-offline-battles-0.9.4-exchange-crew-test-20260924-Windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

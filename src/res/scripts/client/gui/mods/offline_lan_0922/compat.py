@@ -11,7 +11,7 @@ except ImportError:
 
 from gui.mods.offline_lan_0922.entities.remote_vehicle import (
     clear_ground_decal_visibility_state, close_stock_presentation_extras,
-    set_ground_decal_visibility, stop_ground_effects)
+    set_ground_decal_visibility, stop_ground_effects, stop_bound_visual_effects)
 
 
 OFFLINE_SERVER_ADDRESS = 'offline-lan.local:0'
@@ -23,6 +23,60 @@ _account_settings_pinned = False
 _dossier_cache_pinned = False
 # AccountSettings.DEFAULT_VALUES keys whose sections this port adopts once.
 _SETTINGS_KEYS = ('settings', 'filters', 'counters', 'notifications')
+
+
+def _show_lan_death_message(panel, original, own_id, color_format,
+                            key, args=None, extra=None, postfix=None):
+    """Preserve personal messages and color only LAN squad name fields."""
+    death = bool(key and key.startswith('DEATH_FROM_') and postfix)
+    attacker, target = '', ''
+    if death:
+        # Own deaths belong to PostmortemPanel, never the right-hand feed.
+        if any(name == 'target' and vehicle_id == own_id
+               for name, vehicle_id in extra or ()):
+            return None
+        relations = postfix.split('_')
+        if len(relations) == 2:
+            attacker, target = relations
+    if not extra and not death:
+        return original(panel, key, args, extra, postfix)
+    templates = panel._FadingMessages__messages if death else {}
+    if (attacker == 'UNKNOWN' and target in ('ALLY', 'ENEMY') and
+            key != 'DEATH_FROM_SHOT'):
+        # Environmental deaths carry attackerID=0. #1513 has no UNKNOWN
+        # drowning/collision/overturn variants and silently drops that key.
+        # SUICIDE variants name only the victim; kill credit stays zero.
+        unassisted = '%s_SUICIDE' % target
+        if '%s_%s' % (key, unassisted) in templates:
+            postfix = unassisted
+    formatted = dict(args) if args is not None else None
+    remaining = []
+    context = panel.sessionProvider.getCtx()
+    for name, vehicle_id in extra or ():
+        if (formatted and formatted.get(name) and vehicle_id and
+                vehicle_id != own_id and context.isSquadMan(vID=vehicle_id)):
+            rgba = panel.app.colorManager.getRGBA('squad')
+            formatted[name] = color_format.format(
+                int(rgba[0]), int(rgba[1]), int(rgba[2]), formatted[name])
+        else:
+            remaining.append((name, vehicle_id))
+    # Keep native SELF templates, including their whole-line gold kill style.
+    # Squad names also retain gold in friendly-hit/team-killer notifications.
+    # Do not let the stock formatter wrap our squad fields twice.
+    # Other participants retain its ordinary/team-killer formatting.
+    if key == 'DEATH_FROM_SHOT' and attacker == 'UNKNOWN':
+        # These two #1513 XML entries reference absent Chinese translations.
+        # Reuse the neutral "target destroyed" text, with the existing team
+        # colors. An unknown killer is not evidence of self-destruction.
+        message_key = '%s_%s' % (key, postfix)
+        previous = templates[message_key]
+        templates[message_key] = (
+            templates['DEATH_FROM_SHOT_SELF_ENEMY'][0], previous[1])
+        try:
+            return original(panel, key, formatted, tuple(remaining), postfix)
+        finally:
+            templates[message_key] = previous
+    return original(panel, key, formatted, tuple(remaining), postfix)
 
 
 def _entity_bytes(value, default=''):
@@ -330,11 +384,16 @@ def _load_runtime():
     from gui.battle_control.controllers.consumables.ammo_ctrl import \
         AmmoController
     from gui.Scaleform.daapi.view.battle.shared.debug_panel import DebugPanel
+    from gui.Scaleform.daapi.view.battle.shared.consumables_panel import ConsumablesPanel
     from gui.Scaleform.daapi.view.battle.shared.markers2d.plugins import \
         VehicleMarkerPlugin
     from gui.Scaleform.daapi.view.battle.shared.markers2d import settings as \
         VehicleMarkerSettings
     from gui.prb_control.dispatcher import g_prbLoader
+    from gui.battle_control.arena_info import settings as ArenaInfoSettings
+    from gui.Scaleform.daapi.view.battle.shared.messages.player_messages import \
+        PlayerMessages
+    from gui.Scaleform.daapi.view.battle.shared.messages import fading_messages
     from helpers import dependency
     from predefined_hosts import g_preDefinedHosts
     from skeletons.connection_mgr import IConnectionManager
@@ -350,6 +409,9 @@ def _load_runtime():
     runtime.avatar_input_handler = AvatarInputHandler
     runtime.avatar_getter = avatar_getter
     runtime.ammo_controller_type = AmmoController
+    runtime.arena_info_settings = ArenaInfoSettings
+    runtime.player_messages_type = PlayerMessages
+    runtime.battle_message_color_format = fading_messages._EXTRA_COLOR_FORMAT
     runtime.control_modes = ControlModes
     runtime.avatar_position_control = AvatarPositionControl
     runtime.acceleration_smoother_type = AccelerationSmoother
@@ -361,6 +423,7 @@ def _load_runtime():
     runtime.constants = constants
     runtime.connection_manager = dependency.instance(IConnectionManager)
     runtime.debug_panel_type = DebugPanel
+    runtime.consumables_panel_type = ConsumablesPanel
     runtime.login_status = LOGIN_STATUS
     runtime.math = Math
     runtime.offline_map_creator = g_offlineMapCreator
@@ -708,6 +771,11 @@ class OfflineCompatibility(object):
         self._target_lock_input_pending = False
         self._target_lock_input_avatar = None
         self._target_focus_clear_attempted = False
+        self._original_squad_range = None
+        self._lan_squad_range = tuple(range(2, 31))
+        self._original_player_message_show = None
+        self._player_message_show = None
+        self._player_message_show_owned = False
 
     def install(self):
         if self._installed:
@@ -1077,7 +1145,33 @@ class OfflineCompatibility(object):
             self._original_debug_update = debug_panel_type.__dict__.get(
                 'updateDebugInfo',
                 getattr(debug_panel_type, 'updateDebugInfo', None))
+        consumables_panel_type = getattr(runtime, 'consumables_panel_type', None)
+        self._original_shell_tooltip = getattr(
+            consumables_panel_type, '_ConsumablesPanel__makeShellTooltip', None)
         compatibility = self
+
+        def shell_tooltip(panel, descriptor, piercing_power):
+            original = compatibility._original_shell_tooltip(
+                panel, descriptor, piercing_power)
+            if not compatibility._battle_active:
+                return original
+            try:
+                from gui.mods.offline_lan_0922.battle_shell_tooltip import append_speed
+                avatar = runtime.bigworld.player()
+                vehicle = runtime.bigworld.entity(avatar.playerVehicleID)
+                return append_speed(
+                    original, descriptor, vehicle.typeDescriptor,
+                    getattr(runtime.bigworld, 'wg_getNiceNumberFormat', None))
+            except Exception as error:
+                # The stock formatter above owns ammo initialization. This
+                # optional extra line must never abort its event listeners.
+                if not getattr(compatibility, '_shell_tooltip_warning_logged', False):
+                    compatibility._shell_tooltip_warning_logged = True
+                    print('[Offline LAN 0.9.22] shell speed tooltip unavailable: '
+                          '%s: %s' % (type(error).__name__, error))
+                return original
+
+        self._shell_tooltip_wrapper = shell_tooltip
 
         def account_init(account):
             offline_initializing = compatibility._connecting
@@ -1579,6 +1673,10 @@ class OfflineCompatibility(object):
             if avatar is not None:
                 prime_initial_remote_enemy(avatar, vehicle)
             result = original(vehicle, prereqs)
+            # Offline poses live in the presentation matrix, not the native
+            # entity picker. Only the runtime's current-pose, occluded ray
+            # may publish target focus; stock focus can bypass that verdict.
+            vehicle.targetCaps = []
             try:
                 avatar = runtime.bigworld.player()
             except ReferenceError:
@@ -1612,6 +1710,7 @@ class OfflineCompatibility(object):
                 result = original(vehicle)
             finally:
                 compatibility._vehicle_starting_visual = previous
+            vehicle.targetCaps = []
             if avatar is not None:
                 hide_initial_remote_enemy(avatar, vehicle)
             return result
@@ -2294,6 +2393,7 @@ class OfflineCompatibility(object):
             if vehicle is not None and undrawn_lan_remote(vehicle):
                 stop_ground_effects(appearance)
                 set_ground_decal_visibility(appearance, False)
+                stop_bound_visual_effects(appearance)
                 return None
             return original(appearance, distance_from_player)
 
@@ -2487,7 +2587,7 @@ class OfflineCompatibility(object):
             return compatibility._original_server_time()
 
         def debug_update(panel, ping, fps, isLaggingNow, fpsReplay=-1):
-            """Render LAN transport health during a client-only battle.
+            """Render the hidden client's mean frame interval in milliseconds.
 
             Exact #1513's DebugController reads BigWorld.statPing() and
             statLagDetected(), which describe the absent retail game-server
@@ -2496,6 +2596,11 @@ class OfflineCompatibility(object):
             """
             client = compatibility._battle_network_client
             if compatibility._battle_active and client is not None:
+                worker_ping = getattr(client, 'worker_ping_display', None)
+                if callable(worker_ping):
+                    ping, isLaggingNow = worker_ping()
+                    return compatibility._original_debug_update(
+                        panel, ping, fps, isLaggingNow, fpsReplay)
                 connected = bool(getattr(client, 'connected', False))
                 sample = getattr(client, 'rtt_ms', None)
                 if sample is None:
@@ -2562,6 +2667,31 @@ class OfflineCompatibility(object):
 
         try:
             self._install_host()
+            player_messages = getattr(runtime, 'player_messages_type', None)
+            if player_messages is not None:
+                original_show = player_messages.showMessage
+                self._original_player_message_show = (
+                    player_messages.__dict__.get('showMessage'))
+                self._player_message_show_owned = (
+                    'showMessage' in player_messages.__dict__)
+
+                def show_player_message(panel, key, args=None, extra=None,
+                                        postfix=None):
+                    own_id = getattr(runtime.bigworld.player(),
+                                     'playerVehicleID', 0)
+                    return _show_lan_death_message(
+                        panel, original_show, own_id,
+                        runtime.battle_message_color_format,
+                        key, args, extra, postfix)
+
+                self._player_message_show = show_player_message
+                player_messages.showMessage = show_player_message
+            squad_settings = getattr(runtime, 'arena_info_settings', None)
+            if squad_settings is not None:
+                self._original_squad_range = squad_settings.SQUAD_RANGE_TO_SHOW
+                # Native finders otherwise discard a LAN team with 4+ humans.
+                # This affects presentation only; no WG unit is fabricated.
+                squad_settings.SQUAD_RANGE_TO_SHOW = self._lan_squad_range
             account_type.__init__ = account_init
             account_type.__getattribute__ = account_getattribute
             if self._original_account_become_player is not None:
@@ -2636,6 +2766,8 @@ class OfflineCompatibility(object):
             runtime.bigworld.serverTime = server_time
             if self._original_debug_update is not None:
                 debug_panel_type.updateDebugInfo = debug_update
+            if self._original_shell_tooltip is not None:
+                consumables_panel_type._ConsumablesPanel__makeShellTooltip = shell_tooltip
             self._installed = True
         except Exception:
             self._rollback_install()
@@ -2657,6 +2789,21 @@ class OfflineCompatibility(object):
 
     def _rollback_install(self):
         runtime = self._runtime
+        player_messages = getattr(runtime, 'player_messages_type', None)
+        if (player_messages is not None and self._player_message_show is not None
+                and player_messages.__dict__.get('showMessage') is
+                self._player_message_show):
+            if self._player_message_show_owned:
+                player_messages.showMessage = self._original_player_message_show
+            else:
+                del player_messages.showMessage
+        self._original_player_message_show = None
+        self._player_message_show = None
+        squad_settings = getattr(runtime, 'arena_info_settings', None)
+        if (squad_settings is not None and
+                squad_settings.SQUAD_RANGE_TO_SHOW is self._lan_squad_range):
+            squad_settings.SQUAD_RANGE_TO_SHOW = self._original_squad_range
+        self._original_squad_range = None
         account_type = runtime.account_module.PlayerAccount
         avatar_type = runtime.avatar_module.PlayerAvatar
         ammo_controller_type = getattr(
@@ -2906,6 +3053,11 @@ class OfflineCompatibility(object):
                 debug_panel_type.__dict__.get('updateDebugInfo') is
                 self._debug_update_wrapper):
             debug_panel_type.updateDebugInfo = self._original_debug_update
+        consumables_panel_type = getattr(runtime, 'consumables_panel_type', None)
+        if (consumables_panel_type is not None and
+                getattr(consumables_panel_type, '_ConsumablesPanel__makeShellTooltip', None)
+                is getattr(self, '_shell_tooltip_wrapper', None)):
+            consumables_panel_type._ConsumablesPanel__makeShellTooltip = self._original_shell_tooltip
         if self._host_added and self._host is not None:
             try:
                 runtime.predefined_hosts._hosts.remove(self._host)
@@ -3488,6 +3640,27 @@ class OfflineCompatibility(object):
         self._postmortem_vehicle_id = 0
         return previous
 
+    def clear_postmortem_killer(self, avatar):
+        """Keep #1513's delayed death camera on the local wreck.
+
+        ``ClientArena.onVehicleKilled`` must still receive the real attacker:
+        it owns death info, the kill feed and statistics.  Its synchronous
+        PlayerAvatar listener also stores that id in AvatarInputHandler for
+        ``PostmortemDelay``.  Clearing only this camera-owned value after the
+        arena update preserves every authoritative consumer while making the
+        delayed callback follow retail's out-of-AOI result for a hidden
+        killer.
+        """
+        if not self._battle_active:
+            raise RuntimeError('postmortem killer requires an active battle')
+        handler = getattr(avatar, 'inputHandler', None)
+        setter = getattr(handler, 'setKillerVehicleID', None)
+        if not callable(setter):
+            raise RuntimeError(
+                '#1513 postmortem killer boundary is unavailable')
+        setter(None)
+        return True
+
     def bind_vehicle_pose_sources(self, avatar, vehicle):
         """Bind every stock #1513 pose provider to one live matrix.
 
@@ -3705,8 +3878,52 @@ class OfflineCompatibility(object):
         try:
             self.disconnect()
         finally:
+            self._arm_tutorial_shutdown_guard()
             self._arm_sound_shutdown_guard()
             self._rollback_install()
+
+    def _arm_tutorial_shutdown_guard(self):
+        """Let exact #1513's late tutorial cleanup survive a retired GUI.
+
+        game.fini calls gui_personality.fini (including guiModsFini) before
+        its cached tutorialLoaderFini alias. ApplicationEffect still holds a
+        weak proxy to the destroyed app. SetTriggerEffect.stop already handles
+        a missing layout, but its accessor raises before reaching that guard.
+        Scope the expired-proxy fallback to the original loader cleanup and
+        restore both hooks afterward. Do not import GUI modules during partial
+        shutdown, skip any effect's cleanup, or hide other shutdown errors.
+        """
+        import sys
+
+        game = sys.modules.get('game')
+        effects = sys.modules.get('tutorial.gui.Scaleform.effects_player')
+        effect_type = getattr(effects, 'ApplicationEffect', None)
+        original_fini = getattr(game, 'tutorialLoaderFini', None)
+        if (effect_type is None or not callable(original_fini) or
+                not callable(getattr(effect_type, '_getTutorialLayout', None))):
+            return False
+
+        def guarded_fini():
+            original_layout = effect_type.__dict__['_getTutorialLayout']
+
+            def available_layout(effect):
+                try:
+                    return original_layout(effect)
+                except ReferenceError:
+                    return None
+
+            effect_type._getTutorialLayout = available_layout
+            try:
+                return original_fini()
+            finally:
+                if (effect_type.__dict__.get('_getTutorialLayout') is
+                        available_layout):
+                    effect_type._getTutorialLayout = original_layout
+                if getattr(game, 'tutorialLoaderFini', None) is guarded_fini:
+                    game.tutorialLoaderFini = original_fini
+
+        game.tutorialLoaderFini = guarded_fini
+        return True
 
     def _arm_sound_shutdown_guard(self):
         """Protect exact #1513's late SoundGroups.destroy zombie lookup.

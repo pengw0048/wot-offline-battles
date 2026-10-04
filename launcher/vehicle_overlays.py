@@ -39,10 +39,11 @@ except ImportError:
     import vehicle_prices
 
 try:
-    from . import core, bot_lineup_profiles
+    from . import core, bot_lineup_profiles, retired_vehicles
 except ImportError:
     import core
     import bot_lineup_profiles
+    import retired_vehicles
 
 
 TARGET_VERSION = "0.9.22.0.1"
@@ -782,12 +783,14 @@ def list_vehicle_choices(game_root):
 
 
 def list_gold_vehicles(game_root):
-    """List gold and reward vehicles the client can add to a save.
+    """List gold, reward and supported retired vehicles for a save.
 
     Include zero-credit ``notInShop`` rewards such as White Tiger without
     adding the free starter tech-tree vehicles. Keep hidden rewards, but apply
     the same standard-battle and resource exclusions as vehicle_records.
-    The launcher already mirrors those rules for Bot lineup choices.
+    Include the five supported retired vehicles even when their stock entry
+    retains its old credit price. Bot-only exclusions do not apply to manual
+    garage additions; resource and standard-battle checks still do.
     """
     status, package_path = _require_target(game_root)
     try:
@@ -806,8 +809,10 @@ def list_gold_vehicles(game_root):
     vehicles = []
     for record in roster:
         is_reward = record["credits"] == 0 and record["notInShop"]
-        if ((record["gold"] <= 0 and not is_reward) or
-                not bot_lineup_profiles.vehicle_choice_is_eligible(record)):
+        is_retired = ("%s:%s" % (record["nation"], record["vehicle"]) in
+                      retired_vehicles.RETIRED_BOT_VEHICLES_0922)
+        if ((record["gold"] <= 0 and not is_reward and not is_retired) or
+                not bot_lineup_profiles.vehicle_choice_is_standard(record)):
             continue
         nation = record["nation"]
         if nation not in translators:

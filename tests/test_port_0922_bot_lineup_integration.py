@@ -51,7 +51,7 @@ def _descriptor(name):
 
 
 class BotLineupIntegrationTests(unittest.TestCase):
-    def test_default_bot_lineup_has_no_artillery_and_keeps_tank_destroyers(self):
+    def test_default_bot_lineup_allows_three_artillery_and_keeps_destroyers(self):
         artillery = {'name': 'ussr:artillery', 'tags': ('SPG',)}
         destroyer = {'name': 'ussr:destroyer', 'tags': ('AT-SPG',)}
 
@@ -59,7 +59,8 @@ class BotLineupIntegrationTests(unittest.TestCase):
             [artillery, destroyer], 15)
 
         self.assertEqual(15, len(selected))
-        self.assertEqual({'ussr:destroyer'},
+        self.assertEqual(3, sum('SPG' in row['tags'] for row in selected))
+        self.assertEqual({'ussr:destroyer', 'ussr:artillery'},
                          {row['name'] for row in selected})
 
     def test_zero_artillery_cap_replaces_a_mirrored_human_artillery_slot(self):
@@ -72,7 +73,7 @@ class BotLineupIntegrationTests(unittest.TestCase):
 
         self.assertEqual([destroyer] * 15, selected)
 
-    def test_automatic_rosters_have_zero_artillery_without_removing_humans(self):
+    def test_automatic_rosters_allow_artillery_without_removing_humans(self):
         entries = {}
         for level in range(1, 11):
             for class_tag in bot_planner.MATCH_CLASSES:
@@ -114,9 +115,15 @@ class BotLineupIntegrationTests(unittest.TestCase):
 
                         selected = battle._bot_vehicle_assignments
                         self.assertEqual(29, len(selected))
-                        self.assertFalse(any('SPG' in by_name[name].tags
-                                             for name in selected.values()),
-                                         (level, mode, human_class, worker_mode))
+                        for team in (1, 2):
+                            spgs = sum('SPG' in by_name[name].tags
+                                       for (side, slot), name in selected.items()
+                                       if side == team)
+                            human_spgs = int(team == 1 and human_class == 'SPG')
+                            self.assertLessEqual(spgs + human_spgs, 3)
+                        if human_class == 'SPG':
+                            self.assertTrue(any('SPG' in by_name[name].tags
+                                                for name in selected.values()))
                         self.assertEqual((human_class,), descriptor.type.tags)
                         assignments.append(selected)
                     self.assertEqual(assignments[0], assignments[1])
@@ -151,8 +158,55 @@ class BotLineupIntegrationTests(unittest.TestCase):
 
         self.assertTrue(battle._prepare_bot_vehicle_assignments(descriptor))
 
-        self.assertEqual({(1, 1): 'ussr:regular', (2, 0): 'ussr:artillery'},
-                         battle._bot_vehicle_assignments)
+        self.assertEqual('ussr:artillery', battle._bot_vehicle_assignments[(2, 0)])
+        self.assertIn(battle._bot_vehicle_assignments[(1, 1)],
+                      ('ussr:regular', 'ussr:artillery'))
+
+    def test_mixed_tier_lan_clients_share_one_random_tier_window(self):
+        entries = {
+            level: types.SimpleNamespace(
+                name='ussr:medium_%d' % level, level=level,
+                tags=('mediumTank',)) for level in range(1, 11)
+        }
+        descriptors = {entry.name: types.SimpleNamespace(type=entry)
+                       for entry in entries.values()}
+        runtime = types.SimpleNamespace(
+            nations=types.SimpleNamespace(AVAILABLE_NAMES=('all',), INDICES={'all': 0}),
+            vehicles=types.SimpleNamespace(g_list=types.SimpleNamespace(
+                getList=lambda unused: entries)))
+        bots = [{'id': team * 100 + slot, 'team': team, 'slot': slot}
+                for team in (1, 2) for slot in range(1, 15)]
+        for human_tiers in ((6, 8), (6, 4), (1, 3), (10, 8), (4, 8)):
+            players = [{'id': index + 1, 'team': index + 1, 'slot': 0,
+                        'vehicle': entries[level].name}
+                       for index, level in enumerate(human_tiers)]
+            for round_id in range(1, 9):
+                assignments = []
+                for worker, player_id in ((False, 1), (False, 2), (True, -1)):
+                    name = entries[human_tiers[max(0, player_id - 1)]].name
+                    descriptor = descriptors[name]
+                    battle = BattleRuntime.__new__(BattleRuntime)
+                    battle._runtime = runtime
+                    battle._worker_mode = worker
+                    battle._config = {'vehicle': name}
+                    battle.client = types.SimpleNamespace(team=1, player_id=player_id)
+                    battle._resolve_descriptor = descriptors.__getitem__
+                    battle._start_message = {
+                        'round_id': round_id, 'map': '01_karelia',
+                        'players': players, 'bots': bots, 'bot_tier_mode': 'random',
+                    }
+                    self.assertTrue(battle._prepare_bot_vehicle_assignments(descriptor))
+                    selected = battle._bot_vehicle_assignments
+                    self.assertEqual(28, len(selected))
+                    levels = set(descriptors[value].type.level
+                                 for value in selected.values()).union(human_tiers)
+                    if max(human_tiers) - min(human_tiers) <= 2:
+                        self.assertLessEqual(max(levels) - min(levels), 2)
+                    else:
+                        self.assertEqual(set(human_tiers), levels)
+                    assignments.append(selected)
+                self.assertEqual(assignments[0], assignments[1])
+                self.assertEqual(assignments[0], assignments[2])
 
     def _profile_exclusion_runtime(self, worker, mode, excluded, lineup=()):
         names = ('ussr:Edited', 'usa:Regular', 'germany:Regular')
@@ -264,7 +318,10 @@ class BotLineupIntegrationTests(unittest.TestCase):
         self.assertEqual(assignments, server_lineup)
         exclusions = windows_server._bot_excluded_vehicles_from_environment(
             environment)
-        self.assertEqual([expected_name], exclusions)
+        self.assertEqual(
+            sorted(set((expected_name,)).union(
+                windows_server.RETIRED_BOT_VEHICLES_0922)),
+            exclusions)
 
         roster = ({"id": 21, "team": 2, "slot": 0},)
         entries = {
@@ -450,14 +507,17 @@ class BotLineupIntegrationTests(unittest.TestCase):
             frozenset(vehicle_overlays._NON_EDITABLE_VEHICLE_SUFFIXES),
             frozenset(bot_lineup_profiles.NON_BATTLE_ENTITY_BOT_SUFFIXES_0922))
 
+        retired_module = bot_lineup_profiles.retired_vehicles
+        retired_bot_names = retired_module.RETIRED_BOT_VEHICLES_0922
         for name, tags, expected in self._EXCLUSION_CASES:
             entry = types.SimpleNamespace(name=name, level=5, tags=tags)
             admitted = bool(
                 vehicle_configuration.is_standard_battle_vehicle(entry) and
                 not vehicle_blacklist.is_unusable(name))
+            bot_admitted = admitted and name not in retired_bot_names
             self.assertEqual(expected, admitted, name)
             self.assertEqual(
-                admitted, self._launcher_admits(name, tags), name)
+                bot_admitted, self._launcher_admits(name, tags), name)
             runtime = types.SimpleNamespace(
                 nations=types.SimpleNamespace(
                     AVAILABLE_NAMES=('all',), INDICES={'all': 0}),

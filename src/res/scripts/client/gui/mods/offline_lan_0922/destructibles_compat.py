@@ -127,7 +127,21 @@ def _chunk_identity_boundary(area_module, original):
             else:
                 destructibles_sensor._invalidate_chunk_native_names_1513(
                     chunk_id)
+            destructibles_sensor.retire_chunk_identity_1513(chunk_id)
         return original(manager, chunk_id, *args)
+    return handle
+
+
+def _fragile_collision_boundary(area_module, original):
+    """Observe the real native replacement, including delayed/replayed orders."""
+    def handle(manager, space_id, chunk_id, item_index, *args, **kwargs):
+        result = original(manager, space_id, chunk_id, item_index, *args, **kwargs)
+        if (manager is getattr(area_module, 'g_destructiblesManager', None) and
+                manager.getSpaceID() == space_id):
+            from gui.mods.offline_lan_0922 import destructibles_sensor
+            destructibles_sensor.note_native_fragile_replacement(
+                space_id, chunk_id, item_index)
+        return result
     return handle
 
 
@@ -189,6 +203,11 @@ def install(area_module=None, cache_module=None):
 
     manager_type = getattr(AreaDestructibles, 'DestructiblesManager', None)
     if manager_type is not None:
+        name = '_DestructiblesManager__setFragileDestroyed'
+        original = getattr(manager_type, name, None)
+        if callable(original):
+            setattr(manager_type, name,
+                    _fragile_collision_boundary(AreaDestructibles, original))
         for name in ('onChunkLoad', 'onChunkLoose'):
             original = getattr(manager_type, name, None)
             if callable(original):

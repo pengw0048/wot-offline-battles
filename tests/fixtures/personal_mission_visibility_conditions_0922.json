@@ -1,0 +1,186 @@
+{
+  "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/tree/0.9.22/source/res/scripts/item_defs/potapov_quests/regular",
+  "evidence": "Public 0.9.22 reference, not a #1513 archive audit. Production still reads the installed mission definitions.",
+  "missions": [
+    {
+      "name": "regular_1_1_6",
+      "operation": 1,
+      "chain": 1,
+      "number": 6,
+      "qid": 6,
+      "main": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>2</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><preBattle><vehicle><or><installedModules><optionalDevice>stereoscope</optionalDevice></installedModules><installedModules><optionalDevice>coatedOptics</optionalDevice></installedModules></or></vehicle></preBattle><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>2</greaterOrEqual></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_1_1_9",
+      "operation": 1,
+      "chain": 1,
+      "number": 9,
+      "qid": 9,
+      "main": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>1</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>1</greaterOrEqual></results><isAlive /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_1_2_5",
+      "operation": 1,
+      "chain": 2,
+      "number": 5,
+      "qid": 20,
+      "main": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>1000</greaterOrEqual></vehicleDamage></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>1000</greaterOrEqual></vehicleDamage><vehicleKills><greaterOrEqual>2</greaterOrEqual></vehicleKills></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_1_3_12",
+      "operation": 1,
+      "chain": 3,
+      "number": 12,
+      "qid": 42,
+      "main": "<conditions><postBattle><and><vehicleDamage><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage><results><key>xp</key><max>5</max></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_1_4_4",
+      "operation": 1,
+      "chain": 4,
+      "number": 4,
+      "qid": 49,
+      "main": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>1</greaterOrEqual></vehicleKills></and></postBattle></conditions>",
+      "add": "<conditions><preBattle><vehicle><and><installedModules><optionalDevice>camouflageNet</optionalDevice></installedModules></and></vehicle></preBattle><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>1</greaterOrEqual></vehicleKills></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_1_6",
+      "operation": 2,
+      "chain": 1,
+      "number": 6,
+      "qid": 81,
+      "main": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>4</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>4</greaterOrEqual></results><results><plus><key>killsAssistedTrack</key><key>killsAssistedRadio</key></plus><greaterOrEqual>1</greaterOrEqual></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_1_9",
+      "operation": 2,
+      "chain": 1,
+      "number": 9,
+      "qid": 84,
+      "main": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>2</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>2</greaterOrEqual></results><isAlive /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_2_5",
+      "operation": 2,
+      "chain": 2,
+      "number": 5,
+      "qid": 95,
+      "main": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>2000</greaterOrEqual></vehicleDamage></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>2000</greaterOrEqual></vehicleDamage><vehicleKills><greaterOrEqual>3</greaterOrEqual></vehicleKills></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_3_12",
+      "operation": 2,
+      "chain": 3,
+      "number": 12,
+      "qid": 117,
+      "main": "<conditions><postBattle><and><vehicleDamage><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage><results><key>damageDealt</key><greaterOrEqual>1500</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage><results><key>damageDealt</key><greaterOrEqual>1500</greaterOrEqual></results><results><key>xp</key><max>3</max></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_4_4",
+      "operation": 2,
+      "chain": 4,
+      "number": 4,
+      "qid": 124,
+      "main": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>2</greaterOrEqual></vehicleKills></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>2</greaterOrEqual></vehicleKills><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_1_6",
+      "operation": 3,
+      "chain": 1,
+      "number": 6,
+      "qid": 156,
+      "main": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>5</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>5</greaterOrEqual></results><results><plus><key>killsAssistedTrack</key><key>killsAssistedRadio</key></plus><greaterOrEqual>2</greaterOrEqual></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_1_9",
+      "operation": 3,
+      "chain": 1,
+      "number": 9,
+      "qid": 159,
+      "main": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>4</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>4</greaterOrEqual></results><isAlive /><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_2_5",
+      "operation": 3,
+      "chain": 2,
+      "number": 5,
+      "qid": 170,
+      "main": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>3000</greaterOrEqual></vehicleDamage></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>3000</greaterOrEqual></vehicleDamage><vehicleKills><greaterOrEqual>4</greaterOrEqual></vehicleKills></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_3_12",
+      "operation": 3,
+      "chain": 3,
+      "number": 12,
+      "qid": 192,
+      "main": "<conditions><postBattle><and><vehicleDamage><lvlDiff>0</lvlDiff><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><lvlDiff>0</lvlDiff><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage><results><key>xp</key><max>3</max></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_4_4",
+      "operation": 3,
+      "chain": 4,
+      "number": 4,
+      "qid": 199,
+      "main": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>3</greaterOrEqual></vehicleKills></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>3</greaterOrEqual></vehicleKills><isAlive /><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_1_6",
+      "operation": 4,
+      "chain": 1,
+      "number": 6,
+      "qid": 231,
+      "main": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>6</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><plus><key>damagedVehicleCntAssistedTrack</key><key>damagedVehicleCntAssistedRadio</key></plus><greaterOrEqual>6</greaterOrEqual></results><results><plus><key>killsAssistedTrack</key><key>killsAssistedRadio</key></plus><greaterOrEqual>3</greaterOrEqual></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_1_9",
+      "operation": 4,
+      "chain": 1,
+      "number": 9,
+      "qid": 234,
+      "main": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>6</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>spottedBeforeWeBecameSpotted</key><greaterOrEqual>6</greaterOrEqual></results><isAlive /><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_2_5",
+      "operation": 4,
+      "chain": 2,
+      "number": 5,
+      "qid": 245,
+      "main": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>4000</greaterOrEqual></vehicleDamage></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><distance>0</distance><greaterOrEqual>4000</greaterOrEqual></vehicleDamage><vehicleKills><greaterOrEqual>5</greaterOrEqual></vehicleKills></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_3_12",
+      "operation": 4,
+      "chain": 3,
+      "number": 12,
+      "qid": 267,
+      "main": "<conditions><postBattle><and><vehicleDamage><lvlDiff>0</lvlDiff><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage><results><key>damageDealt</key><greaterOrEqual>3000</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleDamage><lvlDiff>0</lvlDiff><fireStarted /><eventCount /><greaterOrEqual>1</greaterOrEqual></vehicleDamage><results><key>damageDealt</key><greaterOrEqual>3000</greaterOrEqual></results><results><key>xp</key><max>3</max></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_4_4",
+      "operation": 4,
+      "chain": 4,
+      "number": 4,
+      "qid": 274,
+      "main": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>4</greaterOrEqual></vehicleKills></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><vehicleKills><whileInvisible /><greaterOrEqual>4</greaterOrEqual></vehicleKills><isAlive /><win /></and></postBattle></conditions>"
+    }
+  ]
+}

@@ -785,10 +785,6 @@ def _decoded_candidates(vehicle_descriptor, profile, crew, bounds, official_geom
 def build_layout(vehicle_descriptor, log_build=True):
 	vehicle_name = vehicle_type_name(vehicle_descriptor)
 	fingerprint = configuration_fingerprint(vehicle_descriptor)
-	cache_key = (vehicle_name, fingerprint, LAYOUT_KEY)
-	if cache_key in _LAYOUT_CACHE:
-		return _LAYOUT_CACHE[cache_key]
-
 	bounds = {}
 	bounds_sources = {}
 	errors = []
@@ -798,6 +794,13 @@ def build_layout(vehicle_descriptor, log_build=True):
 		if parent_bounds is not None:
 			bounds[parent_name] = parent_bounds
 			bounds_sources[parent_name] = source
+	# Native hit testers finish loading after the descriptor is installed.
+	# Type/component IDs alone cannot distinguish an incomplete first query
+	# from the same descriptor once its collision bounds become available.
+	cache_key = (vehicle_name, fingerprint, LAYOUT_KEY,
+		tuple((parent, bounds.get(parent)) for parent in SUPPORTED_PARENTS))
+	if cache_key in _LAYOUT_CACHE:
+		return _LAYOUT_CACHE[cache_key]
 
 	crew, crew_errors = crew_entities(vehicle_descriptor)
 	errors.extend(crew_errors)

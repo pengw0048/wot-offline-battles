@@ -57,7 +57,7 @@ class ServerCaptureTests(unittest.TestCase):
         record = {
             'projectile_id': '%d:b:11:1' % state.round_id,
             'shooter_kind': 'bot', 'shooter_id': 11,
-            'shot_seq': 1, 'shell_index': 0, 'team': 1,
+            'shot_seq': 1, 'shell_index': 0, 'team': 1, 'is_he': False,
         }
         raw = {
             'target_kind': 'player', 'target_id': player.player_id,
@@ -101,6 +101,36 @@ class ServerCaptureTests(unittest.TestCase):
              for index, point in enumerate(graph['objective_bases'])},
             planner.bases)
         self.assertNotIn('bases', self._state()._map_rule_data())
+
+    def test_mittengard_authored_circle_controls_human_bot_and_threat(self):
+        graph = json.loads((PORT_ROOT / 'navgraphs/100_thepit.json').read_text())
+        planner = SpawnPlanner(navigation_graph=graph)
+        state = self._state()
+        state.capture_bases = BattleState._sanitize_capture_bases(planner.capture_bases)
+        for team in (1, 2):
+            base = state.capture_bases[team][0]
+            self.assertEqual(30.0, base['radius'])
+            for distance, inside in ((49.0, False), (30.01, False),
+                                     (30.0, True), (29.99, True)):
+                with self.subTest(team=team, distance=distance):
+                    state.players.clear()
+                    state.bot_states.clear()
+                    state.players[2] = _player(2, 3 - team, base['x'] + distance, base['z'])
+                    state.bot_states[16] = dict(id=16, team=3 - team, alive=True,
+                        world_pose=True, x=base['x'], z=base['z'] + distance)
+                    self._capture_tick(state)
+                    self.assertEqual(2 if inside else 0,
+                        state.rules_state['bases'][str(team)]['invaders'])
+                    self.assertEqual(inside, bool(state.capture_threat_bases[team]))
+        # Re-sanitizing ready data for team orders must retain its radius.
+        self.assertEqual(state.capture_bases,
+                         state._sanitize_capture_bases(state.capture_bases))
+
+    def test_invalid_explicit_capture_radius_is_not_a_legacy_circle(self):
+        for radius in (0, -1, float('nan'), float('inf'), 1e300, 'bad'):
+            with self.subTest(radius=radius):
+                self.assertEqual({}, BattleState._sanitize_capture_bases({
+                    '1': [dict(x=0, z=0, radius=radius)], '2': [(500, 0)]}))
 
     def test_placeholder_poses_never_enter_a_capture_circle(self):
         state = self._state()

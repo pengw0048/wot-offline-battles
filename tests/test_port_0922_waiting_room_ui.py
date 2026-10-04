@@ -545,6 +545,12 @@ class WaitingRoomTests(unittest.TestCase):
         self.assertTrue(room.activate('tier_next'))
         self.assertEqual(['same'], requested)
         self.assertIn('Same tier', room._labels['tier'].properties['text'])
+        for mode, label in self.module.BOT_TIER_OPTIONS[2:]:
+            self.assertTrue(room.activate('tier_next'))
+            self.assertEqual(mode, requested[-1])
+            self.assertIn(label, room._labels['tier'].properties['text'])
+        self.assertTrue(room.activate('tier_next'))
+        self.assertEqual('random', requested[-1])
 
     def test_host_can_cycle_the_bot_skill_preset(self):
         requested = []

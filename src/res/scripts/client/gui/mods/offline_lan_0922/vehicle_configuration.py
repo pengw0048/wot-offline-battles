@@ -21,6 +21,16 @@ NON_BATTLE_ENTITY_SUFFIXES = ('_bot', '_training')
 NON_BATTLE_ENTITY_NAMES = frozenset(('germany:Env_Artillery',))
 CATALOGUE_VISIBILITY_TAG = 'secret'
 
+# Loadable retired tanks remain player vehicles, but no Bot roster may use
+# their post-removal balance data. Kept in parity with launcher/retired_vehicles.
+RETIRED_BOT_VEHICLES = frozenset((
+    'germany:G85_Auf_Panther',
+    'germany:G98_Waffentrager_E100',
+    'ussr:R75_SU122_54',
+    'ussr:R93_Object263B',
+    'ussr:R96_Object_430B',
+))
+
 
 def is_clone_of_a_standard_vehicle(name, tags):
     """Return whether this entry republishes a real tank at a fake level.

@@ -1,0 +1,231 @@
+name: Build rebuilt Airfield Windows test
+
+on:
+  push:
+    branches: [fix/093-airfield-rebuilt-test-20260923]
+    paths:
+      - .github/workflows/build-airfield-test.yml
+      - .airfield-transfer/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: airfield-rebuilt-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/093-airfield-rebuilt-test-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.integrate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/093-airfield-rebuilt-test-20260923
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Integrate and publish exact reviewed source on the test branch
+        id: integrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if test -f .airfield-transfer/apply.py; then
+            python .airfield-transfer/apply.py
+          else
+            test -f docs/testing/airfield-build-inputs-20260923.json
+          fi
+          # The verifier must not inherit its own print_function compiler flag.
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('tools/verify_airfield_test_build.py')
+          text = p.read_text()
+          old = "compile(data, actual.co_filename, 'exec')"
+          new = "compile(data, actual.co_filename, 'exec', 0, True)"
+          if old in text:
+              p.write_text(text.replace(old, new))
+          assert new in p.read_text()
+          PY
+          git add tools/verify_airfield_test_build.py
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          proof = json.loads(Path('docs/testing/airfield-build-inputs-20260923.json').read_text())
+          for rec in proof['changed_files']:
+              assert hashlib.sha256(Path(rec['path']).read_bytes()).hexdigest() == rec['sha256'], rec['path']
+          for name, sha in proof['runtime_source_sha256_lf'].items():
+              assert hashlib.sha256(Path(name).read_bytes().replace(b'\r\n', b'\n')).hexdigest() == sha, name
+          PY
+          if ! git diff --cached --quiet; then
+            git commit -m 'Integrate preserved b51324c5 runtime and rebuilt Airfield navigation asset'
+            git push origin HEAD:refs/heads/fix/093-airfield-rebuilt-test-20260923
+          fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Run offline baker and cold-runtime regressions
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python -m unittest test_port_0922_navigation_baker test_port_0922_navigation_collision_bake test_port_0922_destructibles_baker test_port_0922 2>&1 | tee build-evidence/baker-tests.log
+          python tests/test_airfield_clean_runtime.py 2>&1 | tee build-evidence/cold-runtime-tests.log
+          cp airfield-cold-runtime-paths.json build-evidence/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: airfield-source-tests-${{ github.run_id }}
+          path: build-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - name: Build the manual Windows LAN server
+        shell: pwsh
+        run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airfield-manual-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: airfield-manual-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile the client with CPython 2.7 and test the compiled modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-airfield-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -w /work python:2.7.18 sh -c \
+            'python build_wotmod.py && python tools/verify_airfield_test_build.py bytecode'
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+          docker image inspect python:2.7.18 --format '{{json .RepoDigests}}' > dist/airfield-python27-image.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airfield-client-payload-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-launcher:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      AIRFIELD_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-airfield-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: airfield-client-payload-${{ github.run_id }}
+          path: dist
+      - name: Test launcher and payload staging on Windows
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build the complete runnable launcher folder
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify the exact packaged bytecode, graph, source and fake-client install
+        shell: pwsh
+        run: |
+          python tools/verify_airfield_test_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+          if ($LASTEXITCODE -ne 0) { throw 'Distribution verification failed' }
+          Copy-Item dist/airfield-python27-image.json launcher/dist/wot-0.9.22-offline-battles/
+      - name: Smoke-test the built executable server protocol
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles'
+          $launcher = Join-Path $app 'wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $launcher -ArgumentList '--serve', '0.9.22' -PassThru
+          try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $compatible = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) { throw 'Built server exited before answering its protocol' }
+                  $probe | python -
+                  if ($LASTEXITCODE -eq 0) { $compatible = $true; break }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $compatible) { throw 'Built server protocol probe failed' }
+              Set-Content -LiteralPath (Join-Path $app 'SERVER_SMOKE_TEST.txt') -Value 'PASS: built Windows launcher --serve 0.9.22 answered its protocol. Native game not executed.'
+          }
+          finally {
+              if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+              $global:LASTEXITCODE = 0
+          }
+      - name: Write test-package notes
+        shell: pwsh
+        run: |
+          @'
+          Airfield rebuilt-navigation TEST BUILD (not a formal release)
+          Preserve the b51324c5 runtime; use the rebuilt #1513 Airfield navigation graph.
+          Static destructible-region graph repair is disabled only for this certified graph.
+          Other 40 maps and final physical collision checks are retained.
+          Extract the whole download into a NEW folder and run wot-0.9.22-offline-battles.exe.
+          Select the existing original Chinese HD 0.9.22.0.1 #1513 client directory.
+          Do not overwrite files inside an active old launcher installation.
+          Check AIRFIELD_BUILD_EVIDENCE.json for the source commit, build identity and verification results.
+          This package passed bytecode/source/asset checks and Windows install/server smoke tests.
+          Native gameplay and any improvement to Bot stalls or frame time still require testing.
+          '@ | Set-Content -Encoding utf8 launcher/dist/wot-0.9.22-offline-battles/AIRFIELD_TEST_README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-airfield-clean-test-${{ github.run_id }}-Windows-x64
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

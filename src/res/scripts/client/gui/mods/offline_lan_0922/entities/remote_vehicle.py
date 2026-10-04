@@ -23,6 +23,27 @@ def _blend_angle(source, target, ratio):
         2.0 * math.pi) - math.pi
     return float(source) + delta * ratio
 
+
+def _native_ypr(rotation):
+    """Use finite, equivalent principal angles at the native matrix boundary.
+
+    Shortest-arc interpolation deliberately keeps an unwrapped result: its
+    callers also subtract the source to measure turn speed. Repeated rekeys
+    across the seam can therefore accumulate complete turns even when both
+    authority endpoints were wrapped. Native setRotateYPR rejects invalid
+    angles; wrapping here preserves the transform without changing that
+    interpolation or inventing a physical clamp.
+    """
+    result = []
+    for value in rotation:
+        angle = float(value)
+        if math.isnan(angle) or math.isinf(angle):
+            raise ValueError('remote pose angle must be finite: %r' % value)
+        if angle < -math.pi or angle > math.pi:
+            angle = (angle + math.pi) % (2.0 * math.pi) - math.pi
+        result.append(angle)
+    return tuple(result)
+
 # Native pose objects this process has allocated.  Allocating a fresh pair per
 # accepted pose walked a 2 GB client into its address-space ceiling, so a
 # vehicle now owns its animation and both keyframe matrices for its whole life.
@@ -304,7 +325,8 @@ def clear_ground_decal_visibility_state(appearance):
     if appearance is None:
         return False
     reached = False
-    for name in ('_offlineSplodgeDetach', '_offlineSplodgeDisabled'):
+    for name in ('_offlineSplodgeDetach', '_offlineSplodgeDisabled',
+                 '_offlineVisualGateR12Model'):
         try:
             if getattr(appearance, name, None) is not None:
                 setattr(appearance, name, None)
@@ -430,6 +452,57 @@ def close_stock_presentation_extras(appearance, visible):
     reached = set_vehicle_traces_visibility(appearance, visible) or reached
     if not visible:
         reached = stop_ground_effects(appearance) or reached
+        reached = stop_bound_visual_effects(appearance) or reached
+    return reached
+
+
+def stop_bound_visual_effects(appearance):
+    """Retire timelines which do not belong to the dust/exhaust selectors.
+
+    #1513 CompoundAppearance.deactivate stops both its private effect player
+    and ModelBoundEffects. A compound draw mask and CustomEffect selectors do
+    not cover these owners. Use their stock stop paths to cancel callbacks
+    and detach already loaded particles, including distortion particles.
+    Do not deactivate the appearance or its engine/sound components.
+    """
+    if appearance is None:
+        return False
+    reached = False
+    stopped = 0
+    player = getattr(appearance, '_CompoundAppearance__effectsPlayer', None)
+    if player is not None:
+        try:
+            appearance._CompoundAppearance__stopEffects()
+            stopped += 1
+            reached = True
+        except Exception as error:
+            _report_ground_gate_failure('effects', error)
+    bound = getattr(appearance, 'boundEffects', None)
+    if bound is not None:
+        try:
+            # The stock stop method iterates a snapshot, then clears owners.
+            # Empty lists are a no-op on the periodic hidden-vehicle check.
+            effects = getattr(bound, '_effects', ())
+            count = len(effects)
+            if count:
+                bound.stop()
+                stopped += count
+            reached = True
+        except Exception as error:
+            _report_ground_gate_failure('effects', error)
+    model = getattr(appearance, 'compoundModel', None)
+    if getattr(appearance, '_offlineVisualGateR12Model', None) is not model:
+        appearance._offlineVisualGateR12Model = model
+        manager = getattr(appearance, 'customEffectManager', None)
+        selectors = getattr(manager, '_CustomEffectManager__selectors', ())
+        try:
+            enabled = sum(bool(getattr(s, '_enabled', True)) for s in selectors)
+        except Exception:
+            enabled = -1
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] VISUAL_GATE_R12 id=%s '
+            'stopped_timelines=%s enabled_selectors=%s\n' %
+            (getattr(appearance, 'id', '?'), stopped, enabled))
     return reached
 
 
@@ -1424,6 +1497,7 @@ def _write_changed_pose(matrix, position, rotation, previous):
     fence it by matrix identity so a replacement provider starts uncached.
     Motion timestamps and velocity samples remain owned by the caller.
     """
+    rotation = _native_ypr(rotation)
     xyz = (float(position.x), float(position.y), float(position.z))
     same_matrix = previous is not None and previous[0] is matrix
     rotated = not same_matrix or previous[2] != rotation
@@ -1995,9 +2069,8 @@ class RemoteVehicle(object):
         # Without this dictionary the #1513 shoot extra cannot start.
         self.extras = {}
         self.position = math_module.Vector3(position)
-        self.yaw = float(rotation[2])
-        self.pitch = float(rotation[1])
-        self.roll = float(rotation[0])
+        self.yaw, self.pitch, self.roll = _native_ypr(
+            (rotation[2], rotation[1], rotation[0]))
         self.matrix = math_module.Matrix()
         # The animation and its two keyframe matrices belong to this vehicle
         # for its whole life; rekeying rewrites their contents in place.
@@ -2351,17 +2424,19 @@ class RemoteVehicle(object):
     @staticmethod
     def _write_pose(matrix, pose):
         """Write one pose into an existing native matrix, in place."""
-        matrix.setRotateYPR((pose[3], pose[4], pose[5]))
+        matrix.setRotateYPR(_native_ypr((pose[3], pose[4], pose[5])))
         matrix.translation = (pose[0], pose[1], pose[2])
         return True
 
     def set_pose(self, position, rotation, relax_time=None, now=None):
+        yaw, pitch, roll = _native_ypr(
+            (rotation[2], rotation[1], rotation[0]))
         previous = self.position
         previous_time = self._last_pose_time
         self.position = self._math.Vector3(position)
-        self.roll = float(rotation[0])
-        self.pitch = float(rotation[1])
-        self.yaw = float(rotation[2])
+        self.roll = roll
+        self.pitch = pitch
+        self.yaw = yaw
         self._update_matrix()
         self._retarget_render_pose(relax_time, now)
         velocity = self._math.Vector3(0.0, 0.0, 0.0)

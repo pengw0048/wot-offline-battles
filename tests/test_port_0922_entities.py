@@ -85,6 +85,7 @@ class _MiscStatus(object):
 
 
 class _Constants(object):
+    ATTACK_REASON_INDICES = {'shot': 0, 'fire': 1}
     ARENA_UPDATE = _ArenaUpdate
     ARENA_PERIOD = _ArenaPeriod
     VEHICLE_PHYSICS_MODE = _PhysicsMode
@@ -118,6 +119,7 @@ class _EntityFilter(object):
 
 class _Entity(object):
     typeDescriptor = _EntityDescriptor()
+    health = 0
 
     def __init__(self):
         self.teleports = []
@@ -196,7 +198,13 @@ class _Avatar(object):
             self.visual_starts.append((proxy, immediate)),
             stopVehicleVisual=lambda entity_id, is_player:
             self.visual_stops.append((entity_id, is_player)),
-            shared=types.SimpleNamespace(viewPoints=self.view_points))
+            shared=types.SimpleNamespace(
+                viewPoints=self.view_points,
+                messages=types.SimpleNamespace(
+                    _BattleMessagesController__getKillInfo=lambda *args:
+                        ('DEATH_FROM_SHOT', 'ENEMY_SELF', None, None),
+                    onShowPlayerMessageByCode=mock.Mock(),
+                    onShowVehicleMessageByCode=mock.Mock())))
         self.consistentMatrices = _ConsistentMatrices()
 
     def updateArena(self, update_type, payload):
@@ -244,6 +252,107 @@ class _VehicleDescr(object):
 
 
 class BigWorldBindingTests(unittest.TestCase):
+    def test_own_and_observed_deaths_reach_feed_without_duplicate_messages(self):
+        module = _binding_module()
+        for own, observed, suicide in ((True, False, False),
+                                       (True, False, True),
+                                       (False, True, False),
+                                       (False, False, False)):
+            with self.subTest(own=own, observed=observed, suicide=suicide):
+                avatar = _Avatar()
+                avatar.playerVehicleID = 91
+                avatar.isVehicleAlive = not (own or observed)
+                target = 91 if own else 92
+                attacker = target if suicide else 23
+                avatar.inputHandler = types.SimpleNamespace(ctrl=
+                    types.SimpleNamespace(curVehicleID=target if observed else 91))
+                messages = avatar.guiSessionProvider.shared.messages
+                postfix = ('SELF_SUICIDE' if suicide else
+                           ('ENEMY_SELF' if own else 'ENEMY_ALLY'))
+                messages._BattleMessagesController__getKillInfo = mock.Mock(
+                    return_value=('DEATH_FROM_SHOT', postfix, None, None))
+
+                def stock_update(kind, data):
+                    avatar.updates.append((kind, data))
+                    victim, killer, equipment, reason = pickle.loads(data)
+                    # Exact Avatar and msgs_ctrl independently suppress own
+                    # and observed kills before PlayerMessages receives them.
+                    if victim == avatar.playerVehicleID:
+                        return
+                    if (not avatar.isVehicleAlive and
+                            victim == avatar.inputHandler.ctrl.curVehicleID):
+                        return
+                    messages.onShowPlayerMessageByCode(
+                        'DEATH_FROM_SHOT', 'ENEMY_ALLY', victim, killer, equipment)
+
+                avatar.updateArena = stock_update
+                binding = module.BigWorldVehicleBinding(
+                    _BigWorld(), avatar, _Constants, _VehicleDescr,
+                    lambda yaw, pitch, limits: 321,
+                    outfit_provider=lambda descriptor: '')
+                binding.arena_vehicle_killed(target, attacker, 0)
+                if own:
+                    messages.onShowPlayerMessageByCode.assert_not_called()
+                else:
+                    messages.onShowPlayerMessageByCode.assert_called_once_with(
+                        'DEATH_FROM_SHOT', 'ENEMY_ALLY', target, attacker, 0)
+                self.assertEqual((target, attacker, 0, 0),
+                                 pickle.loads(avatar.updates[0][1]))
+                if own:
+                    messages.onShowVehicleMessageByCode.assert_called_once_with(
+                        'DEATH_FROM_SHOT', postfix, attacker, None, 0)
+                else:
+                    messages.onShowVehicleMessageByCode.assert_not_called()
+
+    def test_own_death_panel_preserves_fire_explosion_and_unknown_causes(self):
+        module = _binding_module()
+        for reason, health, attacker, expected in (
+                (1, 0, 23, 'DEATH_FROM_FIRE'),
+                (0, -1, 23, 'DEATH_FROM_DEVICE_EXPLOSION_AT_SHOT'),
+                (1, -1, 23, 'DEATH_FROM_DEVICE_EXPLOSION_AT_FIRE'),
+                (0, 0, 0, 'DEATH_UNKNOWN')):
+            with self.subTest(reason=reason, health=health, attacker=attacker):
+                avatar, bigworld = _Avatar(), _BigWorld()
+                avatar.playerVehicleID = 91
+                bigworld.entity_value.health = health
+                messages = avatar.guiSessionProvider.shared.messages
+                messages._BattleMessagesController__getKillInfo = mock.Mock(
+                    return_value=('DEATH_FROM_SHOT', 'ENEMY_SELF', None, None))
+                binding = module.BigWorldVehicleBinding(
+                    bigworld, avatar, _Constants, _VehicleDescr,
+                    lambda yaw, pitch, limits: 321,
+                    outfit_provider=lambda descriptor: '')
+                binding.arena_vehicle_killed(91, attacker, reason)
+                messages.onShowVehicleMessageByCode.assert_called_once_with(
+                    expected, 'ENEMY_SELF', attacker, None, 0)
+
+    def test_unassisted_environment_death_selects_native_central_template(self):
+        module = _binding_module()
+        for reason, code in ((3, 'WORLD_COLLISION'), (5, 'DROWNING'),
+                             (7, 'OVERTURN'), (4, 'DEATH_ZONE'),
+                             (3, 'INACTIVE_CREW_AT_WORLD_COLLISION')):
+            for attacker in (0, 23):
+                with self.subTest(code=code, attacker=attacker):
+                    avatar, bigworld = _Avatar(), _BigWorld()
+                    avatar.playerVehicleID = 91
+                    bigworld.entity_value.health = 0
+                    messages = avatar.guiSessionProvider.shared.messages
+                    postfix = 'UNKNOWN_SELF' if not attacker else 'ENEMY_SELF'
+                    key = 'DEATH_FROM_' + code
+                    messages._BattleMessagesController__getKillInfo = mock.Mock(
+                        return_value=(key, postfix, None, None))
+                    binding = module.BigWorldVehicleBinding(
+                        bigworld, avatar, _Constants, _VehicleDescr,
+                        lambda yaw, pitch, limits: 321,
+                        outfit_provider=lambda descriptor: '')
+                    binding.arena_vehicle_killed(91, attacker, reason)
+                    messages.onShowVehicleMessageByCode.assert_called_once_with(
+                        key, 'SELF_SUICIDE' if not attacker else 'ENEMY_SELF',
+                        attacker, None, 0)
+                    messages.onShowPlayerMessageByCode.assert_not_called()
+                    self.assertEqual((91, attacker, 0, reason),
+                                     pickle.loads(avatar.updates[0][1]))
+
     def test_siege_state_drives_exact_vehicle_callback_once_per_edge(self):
         module = _binding_module()
         bigworld = _BigWorld()
@@ -423,6 +532,7 @@ class BigWorldBindingTests(unittest.TestCase):
         self.assertEqual([91, '17', 'Alpha', 1], vehicle_added[:4])
         self.assertTrue(vehicle_added[5])
         self.assertEqual(91, vehicle_added[7])
+        self.assertEqual([], vehicle_added[15])
         self.assertEqual(91, pickle.loads(avatar.updates[1][1]))
         self.assertEqual((5, 0, 0, []),
                          pickle.loads(zlib.decompress(avatar.updates[2][1])))
@@ -432,6 +542,50 @@ class BigWorldBindingTests(unittest.TestCase):
         self.assertEqual((91, 23, 0, 7),
                          pickle.loads(avatar.updates[5][1]))
         self.assertEqual([91], bigworld.destroyed)
+
+    def test_personal_mission_ids_use_the_existing_roster_field(self):
+        module = _binding_module()
+        avatar = _Avatar()
+        binding = module.BigWorldVehicleBinding(
+            _BigWorld(), avatar, _Constants, _VehicleDescr,
+            lambda yaw, pitch, limits: 321,
+            outfit_provider=lambda descriptor: 'verified')
+        properties = binding.properties_from_compact_descr(17, 1, 'Alpha')
+        binding.arena_vehicle_added(91, _snapshot(
+            properties=properties, personal_mission_ids=(270,), crew_group=13))
+        row = pickle.loads(zlib.decompress(avatar.updates[-1][1]))
+        self.assertEqual(18, len(row))
+        self.assertEqual([270], row[15])
+        self.assertEqual(13, row[16])
+        self.assertEqual({}, row[17])
+        # A remote/Bot roster never inherits the player's mission selection.
+        binding.arena_vehicle_added(92, _snapshot(properties=properties))
+        remote = pickle.loads(zlib.decompress(avatar.updates[-1][1]))
+        self.assertEqual([], remote[15])
+
+    def test_blind_enemy_kill_keeps_enemy_team_and_true_attacker_tuple(self):
+        """Visibility never changes the roster relation used by kill voice."""
+        module = _binding_module()
+        avatar = _Avatar()
+        binding = module.BigWorldVehicleBinding(
+            _BigWorld(), avatar, _Constants, _VehicleDescr,
+            lambda yaw, pitch, limits: 321,
+            outfit_provider=lambda descriptor: 'verified')
+        player = binding.properties_from_compact_descr(17, 1, 'Player')
+        hidden_enemy = binding.properties_from_compact_descr(
+            17, 2, 'HiddenEnemy')
+
+        binding.arena_vehicle_added(10, _snapshot(properties=player))
+        binding.arena_vehicle_added(
+            11, _snapshot(properties=hidden_enemy))
+        binding.arena_vehicle_killed(11, 10, 0)
+
+        player_row = pickle.loads(zlib.decompress(avatar.updates[0][1]))
+        enemy_row = pickle.loads(zlib.decompress(avatar.updates[1][1]))
+        kill_row = pickle.loads(avatar.updates[2][1])
+        self.assertEqual((10, 1), (player_row[0], player_row[3]))
+        self.assertEqual((11, 2), (enemy_row[0], enemy_row[3]))
+        self.assertEqual((11, 10, 0, 0), kill_row)
 
     def test_remote_pose_and_aim_use_authoritative_presentation(self):
         module = _binding_module()

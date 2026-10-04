@@ -85,6 +85,10 @@ class _LobbyHeader(object):
         self.calls.append((map_id, action_name))
         return 'stock'
 
+    def showSquad(self):
+        self.calls.append('prebattle/create')
+        return 'stock'
+
     def _updatePrebattleControls(self):
         self.as_disableFightButtonS(True)
         return 'updated'
@@ -93,8 +97,30 @@ class _LobbyHeader(object):
         self.disabled.append(disabled)
 
 
+class _TrainingItem(object):
+    def __init__(self, data='training'):
+        self._data = data
+        self.calls = 0
+
+    def select(self):
+        self.calls += 1
+        return 'stock'
+
+
+class _SquadTypeSelectPopover(object):
+    def __init__(self):
+        self.calls = []
+
+    def selectFight(self, action_name):
+        self.calls.append(('prebattle/create', action_name))
+        return 'stock'
+
+
 _LOBBY_HEADER_FIGHT_CLICK = _LobbyHeader.fightClick
+_LOBBY_HEADER_SHOW_SQUAD = _LobbyHeader.showSquad
 _LOBBY_HEADER_UPDATE_CONTROLS = _LobbyHeader._updatePrebattleControls
+_TRAINING_ITEM_SELECT = _TrainingItem.select
+_SQUAD_SELECT_FIGHT = _SquadTypeSelectPopover.selectFight
 
 
 class JoinButtonUITests(unittest.TestCase):
@@ -104,13 +130,18 @@ class JoinButtonUITests(unittest.TestCase):
         self.handled = True
         self.refresh = mock.Mock()
         self.adapter = self.queue_ui.JoinButtonUI(
-            self._join, runtime=_LobbyHeader, refresh=self.refresh)
+            self._join, runtime=_LobbyHeader, refresh=self.refresh,
+            training_runtime=_TrainingItem,
+            squad_runtime=_SquadTypeSelectPopover)
 
     def tearDown(self):
         self.adapter.uninstall()
         _LobbyHeader.fightClick = _LOBBY_HEADER_FIGHT_CLICK
+        _LobbyHeader.showSquad = _LOBBY_HEADER_SHOW_SQUAD
         _LobbyHeader._updatePrebattleControls = (
             _LOBBY_HEADER_UPDATE_CONTROLS)
+        _TrainingItem.select = _TRAINING_ITEM_SELECT
+        _SquadTypeSelectPopover.selectFight = _SQUAD_SELECT_FIGHT
 
     def _join(self, map_id, action_name):
         self.join_calls.append((map_id, action_name))
@@ -144,6 +175,91 @@ class JoinButtonUITests(unittest.TestCase):
         self.assertEqual([(9, 'ranked')], self.join_calls)
         self.assertEqual([], header.calls)
 
+    def test_training_selector_enters_the_lan_waiting_room_directly(self):
+        self.adapter.install()
+        item = _TrainingItem('trainingList')
+
+        self.assertIsNone(item.select())
+
+        self.assertEqual([(None, 'training')], self.join_calls)
+        self.assertEqual(0, item.calls)
+
+    def test_create_platoon_joins_lan_without_starting_retail_waiting(self):
+        self.adapter.install()
+        header = _LobbyHeader()
+
+        self.assertIsNone(header.showSquad())
+
+        self.assertEqual([(None, 'random')], self.join_calls)
+        self.assertEqual([], header.calls)
+
+    def test_both_platoon_dropdown_choices_join_the_same_lan_room(self):
+        self.adapter.install()
+        popover = _SquadTypeSelectPopover()
+        for action in ('squad', 'eventSquad'):
+            self.assertIsNone(popover.selectFight(action))
+
+        self.assertEqual([(None, 'random')] * 2, self.join_calls)
+        self.assertEqual([], popover.calls)
+
+    def test_failed_lan_join_never_falls_through_to_retail_squad_creation(self):
+        self.handled = False
+        self.adapter.install()
+        header = _LobbyHeader()
+        popover = _SquadTypeSelectPopover()
+
+        self.assertIsNone(header.showSquad())
+        self.assertIsNone(popover.selectFight('squad'))
+
+        self.assertEqual([(None, 'random')] * 2, self.join_calls)
+        self.assertEqual([], header.calls)
+        self.assertEqual([], popover.calls)
+
+    def test_default_runtime_reinstall_keeps_all_lan_entries(self):
+        adapter = self.queue_ui.JoinButtonUI(self._join)
+        with mock.patch.object(self.queue_ui, '_load_join_runtime',
+                               return_value=_LobbyHeader), \
+                mock.patch.object(self.queue_ui, '_load_training_selector_runtime',
+                                  return_value=_TrainingItem), \
+                mock.patch.object(self.queue_ui, '_load_squad_selector_runtime',
+                                  return_value=_SquadTypeSelectPopover), \
+                mock.patch.object(self.queue_ui, '_refresh_join_button') as refresh:
+            try:
+                for unused in range(2):
+                    adapter.install()
+                    adapter.install()
+                    _LobbyHeader().showSquad()
+                    _SquadTypeSelectPopover().selectFight('squad')
+                    _TrainingItem().select()
+                    adapter.uninstall()
+                    adapter.uninstall()
+            finally:
+                adapter.uninstall()
+
+        self.assertEqual([(None, 'random'), (None, 'random'),
+                          (None, 'training')] * 2, self.join_calls)
+        self.assertEqual(2, refresh.call_count)
+
+    def test_inherited_squad_entries_are_deleted_on_uninstall(self):
+        class Header(_LobbyHeader):
+            pass
+
+        class Popover(_SquadTypeSelectPopover):
+            pass
+
+        adapter = self.queue_ui.JoinButtonUI(
+            self._join, runtime=Header, squad_runtime=Popover)
+        adapter.install()
+        Header().showSquad()
+        Popover().selectFight('squad')
+        adapter.uninstall()
+
+        self.assertEqual([(None, 'random')] * 2, self.join_calls)
+        self.assertNotIn('showSquad', Header.__dict__)
+        self.assertNotIn('selectFight', Popover.__dict__)
+        self.assertEqual('stock', Header().showSquad())
+        self.assertEqual('stock', Popover().selectFight('squad'))
+
     def test_uninstall_restores_raw_class_function(self):
         original = _LobbyHeader.__dict__['fightClick']
         original_update = _LobbyHeader.__dict__['_updatePrebattleControls']
@@ -159,10 +275,16 @@ class JoinButtonUITests(unittest.TestCase):
         self.assertIs(
             original_update,
             _LobbyHeader.__dict__['_updatePrebattleControls'])
+        self.assertIs(_TRAINING_ITEM_SELECT, _TrainingItem.__dict__['select'])
+        self.assertIs(_LOBBY_HEADER_SHOW_SQUAD, _LobbyHeader.__dict__['showSquad'])
+        self.assertIs(_SQUAD_SELECT_FIGHT,
+                      _SquadTypeSelectPopover.__dict__['selectFight'])
 
     def test_failed_refresh_rolls_back_both_wrappers(self):
         adapter = self.queue_ui.JoinButtonUI(
             self._join, runtime=_LobbyHeader,
+            training_runtime=_TrainingItem,
+            squad_runtime=_SquadTypeSelectPopover,
             refresh=mock.Mock(side_effect=RuntimeError('refresh failed')))
 
         with self.assertRaisesRegex(RuntimeError, 'refresh failed'):
@@ -174,6 +296,11 @@ class JoinButtonUITests(unittest.TestCase):
         self.assertIs(
             _LOBBY_HEADER_UPDATE_CONTROLS,
             _LobbyHeader.__dict__['_updatePrebattleControls'])
+        self.assertIs(
+            _TRAINING_ITEM_SELECT, _TrainingItem.__dict__['select'])
+        self.assertIs(_LOBBY_HEADER_SHOW_SQUAD, _LobbyHeader.__dict__['showSquad'])
+        self.assertIs(_SQUAD_SELECT_FIGHT,
+                      _SquadTypeSelectPopover.__dict__['selectFight'])
 
     def test_uninstall_does_not_clobber_later_wrapper(self):
         self.adapter.install()
@@ -188,6 +315,29 @@ class JoinButtonUITests(unittest.TestCase):
         self.assertIs(
             _LOBBY_HEADER_UPDATE_CONTROLS,
             _LobbyHeader.__dict__['_updatePrebattleControls'])
+
+    def test_uninstall_does_not_clobber_later_training_wrapper(self):
+        self.adapter.install()
+
+        def later_wrapper(item):
+            return 'later'
+
+        _TrainingItem.select = later_wrapper
+        self.adapter.uninstall()
+
+        self.assertIs(later_wrapper, _TrainingItem.select)
+
+    def test_uninstall_does_not_clobber_later_squad_wrappers(self):
+        self.adapter.install()
+        later_header = lambda header: 'later header'
+        later_popover = lambda popover, action: 'later popover'
+        _LobbyHeader.showSquad = later_header
+        _SquadTypeSelectPopover.selectFight = later_popover
+
+        self.adapter.uninstall()
+
+        self.assertIs(later_header, _LobbyHeader.showSquad)
+        self.assertIs(later_popover, _SquadTypeSelectPopover.selectFight)
 
 
 class QueueUITests(unittest.TestCase):

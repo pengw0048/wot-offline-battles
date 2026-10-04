@@ -17,6 +17,8 @@ Account and per-vehicle progress, including medal counts, is carried by
 
 from __future__ import print_function
 
+import base64
+import binascii
 import copy
 import json
 import os
@@ -32,10 +34,14 @@ try:
 except ImportError:
     import pickle as _pickle
 
-from gui.mods.offline_lan_0922 import battle_mastery
+from gui.mods.offline_lan_0922 import battle_bonds, battle_mastery
+from gui.mods.offline_lan_0922 import friendly_fire
+from gui.mods.offline_lan_0922 import mission_events
+from gui.mods.offline_lan_0922 import personal_campaign_results
 from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922.battle_achievements import (
-    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
+    AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES, DOSSIER_COUNTER_NAMES,
+    achievement_record)
 
 
 try:
@@ -72,6 +78,11 @@ INTERACTION_FIELDS = (
     ('no_damage_direct_hits_received', 'noDamageDirectHitsReceived',
      0, 65535),
     ('target_kills', 'targetKills', 0, 255),
+    # Receipt-only event evidence; never invent fields in the native packer.
+    ('damage_events', None, 0, 65535),
+    ('kills_assisted_stun', None, 0, 1),
+    ('kills_assisted_track', None, 0, 1),
+    ('kills_assisted_radio', None, 0, 1),
 )
 
 
@@ -107,10 +118,24 @@ def _wire_utf8(value):
     return str(value)
 
 
+def _piercing_series_stat(raw_stats, stats):
+    """Retain verified series evidence without inventing it for old receipts."""
+    if 'max_piercing_series' not in raw_stats:
+        stats.pop('max_piercing_series', None)
+        return
+    value = raw_stats['max_piercing_series']
+    if (type(value) not in integer_types or value < 0 or
+            value > min(stats.get('shots', 0), stats.get('piercings', 0))):
+        raise ValueError('battle receipt piercing series is invalid')
+    stats['max_piercing_series'] = value
+
+
 def _receipt(value):
     """Return one bounded canonical receipt or raise ValueError."""
     if not isinstance(value, dict):
         raise ValueError('battle receipt must be an object')
+    if value.get('battle_mode', 'regular') not in ('regular', 'training'):
+        raise ValueError('battle receipt mode is invalid')
     required = ('receipt_id', 'arena_unique_id', 'round_id', 'account_key',
                 'player_name', 'vehicle', 'team', 'winner', 'map', 'stats',
                 'rewards')
@@ -133,14 +158,41 @@ def _receipt(value):
         raise ValueError('battle receipt identity is invalid')
     if winner not in (0, 1, 2):
         raise ValueError('battle receipt winner is invalid')
+    if ('watched_battle_to_end' in value and not isinstance(
+            value['watched_battle_to_end'], bool)):
+        raise ValueError('battle receipt watched state is invalid')
+    mounted = value.get('vehicle_compact_descr')
+    battle_max_health = value.get('max_health')
+    if ('max_health' in value and
+            (type(battle_max_health) not in integer_types or
+             not 1 <= battle_max_health <= 100000)):
+        raise ValueError('battle receipt maximum health is invalid')
+    outfits = value.get('vehicle_outfits')
+    if 'vehicle_outfits' in value:
+        from gui.mods.offline_lan_0922.lan_client import _canonical_wire_outfits
+        if (not isinstance(outfits, dict) or
+                _canonical_wire_outfits(outfits) is None):
+            raise ValueError('battle receipt outfits are invalid')
+    if 'vehicle_compact_descr' in value:
+        try:
+            decoded = base64.b64decode(mounted.encode('ascii'))
+            if (not decoded or len(decoded) > 64 * 1024 or
+                    base64.b64encode(decoded).decode('ascii') != mounted):
+                raise ValueError('invalid mounted descriptor')
+        except (AttributeError, TypeError, ValueError, UnicodeError, binascii.Error):
+            raise ValueError('battle receipt mounted descriptor is invalid')
     raw_stats = value.get('stats')
     raw_rewards = value.get('rewards')
     if not isinstance(raw_stats, dict) or not isinstance(raw_rewards, dict):
         raise ValueError('battle receipt summary is invalid')
     stats = dict((name, max(0, _int(raw_stats.get(name))))
                  for name in RECEIPT_STAT_NAMES)
+    _piercing_series_stat(raw_stats, stats)
+    if 'internal_crits_at_end' not in raw_stats:
+        # Old receipts cannot prove the zero-valued TD2 honor condition.
+        stats.pop('internal_crits_at_end', None)
     rewards = dict((name, max(0, _int(raw_rewards.get(name)))) for name in (
-        'credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost'))
+        'credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost', 'crystal'))
     # The client owns service prices and debits. A server receipt may not
     # charge them again; local service_costs records the actual settlement.
     if rewards['repair_cost'] or rewards['ammo_cost']:
@@ -151,9 +203,10 @@ def _receipt(value):
     awarded = None
     raw_awarded = value.get('awarded')
     if isinstance(raw_awarded, dict):
-        awarded = dict(
-            (name, max(0, _int(raw_awarded.get(name))))
-            for name in ('credits', 'xp', 'free_xp'))
+        awarded = economy.award_record(raw_awarded)
+        if 'crystal' not in raw_awarded:
+            # Receipts predating bond awards did not store this currency.
+            awarded['crystal'] = rewards['crystal']
     shells_fired = {}
     raw_fired = value.get('shells_fired')
     if raw_fired is not None:
@@ -180,6 +233,18 @@ def _receipt(value):
                 raise ValueError('battle receipt consumables are invalid')
             if compact_descr not in equipment_used:
                 equipment_used.append(compact_descr)
+    battle_booster = _int(value.get('battle_booster', 0), -1)
+    if not 0 <= battle_booster <= 2 ** 31 - 1:
+        raise ValueError('battle receipt directive is invalid')
+    crystal_rewards = value.get('crystal_rewards') or {}
+    if (not isinstance(crystal_rewards, dict) or
+            not set(crystal_rewards).issubset(battle_bonds.MEDAL_BONDS)):
+        raise ValueError('battle receipt medal bonds are invalid')
+    crystal_rewards = dict((name, _int(amount, -1))
+                           for name, amount in crystal_rewards.items())
+    if (any(not 1 <= amount <= 15 for amount in crystal_rewards.values()) or
+            sum(crystal_rewards.values()) > rewards['crystal']):
+        raise ValueError('battle receipt medal bonds do not match the reward')
     public_results = []
     raw_public = value.get('public_results')
     if raw_public is None:
@@ -223,6 +288,7 @@ def _receipt(value):
             raise ValueError('battle receipt public row is invalid')
         row_stats = dict((name, max(0, _int(raw_row_stats.get(name))))
                          for name in stats)
+        _piercing_series_stat(raw_row_stats, row_stats)
         # Receipts stored before offline achievements shipped have no list.
         raw_achievements = raw.get('achievements', [])
         if (not isinstance(raw_achievements, (list, tuple)) or
@@ -261,10 +327,16 @@ def _receipt(value):
             len(raw_interactions) > len(public_results)):
         raise ValueError('battle receipt interaction details are invalid')
     interaction_keys = set(field[0] for field in INTERACTION_FIELDS) | {
+        'target_kind', 'target_id'} | mission_events.FIELDS
+    required_interactions = set(field[0] for field in INTERACTION_FIELDS
+                                if field[1] is not None) | {
         'target_kind', 'target_id'}
     interaction_targets = set()
+    mission_event_count = 0
     for raw in raw_interactions:
-        if not isinstance(raw, dict) or set(raw) != interaction_keys:
+        if (not isinstance(raw, dict) or set(raw) - interaction_keys or
+                not required_interactions.issubset(raw) or
+                not mission_events.valid(raw)):
             raise ValueError('battle receipt interaction row is invalid')
         target = (
             _bounded_text(raw.get('target_kind'), 8),
@@ -278,17 +350,29 @@ def _receipt(value):
             'target_kind': target[0], 'target_id': target[1],
         }
         for field_name, unused_native, minimum, maximum in INTERACTION_FIELDS:
+            if field_name not in raw and unused_native is None:
+                continue
             raw_value = raw.get(field_name)
+            number = float if field_name == 'stun_duration' else int
+            number_types = (integer_types + (float,) if number is float
+                            else integer_types)
             if (isinstance(raw_value, bool) or
-                    not isinstance(raw_value, integer_types) or
-                    raw_value < minimum or raw_value > maximum):
+                    not isinstance(raw_value, number_types) or
+                    not minimum <= raw_value <= maximum):
                 raise ValueError(
                     'battle receipt interaction value is invalid')
-            interaction[field_name] = int(raw_value)
+            interaction[field_name] = number(raw_value)
+        mission_event_count += len(raw.get('mission_events', ()))
+        if mission_event_count > mission_events.MAX_EVENTS:
+            raise ValueError('battle receipt mission history is too large')
+        for field_name in mission_events.FIELDS:
+            if field_name in raw:
+                interaction[field_name] = copy.deepcopy(raw[field_name])
         interactions.append(interaction)
         interaction_targets.add(target)
-    return {
+    result = {
         'receipt_id': receipt_id,
+        'battle_mode': value.get('battle_mode', 'regular'),
         'arena_unique_id': arena_unique_id,
         'round_id': round_id,
         'player_id': player_id,
@@ -303,8 +387,14 @@ def _receipt(value):
             _int(value.get('death_reason'), -1), 255)),
         'duration': max(0, _int(value.get('duration'))),
         'premature_leave': bool(value.get('premature_leave', False)),
+        # Historical receipts used one flag for both facts. Preserve their
+        # saved presentation while new receipts distinguish death/retirement.
+        'watched_battle_to_end': value.get(
+            'watched_battle_to_end', not value.get('premature_leave', False)),
         'stats': stats,
         'rewards': rewards,
+        'friendly_fire': friendly_fire.facts(value.get('friendly_fire')),
+        'friendly_fire_costs': friendly_fire.costs(value.get('friendly_fire_costs')),
         'service_costs': economy.service_costs(value.get('service_costs')),
         # The personal row owns the medal list and the health the battle left;
         # mirroring both here keeps the durable progress transaction from
@@ -315,15 +405,28 @@ def _receipt(value):
         # ``None`` means nothing multiplied it, which is what every receipt
         # written before the multiplier existed says.
         'awarded': awarded,
+        'income': copy.deepcopy(value.get('income')),
+        'daily_reserves': list(value.get('daily_reserves') or ()),
+        'daily_missions': list(value.get('daily_missions') or ()),
+        'personal_missions': copy.deepcopy(value.get('personal_missions') or {}),
         # By the shell's index in the gun's own shot order: only the client
         # can turn that into a shell, and only the client owns its price.
         'shells_fired': shells_fired,
         # Consumables come by compact descriptor, which the client does send
         # with the mounted equipment.
         'equipment_used': equipment_used,
+        'battle_booster': battle_booster,
+        'crystal_rewards': crystal_rewards,
         'public_results': public_results,
         'interactions': interactions,
     }
+    if mounted is not None:
+        result['vehicle_compact_descr'] = mounted
+    if battle_max_health is not None:
+        result['max_health'] = battle_max_health
+    if outfits is not None:
+        result['vehicle_outfits'] = copy.deepcopy(outfits)
+    return result
 
 
 def _sanitise_badges(row):
@@ -419,7 +522,9 @@ def _banked_rewards(receipt):
     """Keep durable garage awards authoritative, including vehicle bonuses."""
     awarded = receipt.get('awarded')
     if isinstance(awarded, dict):
-        return awarded
+        result = dict(awarded)
+        result.setdefault('crystal', receipt['rewards'].get('crystal', 0))
+        return result
     rewards = dict(receipt['rewards'])
     factor = _premium_vehicle_xp_factor_100(receipt['vehicle'])
     for name in ('xp', 'free_xp'):
@@ -495,6 +600,31 @@ def _account_award_split(battle_amount, awarded_amount, factor_100=0):
     return battle_amount, awarded_amount - multiplied
 
 
+def _bond_award_breakdown(receipt, awarded):
+    """Apportion the banked integer reward across the native medal rows.
+
+    The server's medal schedule stays unchanged in the receipt. Scale its
+    result rows from the durable award, distributing rounding remainders in
+    a stable order so fractional/downward multipliers also add up exactly.
+    The #1513 packer has medal rows and originalCrystal, but no boosterCrystal.
+    """
+    base = receipt['rewards']['crystal']
+    awarded = max(0, _int(awarded))
+    medals = receipt['crystal_rewards']
+    if base <= 0 or not medals:
+        return awarded, []
+    parts = [('', max(0, base - sum(medals.values())))] + sorted(medals.items())
+    shares = [amount * awarded // base for name, amount in parts]
+    remaining = awarded - sum(shares)
+    order = sorted(range(len(parts)), key=lambda index: (
+        -(parts[index][1] * awarded % base), parts[index][0]))
+    for index in order[:remaining]:
+        shares[index] += 1
+    return shares[0], [(name, shares[index])
+                       for index, (name, amount) in enumerate(parts)
+                       if name and shares[index] > 0]
+
+
 def _add_value_replays(packers, vehicle, replay_types=None):
     """Populate the non-empty replay chains consumed by the #1513 UI.
 
@@ -527,10 +657,34 @@ def _add_value_replays(packers, vehicle, replay_types=None):
             ('crystal', 'originalCrystal', None, None, 'crystalReplay')):
         replay = ValueReplay(
             connector, recordName=record_name, startRecordName=start_name)
+        account_factor = ('appliedPremiumCreditsFactor10' if
+                          record_name == 'credits' else 'appliedPremiumXPFactor10')
+        native_income = account_factor in vehicle and record_name in (
+            'credits', 'xp', 'freeXP')
+        if native_income:
+            replay = replay * account_factor
+        if native_income and record_name == 'xp' and vehicle.get('originalXPPenalty'):
+            replay.subMultipliedValue('originalXPPenalty', account_factor)
+        elif record_name == 'xp' and vehicle.get('originalXPPenalty'):
+            replay = replay - 'originalXPPenalty'
+        if native_income and record_name in ('xp', 'freeXP'):
+            replay = replay * 'dailyXPFactor10'
         if factor_name is not None and _int(vehicle.get(factor_name)) > 100:
             replay = replay * factor_name
         if bonus_name is not None and vehicle[bonus_name]:
-            replay = replay + bonus_name
+            if native_income:
+                replay.addMultipliedValue(bonus_name, account_factor)
+            else:
+                replay = replay + bonus_name
+        if record_name == 'credits':
+            for name in ('originalCreditsContributionOut', 'originalCreditsPenalty'):
+                if vehicle.get(name):
+                    replay = replay - name
+            if vehicle.get('originalCreditsContributionIn'):
+                replay = replay + 'originalCreditsContributionIn'
+        if record_name == 'crystal':
+            for name, unused_value in vehicle.get('eventCrystalList', ()):
+                replay = replay + ('eventCrystalList_' + name)
         vehicle[result_name] = replay.pack()
 
 def _pack_interaction_details(receipt, vehicle_ids, vehicle_type_cds,
@@ -549,7 +703,8 @@ def _pack_interaction_details(receipt, vehicle_ids, vehicle_type_cds,
             vehicle_ids[identity], vehicle_type_cds[identity])]
         for field_name, native_name, unused_minimum, unused_maximum in (
                 INTERACTION_FIELDS):
-            record[native_name] = interaction[field_name]
+            if native_name is not None:
+                record[native_name] = interaction[field_name]
     return details.pack()
 
 
@@ -564,7 +719,7 @@ def _achievement_counts(value):
     if not isinstance(value, dict):
         return {}
     counts = {}
-    for name in AWARDABLE_ACHIEVEMENTS:
+    for name in AWARDABLE_ACHIEVEMENTS + DOSSIER_COUNTER_NAMES:
         count = value.get(name)
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             continue
@@ -585,7 +740,7 @@ def _achievement_records(names, record_db_ids=None):
         record_db_ids = RECORD_DB_IDS
     result = []
     for name in sorted(names):
-        db_id = record_db_ids.get(('achievements', name))
+        db_id = record_db_ids.get(achievement_record(name))
         if db_id is not None:
             result.append((name, int(db_id)))
     return sorted(result, key=lambda row: row[1])
@@ -665,6 +820,8 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     original = receipt['rewards']
     rewards = _banked_rewards(receipt)
     service = economy.service_costs(receipt.get('service_costs'))
+    misconduct = receipt['friendly_fire_costs']
+    xp_penalty = receipt['friendly_fire']['xp_penalty']
     account_dbid = 1
     vehicle_type_cd = _vehicle_type_compact_descr(receipt['vehicle'])
     won = receipt['winner'] == receipt['team']
@@ -686,11 +843,13 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     # #1513's one row for an account-owned multiplier on a finished battle.
     base_credits, booster_credits = _account_award_split(
         _premium_vehicle_credits(receipt['vehicle'], original['credits']),
-        rewards['credits'])
+        misconduct['gross_credits'] if misconduct else rewards['credits'])
     base_xp, booster_xp = _account_award_split(
         original['xp'], rewards['xp'], xp_factor_100)
     base_free_xp, booster_free_xp = _account_award_split(
         original['free_xp'], rewards['free_xp'], xp_factor_100)
+    base_crystal, event_crystal = _bond_award_breakdown(
+        receipt, rewards['crystal'])
     vehicle = {
         'accountDBID': account_dbid,
         'typeCompDescr': vehicle_type_cd,
@@ -699,16 +858,33 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'directHits': stats['direct_hits'],
         'piercings': stats['piercings'],
         'damageDealt': stats['damage'],
+        'explosionHits': stats['explosion_hits'],
+        'sniperDamageDealt': stats['sniper_damage'],
+        'directTeamHits': stats['team_hits'],
+        'tdamageDealt': stats['team_damage'],
+        'tdestroyedModules': stats['team_crits'],
+        'aimerSeries': min(200, stats['assist_radio'] // 1000)
+                       if receipt['winner'] == receipt['team'] else 0,
+        'tkills': stats['team_kills'],
+        'mileage': stats['mileage'],
+        'lifeTime': stats['life_time'],
         'damageReceived': stats['damage_received'],
         'damageBlockedByArmor': stats['damage_blocked'],
         'damageAssistedTrack': stats['assist_track'],
         'damageAssistedRadio': stats['assist_radio'],
         'damageAssistedStun': stats['assist_stun'],
+        'stunNum': stats['stun_num'],
+        'stunDuration': stats['stun_duration_ms'] / 1000.0,
+        'stunned': stats['stunned'],
+        'damaged': stats['damaged'],
         'kills': stats['kills'],
         'spotted': stats['spotted'],
         'capturePoints': stats['capture_points'],
         'droppedCapturePoints': stats['dropped_capture_points'],
         'directHitsReceived': stats['hits_received'],
+        'piercingsReceived': stats['piercings_received'],
+        'noDamageDirectHitsReceived': stats['no_damage_direct_hits_received'],
+        'explosionHitsReceived': stats['explosion_hits_received'],
         'potentialDamageReceived': stats['potential_damage_received'],
         'deathReason': receipt['death_reason'],
         'killerID': 0,
@@ -717,11 +893,18 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'boosterCredits': booster_credits,
         'factualCredits': rewards['credits'],
         'subtotalCredits': rewards['credits'],
-        # ``originalXP`` is the bare battle XP the mastery badge ranks; every
-        # account-side bonus rides in the totals below and in the chain's
-        # boosters step, never inside the number the badge reads.
+        'creditsPenalty': misconduct.get('credits_penalty', 0),
+        'originalCreditsPenalty': misconduct.get('credits_penalty', 0),
+        'creditsContributionOut': misconduct.get('credits_out', 0),
+        'originalCreditsContributionOut': misconduct.get('credits_out', 0),
+        'creditsContributionIn': misconduct.get('credits_in', 0),
+        'originalCreditsContributionIn': misconduct.get('credits_in', 0),
+        # The first native row is gross XP. Its penalty step restores the
+        # net battle XP before any account or premium-vehicle bonus.
         'xp': rewards['xp'],
-        'originalXP': base_xp,
+        'originalXP': base_xp + xp_penalty,
+        'xpPenalty': xp_penalty,
+        'originalXPPenalty': xp_penalty,
         'boosterXP': booster_xp,
         'factualXP': rewards['xp'],
         'subtotalXP': rewards['xp'],
@@ -735,29 +918,36 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'xpByTmen': sorted((xp_by_tankman or {}).items()),
         'gold': 0,
         'originalGold': 0,
-        'crystal': 0,
-        'originalCrystal': 0,
+        'crystal': rewards['crystal'],
+        'originalCrystal': base_crystal,
+        'eventCrystalList': event_crystal,
         'creditsToDraw': 0,
         'originalCreditsToDraw': 0,
         'autoRepairCost': service['repair_credits'],
         'autoLoadCost': (service['ammo_credits'], service['ammo_gold']),
         'autoEquipCost': (service['equipment_credits'],
-                          service['equipment_gold'], 0),
+                          service['equipment_gold'], service['equipment_crystal']),
         'isPrematureLeave': receipt['premature_leave'],
-        'watchedBattleToTheEnd': not receipt['premature_leave'],
+        'watchedBattleToTheEnd': receipt['watched_battle_to_end'],
         'isTeamKiller': False,
     }
+    quests_progress = dict(('offline_daily_' + key,
+            (0, {'bonusCount': 0}, {'bonusCount': 1}))
+            for key in receipt.get('daily_missions', ()))
+    quests_progress.update(personal_campaign_results.quests_progress(
+        receipt.get('personal_missions')))
     avatar = {
+        'questsProgress': quests_progress,
         'accountDBID': account_dbid, 'team': receipt['team'],
         'credits': rewards['credits'], 'xp': rewards['xp'],
-        'freeXP': rewards['free_xp'], 'crystal': 0,
+        'freeXP': rewards['free_xp'], 'crystal': rewards['crystal'],
         # These are damage and kills caused by the avatar outside its
         # vehicles.  The stock result model adds them to the per-vehicle
         # totals, so mirroring vehicle statistics here doubles both columns.
         'avatarDamageDealt': 0,
         'avatarKills': 0,
         'isPrematureLeave': receipt['premature_leave'],
-        'watchedBattleToTheEnd': not receipt['premature_leave'],
+        'watchedBattleToTheEnd': receipt['watched_battle_to_end'],
     }
     common = {
         'arenaTypeID': _arena_type_id(receipt['map']),
@@ -767,10 +957,28 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
         'winnerTeam': receipt['winner'],
         'finishReason': receipt['finish_reason'],
         'duration': receipt['duration'],
-        'bonusType': 1,
-        'guiType': 1,
+        'bonusType': 2 if receipt.get('battle_mode') == 'training' else 1,
+        'guiType': 2 if receipt.get('battle_mode') == 'training' else 1,
         'bots': {},
     }
+    income = receipt.get('income')
+    if isinstance(income, dict):
+        premium = bool(income.get('premium'))
+        account_factor = 15 if premium else 10
+        vehicle.update({
+            'isPremium': premium,
+            'premiumXPFactor10': 15, 'premiumCreditsFactor10': 15,
+            'appliedPremiumXPFactor10': account_factor,
+            'appliedPremiumCreditsFactor10': account_factor,
+            'dailyXPFactor10': 20 if income.get('first_win') else 10,
+            'premiumVehicleXPFactor100': 100 + int(income.get('vehicle_xp_factor', 0)),
+        })
+        boosters = income.get('boosters', income.get('reserves')) or {}
+        for key, native in (('credits', 'Credits'), ('xp', 'XP'), ('free_xp', 'FreeXP')):
+            vehicle['original' + native] = int(income.get(key, 0))
+            vehicle['booster' + native] = int(boosters.get(key, 0))
+        vehicle['originalXP'] += xp_penalty
+        vehicle['xpPenalty'] = economy.premium_xp_bonus(xp_penalty, account_factor * 10)
     _add_value_replays(packers, vehicle, replay_types=replay_types)
     avatar_packed = packers.AVATAR_FULL_RESULTS.pack(avatar)
     personal_identity = ('player', receipt['player_id'])
@@ -812,7 +1020,8 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
     vehicle['achievements'] = _achievement_db_ids(
         personal_public['achievements'], record_db_ids=record_db_ids)
     vehicle['dossierPopUps'] = [
-        (db_id, max(1, _int(counts.get(name, 1), 1)))
+        (db_id, max(1, _int(counts.get(
+            'maxAimerSeries' if name == 'aimer' else name, 1), 1)))
         for name, db_id in _achievement_records(
             personal_public['achievements'], record_db_ids=record_db_ids)]
     _add_badge_results(vehicle, awards, record_db_ids=record_db_ids)
@@ -837,16 +1046,29 @@ def pack_battle_result(receipt, packers=None, replay_types=None,
             'directHits': row_stats['direct_hits'],
             'piercings': row_stats['piercings'],
             'damageDealt': row_stats['damage'],
+            'explosionHits': row_stats['explosion_hits'],
+            'sniperDamageDealt': row_stats['sniper_damage'],
+            'directTeamHits': row_stats['team_hits'],
+            'tdamageDealt': row_stats['team_damage'],
+            'tkills': row_stats['team_kills'],
+            'mileage': row_stats['mileage'],
+            'lifeTime': row_stats['life_time'],
             'damageReceived': row_stats['damage_received'],
             'damageBlockedByArmor': row_stats['damage_blocked'],
             'damageAssistedTrack': row_stats['assist_track'],
             'damageAssistedRadio': row_stats['assist_radio'],
             'damageAssistedStun': row_stats['assist_stun'],
+            'stunNum': row_stats['stun_num'],
+            'stunDuration': row_stats['stun_duration_ms'] / 1000.0,
+            'damaged': row_stats['damaged'],
             'kills': row_stats['kills'],
             'spotted': row_stats['spotted'],
             'capturePoints': row_stats['capture_points'],
             'droppedCapturePoints': row_stats['dropped_capture_points'],
             'directHitsReceived': row_stats['hits_received'],
+            'piercingsReceived': row_stats['piercings_received'],
+            'noDamageDirectHitsReceived': row_stats['no_damage_direct_hits_received'],
+            'explosionHitsReceived': row_stats['explosion_hits_received'],
             'potentialDamageReceived': row_stats['potential_damage_received'],
             'deathReason': row['death_reason'],
             'killerID': identity_to_vehicle_id.get(killer_identity, 0),
@@ -909,6 +1131,7 @@ class PostBattleStore(object):
         self._history = []
         self._progress = self._empty_progress()
         self._progress_applier = None
+        self._participation_applier = None
         # Per-battle outcomes preserve new-record and gun-mark notifications.
         # Pending results persist these alongside the receipt until claimed.
         self._awards = {}
@@ -924,10 +1147,20 @@ class PostBattleStore(object):
             raise TypeError('postbattle progress applier must be callable')
         self._progress_applier = callback
 
+    def set_participation_applier(self, callback):
+        if callback is not None and not callable(callback):
+            raise TypeError('participation applier must be callable')
+        self._participation_applier = callback
+
+    def capture_participants(self, receipt_id, vehicle):
+        if self._participation_applier is None:
+            return False
+        return self._participation_applier(receipt_id, vehicle)
+
     @staticmethod
     def _empty_progress():
         return {
-            'credits': 0, 'freeXP': 0, 'battles': 0, 'wins': 0,
+            'credits': 0, 'freeXP': 0, 'crystal': 0, 'battles': 0, 'wins': 0,
             'losses': 0,
             'damage': 0, 'kills': 0, 'achievements': {}, 'vehicles': {},
         }
@@ -982,11 +1215,16 @@ class PostBattleStore(object):
         if self._progress_applier is not None:
             policy = self._progress_applier(receipt) or {}
         receipt['service_costs'] = economy.service_costs(policy.get('service_costs'))
+        receipt['friendly_fire_costs'] = friendly_fire.costs(
+            policy.get('friendly_fire_costs'))
+        receipt['income'] = copy.deepcopy(policy.get('income'))
+        receipt['daily_reserves'] = list(policy.get('daily_reserves') or ())
+        receipt['daily_missions'] = list(policy.get('daily_missions') or ())
+        receipt['personal_missions'] = copy.deepcopy(
+            policy.get('personal_missions') or {})
         awarded = policy.get('awarded')
         if isinstance(awarded, dict):
-            receipt['awarded'] = dict(
-                (name, max(0, _int(awarded.get(name))))
-                for name in ('credits', 'xp', 'free_xp'))
+            receipt['awarded'] = economy.award_record(awarded)
         previous = self._snapshot()
         self._pending[arena_key] = receipt
         self._session_crew_xp[receipt_id] = dict(
@@ -1060,10 +1298,13 @@ class PostBattleStore(object):
                     battle_mastery.MAX_MARK_OF_MASTERY))}},
             'xp': rewards['xp'],
             'credits': rewards['credits'],
-            'crystal': 0, 'creditsToDraw': 0,
+            'crystal': rewards['crystal'], 'creditsToDraw': 0,
             'isWinner': result_key, 'team': receipt['team'],
             'winnerIfDraw': 0, 'guiType': 1,
             'arenaUniqueID': receipt['arena_unique_id'],
+            'offlineDailyMissions': list(receipt.get('daily_missions') or ()),
+            'offlinePersonalMissions': copy.deepcopy(
+                receipt.get('personal_missions') or {}),
         }
 
     def should_show_immediately(self, arena_unique_id):
@@ -1078,7 +1319,7 @@ class PostBattleStore(object):
                     receipt = archived
                     break
         return bool(receipt is not None and
-                    not receipt.get('premature_leave', False))
+                    receipt.get('watched_battle_to_end', False))
 
     def acknowledge(self, arena_unique_id):
         key = str(_int(arena_unique_id, -1))
@@ -1115,13 +1356,16 @@ class PostBattleStore(object):
                 }
 
     def _apply_progress(self, receipt, vehicle_xp=None):
+        if receipt.get('battle_mode') == 'training':
+            return
         # The lifetime counters count what the account was given, which is
         # what its multipliers made of the battle rather than what the server
         # reported it did.
         rewards = _banked_rewards(receipt)
         stats = receipt['stats']
         progress = self._progress
-        progress['credits'] += rewards['credits']
+        progress['crystal'] = _int(progress.get('crystal')) + rewards['crystal']
+        progress['credits'] = max(0, progress['credits'] + rewards['credits'])
         progress['freeXP'] += rewards['free_xp']
         progress['battles'] += 1
         progress['wins'] += int(receipt['winner'] == receipt['team'])
@@ -1159,9 +1403,35 @@ class PostBattleStore(object):
         vehicle_medals = _achievement_counts(row.get('achievements'))
         progress['achievements'] = account_medals
         row['achievements'] = vehicle_medals
+        # Battle Buddy is account-wide and wraps at 50 clean battles. A
+        # module-only friendly hit breaks it too; harmless bounces do not.
+        series = (account_medals.get('reliableComradeSeries', 0) + 1
+                  if stats['team_damage'] == 0 and stats['team_crits'] == 0
+                  else 0)
+        if series >= 50:
+            if 'reliableComrade' not in receipt['achievements']:
+                receipt['achievements'].append('reliableComrade')
+                for public in receipt['public_results']:
+                    if (public['actor_kind'] == 'player' and
+                            public['actor_id'] == receipt['player_id']):
+                        public['achievements'].append('reliableComrade')
+            series %= 50
+        if series:
+            account_medals['reliableComradeSeries'] = series
+        else:
+            account_medals.pop('reliableComradeSeries', None)
         for name in receipt['achievements']:
+            if name == 'aimer':
+                best = min(200, stats['assist_radio'] // 1000)
+                for counters in (account_medals, vehicle_medals):
+                    counters['aimer'] = 1
+                    counters['maxAimerSeries'] = max(
+                        counters.get('maxAimerSeries', 0), best)
+                continue
             account_medals[name] = account_medals.get(name, 0) + 1
-            vehicle_medals[name] = vehicle_medals.get(name, 0) + 1
+            # The vehicle layout has no Battle Buddy record or series.
+            if name != 'reliableComrade':
+                vehicle_medals[name] = vehicle_medals.get(name, 0) + 1
         for target_name, source_name in (
                 ('shots', 'shots'), ('directHits', 'direct_hits'),
                 ('piercings', 'piercings'), ('spotted', 'spotted'),
@@ -1178,7 +1448,8 @@ class PostBattleStore(object):
             row[target_name] = int(row.get(target_name, 0)) + int(
                 stats[source_name])
         survived = int(receipt['death_reason'] < 0 and
-                       not receipt['premature_leave'])
+                       not receipt['premature_leave'] and
+                       receipt['watched_battle_to_end'])
         row['survivedBattles'] = int(row.get(
             'survivedBattles', 0)) + survived
         row['winAndSurvived'] = int(row.get('winAndSurvived', 0)) + int(
@@ -1413,7 +1684,8 @@ class PostBattleStore(object):
             # Reuse only still-present facts. Lifetime sums stay untouched;
             # a discarded result's totals are not its single-battle records.
             for receipt in list(pending.values()) + history:
-                if 'account_key' in receipt:
+                if ('account_key' in receipt and
+                        receipt.get('battle_mode') != 'training'):
                     row = self._progress.get('vehicles', {}).get(
                         receipt['vehicle'])
                     if isinstance(row, dict):

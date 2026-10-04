@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 from pathlib import Path
@@ -387,8 +388,85 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         return {
             'shooter_kind': 'player', 'shooter_id': 1, 'team': 1,
             'projectile_id': '1:p:1:1', 'shot_seq': 1,
-            'shell_index': 0,
+            'shell_index': 0, 'is_he': False,
         }
+
+    def test_bot_repair_publication_cannot_discard_a_later_module_hit(self):
+        for hp, status in ((25.0, 'destroyed'), (50.0, 'critical')):
+            with self.subTest(hp=hp, status=status):
+                state = _state()
+                proposal_critical = {
+                    'devices': [{'name': 'leftTrackHealth', 'hp': 0.0,
+                                 'max_hp': 100.0, 'state': 'destroyed'}],
+                    'destroyed': ['leftTrackHealth'], 'crew_ko': [],
+                    'fire': False, 'ammo_rack_death': False, 'events': []}
+                current = copy.deepcopy(proposal_critical)
+                current['devices'][0].update(hp=hp, state=status)
+                if status != 'destroyed':
+                    current['destroyed'] = []
+                # Unrelated progress must survive the stale shot snapshot.
+                current['devices'].append({'name': 'engineHealth', 'hp': 80.0,
+                                           'max_hp': 100.0, 'state': 'normal'})
+                target = dict(id=16, team=2, health=500, max_health=500, alive=True,
+                              critical=current, combat_revision=7,
+                              combat_base_revision=4, combat_ack_seq=5)
+                state.bot_states[16] = target
+                raw = _effect(target_kind='bot', target_id=16, damage=0,
+                              critical=proposal_critical,
+                              critical_target_base_revision=4,
+                              critical_target_ack_seq=3, hull_damage=0,
+                              critical_delta={'devices': [{
+                                  'name': 'leftTrackHealth', 'hp_loss': 60.0}],
+                                  'crew_ko': [], 'ignite': False})
+                shot = self._critical_record()
+                proposal = state._normalize_projectile_effect(
+                    raw, shot, (10.0, 1.0, 0.0), False)
+                self.assertFalse(proposal['critical_accepted'])
+                state._apply_projectile_effect(shot, proposal)
+                devices = {row['name']: row for row in target['critical']['devices']}
+                self.assertEqual(0.0, devices['leftTrackHealth']['hp'])
+                self.assertIn('leftTrackHealth', target['critical']['destroyed'])
+                self.assertEqual(80.0, devices['engineHealth']['hp'])
+                self.assertEqual(8, target['combat_base_revision'])
+                self.assertTrue(state.pending_events[-1]['critical_accepted'])
+
+    def test_zero_to_zero_hit_invalidates_pre_hit_owner_repair_checkpoint(self):
+        state = _state()
+        target = state.players[2]
+        target.critical = {
+            'devices': [{'name': 'leftTrackHealth', 'hp': 0.0,
+                         'max_hp': 100.0, 'state': 'destroyed'}],
+            'destroyed': ['leftTrackHealth'], 'crew_ko': [],
+            'fire': False, 'ammo_rack_death': False, 'events': []}
+        target.effective_params['critical']['devices'] = [
+            {'name': 'leftTrackHealth', 'max_hp': 100.0, 'regen_hp': 50.0}]
+        target.effective_params['critical']['crew_roster'] = []
+        before = copy.deepcopy(target.critical)
+        shot = self._critical_record()
+        raw = _effect(damage=0, critical=before,
+                      critical_target_base_revision=0, critical_target_ack_seq=0,
+                      hull_damage=0, critical_delta={
+                          'devices': [{'name': 'leftTrackHealth', 'hp_loss': 1.0}],
+                          'crew_ko': [], 'ignite': False})
+        proposal = state._normalize_projectile_effect(raw, shot, (10.0, 1.0, 0.0), False)
+        state._apply_projectile_effect(shot, proposal)
+        self.assertEqual(before, target.critical)
+        self.assertEqual(1, target.critical_report_base_revision)
+        checkpoint = dict(type='track_repair', round_id=state.round_id,
+                          critical_base_revision=0, repair_seq=1,
+                          tracks=[dict(name='leftTrackHealth', hp=25.0,
+                                       max_hp=100.0, state='destroyed')])
+        self.assertFalse(state.report_track_repair(2, checkpoint))
+        self.assertEqual(0.0, target.critical['devices'][0]['hp'])
+        checkpoint['critical_base_revision'] = 1
+        self.assertTrue(state.report_track_repair(2, checkpoint))
+        self.assertEqual(25.0, target.critical['devices'][0]['hp'])
+        # The same native hit, now overtaken by repair, resets its new progress.
+        proposal = state._normalize_projectile_effect(raw, shot, (10.0, 1.0, 0.0), False)
+        state._apply_projectile_effect(shot, proposal)
+        self.assertEqual(0.0, target.critical['devices'][0]['hp'])
+        self.assertGreater(target.critical_report_base_revision, 1)
+        self.assertFalse(state.report_track_repair(2, checkpoint))
 
     def test_stale_destroyed_snapshot_damages_repaired_canonical_module(self):
         state = _state()
@@ -693,6 +771,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                         _player_destructible_contact(x=True)]),
                     ('destructible_contacts', [
                         _player_destructible_contact(x=2001.0)]),
+                    ('destructible_contacts', [
+                        _player_destructible_contact(
+                            pitch=0.14, roll=-0.08)]),
                 )
                 for field, value in malformed:
                     with self.subTest(condition=condition, field=field):
@@ -735,19 +816,46 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             relayed.append(dict(message)) or True)
         contact = _player_destructible_contact(
             speed=0.0, end_z=0.0, end_yaw=0.2)
+        self.assertNotIn('pitch', contact)
+        self.assertNotIn('roll', contact)
 
         self.assertTrue(_update_player_input(
             state, 1, forward=0.0, turn=1.0, speed=0.0,
+            pitch=0.146789, roll=-0.083216,
             destructible_contacts=[contact]))
 
         self.assertEqual([1], list(player.destructible_contacts))
         admitted = player.destructible_contacts[1]
-        self.assertEqual((0.0, 0.2), (
-            admitted['speed'], admitted['end_yaw']))
+        self.assertEqual((0.0, 0.2, 0.14679, -0.08322), (
+            admitted['speed'], admitted['end_yaw'],
+            admitted['pitch'], admitted['roll']))
         self.assertEqual(0.0, admitted['forward'])
         self.assertEqual('player_destructible_contact', relayed[0]['type'])
-        self.assertEqual(0.2, relayed[0]['player']
-                         ['destructible_contacts'][0]['end_yaw'])
+        relayed_contact = relayed[0]['player']['destructible_contacts'][0]
+        self.assertEqual((0.2, 0.14679, -0.08322), (
+            relayed_contact['end_yaw'], relayed_contact['pitch'],
+            relayed_contact['roll']))
+
+    def test_driving_destructible_contact_binds_to_preceding_render_pose(self):
+        state = _state(players=1)
+        player = state.players[1]
+        player.pose_history.append({
+            'input_seq': 1, 'time_us': 1, 'x': 0.6, 'y': 0.0,
+            'z': 0.0, 'yaw': 0.0, 'forward': 1.0, 'turn': 0.0,
+            'speed': 6.0, 'vx': 0.0, 'vz': 6.0,
+            'pitch': 0.0, 'roll': 0.0,
+        })
+        contact = _player_destructible_contact(
+            x=0.0, z=0.0, speed=6.0, dt=0.1,
+            end_x=0.0, end_z=0.6)
+
+        self.assertIs(
+            player.pose_history[-1],
+            state._player_pose_for_destructible_contact(player, contact))
+
+        contact['x'] = -0.3
+        self.assertIsNone(
+            state._player_pose_for_destructible_contact(player, contact))
 
     def test_lateral_destructible_contact_does_not_require_forward_speed(self):
         state = _state(players=1)
@@ -892,6 +1000,63 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                     token=token + [[7, 64, None]])))
         self.assertIsNone(BattleState._destructible_contact_result_token(
             token + [[7, 64, None]]))
+
+    def test_destructible_track_arc_keeps_precision_and_descriptor_limit(self):
+        physics = effective_params()['physics']
+        physics['rotationIsAroundCenter'] = False
+        start = (100.123456, 0.0, 200.765432)
+        yaw, end_yaw = .123456, .423456
+        end = vehicle_physics.track_pivot_position(
+            start, yaw, end_yaw, physics['trackCenter'])
+        raw = _player_destructible_contact(
+            x=start[0], y=start[1], z=start[2], yaw=yaw,
+            end_x=end[0], end_y=end[1], end_z=end[2], end_yaw=end_yaw,
+            speed=0.0, dt=.1)
+        wire = json.loads(json.dumps(raw))
+        accepted = BattleState._validated_player_destructible_contact(
+            wire, physics)
+        self.assertIsNotNone(accepted)
+        for name in ('x', 'y', 'z', 'yaw', 'end_x', 'end_y', 'end_z', 'end_yaw'):
+            self.assertEqual(raw[name], accepted[name])
+        self.assertIsNone(BattleState._validated_player_destructible_contact(raw))
+        self.assertIsNone(BattleState._validated_player_destructible_contact(
+            raw, dict(physics, rotationIsAroundCenter=True)))
+        self.assertIsNone(BattleState._validated_player_destructible_contact(
+            raw, dict(physics, trackCenter=.5)))
+        self.assertIsNone(BattleState._validated_player_destructible_contact(
+            dict(raw, end_x=end[0]+.01), physics))
+
+    def test_destructible_track_arc_reanchors_both_ends_to_admitted_pose(self):
+        state = _state(players=1)
+        player = state.players[1]
+        physics = player.effective_params['physics']
+        physics['rotationIsAroundCenter'] = False
+        start = (100.123456, 0.0, 200.765432)
+        yaw, end_yaw = .123456, .423456
+        end = vehicle_physics.track_pivot_position(
+            start, yaw, end_yaw, physics['trackCenter'])
+        raw = _player_destructible_contact(
+            x=start[0], y=start[1], z=start[2], yaw=yaw,
+            end_x=end[0], end_y=end[1], end_z=end[2], end_yaw=end_yaw,
+            speed=0.0, dt=.1)
+        # The accepted input is close, but deliberately not the render-frame
+        # start. Keep the established authority anchor without losing its arc.
+        self.assertTrue(_update_player_input(
+            state, 1, x=start[0]+.03, y=start[1], z=start[2]-.02,
+            yaw=yaw+.00012, destructible_contacts=[raw]))
+        self.assertEqual(0, player.destructible_contact_resolved_seq)
+        accepted = player.destructible_contacts[1]
+        sample = player.pose_history[-1]
+        before = tuple(accepted[name] for name in ('x', 'y', 'z'))
+        after = tuple(accepted[name] for name in ('end_x', 'end_y', 'end_z'))
+        self.assertEqual(tuple(round(sample[name], 4)
+                               for name in ('x', 'y', 'z')), before)
+        self.assertNotEqual(start, before)
+        self.assertAlmostEqual(end_yaw-yaw,
+                               accepted['end_yaw']-accepted['yaw'])
+        self.assertAlmostEqual(physics['trackCenter'],
+            vehicle_physics.track_pivot_from_poses(
+                physics, before, accepted['yaw'], after, accepted['end_yaw']))
 
     def test_worker_result_accepts_canonical_tree_contact(self):
         state = _state(players=1)
@@ -1058,7 +1223,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         record = {
             'shooter_kind': 'player', 'shooter_id': 1, 'team': 1,
             'projectile_id': '1:p:1:1', 'shot_seq': 1,
-            'shell_index': 0,
+            'shell_index': 0, 'is_he': False,
         }
 
         state._apply_projectile_effect(record, proposal)
@@ -1109,7 +1274,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         record = {
             'shooter_kind': 'player', 'shooter_id': 1, 'team': 1,
             'projectile_id': '1:p:1:1', 'shot_seq': 1,
-            'shell_index': 0,
+            'shell_index': 0, 'is_he': False,
         }
 
         state._apply_projectile_effect(record, proposal)
@@ -1236,7 +1401,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         player.vehicle = 'sweden:S21_UDES_03'
         _update_player_input(
             state, 1, siege_enabled=True, forward=1.0, turn=1.0,
-            speed=99.0, x=10.0, y=4.0, z=11.0, yaw=0.5)
+            speed=0.0, x=10.0, y=4.0, z=11.0, yaw=0.5)
 
         self.assertEqual(SIEGE_SWITCHING_ON, player.siege_state)
         self.assertEqual(60, player.siege_transition_ticks)
@@ -3182,6 +3347,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 self.assertEqual(blocked, hit['blocked_damage'])
                 self.assertEqual(damage, hit['damage'])
                 self.assertEqual(health - damage, victim.health)
+                victim_row = state._statistics_row('player', 2)
+                self.assertEqual(1, victim_row['hits_received'])
+                self.assertEqual(int(shot_result == 2), victim_row['piercings_received'])
+                self.assertEqual(int(damage == 0), victim_row['no_damage_direct_hits_received'])
                 self.assertEqual(
                     blocked,
                     state._statistics_row('player', 2)['damage_blocked'])
@@ -3218,6 +3387,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 self.assertEqual(0, hit['blocked_damage'])
                 victim_row = state._statistics_row('player', 2)
                 self.assertEqual(0, victim_row['damage_blocked'])
+                self.assertEqual(0, victim_row['piercings_received'])
+                self.assertEqual(int(damage == 0), victim_row['no_damage_direct_hits_received'])
                 self.assertEqual(0, state.vehicle_interactions[
                     ('player', 2)]['player:1']['damage_blocked'])
                 # The separate potential-damage column is untouched.
@@ -3249,20 +3420,27 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             1, state.vehicle_interactions[
                 ('player', 2)]['player:1']['ricochets_received'])
 
-        # The continued shell that finally penetrates adds no second credit.
+    def test_ricochet_continuation_cannot_credit_blocked_damage_twice(self):
+        state = _state()
+        self.assertTrue(_launch_authority(state, _launch()))
+        self.assertTrue(state.ricochet_projectile(
+            SIMULATION_WORKER_AUTHORITY_ID,
+            _ricochet('1:p:1:1', direct=_effect(
+                damage=0, shot_result=0, potential_damage=420))))
+
         self.assertTrue(state.resolve_projectile(
             SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', base_checked_ms=100,
-                     resolved_time_ms=150, checked_distance=20.0,
-                     impact=[20.0, 1.0, 0.0],
-                     direct=_effect(damage=100, shot_result=2, x=20.0,
-                                    potential_damage=390))))
+            _resolve(
+                '1:p:1:1', base_checked_ms=100,
+                resolved_time_ms=150, checked_distance=20.0,
+                impact=[20.0, 1.0, 0.0],
+                direct=_effect(
+                    damage=0, shot_result=1, x=20.0,
+                    potential_damage=420))))
 
-        penetration = [event for event in state.pending_events
-                       if event.get('kind') == 'hit'][-1]
-        self.assertEqual(2, penetration['shot_result'])
-        self.assertEqual(0, penetration['blocked_damage'])
-        self.assertEqual(900, victim.health)
+        hits = [event for event in state.pending_events
+                if event.get('kind') == 'hit']
+        self.assertEqual([420, 0], [event['blocked_damage'] for event in hits])
         self.assertEqual(
             420, state._statistics_row('player', 2)['damage_blocked'])
 
@@ -3312,6 +3490,11 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(
             390, state._statistics_row('player', 2)['damage_blocked'])
         self.assertEqual(2, state.players[4].team)
+        splash_row = state._statistics_row('player', 4)
+        self.assertEqual(1, splash_row['explosion_hits_received'])
+        self.assertEqual(0, splash_row['hits_received'])
+        self.assertEqual(0, splash_row['piercings_received'])
+        self.assertEqual(0, splash_row['no_damage_direct_hits_received'])
         self.assertEqual(
             0, state._statistics_row('player', 4)['damage_blocked'])
         splash_hit = [event for event in state.pending_events
@@ -3714,12 +3897,18 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(1, outgoing['piercings'])
         self.assertEqual(100, outgoing['damage'])
         self.assertEqual(100, incoming['damage_received'])
+        self.assertEqual(
+            [['damage', 0, 100, False, 10.0, True, None]],
+            outgoing['mission_events'])
 
         event_count = len(state.pending_events)
         self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, dict(message)))
         self.assertEqual(900, state.players[2].health)
         self.assertEqual(event_count, len(state.pending_events))
         self.assertEqual(100, outgoing['damage'])
+        self.assertEqual(
+            [['damage', 0, 100, False, 10.0, True, None]],
+            outgoing['mission_events'])
         self.assertFalse(state.resolve_projectile(
             SIMULATION_WORKER_AUTHORITY_ID,
             dict(message, checked_distance=11.0)))

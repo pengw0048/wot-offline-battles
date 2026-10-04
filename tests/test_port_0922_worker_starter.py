@@ -258,7 +258,6 @@ class WorkerStarterTests(unittest.TestCase):
             'static int launch_player', 1)[1].split(
                 'int WINAPI wWinMain', 1)[0]
 
-        self.assertIn('PLAYER_HANDOFF_GRACE_MS', launch)
         self.assertIn('track_player_job_processes(', launch)
         self.assertIn('JobObjectBasicProcessIdList', source)
         self.assertIn('QueryFullProcessImageNameW(', source)

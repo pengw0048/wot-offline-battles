@@ -15,8 +15,43 @@ from gui.mods.offline_lan_0922.ai.driver import LocalDriver
 
 
 class ClimbApproachNavigationTests(unittest.TestCase):
+    def test_unknown_native_edge_is_shared_only_until_next_worker_frame(self):
+        calls = []
+        loaded = [False]
+        def ground(x,z,hint):
+            calls.append((x,z,hint))
+            return 0. if loaded[0] else None
+        nav = TerrainNavigator(ground, obstacle_probe=lambda *unused: False)
+        start,end = (0.,0.,0.),(4.,0.,0.)
+        nav.begin_frame(.1)
+        for unused in range(29):
+            self.assertFalse(nav.grid._native_segment_clear(start,end))
+        self.assertEqual(1,len(calls))
+        nav.end_frame()
+        loaded[0] = True
+        nav.begin_frame(.1)
+        self.assertTrue(nav.grid._native_segment_clear(start,end))
+        self.assertGreater(len(calls),1)
+        nav.end_frame()
+
+    def test_native_cache_capacity_does_not_discard_all_other_bot_receipts(self):
+        grid = TerrainGrid(lambda *unused: 0., obstacle_probe=lambda *unused: False)
+        grid._native_review_cache.update((('receipt',i),True) for i in range(4096))
+        self.assertTrue(grid._native_segment_clear((0.,0.,0.),(4.,0.,0.)))
+        self.assertEqual(4096,len(grid._native_review_cache))
+        self.assertEqual(4095,sum(key[0]=='receipt' for key in grid._native_review_cache))
+
+    def test_pushed_wreck_retires_paths_only_when_occupied_edges_change(self):
+        grid = TerrainGrid(lambda *unused: 0., cell_size=10.)
+        self.assertTrue(grid.set_static_hulls([(11,0.,0.,0.,2.,1.)]))
+        revision = grid.static_hull_revision
+        self.assertFalse(grid.set_static_hulls([(11,.02,0.,.002,2.,1.)]))
+        self.assertEqual(revision,grid.static_hull_revision)
+        self.assertTrue(grid.set_static_hulls([(11,20.,0.,.002,2.,1.)]))
+        self.assertEqual(revision+1,grid.static_hull_revision)
+
     @staticmethod
-    def _fjord_route():
+    def _fjord_route(native_capability=None):
         graph = json.loads((PORT_ROOT / 'navgraphs' / '33_fjord.json').read_text())
         navigator = TerrainNavigator(lambda *unused: None, baked_graph=graph)
         grid = navigator.grid
@@ -31,7 +66,8 @@ class ClimbApproachNavigationTests(unittest.TestCase):
         pivot = next(index for index, point in enumerate(path)
                      if point[0] == 366.0 and point[2] == 14.0)
         key = ('route', 1, 'north_ridge', 1)
-        cache_key = navigator._cache_key(key, goal)
+        cache_key = navigator._cache_key(
+            navigator._native_path_key(key, native_capability), goal)
         navigator.paths[cache_key] = path
         navigator.path_times[cache_key] = 0.0
         return graph, navigator, path, pivot, key
@@ -39,7 +75,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
     @staticmethod
     def _open_grid():
         grid = TerrainGrid(lambda x, z, hint: 0.0, cell_size=10.0)
-        grid.segment_clear = lambda start, end: True
+        grid.segment_clear = lambda start, end, native_capability=None: True
         grid.segment_penalty = lambda start, end, now: 0.0
         grid.segment_has_baked_hazard = lambda start, end, mask: False
         return grid
@@ -93,7 +129,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
 
     def test_lookahead_does_not_skip_turning_setup_point(self):
         navigator = TerrainNavigator(lambda x, z, hint: 0.0)
-        navigator.grid.segment_clear = lambda start, end: True
+        navigator.grid.segment_clear = lambda start, end, native_capability=None: True
         navigator.grid.segment_penalty = lambda start, end, now: 0.0
         path = (
             (0.0, 0.0, 0.0),
@@ -101,7 +137,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
             (10.0, 3.0, 10.0),
             (20.0, 3.0, 10.0),
         )
-        navigator._path = lambda key, start, goal, now, avoid: (key, path)
+        navigator._path = lambda key, start, goal, now, avoid, native_capability=None: (key, path)
 
         selected = navigator.next_target(
             7, (0.0, 0.0, -11.0), path[-1], ('slope',), 1.0)
@@ -110,7 +146,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
 
     def test_flat_lookahead_keeps_original_bounded_target(self):
         navigator = TerrainNavigator(lambda x, z, hint: 0.0)
-        navigator.grid.segment_clear = lambda start, end: True
+        navigator.grid.segment_clear = lambda start, end, native_capability=None: True
         navigator.grid.segment_penalty = lambda start, end, now: 0.0
         path = (
             (0.0, 0.0, 0.0),
@@ -118,7 +154,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
             (10.0, 0.0, 10.0),
             (20.0, 0.0, 10.0),
         )
-        navigator._path = lambda key, start, goal, now, avoid: (key, path)
+        navigator._path = lambda key, start, goal, now, avoid, native_capability=None: (key, path)
 
         selected = navigator.next_target(
             8, (0.0, 0.0, -11.0), path[-1], ('flat',), 1.0)
@@ -128,10 +164,10 @@ class ClimbApproachNavigationTests(unittest.TestCase):
     def test_speed_horizon_advances_farther_along_a_proved_flat_corridor(self):
         navigator = TerrainNavigator(
             lambda x, z, hint: 0.0, cell_size=4.0)
-        navigator.grid.segment_clear = lambda start, end: True
+        navigator.grid.segment_clear = lambda start, end, native_capability=None: True
         navigator.grid.segment_penalty = lambda start, end, now: 0.0
         path = tuple((0.0, 0.0, float(index * 4)) for index in range(8))
-        navigator._path = lambda key, start, goal, now, avoid: (key, path)
+        navigator._path = lambda key, start, goal, now, avoid, native_capability=None: (key, path)
 
         selected = navigator.next_target(
             81, (0.0, 0.0, -1.0), path[-1], ('flat-speed',), 1.0,
@@ -141,7 +177,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
 
     def test_near_waypoint_advance_still_keeps_climb_setup_point(self):
         navigator = TerrainNavigator(lambda x, z, hint: 0.0)
-        navigator.grid.segment_clear = lambda start, end: True
+        navigator.grid.segment_clear = lambda start, end, native_capability=None: True
         navigator.grid.segment_penalty = lambda start, end, now: 0.0
         path = (
             (0.0, 0.0, 0.0),
@@ -149,7 +185,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
             (10.0, 3.0, 10.0),
             (20.0, 3.0, 10.0),
         )
-        navigator._path = lambda key, start, goal, now, avoid: (key, path)
+        navigator._path = lambda key, start, goal, now, avoid, native_capability=None: (key, path)
 
         selected = navigator.next_target(
             9, (0.0, 0.0, 1.0), path[-1], ('near-slope',), 1.0)
@@ -158,7 +194,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
 
     def test_continuation_lookahead_keeps_climb_setup_point(self):
         navigator = TerrainNavigator(lambda x, z, hint: 0.0)
-        navigator.grid.segment_clear = lambda start, end: True
+        navigator.grid.segment_clear = lambda start, end, native_capability=None: True
         navigator.grid.segment_penalty = lambda start, end, now: 0.0
         current = (0.0, 0.0, 0.0)
         goal = (30.0, 3.0, 10.0)
@@ -170,7 +206,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
             (20.0, 3.0, 10.0),
         )
 
-        def path_for(key, start, requested_goal, now, avoid):
+        def path_for(key, start, requested_goal, now, avoid, native_capability=None):
             if key and key[0] == 'continue':
                 return key, continued
             return key, initial
@@ -185,7 +221,8 @@ class ClimbApproachNavigationTests(unittest.TestCase):
     def test_fjord_reached_climb_setup_advances_without_target_reversal(self):
         from gui.mods.offline_lan_0922.bot_runtime import BotRuntime
 
-        graph, navigator, path, pivot, unused_key = self._fjord_route()
+        graph, navigator, path, pivot, unused_key = self._fjord_route(
+            BotRuntime.navigation_planning_capability())
         runtime = BotRuntime(1)
         runtime.navigator = navigator
         runtime.baked_graph = graph
@@ -238,7 +275,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
                 if blocker == 'collision':
                     original = navigator.grid.segment_clear
                     navigator.grid.segment_clear = (
-                        lambda start, end: end != next_point and
+                        lambda start, end, native_capability=None: end != next_point and
                         original(start, end))
                 else:
                     navigator.grid.segment_penalty = (
@@ -324,7 +361,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
             with self.subTest(distance=distance):
                 navigator = TerrainNavigator(lambda x, z, hint: 0.0)
                 navigator.grid.segment_clear = (
-                    lambda start, end: end != (0.0, 3.0, 10.0))
+                    lambda start, end, native_capability=None: end != (0.0, 3.0, 10.0))
                 navigator.grid.segment_penalty = (
                     lambda start, end, now: 0.0)
                 navigator.grid.safe_local_target = (
@@ -334,7 +371,7 @@ class ClimbApproachNavigationTests(unittest.TestCase):
                     (0.0, 3.0, 10.0),
                 )
                 navigator._path = (
-                    lambda key, start, requested, now, avoid: (key, path))
+                    lambda key, start, requested, now, avoid, native_capability=None: (key, path))
 
                 selected = navigator.next_target(
                     40, current, goal, ('parked-node',), 1.0)

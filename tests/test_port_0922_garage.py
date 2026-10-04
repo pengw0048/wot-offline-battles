@@ -237,6 +237,11 @@ def _default_role(compact_descr):
 
 
 class _TankmanDescriptor(object):
+    roleLevel = 100
+
+    def skillLevel(self, name):
+        return 100 if name in self.skills else None
+
     def __init__(self, compact_descr):
         # The real TankmanDescr parses its skills out of the compact
         # descriptor, so the fake must round-trip them too.
@@ -353,7 +358,9 @@ def _modules():
         # removable, and removeOptionalDevice destroys such a device unless
         # the player paid to take it off.
         getItemByCompactDescr=lambda compact_descr: types.SimpleNamespace(
-            removable=(compact_descr != 9002)),
+            removable=(compact_descr != 9002),
+            equipmentType=1 if compact_descr == 11003 else 0,
+            tags=('notForSale',) if compact_descr == 11003 else ()),
         getVehicleType=lambda compact_descr: types.SimpleNamespace(
             id=(0, VEHICLE_TYPE_ID if compact_descr == 50001
                 else compact_descr % 1000),
@@ -380,6 +387,9 @@ def _modules():
 
     tankmen = types.SimpleNamespace(
         TankmanDescr=_TankmanDescriptor,
+        MAX_SKILL_LEVEL=100,
+        COMMON_SKILLS=('repair',),
+        SKILLS_BY_ROLES=dict((role[0], ('repair',)) for role in CREW_ROLES),
         commanderTutorXpBonusFactorForCrew=lambda crew, ammo: 0.0,
         SKILL_NAMES=tuple(skill_names),
         ROLES=('commander', 'radioman', 'driver', 'gunner', 'loader'),
@@ -443,11 +453,12 @@ class GarageStateTests(unittest.TestCase):
         self.assertEqual(
             1, self._record()['inventoryItems'][11][11001])
 
-    def test_the_trailing_battle_booster_slot_is_accepted_and_dropped(self):
+    def test_the_trailing_battle_booster_slot_is_mounted(self):
         # VehicleEquipment.getConsumablesIntCDs appends the booster slot.
-        self.state.equip_equipments(9, [11001, 0, 0, 11002])
+        self.state._snapshot['shopItemPrices'][11003] = {'credits': 0}
+        self.state.equip_equipments(9, [11001, 0, 0, 11003])
 
-        self.assertEqual([11001, 0, 0], self._record()['eqs'])
+        self.assertEqual([11001, 0, 0, 11003], self._record()['eqs'])
 
     def test_mounting_a_fifth_consumable_is_refused(self):
         with self.assertRaises(self.garage.GarageError):
@@ -902,9 +913,10 @@ class GarageStateTests(unittest.TestCase):
     def test_a_battle_booster_layout_leaves_the_regular_slots_alone(self):
         self.state.equip_equipments(9, [11001, 0, 0])
 
-        self.state.set_layouts(9, None, 1, [0, 0, 0, 0, 0, 0, 11002, 1])
+        self.state._snapshot['shopItemPrices'][11003] = {'credits': 0}
+        self.state.set_layouts(9, None, 1, [0, 0, 0, 0, 0, 0, 11003, 1])
 
-        self.assertEqual([11001, 0, 0], self._record()['eqs'])
+        self.assertEqual([11001, 0, 0, 11003], self._record()['eqs'])
 
     def test_an_odd_equipment_layout_is_refused(self):
         with self.assertRaises(self.garage.GarageError):
@@ -2006,6 +2018,48 @@ class FittingRequestTests(unittest.TestCase):
         self.assertEqual(150, _TankmanDescriptor(tankmen[101]).totalXP())
         self.assertEqual(150, _TankmanDescriptor(tankmen[102]).totalXP())
 
+    def test_acceleration_skips_full_skills_even_with_lower_total_xp(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        record = snapshot['vehicles'][0]
+        record['settings'] = 1
+        record['tankmen'][101] = b'tman:101|repair#0'
+        record['tankmen'][102] = b'tman:102|#500'
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        result = state.award_battle_crew_xp(50001, 100, 1)
+        self.assertEqual(102, result['weakest_tankman_id'])
+        self.assertEqual({101: 100, 102: 200}, result['xp_by_tankman'])
+
+    def test_fully_trained_crew_keeps_accelerated_xp_on_the_vehicle(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        record = snapshot['vehicles'][0]
+        record['settings'] = 1
+        record['tankmen'] = dict((identity, b'tman:%d|repair#100' % identity)
+                                 for identity in record['crew'])
+        vehicles, tankmen = _modules()
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        result = state.award_battle_crew_xp(50001, 100, 1)
+        self.assertFalse(result['accelerated'])
+        self.assertEqual(0, result['weakest_tankman_id'])
+        self.assertEqual({101: 100, 102: 100}, result['xp_by_tankman'])
+
+    def test_acceleration_can_train_a_combined_role_in_slot_order(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        record = snapshot['vehicles'][0]
+        record['settings'] = 1
+        record['tankmen'][101] = b'tman:101|repair#0'
+        record['tankmen'][102] = b'tman:102|#0'
+        vehicles, tankmen = _modules()
+        tankmen.SKILLS_BY_ROLES['loader'] = ('repair', 'loader_intuition')
+        state = self.garage.GarageState(
+            snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        state._crew_roles = lambda unused: (
+            ('commander', 'loader'), ('driver',))
+        self.assertEqual(101, state.award_battle_crew_xp(
+            50001, 100, 1)['weakest_tankman_id'])
+
     def test_crew_training_falls_back_to_the_stock_rate(self):
         """An unreadable descriptor must not fail the battle transaction."""
         snapshot = copy.deepcopy(SNAPSHOT)
@@ -2105,6 +2159,194 @@ class FittingRequestTests(unittest.TestCase):
             self.state.snapshot(), self.context['selected_vehicle'])
 
 
+class BattleBoosterPurchaseTests(unittest.TestCase):
+    """Exercise the one-item purchase through the account/inventory boundary."""
+
+    # The item identity is from the 2026-09-21 23:43:16 report. Prices below
+    # are test inputs, not a claim about that item's exact catalogue price.
+    BOOSTER = 27131
+    OTHER_BOOSTER = 11003
+
+    def setUp(self):
+        self.requests, self.commands, self.garage = _request_modules()
+        self.vehicles, tankmen = _modules()
+        item_type = self.vehicles.getTypeOfCompactDescr
+        descriptor = self.vehicles.getItemByCompactDescr
+        self.vehicles.getTypeOfCompactDescr = lambda cd: (
+            11 if cd == self.BOOSTER else item_type(cd))
+        self.vehicles.getItemByCompactDescr = lambda cd: (
+            types.SimpleNamespace(equipmentType=1, tags=())
+            if cd == self.BOOSTER else descriptor(cd))
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {
+            'credits': 100000, 'gold': 100, 'crystal': 50, 'freeXP': 0}
+        snapshot['shopItemPrices'][self.BOOSTER] = {'crystal': 10}
+        snapshot['shopItemPrices'][self.OTHER_BOOSTER] = {'crystal': 5}
+        self.fresh = copy.deepcopy(snapshot)
+        self.state = self.garage.GarageState(
+            snapshot, vehicles_module=self.vehicles, tankmen_module=tankmen)
+        self.pushed = []
+        self.context = {
+            'selected_vehicle': copy.deepcopy(snapshot), 'garage': self.state,
+            'push_update': self.pushed.append}
+
+    def _record(self):
+        return self.state.snapshot()['vehicles'][0]
+
+    def _dispatch(self, command, args):
+        result = self.requests.dispatch(command, self.context, args)
+        if result.before_response is not None:
+            result.before_response()
+        return result
+
+    def _buy_and_equip(self, cd=None, slot=0):
+        # The report proves a six-field CMD 308 for a battleBooster was
+        # rejected by slot validation, but did not log the slot value. Zero
+        # reproduces that failure; the destination follows equipmentType.
+        return self._dispatch(self.commands.CMD_BUY_AND_EQUIP_ITEM,
+            ([77, self.BOOSTER if cd is None else cd, 9, slot, 0, 0],))
+
+    def test_buy_and_equip_places_directive_in_its_own_slot_and_charges_once(self):
+        self.state.equip_equipments(9, [11001, 0, 0])
+        result = self._buy_and_equip()
+
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual([11001, 0, 0, self.BOOSTER], self._record()['eqs'])
+        self.assertEqual(self._record()['eqs'], self._record()['eqsLayout'])
+        self.assertEqual(40, self.state.snapshot()['wallet']['crystal'])
+        self.assertEqual(100000, self.state.snapshot()['wallet']['credits'])
+        self.assertEqual(100, self.state.snapshot()['wallet']['gold'])
+        self.assertEqual(1, self.state.snapshot()['inventoryItems'][11][self.BOOSTER])
+        self.assertEqual(40, self.pushed[-1]['stats']['crystal'])
+        self.assertEqual([11001, 0, 0, self.BOOSTER],
+                         self.pushed[-1]['inventory'][1]['eqs'][9])
+        # Stock inventory diffs use None to remove a zero-count depot row.
+        self.assertIsNone(self.pushed[-1]['inventory'][11][self.BOOSTER])
+
+    def test_replacement_returns_old_directive_to_depot_without_consuming_it(self):
+        self.state.equip_equipments(9, [11001, 0, 0, self.OTHER_BOOSTER])
+        result = self._buy_and_equip()
+
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual(35, self.state.snapshot()['wallet']['crystal'])
+        self.assertEqual([11001, 0, 0, self.BOOSTER], self._record()['eqs'])
+        depot = self.pushed[-1]['inventory'][11]
+        self.assertEqual(1, depot[self.OTHER_BOOSTER])
+        self.assertIsNone(depot[self.BOOSTER])
+
+    def test_unload_returns_purchased_directive_to_depot_without_charge(self):
+        self._buy_and_equip()
+        result = self._dispatch(self.commands.CMD_EQUIP_EQS, ([9, 0, 0, 0, 0],))
+
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual([0, 0, 0, 0], self._record()['eqs'])
+        self.assertEqual([0, 0, 0, 0], self._record()['eqsLayout'])
+        self.assertEqual(40, self.state.snapshot()['wallet']['crystal'])
+        self.assertEqual(1, self.pushed[-1]['inventory'][11][self.BOOSTER])
+
+    def test_depot_purchase_then_equip_uses_owned_copy_without_second_charge(self):
+        bought = self._dispatch(self.commands.CMD_BUY_ITEM,
+                               (77, self.BOOSTER, 2, 0))
+        mounted = self._dispatch(self.commands.CMD_EQUIP_EQS,
+                                 ([9, 0, 0, 0, self.BOOSTER],))
+
+        self.assertEqual(self.commands.RES_SUCCESS, bought.result_id)
+        self.assertEqual(self.commands.RES_SUCCESS, mounted.result_id)
+        self.assertEqual(30, self.state.snapshot()['wallet']['crystal'])
+        self.assertEqual(1, self.pushed[-1]['inventory'][11][self.BOOSTER])
+
+    def test_native_directive_layout_can_unmount_with_no_bonds(self):
+        self._buy_and_equip()
+        self.state.snapshot()['wallet']['crystal'] = 0
+        result = self._dispatch(self.commands.CMD_SET_AND_FILL_LAYOUTS,
+            ([77, 9, 0, 1, 8, 0, 0, 0, 0, 0, 0, 0, 0],))
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual([0, 0, 0, 0], self._record()['eqs'])
+        self.assertEqual([0, 0, 0, 0], self._record()['eqsLayout'])
+        self.assertEqual(0, self.state.snapshot()['wallet']['crystal'])
+        self.assertEqual(1, self.pushed[-1]['inventory'][11][self.BOOSTER])
+        # Reusing the owned copy must not charge bonds again.
+        result = self._dispatch(self.commands.CMD_SET_AND_FILL_LAYOUTS,
+            ([77, 9, 0, 1, 8, 0, 0, 0, 0, 0, 0, self.BOOSTER, 1],))
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual(self.BOOSTER, self._record()['eqs'][3])
+        self.assertEqual(0, self.state.snapshot()['wallet']['crystal'])
+
+    def test_buy_directive_preserves_used_regular_supply_and_currency_layout(self):
+        self.state.equip_equipments(9, [-11001, 0, 0])
+        self.state.settle_battle_consumables(50001, [11001])
+        owned = self.state.snapshot()['inventoryItems'][11][11001]
+        result = self._buy_and_equip()
+
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual([0, 0, 0, self.BOOSTER], self._record()['eqs'])
+        self.assertEqual([-11001, 0, 0, self.BOOSTER], self._record()['eqsLayout'])
+        self.assertEqual(owned, self.state.snapshot()['inventoryItems'][11][11001])
+
+    def test_buy_regular_supply_preserves_consumed_directive_layout(self):
+        self._buy_and_equip()
+        self.state.settle_battle_consumables(50001, [self.BOOSTER])
+        result = self._buy_and_equip(cd=11001, slot=2)
+
+        self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+        self.assertEqual([0, 0, 11001, 0], self._record()['eqs'])
+        self.assertEqual([0, 0, 11001, self.BOOSTER], self._record()['eqsLayout'])
+        self.assertEqual(40, self.state.snapshot()['wallet']['crystal'])
+
+    def test_insufficient_bonds_or_invalid_fit_leaves_garage_unchanged(self):
+        for cd, slot, bonds in ((self.BOOSTER, 0, 9), (11001, 3, 50),
+                                (self.BOOSTER, 4, 50)):
+            with self.subTest(item=cd, slot=slot, bonds=bonds):
+                self.state.snapshot()['wallet']['crystal'] = bonds
+                before = copy.deepcopy(self.state.snapshot())
+                result = self._buy_and_equip(cd, slot)
+                self.assertEqual(self.commands.RES_FAILURE, result.result_id)
+                self.assertEqual(before, self.state.snapshot())
+                self.assertEqual([], self.pushed)
+                self.assertEqual(0, self.state.revision)
+
+    def test_battle_consumption_and_auto_resupply_debit_one_more_directive(self):
+        self._buy_and_equip()
+        self._record()['settings'] = 16
+        self.state.settle_battle_consumables(50001, [self.BOOSTER])
+        store = _load('garage_store')
+        costs = store._settle_automatically(
+            self.state, 9, (2, 4, 8, 16), self.garage.GarageError)
+
+        self.assertEqual([0, 0, 0, self.BOOSTER], self._record()['eqs'])
+        self.assertEqual(30, self.state.snapshot()['wallet']['crystal'])
+        self.assertEqual(1, self.state.snapshot()['inventoryItems'][11][self.BOOSTER])
+        self.assertEqual(10, costs['equipment_crystal'])
+
+    def test_missing_equipment_descriptor_rolls_back_the_purchase(self):
+        before = copy.deepcopy(self.state.snapshot())
+        with mock.patch.object(self.vehicles, 'getItemByCompactDescr',
+                               side_effect=ValueError('missing descriptor')):
+            result = self._buy_and_equip()
+
+        self.assertEqual(self.commands.RES_FAILURE, result.result_id)
+        self.assertEqual(before, self.state.snapshot())
+        self.assertEqual([], self.pushed)
+        self.assertEqual(0, self.state.revision)
+
+    def test_purchase_saves_wallet_stock_and_directive_before_callback(self):
+        store_module = _load('garage_store')
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'garage_state.json')
+            self.context['garage_store'] = store_module.GarageStore(path=path)
+            result = self.requests.dispatch(self.commands.CMD_BUY_AND_EQUIP_ITEM,
+                self.context, ([77, self.BOOSTER, 9, 0, 0, 0],))
+            self.assertEqual(self.commands.RES_SUCCESS, result.result_id)
+            self.assertEqual([], self.pushed)
+            restored = copy.deepcopy(self.fresh)
+            store_module.GarageStore(path=path).apply(restored)
+
+        self.assertEqual(40, restored['wallet']['crystal'])
+        self.assertEqual(1, restored['inventoryItems'][11][self.BOOSTER])
+        self.assertEqual([0, 0, 0, self.BOOSTER], restored['vehicles'][0]['eqs'])
+        self.assertEqual([0, 0, 0, self.BOOSTER], restored['vehicles'][0]['eqsLayout'])
+
+
 class CrewShopTests(unittest.TestCase):
     """The three crew commands #1513 prices through the shop."""
 
@@ -2191,6 +2433,58 @@ class CrewShopTests(unittest.TestCase):
             state.dismiss_tankman(300 + index)
 
         self.assertEqual(2, len(state.snapshot()['recycleBinTankmen']))
+
+    def test_current_recovery_policy_charges_immediately_and_expires_at_seven_days(self):
+        from gui.mods.offline_lan_0922.account_rpc import economy, data
+        day = 86400
+        for elapsed, cost in ((0, 100), (7 * day - 1, 100), (7 * day, None)):
+            state = self._state(gold=1000)
+            state.snapshot()['tankmenRestoreConfig'] = dict(economy.TANKMEN_RESTORE_CONFIG)
+            with mock.patch('time.time', return_value=100):
+                state.dismiss_tankman(201)
+            before = copy.deepcopy(state.snapshot())
+            with mock.patch('time.time', return_value=100 + elapsed):
+                if cost is None:
+                    with self.assertRaises(self.garage.GarageError):
+                        state.restore_tankman(201)
+                    self.assertEqual(before, state.snapshot())
+                else:
+                    state.restore_tankman(201)
+                    self.assertEqual(1000 - cost, state._wallet()['gold'])
+                    self.assertIn(201, state.snapshot()['barracksTankmen'])
+            published = data._restore_config(state.snapshot())['tankmen']
+            self.assertEqual(0, published['freeDuration'])
+            self.assertEqual(7 * day, published['goldDuration'])
+
+    def test_hundred_entry_limit_preserves_newest_and_records_terminal_reward_source(self):
+        state = self._state(barracks={500: b'reward-woman'})
+        state.snapshot()['personalMissionRewardJournal'] = {
+            'crew:15': {'tankman': 500, 'descriptor': 'cmV3YXJkLXdvbWFu'}}
+        with mock.patch('time.time', return_value=100):
+            state.dismiss_tankman(500)
+            for identity in range(501, 601):
+                state._barracks()[identity] = b'other-crew'
+                state.dismiss_tankman(identity)
+            # A restored member with an older, smaller ID is still newest.
+            state._barracks()[201] = b'newest-dismissal'
+            state.dismiss_tankman(201)
+        self.assertEqual(100, len(state._recycle_bin()))
+        self.assertIn(201, state._recycle_bin())
+        self.assertNotIn(500, state._recycle_bin())
+        self.assertTrue(state.snapshot()['personalMissionRewardJournal'][
+            'crew:15']['permanently_dismissed'])
+
+    def test_expired_recovery_records_are_pruned_before_they_displace_live_crew(self):
+        state = self._state(barracks={500: b'reward-woman', 501: b'new'})
+        state.snapshot()['personalMissionRewardJournal'] = {'crew:15': {'tankman': 500}}
+        state.snapshot()['tankmenRestoreConfig'].update(limit=1, goldDuration=10)
+        with mock.patch('time.time', return_value=100):
+            state.dismiss_tankman(500)
+        with mock.patch('time.time', return_value=110):
+            state.dismiss_tankman(501)
+        self.assertEqual({501}, set(state._recycle_bin()))
+        self.assertTrue(state.snapshot()['personalMissionRewardJournal'][
+            'crew:15']['permanently_dismissed'])
 
     def test_a_sold_vehicles_dismissed_crew_lands_in_the_bin(self):
         """#1513 counts these separately but recovers them the same way."""
@@ -2313,6 +2607,76 @@ class CrewShopTests(unittest.TestCase):
         self.assertEqual(2, descriptor.vehicleTypeID)
         self.assertEqual(10000 - 600, state.snapshot()['wallet']['gold'])
 
+    def test_role_change_resets_learned_skills_without_xp_loss_or_extra_fee(self):
+        state = self._skilled()
+        before = copy.deepcopy(state.snapshot()['wallet'])
+        calls = []
+        native_drop = _TankmanDescriptor.dropSkills
+
+        def drop(descriptor, fraction, throw):
+            calls.append((fraction, throw))
+            native_drop(descriptor, fraction, throw)
+
+        with mock.patch.object(_TankmanDescriptor, 'dropSkills', drop):
+            state.change_tankman_role(201, 3, 50002)
+
+        serialized = state.snapshot()['barracksTankmen'][201]
+        descriptor = _TankmanDescriptor(serialized)
+        self.assertEqual([(1.0, False)], calls)
+        self.assertEqual([], descriptor.skills)
+        self.assertEqual(1000, descriptor.totalXP())
+        self.assertEqual(('driver', 2),
+                         (descriptor.role, descriptor.vehicleTypeID))
+        expected_wallet = dict(before, gold=before['gold'] - 600,
+                               crystal=before.get('crystal', 0))
+        self.assertEqual(expected_wallet, state.snapshot()['wallet'])
+        # The stored descriptor stays valid before choosing any new skill.
+        self.assertEqual(serialized, descriptor.makeCompactDescr())
+
+    def test_radio_to_gunner_role_change_clears_the_old_specialty(self):
+        state = self._state(barracks={
+            201: b'tman:201!radioman|radioman_finder#123456'})
+        state._vehicles.getVehicleType = lambda cd: types.SimpleNamespace(
+            id=(0, 2), crewRoles=(('commander',), ('gunner',)))
+
+        state.change_tankman_role(201, 4, 50002)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual('gunner', descriptor.role)
+        self.assertEqual([], descriptor.skills)
+        self.assertEqual(123456, descriptor.totalXP())
+        self.assertEqual(9400, state.snapshot()['wallet']['gold'])
+
+    def test_role_change_does_not_clear_native_free_skills_manually(self):
+        state = self._skilled()
+        calls = []
+
+        def drop(descriptor, fraction, throw):
+            calls.append((fraction, throw))
+            # Model the original method retaining the zero-skill prefix.
+            descriptor.skills = ['brotherhood']
+
+        with mock.patch.object(_TankmanDescriptor, 'dropSkills', drop):
+            state.change_tankman_role(201, 3, 50002)
+
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][201])
+        self.assertEqual([(1.0, False)], calls)
+        self.assertEqual(['brotherhood'], descriptor.skills)
+        self.assertEqual(1000, descriptor.totalXP())
+
+    def test_native_role_reset_failure_leaves_wallet_and_crew_unchanged(self):
+        state = self._skilled()
+        before = copy.deepcopy(state.snapshot())
+        revision = state.revision
+        with mock.patch.object(_TankmanDescriptor, 'dropSkills',
+                               side_effect=ValueError('reset rejected')):
+            with self.assertRaises(self.garage.GarageError):
+                state.change_tankman_role(201, 3, 50002)
+        self.assertEqual(before, state.snapshot())
+        self.assertEqual(revision, state.revision)
+
     def test_a_role_change_the_account_cannot_pay_for_changes_nothing(self):
         state = self._state(gold=100)
         before = copy.deepcopy(state.snapshot())
@@ -2340,14 +2704,96 @@ class CrewShopTests(unittest.TestCase):
         with self.assertRaises(self.garage.GarageError):
             state.change_tankman_role(201, 3, 50002)
 
-    def test_a_seated_crew_member_keeps_the_seat_they_still_fit(self):
-        """The restore boundary requires a seat and its occupant to match."""
+    def test_a_seated_crew_member_changes_role_into_the_barracks(self):
         state = self._state()
 
+        result = state.change_tankman_role(101, 3, 50001)
+
+        snapshot = state.snapshot()
+        self.assertEqual(self.garage.CREW_EQUIP_NO_FREE_SLOT, result)
+        self.assertEqual([None, 102], snapshot['vehicles'][0]['crew'])
+        self.assertNotIn(101, snapshot['vehicles'][0]['tankmen'])
+        self.assertEqual('driver', _TankmanDescriptor(
+            snapshot['barracksTankmen'][101]).role)
+        self.assertEqual(9400, snapshot['wallet']['gold'])
+        self.assertEqual({9}, state.touched_vehicles())
+        self.assertIn(101, state.touched_tankmen())
+
+    def test_role_change_fills_an_empty_primary_seat_with_no_free_berths(self):
+        state = self._state(berths=0, barracks={})
+        record = state.snapshot()['vehicles'][0]
+        record['crew'][1] = None
+        del record['tankmen'][102]
+
+        result = state.change_tankman_role(101, 3, 50001)
+
+        self.assertEqual(self.garage.CREW_EQUIP_OK, result)
+        self.assertEqual([None, 101], record['crew'])
+        self.assertEqual('driver', _TankmanDescriptor(
+            record['tankmen'][101]).role)
+        self.assertEqual({}, state.snapshot()['barracksTankmen'])
+
+    def test_a_barracks_member_installs_automatically_after_role_change(self):
+        state = self._state()
+        record = state.snapshot()['vehicles'][0]
+        record['crew'][1] = None
+        del record['tankmen'][102]
+
+        result = state.change_tankman_role(201, 3, 50001)
+
+        self.assertEqual(self.garage.CREW_EQUIP_OK, result)
+        self.assertEqual([101, 201], record['crew'])
+        self.assertNotIn(201, state.snapshot()['barracksTankmen'])
+
+    def test_a_seated_role_change_to_an_unowned_vehicle_uses_the_barracks(self):
+        state = self._state()
+
+        result = state.change_tankman_role(101, 3, 50002)
+
+        self.assertEqual(self.garage.CREW_EQUIP_NO_VEHICLE, result)
+        self.assertEqual([None, 102], state.snapshot()['vehicles'][0]['crew'])
+        descriptor = _TankmanDescriptor(
+            state.snapshot()['barracksTankmen'][101])
+        self.assertEqual(('driver', 2),
+                         (descriptor.role, descriptor.vehicleTypeID))
+
+    def test_a_seated_role_change_to_a_full_barracks_is_atomic(self):
+        state = self._state(berths=1)
+        before = copy.deepcopy(state.snapshot())
+
         with self.assertRaises(self.garage.GarageError):
-            # 101 is the commander of the fixture's vehicle; a driver does
-            # not belong in the commander's seat.
             state.change_tankman_role(101, 3, 50001)
+
+        self.assertEqual(before, state.snapshot())
+        self.assertEqual(0, state.revision)
+        self.assertEqual(set(), state.touched_vehicles())
+        self.assertEqual(set(), state.touched_tankmen())
+
+    def test_an_unaffordable_seated_role_change_does_not_unseat_or_charge(self):
+        state = self._state(gold=599)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(self.garage.GarageError):
+            state.change_tankman_role(101, 3, 50001)
+
+        self.assertEqual(before, state.snapshot())
+
+    def test_a_secondary_role_does_not_count_as_a_primary_crew_seat(self):
+        state = self._state()
+        state._vehicles.getVehicleType = lambda compact_descr: (
+            types.SimpleNamespace(id=(0, 2),
+                                  crewRoles=(('commander', 'driver'),)))
+
+        with self.assertRaises(self.garage.GarageError):
+            state.change_tankman_role(201, 3, 50002)
+
+    def test_a_legacy_snapshot_uses_the_same_crew_price_as_the_shop(self):
+        state = self._state()
+        del state.snapshot()['crewChangeRoleCost']
+
+        state.change_tankman_role(201, 3, 50002)
+
+        self.assertEqual(9400, state.snapshot()['wallet']['gold'])
 
     def test_a_role_index_that_names_a_skill_is_refused(self):
         state = self._state()
@@ -2559,7 +3005,7 @@ class GarageSaveDurabilityTests(unittest.TestCase):
         return store, snapshot
 
     def test_a_researched_guns_own_rounds_do_not_refuse_the_save(self):
-        """The v0.7.0 loss, from a real client log.
+        """A previous regression, from a real client log.
 
         Installing a researched gun loads the rounds that gun fires.  Rounds
         are never researched in #1513, so nothing ever put them in the
@@ -2767,7 +3213,7 @@ class GarageSaveDurabilityTests(unittest.TestCase):
         self.assertIn('without 1 vehicle', log.getvalue())
         # The account survives the one vehicle it could not publish.
         self.assertEqual(
-            {'credits': 250000, 'gold': 700, 'freeXP': 4200}, fresh['wallet'])
+            {'credits': 250000, 'gold': 700, 'freeXP': 4200, 'crystal': 0}, fresh['wallet'])
         self.assertIn(50002, fresh['unlockItemCompactDescrs'])
         self.assertEqual(1, len(self._variants('rejected-')))
 
@@ -2795,7 +3241,7 @@ class GarageSaveDurabilityTests(unittest.TestCase):
 
         self.assertIn('without any vehicle fitting or crew', log.getvalue())
         self.assertEqual(
-            {'credits': 250000, 'gold': 700, 'freeXP': 4200}, fresh['wallet'])
+            {'credits': 250000, 'gold': 700, 'freeXP': 4200, 'crystal': 0}, fresh['wallet'])
         self.assertIn(50002, fresh['unlockItemCompactDescrs'])
 
     def test_a_degraded_restore_is_not_rewritten_for_convenience(self):
@@ -2940,6 +3386,148 @@ class GaragePersistenceTests(unittest.TestCase):
         snapshot['vehicleTypeCompactDescrs'] = {50001, 50002}
         snapshot['shopItemPrices'][50002] = {'credits': 0, 'gold': 0}
         return snapshot
+
+    def test_personal_reserves_and_daily_rewards_survive_restart_and_receipt_retry(self):
+        policy = self.store_module.offline_services
+        state = self._state(self._matching_snapshot())
+        state.snapshot()['wallet']['gold'] = 100
+        policy.transact(state, 'buy_reserve', 'xp', now=100)
+        policy.transact(state, 'activate_reserve', 'xp', now=100)
+        snapshot = state.snapshot()
+        snapshot['dailyMissions'] = {'day': 0, 'claimed': []}
+        snapshot['selectedBadges'] = [17]
+        snapshot['badgeSelectionVerified'] = True
+        vehicles, tankmen = _modules()
+        store = self._store()
+        kwargs = dict(tankmen_module=tankmen, vehicles_module=vehicles,
+                      rewards={'credits': 1000, 'xp': 100, 'free_xp': 5},
+                      battle_start=150, daily_facts={'damage': 3000, 'won': True,
+                                                   'finished_at': 200})
+        result = store.apply_battle_crew_xp(snapshot, 'reserve:1', 50001, 100, 1, **kwargs)
+        self.assertEqual(250, result['awarded']['xp'])
+        restored = self._restart(self._matching_snapshot())
+        reserves = policy.reserve_state(restored)
+        self.assertEqual([100, 3700], reserves['active']['xp'])
+        self.assertEqual(1, reserves['counts']['credits'])
+        self.assertEqual(1, reserves['counts']['crew_xp'])
+        self.assertEqual(50, restored['wallet']['gold'])
+        self.assertEqual([17], restored['selectedBadges'])
+        self.assertEqual({'50001': 0}, restored['firstWinDays'])
+        retry = self._store().apply_battle_crew_xp(restored, 'reserve:1', 50001, 100, 1, **kwargs)
+        self.assertFalse(retry['applied'])
+        self.assertEqual(result['income'], retry['income'])
+        self.assertEqual(reserves, policy.reserve_state(restored))
+
+    def test_premium_first_win_per_vehicle_day_and_failed_write(self):
+        snapshot = self._two_vehicle_snapshot()
+        snapshot['premiumExpiryTime'] = 500
+        vehicles, tankmen = _modules()
+        store = self._store()
+        def settle(identity, cd=50001, start=100, finish=600, won=True):
+            return store.apply_battle_crew_xp(
+                snapshot, identity, cd, 101, 1,
+                tankmen_module=tankmen, vehicles_module=vehicles,
+                rewards={'credits': 1001, 'xp': 101, 'free_xp': 5, 'crystal': 7},
+                battle_start=start,
+                daily_facts={'damage': 0, 'won': won, 'finished_at': finish})
+        with mock.patch.object(store, '_write_state', return_value=False):
+            with self.assertRaises(RuntimeError):
+                settle('failed')
+        self.assertNotIn('firstWinDays', snapshot)
+        first = settle('first')
+        self.assertEqual({'credits': 1502, 'xp': 304, 'free_xp': 16, 'crystal': 7},
+                         first['awarded'])
+        self.assertTrue(first['income']['premium'])
+        self.assertTrue(first['income']['first_win'])
+        self.assertEqual(152, settle('second')['awarded']['xp'])
+        self.assertEqual(304, settle('other', cd=50002)['awarded']['xp'])
+        self.assertEqual(101, settle('loss', start=86410, finish=86500, won=False)['awarded']['xp'])
+        tomorrow = settle('tomorrow', start=86510, finish=86600)
+        self.assertEqual(202, tomorrow['awarded']['xp'])
+        self.assertFalse(tomorrow['income']['premium'])
+        self.assertEqual(101, settle('late', start=700, finish=800)['awarded']['xp'])
+
+    def test_early_exit_receipt_does_not_consume_first_win_or_daily_progress(self):
+        snapshot = self._matching_snapshot()
+        vehicles, tankmen = _modules()
+        store = self._store()
+        result = store.apply_battle_crew_xp(
+            snapshot, 'early:1', 50001, 100, 1,
+            tankmen_module=tankmen, vehicles_module=vehicles,
+            rewards={'credits': 1000, 'xp': 100, 'free_xp': 5}, battle_start=150,
+            daily_facts={'damage': 9000, 'won': True, 'finished_at': 200,
+                         'premature_leave': True})
+        self.assertFalse(result['income']['first_win'])
+        self.assertFalse(snapshot.get('firstWinDays'))
+        self.assertFalse(snapshot.get('dailyMissions'))
+        restored = self._restart(self._matching_snapshot())
+        self.assertFalse(restored.get('firstWinDays'))
+        self.assertFalse(restored.get('dailyMissions'))
+
+    def test_destroyed_exit_banks_daily_and_first_win_once_after_restart(self):
+        snapshot = self._matching_snapshot()
+        snapshot['dailyMissions'] = {
+            'day': 0, 'battles': 2, 'damage': 2999, 'wins': 0, 'claimed': []}
+        vehicles, tankmen = _modules()
+        arguments = dict(
+            tankmen_module=tankmen, vehicles_module=vehicles,
+            rewards={'credits': 1000, 'xp': 100, 'free_xp': 5},
+            health=0, battle_start=150,
+            daily_facts={'damage': 1, 'won': True, 'finished_at': 200,
+                         'premature_leave': False})
+        result = self._store().apply_battle_crew_xp(
+            snapshot, 'destroyed:1', 50001, 100, 1, **arguments)
+        self.assertTrue(result['income']['first_win'])
+        self.assertEqual(['battles', 'damage', 'wins'], result['daily_missions'])
+        self.assertEqual(['xp', 'credits', 'crew_xp'], result['daily_reserves'])
+        restored = self._restart(self._matching_snapshot())
+        before = copy.deepcopy(restored)
+        retry = self._store().apply_battle_crew_xp(
+            restored, 'destroyed:1', 50001, 100, 1, **arguments)
+        self.assertFalse(retry['applied'])
+        self.assertEqual(result['daily_missions'], retry['daily_missions'])
+        self.assertEqual(result['daily_reserves'], retry['daily_reserves'])
+        self.assertEqual(before, restored)
+
+    def test_training_spends_ammunition_but_no_repair_rewards_or_daily_progress(self):
+        snapshot = self._settling_snapshot()
+        before_xp = snapshot['vehicles'][0]['tankmen'].copy()
+        vehicles, tankmen = _modules()
+        result = self._store().apply_battle_crew_xp(
+            snapshot, 'training:1', 50001, 100, 1,
+            tankmen_module=tankmen, vehicles_module=vehicles,
+            health=1, shells_fired={0: 2}, auto_settings=(2, 4, 8),
+            rewards={'credits': 1000, 'xp': 100, 'free_xp': 5}, training=True,
+            daily_facts={'damage': 9000, 'won': True})
+        self.assertFalse(any(result['awarded'].values()))
+        self.assertEqual((0, 1000), snapshot['vehicles'][0]['repair'])
+        self.assertEqual(99800, snapshot['wallet']['credits'])
+        self.assertEqual(before_xp, snapshot['vehicles'][0]['tankmen'])
+        self.assertNotIn('dailyMissions', snapshot)
+
+    def test_premium_and_personal_missions_survive_a_restart(self):
+        snapshot = copy.deepcopy(SNAPSHOT)
+        snapshot['wallet'] = {
+            'credits': 100000, 'gold': 5000, 'freeXP': 0, 'crystal': 0}
+        state = self._state(snapshot)
+        expiry = state.buy_premium(7, now=1700000000)
+        state.select_personal_missions(0, [1, 16])
+        state.snapshot()['personalMissionProgress'] = {'1': 1, '300': 2}
+        state.snapshot()['personalMissionOrders'] = 7
+        state.snapshot()['accountBadges'] = {'1': 1700000000}
+        store = self._store()
+        store.mark_dirty()
+        self.assertTrue(store.flush(state.snapshot()))
+
+        restored = self._restart()
+
+        self.assertEqual(expiry, restored['premiumExpiryTime'])
+        self.assertEqual(
+            {'regular': [1, 16]}, restored['personalMissionSelections'])
+        self.assertEqual(3750, restored['wallet']['gold'])
+        self.assertEqual({'1': 1, '300': 2}, restored['personalMissionProgress'])
+        self.assertEqual(7, restored['personalMissionOrders'])
+        self.assertEqual({'1': 1700000000}, restored['accountBadges'])
 
     def test_the_rounds_a_battle_fired_stay_spent_across_a_restart(self):
         """A restart that refilled the racks would be free ammunition."""
@@ -3518,7 +4106,7 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertEqual(10, snapshot['wallet']['freeXP'])
         self.assertEqual(200, snapshot['vehicleXP'][50001])
         self.assertEqual(
-            {'credits': 1000, 'xp': 200, 'free_xp': 10}, result['awarded'])
+            {'credits': 1000, 'xp': 200, 'free_xp': 10, 'crystal': 0}, result['awarded'])
 
     def test_the_launchers_multiplier_moves_credits_and_experience(self):
         """One number on the save, applied to everything a battle pays."""
@@ -3530,7 +4118,7 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertEqual(25, snapshot['wallet']['freeXP'])
         self.assertEqual(500, snapshot['vehicleXP'][50001])
         self.assertEqual(
-            {'credits': 2500, 'xp': 500, 'free_xp': 25}, result['awarded'])
+            {'credits': 2500, 'xp': 500, 'free_xp': 25, 'crystal': 0}, result['awarded'])
         # The crew was trained on the multiplied experience too: #1513 gives
         # each crew member the battle's whole experience, not a share of it.
         self.assertEqual(500, _TankmanDescriptor(
@@ -3546,7 +4134,7 @@ class GaragePersistenceTests(unittest.TestCase):
         self.assertEqual(200, snapshot['vehicleXP'][PREMIUM_VEHICLE_CD])
         self.assertEqual(10, snapshot['wallet']['freeXP'])
         self.assertEqual(
-            {'credits': 1500, 'xp': 200, 'free_xp': 10}, result['awarded'])
+            {'credits': 1500, 'xp': 200, 'free_xp': 10, 'crystal': 0}, result['awarded'])
 
     def test_native_vehicle_and_crew_bonuses_keep_distinct_owners(self):
         snapshot = self._earning_snapshot(
@@ -3566,7 +4154,7 @@ class GaragePersistenceTests(unittest.TestCase):
                 tankmen_module=tankmen, rewards=self.REWARDS,
                 vehicles_module=vehicles)
         result = settle()
-        self.assertEqual({'credits': 3000, 'xp': 600, 'free_xp': 30},
+        self.assertEqual({'credits': 3000, 'xp': 600, 'free_xp': 30, 'crystal': 0},
                          result['awarded'])
         self.assertEqual(600, snapshot['vehicleXP'][PREMIUM_VEHICLE_CD])
         self.assertEqual(30, snapshot['wallet']['freeXP'])
@@ -3961,9 +4549,16 @@ class NarrowInventoryDiffTests(unittest.TestCase):
         full = self.data.inventory(snapshot)
 
         tankmen = full['inventory'][self.data.TANKMAN_ITEM_TYPE]
-        self.assertEqual(b'tman:201', tankmen['compDescr'][201])
+        # ItemsRequester.getTankmen enumerates this complete compDescr map.
+        # Barracks then applies its location criterion: positive foreign keys
+        # are the "in tanks" rows and -1 is the "in barracks" row.  Publishing
+        # the latter must never replace or duplicate the seated crew.
         self.assertEqual(
-            self.data.BARRACKS_VEHICLE_ID, tankmen['vehicle'][201])
+            {101: b'tman:101', 102: b'tman:102', 201: b'tman:201'},
+            tankmen['compDescr'])
+        self.assertEqual(
+            {101: 9, 102: 9, 201: self.data.BARRACKS_VEHICLE_ID},
+            tankmen['vehicle'])
 
     def test_a_barracks_larger_than_its_berths_is_refused(self):
         snapshot = copy.deepcopy(SNAPSHOT)

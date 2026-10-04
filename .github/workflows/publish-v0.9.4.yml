@@ -1,0 +1,251 @@
+name: Publish v0.9.4 original Bot077 release
+on:
+  push:
+    branches: [release/v0.9.4]
+    paths: [.github/workflows/publish-v0.9.4.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: publish-v0.9.4
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/release/v0.9.4'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tests:server:tools
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Promote only release metadata from the selected original-policy build
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p build-evidence
+          python - <<'PYFIX'
+          from pathlib import Path
+          p = Path('tools/release_v094.py')
+          text = p.read_text()
+          text = text.replace("    'launcher/tests/test_launcher_window.py',\n)", "    'launcher/tests/test_launcher_window.py', 'tests/test_port_0922.py',\n)")
+          text = text.replace("if path.endswith('version_info.txt'):", "if path.endswith('version_info.txt') or path == 'tests/test_port_0922.py':")
+          assert "'launcher/tests/test_launcher_window.py', 'tests/test_port_0922.py'," in text
+          assert "or path == 'tests/test_port_0922.py':" in text
+          p.write_text(text)
+          PYFIX
+          python tools/release_v094.py prepare
+          git diff --cached --stat
+          if ! git diff --cached --quiet; then
+            git commit -m 'Release v0.9.4 from selected a3e4c593 Bot077 original-policy build'
+            git push origin HEAD:refs/heads/release/v0.9.4
+          fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git diff a3e4c5937789d9dd63fde6902783d5027ec7c6f3 -- > build-evidence/release-only.patch
+          python tools/release_v094.py verify | tee build-evidence/source-identity.log
+      - name: Verify historical driving, radio and nonempty battle startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bot077_build.py source-tests 2>&1 | tee build-evidence/historical-driving.log
+          python -m unittest test_bot080_radio_integration test_port_0922_spotting_radio test_port_0922_radio_server.RadioRelayTests.test_radio_links_relay_and_empty_batch_clear_coverage test_port_0922_radio_server.RadioRelayTests.test_invalid_recipient_rejects_whole_batch_without_committing test_port_0922_radio_server.RadioRelayTests.test_unknown_enemy_self_and_duplicate_radio_links_are_rejected test_port_0922_radio_server.RadioRelayTests.test_known_ally_dying_in_flight_is_pruned 2>&1 | tee build-evidence/radio-integration.log
+          python tools/test_bot080_radio_contract.py 2>&1 | tee build-evidence/radio-contract.log
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/roster.log
+          python -m unittest test_bot080_pinned_startup test_port_0922_battle_runtime.BattleRuntimeContractTests.test_bot_roster_uses_complete_catalog_without_persistent_pool test_port_0922_battle_runtime.BattleRuntimeContractTests.test_all_clients_preload_the_same_server_roster 2>&1 | tee build-evidence/startup.log
+          python -m unittest test_port_0922_world_collision test_port_0922_vehicle_physics test_port_0922 2>&1 | tee build-evidence/retained-physics.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v094-source-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v094-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: v094-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile the selected Bot and verify actual Python 2.7 bytecode
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/release_v094.py verify
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-v094-bot077-original-${{ github.run_id }}-${{ github.run_attempt }}" \
+            python:2.7.18 sh -c 'python build_wotmod.py && python tools/bot077_build.py bytecode && python tools/test_bot080_radio_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod' 2>&1 | tee build-evidence/compiled-tests.log
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v094-compiled-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v094-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+  windows-package:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-v094-bot077-original-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v094-client-${{ github.run_id }}
+          path: dist
+      - name: Test installation and versioned launcher
+        shell: pwsh
+        run: |
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher core tests failed' }
+          python -m unittest discover -s tests -p 'test_launcher_window.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher version tests failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed' }
+      - name: Verify package source, original maps and compiled payload
+        run: python tools/bot077_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Verify both executable versions
+        shell: pwsh
+        run: |
+          foreach ($exe in @('launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe','dist/server/WoT-0.9.22-LAN-Server.exe')) {
+            $v = (Get-Item $exe).VersionInfo
+            if ($v.FileVersion -ne '0.9.4' -or $v.ProductVersion -ne '0.9.4' -or $v.FileMajorPart -ne 0 -or $v.FileMinorPart -ne 9 -or $v.FileBuildPart -ne 4 -or $v.FilePrivatePart -ne 0) { throw "Incorrect version: $exe" }
+            Write-Host "Verified $exe version 0.9.4"
+          }
+      - name: Check built server readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { throw 'Server exited before readiness' }
+              $probe | python -
+              if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw 'Server readiness test failed' }
+          } finally {
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+            $global:LASTEXITCODE = 0
+          }
+      - name: Create the clean flat release ZIP and keep evidence separate
+        run: python tools/release_v094.py package launcher/dist/wot-0.9.22-offline-battles
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v094-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v094-release-package-${{ github.run_id }}
+          path: wot-0.9.22-offline-battles-0.9.4-Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+  publish:
+    needs: [prepare, windows-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_SOURCE: ${{ needs.prepare.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: v094-release-package-${{ github.run_id }}
+          path: release-download
+      - name: Publish the verified selected build as v0.9.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE"
+          existing=$(gh api "repos/$GH_REPO/releases?per_page=100" --jq '[.[] | select(.tag_name == "v0.9.4")] | length')
+          test "$existing" = '0' || { echo 'Refusing to overwrite an existing v0.9.4 release'; exit 1; }
+          test -z "$(git ls-remote --tags origin refs/tags/v0.9.4)" || { echo 'Refusing to overwrite an existing v0.9.4 tag'; exit 1; }
+          asset='release-download/wot-0.9.22-offline-battles-0.9.4-Windows-x64.zip'
+          sha256sum "$asset"
+          gh release create v0.9.4 "$asset" --draft --target "$RELEASE_SOURCE" --title 'wot-0.9.22-offline-battles v0.9.4' --notes-file docs/releases/v0.9.4.md
+          gh release edit v0.9.4 --draft=false --prerelease=false --latest
+          git fetch origin refs/tags/v0.9.4
+          test "$(git rev-parse FETCH_HEAD)" = "$RELEASE_SOURCE"
+          gh release view v0.9.4 --json tagName,isDraft,isPrerelease,url,assets

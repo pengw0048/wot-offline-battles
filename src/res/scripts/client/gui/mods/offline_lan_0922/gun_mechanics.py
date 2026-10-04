@@ -31,11 +31,29 @@ def _positive(value, default):
     return value if value > 0.0 else float(default)
 
 
+def mounted_shot_order(shots, shell_order):
+    """Put mounted garage slots before unmounted descriptor defaults."""
+    shots = tuple(shots or ())
+    if not shell_order:
+        return shots
+    positions = {}
+    for position, compact_descr in enumerate(shell_order):
+        try:
+            positions.setdefault(int(compact_descr), position)
+        except (TypeError, ValueError):
+            continue
+    return tuple(sorted(shots, key=lambda shot: positions.get(
+        _field(_field(shot, 'shell', {}), 'compactDescr'), len(positions))))
+
+
 class GunState(object):
 
-    def __init__(self, descriptor, loadout_modifiers=None, ammo_layout=None):
+    def __init__(self, descriptor, loadout_modifiers=None, ammo_layout=None,
+                 shell_order=None):
         gun = descriptor.gun
-        self.shots = tuple(_field(gun, 'shots', ()) or ())
+        self.shell_order = tuple(shell_order or ())
+        self.shots = mounted_shot_order(
+            _field(gun, 'shots', ()), self.shell_order)
         self.base_dispersion = _positive(
             _field(gun, 'shotDispersionAngle', 0.1), 0.1)
         factors = _field(gun, 'shotDispersionFactors', {}) or {}
@@ -73,6 +91,10 @@ class GunState(object):
         try:
             selected = int(getattr(descriptor, 'activeGunShotIndex', 0))
         except (TypeError, ValueError):
+            selected = 0
+        # The descriptor's active index addresses the original XML order;
+        # after a garage slot swap, the first mounted slot is selected.
+        if self.shell_order:
             selected = 0
         self.shot_index = max(0, min(selected, max(0, len(self.shots) - 1)))
         if not self.ammo or self.ammo[self.shot_index] <= 0:
@@ -129,7 +151,8 @@ class GunState(object):
         active descriptor.
         """
         gun = descriptor.gun
-        shots = tuple(_field(gun, 'shots', ()) or ())
+        shots = mounted_shot_order(
+            _field(gun, 'shots', ()), self.shell_order)
         if (self._shot_compact_descrs(shots) !=
                 self._shot_compact_descrs(self.shots)):
             raise RuntimeError(
@@ -284,10 +307,12 @@ class GunState(object):
         return result
 
     def sync_shell_index(self, index, instant=False):
-        """Load ``index`` now, restarting the reload from zero.
+        """Select ``index``, either restarting or transferring reload progress.
 
-        ``instant`` is the finished ``loader_intuition`` perk: the new shell
-        arrives loaded instead of starting a reload.
+        ``instant`` names a successful ``loader_intuition`` roll for historical
+        call-site compatibility. A loaded round still changes immediately;
+        during an active reload the new shell keeps the completed percentage
+        instead of becoming ready or restarting from zero.
         """
         if not self.shots:
             return False
@@ -299,12 +324,22 @@ class GunState(object):
         self.pending_index = None
         if index == self.shot_index:
             return False
+        previous_remaining = max(0.0, float(self.reload_time))
+        previous_duration = max(0.0, float(self.reload_duration))
         self.shot_index = index
         self.load_started = False
         if instant and index < len(self.ammo) and self.ammo[index] > 0:
-            self.clip = min(self.clip_size, self.ammo[index])
-            self.reload_time = 0.0
             self.reload_duration = self.reload
+            if previous_remaining <= 0.0:
+                self.clip = min(self.clip_size, self.ammo[index])
+                self.reload_time = 0.0
+            else:
+                remaining_fraction = 1.0
+                if previous_duration > 0.0:
+                    remaining_fraction = max(0.0, min(
+                        1.0, previous_remaining / previous_duration))
+                self.clip = 0
+                self.reload_time = self.reload_duration * remaining_fraction
             return True
         self.clip = 0
         self.reload_time = self.reload

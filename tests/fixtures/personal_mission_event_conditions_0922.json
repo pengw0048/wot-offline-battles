@@ -1,0 +1,110 @@
+[
+  {
+    "name": "regular_1_3_3",
+    "operation": 1,
+    "chain": 3,
+    "number": 3,
+    "qid": 33,
+    "main": "<postBattle>\n          <and>\n            <vehicleDamage>\n              <limittedTime>\t120\t</limittedTime>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleDamage>\n              <limittedTime>\t120\t</limittedTime>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleDamage>\n            <isAlive />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_1_3_4",
+    "operation": 1,
+    "chain": 3,
+    "number": 4,
+    "qid": 34,
+    "main": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t1\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t1\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleDamage>\n            <vehicleKills>\n              <enemyImmobilized />\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_1_2_2",
+    "operation": 1,
+    "chain": 2,
+    "number": 2,
+    "qid": 17,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n            <results>\n              <key>\tdamageDealt\t</key>\n              <greaterOrEqual>\t1000\t</greaterOrEqual>\n            </results>\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_2_3_3",
+    "operation": 2,
+    "chain": 3,
+    "number": 3,
+    "qid": 108,
+    "main": "<postBattle>\n          <and>\n            <vehicleDamage>\n              <limittedTime>\t120\t</limittedTime>\n              <greaterOrEqual>\t750\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleDamage>\n              <limittedTime>\t120\t</limittedTime>\n              <greaterOrEqual>\t750\t</greaterOrEqual>\n            </vehicleDamage>\n            <isAlive />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_2_3_4",
+    "operation": 2,
+    "chain": 3,
+    "number": 4,
+    "qid": 109,
+    "main": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t2\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t2\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleDamage>\n            <vehicleKills>\n              <enemyImmobilized />\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_2_2_2",
+    "operation": 2,
+    "chain": 2,
+    "number": 2,
+    "qid": 92,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleKills>\n            <results>\n              <key>\tdamageDealt\t</key>\n              <greaterOrEqual>\t2000\t</greaterOrEqual>\n            </results>\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_3_3_3",
+    "operation": 3,
+    "chain": 3,
+    "number": 3,
+    "qid": 183,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <limittedTime>\t180\t</limittedTime>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <limittedTime>\t180\t</limittedTime>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n            <isAlive />\n            <win />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_3_3_4",
+    "operation": 3,
+    "chain": 3,
+    "number": 4,
+    "qid": 184,
+    "main": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t3\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t3\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t3\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t3\t</greaterOrEqual>\n            </vehicleDamage>\n            <win />\n            <vehicleKills>\n              <enemyImmobilized />\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_3_2_2",
+    "operation": 3,
+    "chain": 2,
+    "number": 2,
+    "qid": 167,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t3\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t3\t</greaterOrEqual>\n            </vehicleKills>\n            <results>\n              <key>\tdamageDealt\t</key>\n              <greaterOrEqual>\t3000\t</greaterOrEqual>\n            </results>\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_4_3_3",
+    "operation": 4,
+    "chain": 3,
+    "number": 3,
+    "qid": 258,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <limittedTime>\t180\t</limittedTime>\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <limittedTime>\t180\t</limittedTime>\n              <greaterOrEqual>\t2\t</greaterOrEqual>\n            </vehicleKills>\n            <isAlive />\n            <win />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_4_3_4",
+    "operation": 4,
+    "chain": 3,
+    "number": 4,
+    "qid": 259,
+    "main": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t4\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t4\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <crits>\n              <destroyed>\n                <crit>\n                  <critName>\ttrack\t</critName>\n                  <greaterOrEqual>\t4\t</greaterOrEqual>\n                </crit>\n              </destroyed>\n            </crits>\n            <vehicleDamage>\n              <enemyImmobilized />\n              <eventCount />\n              <greaterOrEqual>\t4\t</greaterOrEqual>\n            </vehicleDamage>\n            <vehicleKills>\n              <enemyImmobilized />\n              <greaterOrEqual>\t3\t</greaterOrEqual>\n            </vehicleKills>\n            <win />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_4_2_2",
+    "operation": 4,
+    "chain": 2,
+    "number": 2,
+    "qid": 242,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t4\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <distance>\t-101\t</distance>\n              <greaterOrEqual>\t4\t</greaterOrEqual>\n            </vehicleKills>\n            <results>\n              <key>\tdamageDealt\t</key>\n              <greaterOrEqual>\t4000\t</greaterOrEqual>\n            </results>\n          </and>\n        </postBattle>\n      "
+  }
+]

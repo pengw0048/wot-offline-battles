@@ -84,6 +84,8 @@ BOT_TIER_OPTIONS = (
     ('random', 'Random'), ('same', 'Same tier'),
     ('minus1_0', 'Tier -1 / 0'), ('0_plus1', 'Tier 0 / +1'),
     ('minus1_plus1', 'Tier -1 / +1'),
+    ('0_plus2', 'Tier 0 / +1 / +2'),
+    ('minus2_0', 'Tier -2 / -1 / 0'),
 )
 _BOT_SKILL_CONTROLS = ('skill_previous', 'skill', 'skill_next')
 # The values and their order are bot_gunnery.SKILL_MODES, easiest first, bound
@@ -355,7 +357,10 @@ class WaitingRoomUI(object):
                  on_map_selected=None, bot_tier_status=None,
                  request_bot_tier_mode=None, open_map_picker=None,
                  round_seconds=None, bot_skill_status=None,
-                 request_bot_skill_mode=None):
+                 request_bot_skill_mode=None, training_status=None,
+                 toggle_training_bots=None):
+        self._training_status = training_status or (lambda: (False, False))
+        self._toggle_training_bots = toggle_training_bots
         self._request_start = request_start
         self._map_pool = map_pool
         self._status = status or (lambda: '')
@@ -1042,6 +1047,15 @@ class WaitingRoomUI(object):
         for role in ('title', 'room', 'players', 'tier', 'skill', 'map',
                      'message'):
             self._set(self._labels[role], 'visible', True)
+        training, bots = self._training_status()
+        self._set_text('title', tr('TRAINING ROOM') if training else tr('LAN WAITING ROOM'))
+        if training:
+            self._set_text('tier', tr('TRAINING BOTS: ON') if bots else tr('TRAINING BOTS: OFF'))
+            if not self._message:
+                self._set_text('message', tr('Training: no battle rewards or mission progress.'))
+            for role in ('tier', 'tier_previous', 'tier_next'):
+                self._set(self._controls[role], 'visible', is_host)
+                self._set(self._labels[role], 'visible', True)
         self._paint()
         self._set(self._panel, 'visible', True)
         return True
@@ -1074,6 +1088,11 @@ class WaitingRoomUI(object):
             self.close()
             if callable(self._on_close):
                 self._on_close()
+            return True
+        if (role in _BOT_TIER_CONTROLS and self._training_status()[0] and
+                self._host() and callable(self._toggle_training_bots)):
+            self._toggle_training_bots()
+            self.refresh()
             return True
         if role in _TEAM_SELECT_CONTROLS:
             return self._select_team(_TEAM_SELECT_ACTIONS[role])

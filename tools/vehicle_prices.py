@@ -66,9 +66,10 @@ def own_text(nested):
 
 
 def read_price(section):
-    """Return ``(credits, gold, not_in_shop)``, or None when unpriced."""
+    """Return ``(credits, gold, not_in_shop[, crystal])``, or None."""
     price = None
     not_in_shop = False
+    crystal = 0
     for name, value in children(section):
         if name == 'price':
             nested = element(value)
@@ -76,11 +77,16 @@ def read_price(section):
                 own_text(nested) if nested is not None else text(value.value))
             is_gold = nested is not None and any(
                 child == 'gold' for child, unused in children(nested))
-            price = (0, amount) if is_gold else (amount, 0)
+            is_crystal = nested is not None and any(
+                child == 'crystal' for child, unused in children(nested))
+            crystal = amount if is_crystal else 0
+            price = ((0, 0) if is_crystal else
+                     ((0, amount) if is_gold else (amount, 0)))
         elif name == 'notInShop':
             raw = value.value
             not_in_shop = (raw is True or
                            text(raw).strip().lower() in ('true', '1'))
     if price is None:
         return None
-    return (price[0], price[1], not_in_shop)
+    result = (price[0], price[1], not_in_shop)
+    return result + (crystal,) if crystal else result

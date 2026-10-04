@@ -17,10 +17,11 @@ sys.path.insert(0, str(SERVER_ROOT))
 
 import lan_battle_server as server_module  # noqa: E402
 from lan_battle_server import (  # noqa: E402
-    BattleState, CLIENT_BUILD_0922, ClientHandler,
+    BattleState, BOT_MANIFEST_REFRESH_TICKS, CLIENT_BUILD_0922, ClientHandler,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY, PROJECTILE_CAPABILITY,
     HUMAN_RAM_TIMELINE_CAPABILITY,
-    LEAN_SNAPSHOT_MANIFEST_CAPABILITY, Player, PREBATTLE_SECONDS,
+    LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_LINE_BYTES, Player,
+    PREBATTLE_SECONDS,
     PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
     RAM_CONTACT_LEDGER_CAPABILITY,
@@ -543,6 +544,239 @@ class OutboundFailureDiagnosticsTests(unittest.TestCase):
 
 
 class SimulationWorkerStateTests(unittest.TestCase):
+    @staticmethod
+    def _oversized_manifest_state(lineage_current):
+        state = BattleState(map_name='11_murovanka')
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        state.tick = BOT_MANIFEST_REFRESH_TICKS
+        state._next_bot_planner_tick = state.tick + 10000
+        connection = _Connection()
+        player = Player(
+            1, connection, ('127.0.0.1', 1000), team=1, slot=0,
+            capabilities=(LEAN_SNAPSHOT_MANIFEST_CAPABILITY,))
+        state.players = {player.player_id: player}
+        state.bot_authority_id = player.player_id
+        state.bot_manifest = [{
+            'id': 2, 'team': 2, 'slot': 0,
+            'name': 'oversized-periodic-replay',
+            'vehicle': 'ussr:R11_MS-1',
+            'synthetic_padding': 'x' * MAX_LINE_BYTES,
+        }]
+        state.bot_manifest_revision = 1
+        if lineage_current:
+            player.bot_manifest_round_id_sent = state.round_id
+            player.bot_manifest_revision_sent = state.bot_manifest_revision
+            player.bot_manifest_authority_epoch_sent = state.authority_epoch
+            player.bot_manifest_tick_sent = 0
+        return state, player, connection
+
+    def test_oversized_periodic_manifest_defers_without_dropping_live_state(self):
+        state, player, connection = self._oversized_manifest_state(True)
+
+        state.tick_once(1.0 / TICK_HZ)
+
+        snapshots = [message for message in connection.messages
+                     if message.get('type') == 'snapshot']
+        self.assertEqual(1, len(snapshots))
+        self.assertNotIn('bot_manifest', snapshots[0])
+        self.assertTrue(player.connected)
+        self.assertEqual(state.tick, player.snapshot_tick_sent)
+        self.assertEqual(state.tick, player.bot_manifest_tick_sent)
+
+    def test_oversized_lineage_snapshot_is_deferred_without_disconnect(self):
+        state, player, connection = self._oversized_manifest_state(False)
+
+        with mock.patch.object(server_module, '_server_log_limited') as log:
+            state.tick_once(1.0 / TICK_HZ)
+
+        self.assertEqual([], connection.messages)
+        self.assertTrue(player.connected)
+        self.assertEqual(-1, player.snapshot_tick_sent)
+        log.assert_called_once()
+
+    def test_unsent_periodic_sections_survive_latest_snapshot_replacement(self):
+        state = BattleState(map_name='01_karelia')
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        state.tick = 1000
+        state._next_bot_planner_tick = state.tick + 10000
+        player = Player(
+            1, _Connection(), ('127.0.0.1', 1000), team=1, slot=0,
+            capabilities=(LEAN_SNAPSHOT_MANIFEST_CAPABILITY,))
+        player._force_async_outbox = True
+        state.players = {player.player_id: player}
+        state.bot_authority_id = player.player_id
+
+        player.bot_manifest_round_id_sent = state.round_id
+        player.bot_manifest_revision_sent = state.bot_manifest_revision
+        player.bot_manifest_authority_epoch_sent = state.authority_epoch
+        player.bot_manifest_tick_sent = state.tick
+        player.bot_order_revision_sent = state.bot_orders['revision']
+        player.destructible_revision_sent = state.destructible_revision
+        order_tick = state.tick - server_module.BOT_ORDER_REFRESH_TICKS
+        destructible_tick = (
+            state.tick - server_module.DESTRUCTIBLE_REFRESH_TICKS)
+        player.bot_order_tick_sent = order_tick
+        player.destructible_tick_sent = destructible_tick
+
+        # Hold the asynchronous writer so the second latest-only offer really
+        # replaces the first. Delivery frontiers must remain unchanged until
+        # _outbox_loop completes a write, making both offers retain the due
+        # repair sections instead of replacing them with a lean frame.
+        with mock.patch.object(
+                player, '_start_outbox_locked', return_value=None):
+            state.tick_once(1.0 / TICK_HZ)
+            first = dict(player._outbox_snapshot['message'])
+            self.assertIn('bot_orders', first)
+            self.assertIn('destructibles', first)
+            self.assertEqual(order_tick, player.bot_order_tick_sent)
+            self.assertEqual(
+                destructible_tick, player.destructible_tick_sent)
+
+            state.tick_once(1.0 / TICK_HZ)
+            second = dict(player._outbox_snapshot['message'])
+            self.assertGreater(second['server_tick'], first['server_tick'])
+            self.assertIn('bot_orders', second)
+            self.assertIn('destructibles', second)
+            self.assertEqual(order_tick, player.bot_order_tick_sent)
+            self.assertEqual(
+                destructible_tick, player.destructible_tick_sent)
+
+        player._mark_message_sent(second)
+        self.assertEqual(second['server_tick'], player.bot_order_tick_sent)
+        self.assertEqual(
+            second['server_tick'], player.destructible_tick_sent)
+
+    def test_late_join_barrier_defers_the_cumulative_destructible_ledger(self):
+        state = BattleState(map_name='11_murovanka')
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        for revision in range(1, 1801):
+            event = {
+                'kind': 'destructible',
+                'destructible_kind': 'fragile',
+                'chunk_id': 32384 + revision // 256,
+                'item_index': revision,
+                'x': float(revision % 100), 'y': 0.0,
+                'z': float(-(revision % 100)),
+                'fall_yaw': 0.0, 'speed': 12.0,
+                'is_shot': False, 'revision': revision,
+                'reported_by': -1,
+            }
+            state.destructibles[
+                ('fragile', event['chunk_id'], revision, None)] = event
+        state.destructible_revision = 1800
+
+        message = state.current_battle_message()
+        payload = (json.dumps(message, separators=(',', ':')) +
+                   '\n').encode('utf-8')
+
+        self.assertNotIn('destructibles', message)
+        self.assertEqual(1800, message['destructible_revision'])
+        self.assertLessEqual(len(payload), MAX_LINE_BYTES)
+
+    def test_large_destructible_ledger_is_paged_under_the_wire_limit(self):
+        state = BattleState(map_name='11_murovanka')
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        state.tick = 5250
+        state._next_bot_planner_tick = state.tick + 10000
+        connection = _Connection()
+        player = Player(
+            1, connection, ('127.0.0.1', 1000), team=1, slot=0,
+            capabilities=(LEAN_SNAPSHOT_MANIFEST_CAPABILITY,))
+        state.players = {player.player_id: player}
+        state.bot_authority_id = player.player_id
+        state.bot_manifest = [{
+            'id': bot_id, 'team': 1 if bot_id <= 15 else 2,
+            'slot': (bot_id - 1) % 15,
+            'name': 'Murovanka-%02d' % bot_id,
+            'vehicle': 'ussr:R11_MS-1',
+            'profile': {'shells': [{
+                'index': index, 'kind': 'ARMOR_PIERCING',
+                'penetration': 100.0, 'damage': 100.0,
+                'speed': 500.0,
+            } for index in range(5)]},
+        } for bot_id in range(2, 31)]
+        state.bot_manifest_revision = 1
+        state.bot_states = dict((entry['id'], {
+            'id': entry['id'], 'team': entry['team'],
+            'slot': entry['slot'], 'name': entry['name'],
+            'vehicle': entry['vehicle'], 'alive': True,
+            'health': 1000, 'max_health': 1000,
+            'x': float(entry['id']), 'y': 0.0, 'z': 0.0,
+        }) for entry in state.bot_manifest)
+        state.bot_orders = {
+            'revision': 1,
+            'orders': [{
+                'id': entry['id'], 'mode': 'advance',
+                'move_position': {
+                    'x': float(entry['id']), 'y': 0.0, 'z': 100.0},
+                'aim_position': {
+                    'x': 0.0, 'y': 1.0, 'z': -100.0},
+            } for entry in state.bot_manifest],
+        }
+        event_count = 1800
+        for revision in range(1, event_count + 1):
+            event = {
+                'kind': 'destructible',
+                'destructible_kind': 'fragile',
+                'chunk_id': 32384 + revision // 256,
+                'item_index': revision,
+                'x': float(revision % 100), 'y': 0.0,
+                'z': float(-(revision % 100)),
+                'fall_yaw': 0.0, 'speed': 12.0,
+                'is_shot': False, 'revision': revision,
+                'reported_by': -1,
+            }
+            state.destructibles[
+                ('fragile', event['chunk_id'], revision, None)] = event
+        state.destructible_revision = event_count
+        # Reproduce the report's tick 5251 cadence collision exactly: the
+        # manifest, orders and cumulative scenery replay all become due on
+        # 1 + 35 * 150 while one large destruction ledger already exists.
+        due_tick = state.tick + 1
+        player.bot_manifest_round_id_sent = state.round_id
+        player.bot_manifest_revision_sent = state.bot_manifest_revision
+        player.bot_manifest_authority_epoch_sent = state.authority_epoch
+        player.bot_manifest_tick_sent = (
+            due_tick - BOT_MANIFEST_REFRESH_TICKS)
+        player.bot_order_revision_sent = state.bot_orders['revision']
+        player.bot_order_tick_sent = (
+            due_tick - server_module.BOT_ORDER_REFRESH_TICKS)
+        player.destructible_revision_sent = state.destructible_revision
+        player.destructible_tick_sent = (
+            due_tick - server_module.DESTRUCTIBLE_REFRESH_TICKS)
+
+        for unused in range(12):
+            state.tick_once(1.0 / TICK_HZ)
+            if (player.destructible_revision_sent == event_count and
+                    player.destructible_tick_sent >= due_tick and
+                    player.bot_order_tick_sent >= due_tick):
+                break
+
+        snapshots = [message for message in connection.messages
+                     if message.get('type') == 'snapshot']
+        self.assertGreaterEqual(len(snapshots), 3)
+        self.assertIn('bot_manifest', snapshots[0])
+        self.assertNotIn('bot_orders', snapshots[0])
+        self.assertNotIn('destructibles', snapshots[0])
+        self.assertTrue(any('bot_orders' in message
+                            for message in snapshots[1:]))
+        pages = [message['destructibles'] for message in snapshots
+                 if 'destructibles' in message]
+        self.assertGreaterEqual(len(pages), 2)
+        self.assertEqual(
+            list(range(1, event_count + 1)),
+            [event['revision'] for page in pages for event in page])
+        for message in snapshots:
+            payload = (json.dumps(message, separators=(',', ':')) +
+                       '\n').encode('utf-8')
+            self.assertLessEqual(len(payload), MAX_LINE_BYTES)
+        self.assertTrue(player.connected)
+        self.assertEqual(event_count, player.destructible_revision_sent)
+
     def test_worker_loading_timeout_has_separate_startup_grace(self):
         self.assertGreater(
             server_module.SIMULATION_WORKER_LOADING_TIMEOUT_SECONDS,
@@ -1219,7 +1453,8 @@ class SimulationWorkerStateTests(unittest.TestCase):
         self.assertEqual(2, receipts[0]['death_reason'])
         self.assertEqual(1, receipts[0]['finish_reason'])
         self.assertEqual(123, receipts[0]['stats']['damage'])
-        self.assertTrue(receipts[0]['premature_leave'])
+        self.assertFalse(receipts[0]['premature_leave'])
+        self.assertFalse(receipts[0]['watched_battle_to_end'])
 
         result_events = len([
             event for event in state.pending_events
@@ -1416,6 +1651,40 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         self.assertLess(
             self.state.tick, int(round(PREBATTLE_SECONDS * TICK_HZ)))
         return manifest
+
+    def test_visible_ping_reaches_worker_main_loop_through_socket_dispatch(self):
+        from gui.mods.offline_lan_0922.authority_worker import AuthorityWorkerLANClient
+        worker = self._connect()
+        worker.send(_worker_hello())
+        worker.receive_until('welcome')
+        player = self._connect()
+        player.send(_player_hello())
+        welcome = player.receive_until('welcome')
+        self._enter_worker_countdown(worker, player)
+        stamp = time.monotonic()
+        player.send({'type': 'worker_ping', 'seq': 27, 'client_time': stamp})
+        probe = worker.receive_until('worker_ping')
+        player_id = welcome['player_id']
+        self.assertEqual(player_id, probe['player_id'])
+        self.assertIn(player_id, self.state.worker_ping_pending)
+        # A visible client must remain unable to impersonate the worker.
+        player.send(dict(probe, type='worker_pong'))
+        player.send({'type': 'ping', 'seq': 28, 'client_time': stamp})
+        player.receive_until('pong')
+        self.assertIn(player_id, self.state.worker_ping_pending)
+        client = AuthorityWorkerLANClient('localhost', 28782)
+        client._send = worker.send
+        client.round_id = self.state.round_id
+        client.authority_epoch = self.state.authority_epoch
+        client.record_frame_interval(0.1)
+        client._handle_message(probe)
+        reply = player.receive_until('worker_pong')
+        self.assertEqual(27, reply['seq'])
+        self.assertAlmostEqual(100.0, reply['frame_ms'], places=3)
+        self.assertEqual(stamp, reply['client_time'])
+        self.assertEqual(self.state.round_id, reply['round_id'])
+        self.assertEqual(self.state.authority_epoch, reply['authority_epoch'])
+        self.assertNotIn(player_id, self.state.worker_ping_pending)
 
     def test_handler_requires_exact_protocol_for_all_handshakes(self):
         incompatible = self._connect()

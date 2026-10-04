@@ -8,7 +8,7 @@ $WorkRoot = Join-Path $BuildRoot "pyinstaller"
 $SpecRoot = Join-Path $BuildRoot "spec"
 # PyInstaller owns its work directory, so the payload is staged beside it.
 $PayloadRoot = Join-Path $BuildRoot "payload"
-$AppName = "WoT-Offline-Battles-Launcher"
+$AppName = "wot-0.9.22-offline-battles"
 $PackedXmlModule = Join-Path $RepoRoot "tools\packed_xml.py"
 
 if (-not (Test-Path -LiteralPath $PackedXmlModule)) {
@@ -46,11 +46,19 @@ python -m PyInstaller `
     --onedir `
     --windowed `
     --noupx `
+    --version-file (Join-Path $LauncherRoot "version_info.txt") `
     --name $AppName `
     --distpath $DistRoot `
     --workpath $WorkRoot `
     --specpath $SpecRoot `
     --paths (Join-Path $RepoRoot "tools") `
+    --paths (Join-Path $RepoRoot "src/res/scripts/client") `
+    --hidden-import replay_launch `
+    --hidden-import bot_tactics_ui `
+    --hidden-import bot_tactics_smoke `
+    --exclude-module gui `
+    --hidden-import PIL.ImageTk `
+    --hidden-import PIL.DdsImagePlugin `
     --hidden-import packed_xml `
     --hidden-import vehicle_prices `
     --add-data "$PayloadRoot\servers;servers" `
@@ -105,7 +113,13 @@ Copy-Item -Force `
     (Join-Path $RepoRoot "licenses\Boost-1.0.txt") `
     (Join-Path $LicenseRoot "Boost-1.0.txt")
 
-foreach ($entry in @("$AppName.exe", "README.txt", "LICENSE",
+# The editor's shared pure modules are read from the bundled server source,
+# not a partial frozen gui package that would hide other server imports.
+python (Join-Path $RepoRoot "tools/stage_editor_licenses.py") $LicenseRoot
+if ($LASTEXITCODE -ne 0) { throw "Pillow license staging failed" }
+
+foreach ($entry in @("$AppName.exe", "README.txt",
+                     "LICENSE",
                      "THIRD_PARTY_NOTICES.md", "licenses\Boost-1.0.txt")) {
     if (-not (Test-Path -LiteralPath (Join-Path $DistRoot "$AppName\$entry"))) {
         throw "Launcher distribution is incomplete: $entry"

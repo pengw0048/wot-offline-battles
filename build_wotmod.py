@@ -29,8 +29,8 @@ if _SCHEMA_ROOT not in sys.path:
 import navigation_graph_schema as _navigation_schema
 
 
-MOD_ID = 'org.peng.offline_lan_0922'
-MOD_VERSION = '0.7.7'
+MOD_ID = 'org.colorfulmeans.offline_lan_0922'
+MOD_VERSION = '0.9.7'
 BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
 BUILD_IDENTITY_FILENAME = 'build_identity.json'
 BUILD_IDENTITY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
@@ -714,6 +714,16 @@ def build():
                 staging_root, ddir='.', force=1, quiet=1):
             raise SystemExit('Python 2.7 compilation failed')
         _remove_sources(staging_root)
+        replay_root = os.path.join(staging_root, 'res', 'offline_replay')
+        os.makedirs(replay_root)
+        for source, name in (
+                (os.path.join(repo_root, 'build', 'replay-runtime',
+                              'recorder-runtime.zip'), 'recorder-runtime.zip'),
+                (os.path.join(repo_root, 'tools', 'replay',
+                              'replay_reader_process.py'), 'replay_reader_process.py')):
+            if not os.path.isfile(source):
+                raise SystemExit('run python3 tools/build_replay_runtime.py first: ' + source)
+            shutil.copy2(source, os.path.join(replay_root, name))
         _validate_entry(staging_root)
         filename = '%s_%s.wotmod' % (MOD_ID, MOD_VERSION)
         destination = os.path.join(dist_root, filename)

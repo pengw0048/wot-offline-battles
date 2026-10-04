@@ -347,7 +347,7 @@ def _anchor_value(points, rating):
     return lower + (float(points[index + 1]) - lower) * fraction
 
 
-def rating_parameters(rating):
+def rating_parameters(rating, overrides=None):
     """Return one Bot's gunner bundle, interpolated between the anchors.
 
     The bundle is built per call, so a caller may not rely on identity and
@@ -363,6 +363,9 @@ def rating_parameters(rating):
     level = _anchor_value([row['crew_level'] for row in rows], rating)
     result['crew_level'] = min(
         PROVEN_CREW_LEVELS, key=lambda proven: (abs(proven - level), proven))
+    if overrides:
+        from gui.mods.offline_lan_0922.bot_tactics import normalize_values
+        result.update(dict((k, v) for k, v in normalize_values(overrides).items() if k != 'skill'))
     return result
 
 
@@ -468,7 +471,7 @@ def bias_epoch(hold_seconds):
     return int(held / AIM_BIAS_SECONDS)
 
 
-def engagement_error(rating, round_id, bot_id, target_key, epoch):
+def engagement_error(rating, round_id, bot_id, target_key, epoch, overrides=None):
     """Return one gunner's frozen error for one aiming epoch.
 
     ``radius`` is a truncated half-normal in [0, 1]; the caller scales it by
@@ -477,7 +480,7 @@ def engagement_error(rating, round_id, bot_id, target_key, epoch):
     gunner under- or over-leads a moving target for the whole epoch instead
     of correcting between shots.
     """
-    params = rating_parameters(rating)
+    params = rating_parameters(rating, overrides)
     generator = random.Random(_stable_seed(
         'bot-gunner-v1', round_id, bot_id, target_key, epoch))
     radius = abs(generator.gauss(0.0, 0.5))
@@ -491,13 +494,13 @@ def engagement_error(rating, round_id, bot_id, target_key, epoch):
     }
 
 
-def aim_offset_metres(rating, error, dispersion_angle, distance):
+def aim_offset_metres(rating, error, dispersion_angle, distance, overrides=None):
     """Return the (lateral, vertical) aim-point error for one shot, in metres.
 
     The caller maps these onto the line of sight.  The error is angular so it
     grows with range exactly like the aiming circle it is measured against.
     """
-    params = rating_parameters(rating)
+    params = rating_parameters(rating, overrides)
     try:
         angle = float(dispersion_angle)
         reach = float(distance)
@@ -516,7 +519,7 @@ def aim_offset_metres(rating, error, dispersion_angle, distance):
 
 
 def may_fire(rating, hold_seconds, laying_seconds, dispersion_factor,
-             opening_shot=True):
+             opening_shot=True, overrides=None):
     """Return whether this gunner has reacted and finished laying.
 
     ``hold_seconds`` is the continuous hold on the current target and drives
@@ -531,7 +534,7 @@ def may_fire(rating, hold_seconds, laying_seconds, dispersion_factor,
     invert.  After the opening shot the gun's own reload owns the cadence;
     the aim-point bias and the lead error still separate Bots on every round.
     """
-    params = rating_parameters(rating)
+    params = rating_parameters(rating, overrides)
     try:
         held = float(hold_seconds)
         laying = float(laying_seconds)

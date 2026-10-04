@@ -349,7 +349,7 @@ class ProjectileWireTests(unittest.TestCase):
             0.0, 0.0, shell_index=0, next_shell_index=0,
             shell_change_pending=1))
 
-    def test_visible_input_carries_full_world_up_without_expanding_euler(self):
+    def test_visible_input_preserves_overturned_pose_and_world_up(self):
         client = self.active_client()
         up_cosine = math.cos(math.radians(85.0))
 
@@ -361,8 +361,8 @@ class ProjectileWireTests(unittest.TestCase):
             gun_checkpoint=self.gun_checkpoint()))
 
         message = wire_copy(client._outbound_queue[-1][1])
-        self.assertEqual(0.61, message['pitch'])
-        self.assertEqual(-0.61, message['roll'])
+        self.assertEqual(1.5, message['pitch'])
+        self.assertEqual(-1.5, message['roll'])
         self.assertAlmostEqual(up_cosine, message['up_cosine'])
         count = len(client._outbound_queue)
         for invalid in (True, '0.5', float('nan'), float('inf'), -1.01, 1.01):

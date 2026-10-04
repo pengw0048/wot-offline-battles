@@ -24,10 +24,16 @@ CMD_VEH_APPLY_STYLE = 116
 CMD_SELL_C11N_ITEMS = 117
 CMD_BUY_C11N_ITEMS = 118
 CMD_VEH_APPLY_OUTFIT = 119
+CMD_SELECT_POTAPOV_QUESTS = 124
+# 0.9.22 Account.getPersonalMissionReward / pawnFreeAwardList. The pawn
+# payload uses EVENT_TYPE.PERSONAL_MISSION (8), unlike selection's branch 0.
+CMD_GET_POTAPOV_QUEST_REWARD = 125
+CMD_PAWN_FREE_AWARD_LIST = 10019
 # Ledger surface, verified against this build's AccountCommands.pyc.
 CMD_UNLOCK = 201
 CMD_EXCHANGE = 202
 CMD_FREE_XP_CONV = 203
+CMD_PREMIUM = 204
 CMD_BUY_SLOT = 205
 CMD_BUY_BERTHS = 206
 CMD_BUY_VEHICLE = 301
@@ -62,6 +68,8 @@ CMD_REQ_BATTLE_RESULTS = 1500
 CMD_BATTLE_RESULTS_RECEIVED = 1501
 CMD_ADD_INT_USER_SETTINGS = 1600
 CMD_DEL_INT_USER_SETTINGS = 1601
+# Mod-owned command, carried by the existing Account string-request mailbox.
+CMD_OFFLINE_SERVICE = 19900
 
 # constants.pyc QUEUE_TYPE.RANDOMS, consumed by Account.onEnqueued/onDequeued.
 QUEUE_TYPE_RANDOMS = 1

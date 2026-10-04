@@ -132,6 +132,7 @@ def _vehicles(unlocks_descrs=(), autounlocked=()):
     }
     return types.SimpleNamespace(
         getTypeOfCompactDescr=lambda compact_descr: item_types[compact_descr],
+        getItemByCompactDescr=lambda compact_descr: types.SimpleNamespace(tags=()),
         getVehicleType=lambda compact_descr: types.SimpleNamespace(
             id=(0, 1), unlocksDescrs=unlocks_descrs,
             autounlockedItems=autounlocked))
@@ -222,6 +223,27 @@ class PriceIndexTests(unittest.TestCase):
         self.assertEqual({20}, not_in_shop)
         # A free item is still an item; it is priced at nothing, not absent.
         self.assertEqual({'credits': 0}, prices[30])
+
+    def test_only_retail_gold_vehicles_receive_shop_offer_entitlement(self):
+        class _List(object):
+            def getList(self, nation_id):
+                return {7: object(), 8: object(), 9: object()}
+
+        vehicles = types.SimpleNamespace(
+            makeIntCompactDescrByID=lambda unused_kind, nation, item: (
+                nation * 100 + item),
+            g_list=_List())
+        nations = types.SimpleNamespace(NAMES=('ussr',))
+        prices = {
+            7: (0, 1500, False),
+            8: (0, 11500, True),
+            9: (100000, 0, False),
+        }
+
+        self.assertEqual(
+            {7},
+            ECONOMY.retail_gold_vehicle_offers(
+                vehicles, nations, prices))
 
 
 class PurchaseTests(unittest.TestCase):
@@ -453,6 +475,93 @@ class VehiclePurchaseTests(unittest.TestCase):
                 'items': items}), mock.patch.object(
                     package, 'vehicle_records', module, create=True):
             yield
+
+    def test_bond_offer_includes_slot_and_full_crew_and_rolls_back_if_unaffordable(self):
+        from unittest import mock
+        import test_port_0922_garage as crew_fixture
+        snapshot = _snapshot()
+        snapshot['accountSlots'] = 1
+        snapshot['wallet'].update(gold=0, crystal=6000)
+        snapshot['offlineVehicleOffers'] = [{'cd': SECOND_VEHICLE_CD}]
+        snapshot['shopItemPrices'][SECOND_VEHICLE_CD] = {'crystal': 6000}
+        vehicles = _vehicles()
+        vehicle_type = vehicles.getVehicleType(SECOND_VEHICLE_CD)
+        vehicle_type.crewRoles = (('commander',),)
+        vehicles.getVehicleType = lambda cd: vehicle_type
+        unused, tankmen = crew_fixture._modules()
+        state = GARAGE.GarageState(snapshot, vehicles_module=vehicles, tankmen_module=tankmen)
+        with self._built([]):
+            record = state.buy_vehicle(SECOND_VEHICLE_CD)
+        self.assertEqual(0, state.snapshot()['wallet']['gold'])
+        self.assertEqual(0, state.snapshot()['wallet']['crystal'])
+        self.assertEqual(2, state.snapshot()['accountSlots'])
+        self.assertEqual(b'tman:new:commander#100', record['tankmen'][record['crew'][0]])
+        before = copy.deepcopy(state.snapshot())
+        with self._built([]), self.assertRaises(GARAGE.GarageError):
+            state.buy_vehicle(SECOND_VEHICLE_CD)
+        self.assertEqual(before, state.snapshot())
+        poor = copy.deepcopy(snapshot)
+        poor['wallet']['crystal'] = 5999
+        poor_state = GARAGE.GarageState(poor, vehicles_module=vehicles, tankmen_module=tankmen)
+        before = copy.deepcopy(poor_state.snapshot())
+        with self._built([]), self.assertRaises(GARAGE.GarageError):
+            poor_state.buy_vehicle(SECOND_VEHICLE_CD)
+        self.assertEqual(before, poor_state.snapshot())
+
+    def test_native_and_bond_vehicle_purchases_keep_their_own_price_and_bundle(self):
+        import test_port_0922_garage as crew_fixture
+        snapshot = _snapshot()
+        snapshot['accountSlots'] = 3
+        snapshot['wallet'].update(gold=32000, crystal=8000, credits=1000000)
+        snapshot['offlineVehicleOffers'] = [
+            {'cd': SECOND_VEHICLE_CD, 'name': 'offer', 'price': 8000}]
+        snapshot['shopItemPrices'][SECOND_VEHICLE_CD] = {'gold': 9000}
+        vehicles = _vehicles()
+        vehicle_type = vehicles.getVehicleType(SECOND_VEHICLE_CD)
+        vehicle_type.crewRoles = (('commander',),)
+        vehicles.getVehicleType = lambda cd: vehicle_type
+        unused, tankmen = crew_fixture._modules()
+        for restoring in (False, True):
+            for bonds in (False, True):
+                with self.subTest(restoring=restoring, bonds=bonds):
+                    data = copy.deepcopy(snapshot)
+                    if restoring:
+                        data['vehicleRecovery'] = {SECOND_VEHICLE_CD: {
+                            'soldAt': 1, 'credits': 123, 'limited': False}}
+                    state = GARAGE.GarageState(data, vehicles_module=vehicles,
+                                              tankmen_module=tankmen)
+                    with self._built([]):
+                        record = state.buy_vehicle(SECOND_VEHICLE_CD, bond_offer=bonds)
+                    wallet = state.snapshot()['wallet']
+                    self.assertEqual(0 if bonds else 8000, wallet['crystal'])
+                    self.assertEqual(23000 if not bonds and not restoring else 32000,
+                                     wallet['gold'])
+                    self.assertEqual(999877 if restoring and not bonds else 1000000,
+                                     wallet['credits'])
+                    self.assertEqual(4 if bonds else 3, state.snapshot()['accountSlots'])
+                    if bonds:
+                        self.assertEqual(b'tman:new:commander#100',
+                            record['tankmen'][record['crew'][0]])
+                    self.assertEqual({'gold': 9000},
+                                     state.snapshot()['shopItemPrices'][SECOND_VEHICLE_CD])
+        poor = copy.deepcopy(snapshot)
+        poor['wallet']['crystal'] = 7999
+        state = GARAGE.GarageState(poor, vehicles_module=vehicles, tankmen_module=tankmen)
+        before = copy.deepcopy(state.snapshot())
+        with self._built([]), self.assertRaises(GARAGE.GarageError):
+            state.buy_vehicle(SECOND_VEHICLE_CD, bond_offer=True)
+        self.assertEqual(before, state.snapshot())
+
+    def test_bond_purchase_requires_a_published_positive_quote(self):
+        for offers in ([], [{'cd': SECOND_VEHICLE_CD, 'price': 0}]):
+            with self.subTest(offers=offers):
+                snapshot = _snapshot()
+                snapshot['offlineVehicleOffers'] = offers
+                state = _state(snapshot)
+                before = copy.deepcopy(state.snapshot())
+                with self.assertRaises(GARAGE.GarageError):
+                    state.buy_vehicle(SECOND_VEHICLE_CD, bond_offer=True)
+                self.assertEqual(before, state.snapshot())
 
     def test_permanent_purchase_accepts_the_exact_client_sentinel(self):
         snapshot = _snapshot()
@@ -690,6 +799,69 @@ class VehiclePurchaseTests(unittest.TestCase):
             state.buy_vehicle(SECOND_VEHICLE_CD)
         self.assertEqual(4321, state.snapshot()['vehicleXP'][SECOND_VEHICLE_CD])
 
+    def test_premium_sale_restore_uses_credits_slot_and_single_entitlement(self):
+        import json
+        from unittest import mock
+        from gui.mods.offline_lan_0922 import offline_services as policy
+        vehicles = _vehicles()
+        vehicle_type = vehicles.getVehicleType(SECOND_VEHICLE_CD)
+        vehicle_type.tags = frozenset(('premium',))
+        vehicles.getVehicleType = lambda cd: vehicle_type
+        state = _state(self._two_vehicles(), vehicles=vehicles)
+        with mock.patch.object(GARAGE.time, 'time', return_value=100):
+            state.sell_vehicle(10)
+        data = state.snapshot()
+        self.assertEqual({'soldAt': 100, 'credits': 2750000, 'limited': True},
+                         data['vehicleRecovery'][SECOND_VEHICLE_CD])
+        restored = json.loads(json.dumps(policy.saved_fields(data)))
+        self.assertEqual({SECOND_VEHICLE_CD: (0, 100)},
+                         policy.vehicle_recovery_buffer(restored))
+        self.assertIsNone(policy.vehicle_recovery_offer(restored, SECOND_VEHICLE_CD,
+                         100 + policy.VEHICLE_RESTORE_SECONDS))
+        data['accountSlots'] = 1
+        with mock.patch.object(policy.time, 'time', return_value=101):
+            before = copy.deepcopy(data)
+            with self.assertRaises(GARAGE.GarageError):
+                state.buy_vehicle(SECOND_VEHICLE_CD)
+            self.assertEqual(before, data)
+            data['accountSlots'] = 2
+            data['wallet']['credits'] = 3000000
+            gold = data['wallet']['gold']
+            with self._built([]):
+                record = state.buy_vehicle(SECOND_VEHICLE_CD)
+            self.assertEqual(250000, data['wallet']['credits'])
+            self.assertEqual(gold, data['wallet']['gold'])
+            self.assertEqual([None], record['crew'])
+            self.assertEqual({}, data['vehicleRecovery'])
+            before = copy.deepcopy(data)
+            with self.assertRaises(GARAGE.GarageError):
+                state.buy_vehicle(SECOND_VEHICLE_CD)
+            self.assertEqual(before, data)
+
+    def test_rare_premium_has_unlimited_recovery_but_regular_vehicle_has_none(self):
+        from unittest import mock
+        from gui.mods.offline_lan_0922 import offline_services as policy
+        for tags, rented, expected in ((('premium',), False, True),
+                ((), False, False), (('premium', 'unrecoverable'), False, False),
+                (('premium',), True, False)):
+            vehicles = _vehicles()
+            vehicle_type = vehicles.getVehicleType(SECOND_VEHICLE_CD)
+            vehicle_type.tags = frozenset(tags)
+            vehicles.getVehicleType = lambda cd: vehicle_type
+            data = self._two_vehicles()
+            if rented:
+                data['vehicles'][1]['rent'] = (1000,)
+            data['notInShopItems'] = {SECOND_VEHICLE_CD}
+            state = _state(data, vehicles=vehicles)
+            with mock.patch.object(GARAGE.time, 'time', return_value=100):
+                state.sell_vehicle(10)
+            offer = policy.vehicle_recovery_offer(
+                state.snapshot(), SECOND_VEHICLE_CD, 100000000)
+            self.assertEqual(expected, offer is not None)
+            if expected:
+                self.assertEqual({SECOND_VEHICLE_CD: (1, 0)},
+                    policy.vehicle_recovery_buffer(state.snapshot()))
+
     def test_the_last_vehicle_cannot_be_sold(self):
         state = _state()
 
@@ -799,6 +971,66 @@ class VehiclePurchaseTests(unittest.TestCase):
 
 
 class CurrencyTests(unittest.TestCase):
+    def test_premium_packet_charges_the_published_price_and_extends_time(self):
+        snapshot = _snapshot()
+        snapshot['wallet']['gold'] = 5000
+        snapshot['premiumExpiryTime'] = 1700003600
+        state = _state(snapshot)
+
+        expiry = state.buy_premium(7, now=1700000000)
+
+        self.assertEqual(3750, state.snapshot()['wallet']['gold'])
+        self.assertEqual(
+            1700003600 + 7 * 24 * 60 * 60, expiry)
+
+    def test_original_premium_durations_and_one_day_purchase(self):
+        self.assertEqual([360, 180, 30, 7, 3, 1],
+                         sorted(ECONOMY.PREMIUM_COSTS, reverse=True))
+        snapshot = _snapshot()
+        snapshot['wallet']['gold'] = 5000
+        snapshot['premiumExpiryTime'] = 1700003600
+        state = _state(snapshot)
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(GARAGE.GarageError):
+            state.buy_premium(90, now=1700000000)
+        self.assertEqual(before, state.snapshot())
+        self.assertEqual(1700003600 + 86400,
+                         state.buy_premium(1, now=1700000000))
+        self.assertEqual(4750, state.snapshot()['wallet']['gold'])
+
+    def test_unoffered_or_unaffordable_premium_packet_is_atomic(self):
+        snapshot = _snapshot()
+        snapshot['wallet']['gold'] = 100
+        snapshot['premiumExpiryTime'] = 1700003600
+        state = _state(snapshot)
+        before = copy.deepcopy(state.snapshot())
+
+        with self.assertRaises(GARAGE.GarageError):
+            state.buy_premium(2, now=1700000000)
+        self.assertEqual(before, state.snapshot())
+        with self.assertRaises(GARAGE.GarageError):
+            state.buy_premium(7, now=1700000000)
+        self.assertEqual(before, state.snapshot())
+
+    def test_personal_missions_allow_one_active_quest_per_vehicle_class_chain(self):
+        state = _state()
+
+        selected = state.select_personal_missions(
+            0, [1, 1, 16, 31, 46, 61])
+
+        self.assertEqual([1, 16, 31, 46, 61], selected)
+        # The stock client sends the full replacement list: changing the LT
+        # mission replaces chain 1 while the other four stay active.
+        selected = state.select_personal_missions(
+            0, [2, 16, 31, 46, 61])
+        self.assertEqual([2, 16, 31, 46, 61], selected)
+        before = copy.deepcopy(state.snapshot())
+        with self.assertRaises(GARAGE.GarageError):
+            state.select_personal_missions(0, [1, 2, 16, 31, 46, 61])
+        with self.assertRaises(GARAGE.GarageError):
+            state.select_personal_missions(1, [1])
+        self.assertEqual(before, state.snapshot())
+
     def test_gold_converts_to_credits_at_the_published_rate(self):
         state = _state()
 

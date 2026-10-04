@@ -62,6 +62,10 @@ def _economy_modules(package_stubs):
                         'gui.mods.offline_lan_0922.account_rpc.economy'))
             _ECONOMY_MODULES['gui.mods.offline_lan_0922.launcher_inbox'] = (
                 _real_module('launcher_inbox'))
+            _ECONOMY_MODULES['gui.mods.offline_lan_0922.offline_services'] = (
+                _real_module('offline_services'))
+            for name in ('ui_i18n', 'personal_campaign_ui'):
+                _ECONOMY_MODULES['gui.mods.offline_lan_0922.' + name] = _real_module(name)
     return dict(_ECONOMY_MODULES)
 
 
@@ -300,6 +304,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         config_module.save_slot_earnings_percent = lambda: (
             100 if earnings_percent is None else earnings_percent)
         config_module.save_slot_initial_wallet = lambda: dict(initial_wallet or {})
+        config_module.save_slot_initial_personal_progress = lambda: {}
         config_module.ACTIVE_SAVE_SLOT = object()
         config_module.active_save_slot = lambda: 'default'
         # No inbox file exists unless a test writes one, so the launcher
@@ -328,6 +333,10 @@ class BootstrapLifecycleTests(unittest.TestCase):
         lan_session_module = types.ModuleType(
             'gui.mods.offline_lan_0922.lan_session')
         lan_session_module.LANSession = lambda *args, **kwargs: session
+        services_ui_module = types.ModuleType(
+            'gui.mods.offline_lan_0922.offline_services_ui')
+        services_ui_module.install = lambda: events.append('install_services')
+        services_ui_module.uninstall = lambda: None
         announcement_ui = types.SimpleNamespace(
             install=lambda: events.append('install_announcement_router'),
             uninstall=lambda: events.append('uninstall_announcement_router'))
@@ -612,6 +621,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.instance_guard': (
                 instance_guard_module),
             'gui.mods.offline_lan_0922.lan_session': lan_session_module,
+            'gui.mods.offline_lan_0922.offline_services_ui': services_ui_module,
             'gui.mods.offline_lan_0922.lobby_ui': lobby_ui_module,
             'gui.mods.offline_lan_0922.vehicle_blacklist': VEHICLE_BLACKLIST,
             'gui.mods.offline_lan_0922.vehicle_configuration': (
@@ -648,6 +658,259 @@ class BootstrapLifecycleTests(unittest.TestCase):
     def _career(self):
         return self._build(
             save_mode='new_account', starters=self.STARTER_NAMES)
+
+    def _campaign_modules(self, modules):
+        """Use the real campaign/store with the native resource read shape."""
+        import xml.etree.ElementTree as ET
+
+        def section(element):
+            return types.SimpleNamespace(
+                asString=element.text or '',
+                items=lambda: [(child.tag, section(child))
+                               for child in element])
+
+        resource_root = 'scripts/item_defs/potapov_quests/'
+        resources = {
+            resource_root + 'list.xml': ET.fromstring(
+                '<root><regular_1_1_1/></root>'),
+            resource_root + 'tiles.xml': ET.fromstring(
+                '<root><quests><tokenQuest><id>test_badge</id><enabled>true</enabled>'
+                '<conditions><preBattle><account><token><id>component</id>'
+                '<greaterOrEqual>1</greaterOrEqual></token></account></preBattle></conditions>'
+                '<bonus><dossier><name>playerBadges:10</name><value>timestamp</value>'
+                '</dossier></bonus></tokenQuest></quests></root>'),
+            resource_root + 'regular/tile_1/chain_1/regular_1_1_1.xml':
+                ET.fromstring('<root><quests>' + ''.join(
+                    '<potapovQuest><id>regular_1_1_1_%s</id><bonus>%s'
+                    '</bonus></potapovQuest>' % (
+                        stage, '<credits>1234</credits>'
+                        if stage == 'main' else '')
+                    for stage in ('main', 'main_award_list',
+                                  'add', 'add_award_list')) +
+                    '</quests></root>'),
+        }
+        modules['ResMgr'] = types.SimpleNamespace(
+            openSection=lambda path: (section(resources[path])
+                                      if path in resources else None))
+        config = modules['gui.mods.offline_lan_0922.config']
+        config.rotate_state_backup = lambda path: None
+        # These modules retain the config/data objects they import. Load them
+        # inside this client's isolated package, not another test's globals.
+        with mock.patch.dict(sys.modules, modules):
+            for relative in ('account_rpc/garage', 'ui_i18n',
+                             'personal_campaign_rewards',
+                             'personal_campaign_vehicles',
+                             'personal_campaign_ui', 'personal_campaign',
+                             'personal_campaign_ledger', 'friendly_fire',
+                             'account_rpc/garage_store'):
+                name = 'gui.mods.offline_lan_0922.' + relative.replace('/', '.')
+                modules[name] = _real_module(relative, name)
+        return modules['gui.mods.offline_lan_0922.account_rpc.garage_store']
+
+    def test_queued_campaign_edit_is_settled_saved_and_published_at_startup(self):
+        bootstrap, unused_callbacks, unused_compatibility, unused_loader, \
+            unused_spaces, unused_events, modules = self._load()
+        store_module = self._campaign_modules(modules)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            credits = snapshot['wallet']['credits']
+            snapshot['personalMissionRequestedCompleted'] = {'1': 1}
+            snapshot['personalMissionRequestedRegular'] = [2]
+            store = store_module.GarageStore()
+            store.mark_dirty()
+            self.assertTrue(store.flush(snapshot))
+
+            # A new process reads the pending request from the real save and
+            # passes both native descriptors and relational publication checks.
+            bootstrap._store = store_module.GarageStore()
+            settled = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
+            published = ACCOUNT_DATA.stats(settled)
+            inventory = ACCOUNT_DATA.inventory(settled)['inventory']
+            with open(store._path, encoding='utf-8') as stream:
+                saved = json.load(stream)['ledger']
+
+            self.assertEqual({'1': 1}, settled['personalMissionProgress'])
+            self.assertEqual({'1': 1}, settled['personalMissionRewarded'])
+            self.assertNotIn('personalMissionRequestedCompleted', settled)
+            self.assertEqual([2], settled['personalMissionSelections']['regular'])
+            self.assertEqual(credits + 1234, published['stats']['credits'])
+            self.assertEqual(len(settled['vehicles']),
+                             len(inventory[1]['compDescr']))
+            self.assertEqual({'1': 1}, saved['personalMissions']['completed'])
+            self.assertNotIn('requestedCompleted', saved['personalMissions'])
+            self.assertEqual(credits + 1234, saved['wallet']['credits'])
+            notifications = settled['personalMissionNotifications']
+            self.assertEqual(1, len(notifications))
+            self.assertTrue(notifications[0]['id'])
+            self.assertEqual(1, notifications[0]['settlement']['missions'][0]['id'])
+            self.assertEqual(notifications, saved['personalMissions']['notifications'])
+
+            # Recreating the Account from the committed file must not pay it
+            # again or resurrect the launcher's consumed request.
+            bootstrap._store = store_module.GarageStore()
+            restarted = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
+            self.assertEqual(credits + 1234, restarted['wallet']['credits'])
+            self.assertNotIn('personalMissionRequestedCompleted', restarted)
+            self.assertEqual(notifications, restarted['personalMissionNotifications'])
+
+    def test_initial_asset_notice_is_not_resurrected_after_durable_acknowledgement(self):
+        import copy
+        bootstrap, unused_callbacks, unused_compatibility, unused_loader, \
+            unused_spaces, unused_events, modules = self._load()
+        store_module = self._campaign_modules(modules)
+        notice = {'id': 'initial-wallet', 'settlement': {'account_changes': [
+            {'phase': 'granted', 'rewards': [{'kind': 'credits', 'count': 1234}]}]}}
+        config = modules['gui.mods.offline_lan_0922.config']
+        config.save_slot_initial_personal_progress = lambda: {
+            'personalMissionNotifications': [copy.deepcopy(notice)]}
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
+            self.assertEqual([notice], snapshot['personalMissionNotifications'])
+            store = store_module.GarageStore()
+            snapshot['personalMissionNotifications'] = []
+            store.mark_dirty()
+            self.assertTrue(store.flush(snapshot))
+            bootstrap._store = store_module.GarageStore()
+            restarted = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
+            self.assertEqual([], restarted['personalMissionNotifications'])
+
+    def test_campaign_edit_stays_pending_when_the_save_cannot_be_committed(self):
+        bootstrap, unused_callbacks, unused_compatibility, unused_loader, \
+            unused_spaces, unused_events, modules = self._load()
+        store_module = self._campaign_modules(modules)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            credits = snapshot['wallet']['credits']
+            snapshot['personalMissionRequestedCompleted'] = {'1': 1}
+            bootstrap._store = store_module.GarageStore()
+            config = modules['gui.mods.offline_lan_0922.config']
+            with mock.patch.object(config, 'write_json',
+                                   side_effect=OSError('disk full')) as writer:
+                bootstrap._settle_launcher_campaign(
+                    snapshot, modules['items'].vehicles, modules['items'].tankmen)
+            writer.assert_called_once()
+            self.assertEqual({'1': 1}, snapshot['personalMissionRequestedCompleted'])
+            self.assertEqual(credits, snapshot['wallet']['credits'])
+            self.assertFalse(snapshot.get('personalMissionProgress'))
+            self.assertFalse(snapshot.get('personalMissionNotifications'))
+
+    def test_spent_credit_reset_persists_success_without_fictitious_withdrawal(self):
+        bootstrap, unused_callbacks, unused_compatibility, unused_loader, \
+            unused_spaces, unused_events, modules = self._load()
+        store_module = self._campaign_modules(modules)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            bootstrap._store = store_module.GarageStore()
+            snapshot['personalMissionRequestedCompleted'] = {'1': 1}
+            bootstrap._settle_launcher_campaign(
+                snapshot, modules['items'].vehicles, modules['items'].tankmen)
+            self.assertEqual({'1': 1}, snapshot['personalMissionProgress'])
+            snapshot['personalMissionNotifications'] = []
+            snapshot['wallet']['credits'] = 0
+            snapshot['personalMissionRequestedCompleted'] = {}
+            bootstrap._settle_launcher_campaign(
+                snapshot, modules['items'].vehicles, modules['items'].tankmen)
+            self.assertEqual({}, snapshot['personalMissionProgress'])
+            self.assertEqual(0, snapshot['wallet']['credits'])
+            notices = snapshot['personalMissionNotifications']
+            self.assertEqual(1, len(notices))
+            self.assertEqual('', notices[0]['settlement']['reset_error'])
+            mission = notices[0]['settlement']['missions'][0]
+            self.assertEqual('revoked', mission['phase'])
+            self.assertEqual([], mission['rewards'])
+            with open(bootstrap._store._path, encoding='utf-8') as stream:
+                saved = json.load(stream)['ledger']['personalMissions']
+            self.assertEqual(notices, saved['notifications'])
+
+    def test_startup_reconciles_legacy_orders_even_without_any_mission_progress(self):
+        bootstrap, unused_callbacks, unused_compatibility, unused_loader, \
+            unused_spaces, unused_events, modules = self._load()
+        store_module = self._campaign_modules(modules)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            snapshot['personalMissionOrders'] = 21
+            store = store_module.GarageStore()
+            store.mark_dirty()
+            self.assertTrue(store.flush(snapshot))
+
+            bootstrap._store = store_module.GarageStore()
+            restored = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
+            self.assertEqual(0, restored['personalMissionOrders'])
+            with open(store._path, encoding='utf-8') as stream:
+                saved = json.load(stream)['ledger']['personalMissions']
+            self.assertEqual(0, saved['orders'])
+
+    def test_startup_revokes_stale_campaign_badge_and_equipment_without_progress(self):
+        bootstrap, unused_callbacks, unused_compatibility, unused_loader, \
+            unused_spaces, unused_events, modules = self._load()
+        store_module = self._campaign_modules(modules)
+        with mock.patch.dict(sys.modules, modules):
+            snapshot = bootstrap._selected_vehicle(
+                {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
+            snapshot.update(accountBadges={'10': 100, '77': 101},
+                            selectedBadges=[10], personalMissionTokenRewards=['test_badge'])
+            store = store_module.GarageStore()
+            store.mark_dirty()
+            self.assertTrue(store.flush(snapshot))
+
+            bootstrap._store = store_module.GarageStore()
+            restored = bootstrap._selected_vehicle({'vehicle': 'ussr:R11_MS-1'})
+            self.assertEqual({'77': 101}, restored['accountBadges'])
+            self.assertEqual([], restored['selectedBadges'])
+            from gui.mods.offline_lan_0922 import offline_services
+            self.assertEqual((), offline_services.service_diff(restored)['badges'])
+            with open(store._path, encoding='utf-8') as stream:
+                saved = json.load(stream)['ledger']
+            self.assertEqual({'77': 101}, saved['accountBadges'])
+            self.assertEqual([], saved['offlineServices']['selectedBadges'])
+
+    def test_bond_offers_survive_full_account_sync_without_granting_ownership(self):
+        # The launcher waits for the worker's full Account sync before opening
+        # the visible client. Include a real offer name absent from the garage;
+        # a catalogue with no matching offers cannot catch this startup fault.
+        for mode in ('unlocked', 'new_account'):
+            for restore_saved in (False, True):
+                with self.subTest(mode=mode, restore_saved=restore_saved):
+                    (bootstrap, unused_callbacks, unused_compatibility,
+                     unused_app_loader, unused_spaces, unused_events,
+                     modules) = self._load(
+                        save_mode=mode, starters=self.STARTER_NAMES)
+                    vehicles = modules['items'].vehicles
+                    original_descriptor = vehicles.VehicleDescr
+                    offer = original_descriptor(typeID=(1, 8))
+                    offer.type.level = 10
+                    offer.type.userString = 'M60'
+                    offer_cd = vehicles.makeIntCompactDescrByID('vehicle', 1, 8)
+
+                    def descriptor(**kwargs):
+                        if kwargs.get('typeName') == 'usa:A92_M60':
+                            return offer
+                        return original_descriptor(**kwargs)
+
+                    with mock.patch.dict(sys.modules, modules), mock.patch.object(
+                            vehicles, 'VehicleDescr', side_effect=descriptor):
+                        snapshot = bootstrap._selected_vehicle(
+                            {'vehicle': 'ussr:R11_MS-1'}, restore_saved=restore_saved)
+                        # Follow the real failing sync_data -> inventory ->
+                        # _validate_selected_vehicle path from the report.
+                        synced = ACCOUNT_DATA.sync_data(selected_vehicle=snapshot)
+                    owned = set(row['vehicleTypeCompactDescr']
+                                for row in snapshot['vehicles'])
+                    self.assertEqual(owned, snapshot['vehicleTypeCompactDescrs'])
+                    self.assertNotIn(offer_cd, owned)
+                    self.assertEqual({'gold': 22500},
+                                     snapshot['shopItemPrices'][offer_cd])
+                    published_offer = next(row for row in snapshot['offlineVehicleOffers']
+                                           if row['cd'] == offer_cd)
+                    self.assertEqual(15000, published_offer['price'])
+                    self.assertIn(offer_cd, snapshot['notInShopItems'])
+                    self.assertIn(offer_cd, synced['stats']['unlocks'])
+                    if mode == 'new_account':
+                        self.assertNotIn(offer_cd, snapshot['unlockItemCompactDescrs'])
 
     def _with_saved_garage(self, owned, **kwargs):
         """Build a garage against a save that owns exactly ``owned``."""
@@ -750,7 +1013,6 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual({}, snapshot['recycleBinTankmen'])
 
     def test_no_crew_price_the_shop_publishes_is_zero(self):
-        """"Nothing is free" is a property of the numbers, not of the code."""
         (bootstrap, unused_callbacks, unused_compatibility,
          unused_app_loader, unused_spaces, unused_events,
          modules) = self._load()
@@ -766,7 +1028,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual(0, restore['freeDuration'])
         self.assertGreater(restore['goldCost'], 0)
         # ItemsRequester.getTankmen hides everyone older than this.
-        self.assertGreater(restore['goldDuration'], 0)
+        self.assertEqual(7 * 86400, restore['goldDuration'])
         # The cheapest skill reset is paid for in crew experience instead.
         self.assertEqual(
             0.0, snapshot['dropSkillsCosts'][0]['xpReuseFraction'])
@@ -878,7 +1140,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
     # somewhere to land.
     OWNED_ONE = ('nation-0:vehicle-11', 90011)
 
-    def _with_inbox(self, names, owned=(OWNED_ONE,), validator=None, **kwargs):
+    def _with_inbox(self, names, owned=(OWNED_ONE,), validator=None, flush_ok=True, **kwargs):
         """Start a client with the launcher's shop having bought ``names``."""
         (bootstrap, unused_callbacks, unused_compatibility,
          unused_app_loader, unused_spaces, unused_events,
@@ -906,7 +1168,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
             def flush(self, candidate):
                 self.flushed = candidate
-                return True
+                return flush_ok
 
         store = _Store()
         bootstrap._store = store
@@ -937,7 +1199,12 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual(0, snapshot['vehicleXP'][90012])
         # A delivery that is never written is delivered again next start,
         # against an inbox entry that is already gone.
-        self.assertIs(snapshot, store.flushed)
+        self.assertEqual(snapshot, store.flushed)
+        notices = snapshot['personalMissionNotifications']
+        self.assertEqual(1, len(notices))
+        rewards = notices[0]['settlement']['account_changes'][0]['rewards']
+        self.assertEqual(90012, rewards[0]['vehicle_type'])
+        self.assertTrue(any(row['kind'] == 'crew' and row['count'] > 0 for row in rewards))
         self.assertFalse(os.path.exists(path))
 
     def test_a_delivered_vehicle_arrives_stock_and_without_consumables(self):
@@ -954,6 +1221,15 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 for item_type in range(2, 8)
                 for compact_descr in record['inventoryItems'][item_type]))
 
+    def test_failed_delivery_save_retains_inbox_without_grant_or_notice(self):
+        snapshot, store, path, inbox = self._with_inbox(
+            ['nation-0:vehicle-12'], flush_ok=False)
+        self.assertEqual(['nation-0:vehicle-12'], inbox.pending_vehicles(path))
+        self.assertEqual([90011], [row['vehicleTypeCompactDescr']
+                                  for row in snapshot['vehicles']])
+        self.assertFalse(snapshot.get('personalMissionNotifications'))
+        self.assertTrue(store.flushed.get('personalMissionNotifications'))
+
     def test_a_vehicle_the_save_already_owns_is_not_delivered_twice(self):
         snapshot, unused_store, path, unused_inbox = self._with_inbox(
             ['nation-0:vehicle-11'])
@@ -962,6 +1238,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
             1, sum(1 for record in snapshot['vehicles']
                    if record['vehicleTypeName'] == 'nation-0:vehicle-11'))
         self.assertFalse(os.path.exists(path))
+        self.assertFalse(snapshot.get('personalMissionNotifications'))
 
     def test_a_new_crew_never_takes_an_id_the_barracks_already_holds(self):
         """A reused id makes the whole restored garage invalid, not one car."""
@@ -977,6 +1254,26 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual(100004, bootstrap._next_tankman_id(snapshot))
         del snapshot['barracksTankmen']
         self.assertEqual(100003, bootstrap._next_tankman_id(snapshot))
+
+    def test_delivered_crew_cannot_take_a_dismissed_mission_reward_identity(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+        snapshot = {
+            'vehicles': [{'id': 1, 'tankmen': {100001: b'ordinary'}}],
+            'barracksTankmen': {},
+            'recycleBinTankmen': {100002: (b'reward-woman', 100)},
+            'personalMissionRewardJournal': {
+                'crew:15': {'tankman': 100002, 'dossier_count': 1}},
+        }
+        self.assertEqual(100003, bootstrap._next_tankman_id(snapshot))
+        # The recycle-bin limit may evict her. The outstanding receipt must
+        # still not identify a replacement crew member when the task resets.
+        snapshot['recycleBinTankmen'].clear()
+        self.assertEqual(100003, bootstrap._next_tankman_id(snapshot))
+        snapshot['personalMissionRewardJournal'].clear()
+        snapshot['recycleBinTankmen'][100004] = (b'other-dismissed', 101)
+        self.assertEqual(100005, bootstrap._next_tankman_id(snapshot))
 
     def test_a_delivery_the_client_cannot_publish_is_never_written(self):
         """An unpublishable save is discarded whole on the next start.
@@ -1208,7 +1505,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
     def test_the_first_garage_uses_the_launchers_initial_wallet(self):
         snapshot = self._with_saved_garage(
             (), initial_wallet={'credits': 23, 'gold': 45, 'freeXP': 67})
-        self.assertEqual({'credits': 23, 'gold': 45, 'freeXP': 67}, snapshot['wallet'])
+        self.assertEqual({'credits': 23, 'gold': 45, 'freeXP': 67, 'crystal': 0}, snapshot['wallet'])
 
     def test_the_garage_reads_the_multiplier_the_launcher_wrote(self):
         """It describes the account, like the save type, not the garage."""
@@ -1413,7 +1710,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
                     {11100: {'credits': 100}, 11200: {'credits': 200}}, set())):
             snapshot = bootstrap._selected_vehicle(
                 {'vehicle': 'ussr:R11_MS-1'}, restore_saved=False)
-        for compact_descr in (11100, 11200):
+        for compact_descr in (11100,):
             self.assertNotIn(compact_descr, snapshot['shopItemPrices'])
             self.assertIn(compact_descr, snapshot['notInShopItems'])
 
@@ -1423,7 +1720,9 @@ class BootstrapLifecycleTests(unittest.TestCase):
         initial = {'vehicles': [{'id': 1, 'compDescr': b'stock'},
                                 {'id': 2, 'compDescr': b'stock'}]}
         live = {'vehicles': [{'id': 1, 'compDescr': b'stock'},
-                             {'id': 2, 'compDescr': b'top-fitting'}]}
+                             {'id': 2, 'compDescr': b'top-fitting'}],
+                'vehicleTypeCompactDescrs': {90011},
+                'unlockItemCompactDescrs': {90011, 2002}}
         applied = []
         bound = []
 
@@ -1433,7 +1732,10 @@ class BootstrapLifecycleTests(unittest.TestCase):
                                      tankmen_module=None, rewards=None,
                                      health=None, vehicles_module=None,
                                      shells_fired=None, equipment_used=None,
-                                     auto_settings=None):
+                                     auto_settings=None, friendly_fire_facts=None,
+                                     vehicle_type_name=None, battle_start=0,
+                                     daily_facts=None, training=False,
+                                     campaign_receipt=None):
                 applied.append(snapshot)
                 self.assert_not_used = tankmen_module
                 # The vehicle's own repair/reload/restock switches are settled
@@ -1447,13 +1749,22 @@ class BootstrapLifecycleTests(unittest.TestCase):
                 settled.append(health)
                 spent.append(shells_fired)
                 consumed.append(equipment_used)
+                misconduct.append((friendly_fire_facts, vehicle_type_name))
+                services.append((battle_start, daily_facts, training))
+                # An operation can award a new tank in this same receipt.
+                # Exercise the real data.stats call that computes research
+                # additions; unchanged research would skip the broken path.
+                snapshot['vehicleTypeCompactDescrs'].add(90012)
+                snapshot['unlockItemCompactDescrs'].add(90012)
                 return {'vehicle_id': 1, 'applied': True}
 
         banked = []
         settled = []
         spent = []
         consumed = []
+        misconduct = []
         switches = []
+        services = []
         bootstrap._postbattle_store = types.SimpleNamespace(
             set_progress_applier=lambda callback: bound.append(callback))
         compatibility.garage_state = lambda: types.SimpleNamespace(
@@ -1468,21 +1779,33 @@ class BootstrapLifecycleTests(unittest.TestCase):
             bound[0]({
                 'vehicle': 'ussr:R11_MS-1',
                 'receipt_id': 'server:1:1',
+                'arena_unique_id': (55 << 32) | 172800,
+                'stats': {'damage': 500}, 'duration': 300,
+                'premature_leave': True,
+                'winner': 1, 'team': 1,
                 'rewards': {'xp': 100},
                 'health': 40,
                 'shells_fired': {0: 12},
                 'equipment_used': [11001],
+                'friendly_fire': {'victims': [], 'received_damage': 10, 'xp_penalty': 0},
             })
 
         self.assertEqual([live], applied)
         self.assertIs(live, context['selected_vehicle'])
         self.assertEqual([{'xp': 100}], banked)
-        self.assertEqual([(2, 4, 8)], switches)
+        self.assertEqual([(2, 4, 8, 128)], switches)
         self.assertEqual([40], settled)
         self.assertEqual([{0: 12}], spent)
         self.assertEqual([[11001]], consumed)
+        self.assertEqual([(172800, {'damage': 500, 'finished_at': 173100,
+                                   'premature_leave': True,
+                                   'won': True}, False)], services)
+        self.assertEqual([({'victims': [], 'received_damage': 10, 'xp_penalty': 0},
+                           'ussr:R11_MS-1')], misconduct)
         self.assertEqual(
             b'top-fitting', live['vehicles'][1]['compDescr'])
+        self.assertEqual({90012}, context['postbattle_added_unlocks'])
+        self.assertEqual({90012}, context['postbattle_added_eliteVehicles'])
 
     def test_the_ammunition_layout_mirrors_the_loaded_shells(self):
         (bootstrap, unused_callbacks, unused_compatibility,
@@ -1555,9 +1878,10 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertTrue(
             required_prices.issubset(selected['unlockItemCompactDescrs']))
         self.assertEqual(4, selected['optionalDeviceCount'])
-        # The avatar strike and the battle booster stay out of the catalogue.
-        self.assertEqual(3, selected['equipmentCount'])
-        for compact_descr in (11100, 11200):
+        # Avatar strikes stay out; the fourth-slot directive is offered.
+        self.assertEqual(4, selected['equipmentCount'])
+        self.assertIn(11200, selected['shopItemPrices'])
+        for compact_descr in (11100,):
             self.assertNotIn(compact_descr, selected['inventoryItems'][11])
             self.assertNotIn(compact_descr, selected['shopItemPrices'])
         for compact_descr in (9000, 9003, 11000, 11002):
@@ -1626,7 +1950,7 @@ class BootstrapLifecycleTests(unittest.TestCase):
         self.assertEqual(
             ['clear_entities_and_spaces', 'pin_dossier_cache',
              'install_announcement_router', 'install_battle_router',
-             'pin_account_settings', 'connect'],
+             'install_services', 'pin_account_settings', 'connect'],
             events)
         self.assertEqual(1, len(compatibility.connect_calls))
         self.assertTrue(compatibility.connect_calls[0][0])

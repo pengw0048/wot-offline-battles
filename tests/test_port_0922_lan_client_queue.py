@@ -170,6 +170,208 @@ class LanClientQueueTests(unittest.TestCase):
         ], [(value['server_tick'], 'bot_manifest' in value)
             for value in client._pending])
 
+    @staticmethod
+    def order_snapshot(tick, **changes):
+        message = {
+            'type': 'snapshot', 'protocol': 5,
+            'round_id': 7, 'authority_epoch': 1,
+            'bot_authority_id': -1, 'map': '31_airfield',
+            'server_tick': tick, 'bot_order_revision': 4,
+            'bot_state_revision': tick, 'motion_time_us': tick * 100000,
+            'bot_state_time_us': tick * 100000,
+            'players': [], 'bots': [],
+        }
+        message.update(changes)
+        return message
+
+    def drain_messages(self, messages, worker=False):
+        client = self.activate(worker=worker)
+        client.connected = False
+        seen = []
+        client._handle_message = seen.append
+        client._pending = list(messages)
+        client._poll()
+        return seen
+
+    def test_busy_poll_retains_orders_with_latest_motion_for_both_clients(self):
+        orders = [{'id': 3, 'route_index': 3,
+                   'move_position': {'x': 186.0, 'y': 0.0, 'z': -250.0}}]
+        first = self.order_snapshot(30, bot_orders=orders)
+        latest = self.order_snapshot(36, bots=[{'id': 3, 'x': 230.0}])
+        messages = [first] + [self.order_snapshot(tick)
+                              for tick in range(31, 36)] + [latest]
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                seen = self.drain_messages(messages, worker=worker)
+                self.assertEqual(1, len(seen))
+                self.assertEqual(dict(latest, bot_orders=orders), seen[0])
+        self.assertNotIn('bot_orders', latest)
+        self.assertEqual(30, first['server_tick'])
+
+    def test_merged_orders_pass_snapshot_validation_and_dispatch(self):
+        client = self.activate()
+        client.connected = False
+        client.round_id = 7
+        client.server_capabilities = (
+            lan_client_module.LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
+        client.last_snapshot = self.order_snapshot(29, bot_manifest=[])
+        seen = []
+        client.on_event = lambda kind, message: seen.append((kind, message))
+        orders = [{'id': 3, 'route_index': 3}]
+        client._pending = [self.order_snapshot(30, bot_orders=orders),
+                           self.order_snapshot(36)]
+
+        client._poll()
+
+        self.assertTrue(client.running)
+        self.assertEqual(['snapshot'], [kind for kind, message in seen])
+        self.assertEqual(36, seen[0][1]['server_tick'])
+        self.assertEqual(36, seen[0][1]['bot_state_revision'])
+        self.assertEqual(orders, seen[0][1]['bot_orders'])
+        self.assertEqual(4, seen[0][1]['bot_order_revision'])
+
+    def test_busy_poll_keeps_payload_revision_and_explicit_order_clear(self):
+        first = self.order_snapshot(30, bot_orders=[{'id': 3}])
+        cases = (
+            ([first, self.order_snapshot(31, bot_order_revision=5)],
+             4, [{'id': 3}]),
+            ([first, self.order_snapshot(
+                31, bot_order_revision=3, bot_orders=[{'id': 5}]),
+              self.order_snapshot(32)], 4, [{'id': 3}]),
+            ([first, self.order_snapshot(
+                31, bot_order_revision=5, bot_orders=[]),
+              self.order_snapshot(32, bot_order_revision=5)], 5, []),
+            ([first, self.order_snapshot(31, bot_orders=[])], 4, []),
+        )
+        for messages, revision, orders in cases:
+            with self.subTest(revision=revision, orders=orders):
+                seen = self.drain_messages(messages)
+                self.assertEqual(1, len(seen))
+                self.assertEqual(revision, seen[0]['bot_order_revision'])
+                self.assertEqual(orders, seen[0]['bot_orders'])
+
+    def test_order_merge_never_crosses_round_authority_or_map(self):
+        first = self.order_snapshot(30, bot_orders=[{'id': 3}])
+        for changes in ({'round_id': 8}, {'authority_epoch': 2},
+                        {'bot_authority_id': -2}, {'map': '01_karelia'}):
+            with self.subTest(changes=changes):
+                latest = self.order_snapshot(31, **changes)
+                self.assertEqual([latest], self.drain_messages([first, latest]))
+
+    def test_order_merge_preserves_lifecycle_and_event_boundaries(self):
+        first = self.order_snapshot(30, bot_orders=[{'id': 3}])
+        latest = self.order_snapshot(31)
+        for kind in ('roster', 'battle_start', 'events'):
+            with self.subTest(kind=kind):
+                barrier = {'type': kind, 'round_id': 7, 'server_tick': 30}
+                seen = self.drain_messages([first, barrier, latest])
+                expected = ([barrier, first, latest] if kind == 'events'
+                            else [first, barrier, latest])
+                self.assertEqual(expected, seen)
+                self.assertNotIn('bot_orders', seen[-1])
+
+    def test_receive_overflow_folds_orders_into_latest_motion_at_fixed_bound(self):
+        client = self.activate()
+        orders = [{'id': 3, 'route_index': 3}]
+        original_limit = lan_client_module.MAX_PENDING_MESSAGES
+        lan_client_module.MAX_PENDING_MESSAGES = 4
+        try:
+            client._queue_message(self.order_snapshot(1, bot_orders=orders))
+            for tick in range(2, 101):
+                client._queue_message(self.order_snapshot(tick))
+                self.assertLessEqual(len(client._pending), 4)
+        finally:
+            lan_client_module.MAX_PENDING_MESSAGES = original_limit
+
+        seen = self.drain_messages(client._pending)
+        self.assertEqual([self.order_snapshot(100, bot_orders=orders)], seen)
+
+    def test_receive_overflow_retains_latest_orders_before_event_barrier(self):
+        client = self.activate()
+        older = self.order_snapshot(1, bot_order_revision=3,
+                                    bot_orders=[{'id': 5}])
+        latest = self.order_snapshot(2, bot_orders=[])
+        barrier = {'type': 'events', 'round_id': 7, 'server_tick': 2,
+                   'events': []}
+        incoming = self.order_snapshot(4)
+        client._pending = [older, latest, barrier, self.order_snapshot(3)]
+        original_limit = lan_client_module.MAX_PENDING_MESSAGES
+        lan_client_module.MAX_PENDING_MESSAGES = 4
+        try:
+            client._queue_message(incoming)
+        finally:
+            lan_client_module.MAX_PENDING_MESSAGES = original_limit
+
+        self.assertEqual([latest, barrier, self.order_snapshot(3), incoming],
+                         client._pending)
+        self.assertNotIn('bot_orders', client._pending[-1])
+        seen = self.drain_messages(client._pending)
+        self.assertEqual([barrier, latest, incoming], seen)
+
+    def test_receive_overflow_replaces_one_order_carrier_and_honors_clear(self):
+        original_limit = lan_client_module.MAX_PENDING_MESSAGES
+        lan_client_module.MAX_PENDING_MESSAGES = 1
+        try:
+            client = self.activate()
+            client._queue_message(self.order_snapshot(
+                1, bot_orders=[{'id': 3}]))
+            client._queue_message(self.order_snapshot(
+                2, bot_order_revision=3, bot_orders=[{'id': 5}]))
+            self.assertEqual([self.order_snapshot(
+                2, bot_orders=[{'id': 3}])], client._pending)
+            client._queue_message(self.order_snapshot(
+                3, bot_order_revision=5, bot_orders=[]))
+            client._queue_message(self.order_snapshot(
+                4, bot_order_revision=5))
+            self.assertEqual([self.order_snapshot(
+                4, bot_order_revision=5, bot_orders=[])], client._pending)
+        finally:
+            lan_client_module.MAX_PENDING_MESSAGES = original_limit
+
+    def test_new_orders_after_barrier_cannot_evict_preceding_order_section(self):
+        first = self.order_snapshot(1, bot_orders=[{'id': 3}])
+        original_limit = lan_client_module.MAX_PENDING_MESSAGES
+        lan_client_module.MAX_PENDING_MESSAGES = 3
+        try:
+            for kind in ('events', 'roster'):
+                for orders in ([{'id': 5}], []):
+                    with self.subTest(kind=kind, orders=orders):
+                        client = self.activate()
+                        barrier = {'type': kind, 'round_id': 7,
+                                   'server_tick': 1}
+                        client._pending = [
+                            first, barrier, self.order_snapshot(2)]
+                        incoming = self.order_snapshot(
+                            3, bot_order_revision=5, bot_orders=orders)
+                        client._queue_message(incoming)
+
+                        self.assertEqual([first, barrier, incoming],
+                                         client._pending)
+                        seen = self.drain_messages(client._pending)
+                        expected = ([barrier, first, incoming]
+                                    if kind == 'events'
+                                    else [first, barrier, incoming])
+                        self.assertEqual(expected, seen)
+        finally:
+            lan_client_module.MAX_PENDING_MESSAGES = original_limit
+
+    def test_receive_overflow_cannot_evict_other_round_order_section(self):
+        client = self.activate()
+        first = self.order_snapshot(1, bot_orders=[{'id': 3}])
+        second = self.order_snapshot(1, round_id=8, bot_orders=[])
+        client._pending = [first, second, self.order_snapshot(2, round_id=8)]
+        incoming = self.order_snapshot(3, round_id=8)
+        original_limit = lan_client_module.MAX_PENDING_MESSAGES
+        lan_client_module.MAX_PENDING_MESSAGES = 3
+        try:
+            client._queue_message(incoming)
+        finally:
+            lan_client_module.MAX_PENDING_MESSAGES = original_limit
+
+        self.assertEqual(first, client._pending[0])
+        self.assertEqual(dict(incoming, bot_orders=[]), client._pending[-1])
+        self.assertEqual(3, len(client._pending))
+
     def test_receive_overflow_fails_closed_for_each_new_terminal_message(self):
         client = self.activate()
         protected = [
@@ -385,6 +587,9 @@ class LanClientQueueTests(unittest.TestCase):
             'type': 'bot_state', 'round_id': client.round_id,
             'bots': states,
         }
+        for state in states:
+            state.update(push_x=0.0, push_z=0.0,
+                         contact_push_acks=[[1, 2, 150.0, -75.0, .2, -.1, 0.0]])
         unused_frozen, full_size = lan_client_module._freeze_outbound(
             full_message, [0])
 
@@ -403,11 +608,11 @@ class LanClientQueueTests(unittest.TestCase):
         # keeps the state it already admitted for them.
         expected = {
             'id', 'x', 'y', 'z', 'yaw', 'pitch', 'roll',
-            'aim_yaw', 'gun_pitch', 'speed',
+            'aim_yaw', 'gun_pitch', 'speed', 'push_x', 'push_z', 'push_yaw', 'contact_push_acks',
             'movement_dir', 'rotation_dir', 'fire_seq', 'shell_index',
             'next_shell_index', 'ammo_remaining', 'ammo_reload_pending',
             'reload_time', 'reload_duration', 'clip', 'clip_size',
-            'world_pose', 'stun_end_server_time_ms',
+            'world_pose', 'airborne', 'service_brake', 'stun_end_server_time_ms',
             'health', 'alive', 'critical', 'combat_base_revision',
             'combat_seq', 'combat_fire_elapsed', 'combat_fire_timer',
             'death_reason', 'display_health', 'shot_yaw', 'shot_pitch',

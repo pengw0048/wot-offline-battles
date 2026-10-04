@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import importlib.util
+import io
 import os
 from pathlib import Path
 import sys
@@ -94,8 +95,9 @@ class _Client(object):
         self.round_requests.append(round_seconds)
         return True
 
-    def leave_battle(self):
+    def leave_battle(self, voluntary=True):
         self.leave_calls += 1
+        self.last_leave_voluntary = voluntary
         return True
 
     def select_vehicle(self, vehicle, max_health, outfits=None,
@@ -937,7 +939,9 @@ class LANSessionTests(unittest.TestCase):
             def service_message_data(self, arena):
                 return {'arenaUniqueID': arena}
             def should_show_immediately(self, arena):
-                return not self.rows[arena].get('premature_leave', False)
+                return self.rows[arena].get(
+                    'watched_battle_to_end',
+                    not self.rows[arena].get('premature_leave', False))
 
         self.session._postbattle_store = Store()
         self.session._publish_postbattle_progress = mock.Mock()
@@ -1013,6 +1017,18 @@ class LANSessionTests(unittest.TestCase):
             self._result_receipt()
         self.assertEqual([(123, False, False, True)], requested)
 
+    def test_destroyed_exit_only_notifies_without_opening_results(self):
+        patch, requested = self._result_lifecycle()
+        with patch:
+            self._start_result_round()
+            self.session._on_local_battle_leave()
+            self.assertTrue(self.client.last_leave_voluntary)
+            self.emit('roster', {'phase': 'waiting', 'round_id': 1})
+            self._result_receipt(premature_leave=False,
+                                 watched_battle_to_end=False)
+        self.assertEqual([(123, False, False, True)], requested)
+        self.assertEqual(1, self.session._postbattle_store.progress()['battles'])
+
     def test_join_revokes_natural_return_popup_while_lobby_is_loading(self):
         patch, requested = self._result_lifecycle()
         with patch:
@@ -1078,6 +1094,37 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual([11001], accepted[0]['equipment_used'])
         self.assertEqual(40, accepted[0]['health'])
 
+    def test_rejected_receipt_remains_unacknowledged_and_retry_is_logged_once(self):
+        store = mock.Mock(account_key='account')
+        store.progress.return_value = {'battles': 0}
+        store.accept.side_effect = [RuntimeError('missing campaign data'),
+                                    True, False]
+        session = self.module.LANSession(
+            {}, postbattle_store=store, lobby_ready=lambda: True)
+        session.client = self.client
+        session._publish_postbattle_progress = mock.Mock(return_value=True)
+        session._publish_postbattle_results = mock.Mock(return_value=True)
+        output = io.StringIO()
+        with mock.patch.object(self.module.sys, 'stdout', output), \
+                mock.patch.object(self.module.time, 'time',
+                                  side_effect=[10.0, 10.25, 11.0, 11.5, 12.0]):
+            session._on_event('battle_receipt', {'receipt_id': 'r1'})
+            self.assertEqual([], self.client.receipt_acks)
+            session._publish_postbattle_progress.assert_not_called()
+            session._publish_postbattle_results.assert_not_called()
+            session._on_event('battle_receipt', {'receipt_id': 'r1'})
+            session._on_event('battle_receipt', {'receipt_id': 'r1'})
+
+        self.assertEqual(['r1', 'r1'], self.client.receipt_acks)
+        session._publish_postbattle_progress.assert_called_once_with()
+        self.assertEqual(2, session._publish_postbattle_results.call_count)
+        text = output.getvalue()
+        self.assertIn('receipt_id=r1 elapsed_ms=250.000', text)
+        self.assertIn('Traceback (most recent call last)', text)
+        self.assertIn('RuntimeError: missing campaign data', text)
+        self.assertEqual(1, text.count('battle receipt accepted'))
+        self.assertIn('receipt_id=r1 elapsed_ms=500.000', text)
+
     def test_lobby_view_notification_starts_postbattle_drain_without_retry(self):
         store = mock.Mock()
         store.progress.return_value = {'battles': 0}
@@ -1091,7 +1138,47 @@ class LANSessionTests(unittest.TestCase):
         session._publish_postbattle_progress.assert_called_once_with()
         session._publish_postbattle_results.assert_called_once_with()
 
-    def test_clickable_battle_result_uses_native_service_channel_wrapper(self):
+    def test_launcher_campaign_outbox_waits_for_lobby_then_drains_without_battle(self):
+        ready = [False]
+        callbacks = []
+        publisher = mock.Mock(return_value=(1, False))
+        player = types.SimpleNamespace(fakeServer=types.SimpleNamespace(
+            publish_campaign_notifications=publisher))
+        bigworld = types.SimpleNamespace(player=lambda: player)
+        session = self.module.LANSession(
+            {}, lobby_ready=lambda: ready[0],
+            callback=lambda delay, function: callbacks.append(function) or len(callbacks))
+        with mock.patch.dict(sys.modules, {'BigWorld': bigworld}):
+            self.assertFalse(session.on_lobby_view_loaded())
+            publisher.assert_not_called()
+            self.assertEqual(1, len(callbacks))
+            ready[0] = True
+            callbacks.pop(0)()
+        publisher.assert_called_once_with(session._campaign_notifications_sent)
+        self.assertIsNone(session._postbattle_callback_id)
+
+    def test_launcher_campaign_outbox_retries_failed_push_and_cancels_stale_callback(self):
+        callbacks = []
+        publisher = mock.Mock(side_effect=[RuntimeError('native UI loading'), (1, False)])
+        player = types.SimpleNamespace(fakeServer=types.SimpleNamespace(
+            publish_campaign_notifications=publisher))
+        session = self.module.LANSession(
+            {}, callback=lambda delay, function: callbacks.append(function) or len(callbacks))
+        with mock.patch.dict(sys.modules, {'BigWorld': types.SimpleNamespace(player=lambda: player)}):
+            self.assertFalse(session.on_lobby_view_loaded())
+            self.assertEqual(1, len(callbacks))
+            callbacks.pop(0)()
+            self.assertEqual(2, publisher.call_count)
+            self.assertIsNone(session._postbattle_callback_id)
+            publisher.return_value = (0, True)
+            publisher.side_effect = None
+            session._publish_campaign_notifications()
+            retry = callbacks.pop(0)
+            session._cancel_postbattle_callback()
+            retry()
+        self.assertEqual(3, publisher.call_count)
+
+    def test_native_battle_message_is_not_replayed_when_mission_notice_retries(self):
         received = []
 
         class Entry(object):
@@ -1110,15 +1197,30 @@ class LANSessionTests(unittest.TestCase):
                     onReceiveSysMessage=received.append))))
         messenger = types.ModuleType('messenger')
         messenger.MessengerEntry = messenger_entry
+        services_ui = types.ModuleType('gui.mods.offline_lan_0922.offline_services_ui')
+        services_ui.notify_missions = mock.Mock()
+        campaign_ui = types.ModuleType('gui.mods.offline_lan_0922.personal_campaign_ui')
+        campaign_ui.notify = mock.Mock(side_effect=[RuntimeError('UI not ready'), True])
+        campaign = {'missions': [{'id': 1, 'before': 0, 'after': 1}]}
+        result = {'arenaUniqueID': 123, 'credits': 7,
+                  'offlineDailyMissions': ['damage', 'wins'],
+                  'offlinePersonalMissions': campaign}
         with mock.patch.dict(sys.modules, {
                 'chat_shared': chat_shared, 'messenger': messenger,
-                'messenger.MessengerEntry': messenger_entry}):
+                'messenger.MessengerEntry': messenger_entry,
+                'gui.mods.offline_lan_0922.offline_services_ui': services_ui,
+                'gui.mods.offline_lan_0922.personal_campaign_ui': campaign_ui}):
+            self.assertFalse(self.session._publish_battle_service_message(123, result))
+            self.assertNotIn(123, self.session._notified_results)
             self.assertTrue(self.session._publish_battle_service_message(
-                123, {'arenaUniqueID': 123, 'credits': 7}))
+                123, result))
             self.assertFalse(self.session._publish_battle_service_message(
-                123, {'arenaUniqueID': 123, 'credits': 7}))
+                123, result))
 
         self.assertEqual(1, len(received))
+        services_ui.notify_missions.assert_called_once_with(['damage', 'wins'])
+        self.assertEqual([mock.call(campaign), mock.call(campaign)],
+                         campaign_ui.notify.call_args_list)
         action = received[0]
         self.assertEqual(123, action['data']['messageID'])
         self.assertEqual(17, action['data']['type'])
@@ -1226,6 +1328,50 @@ class LANSessionTests(unittest.TestCase):
         self.assertEqual(1, screen.install_calls)
         self.assertEqual(1, screen.open_calls)
         self.assertTrue(self.session._picker_open)
+
+    def test_training_opens_a_room_without_queue_and_sends_host_options(self):
+        self.session.join(None, 'training')
+        self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
+        self.assertEqual([], self.queue_screens)
+        self.assertTrue(self.session._picker_open)
+        calls = []
+        self.client.request_start = lambda *args, **kwargs: calls.append((args, kwargs)) or True
+        self.assertTrue(self.session._toggle_training_bots())
+        self.assertTrue(self.session.request_start('01_karelia'))
+        self.assertEqual({'battle_mode': 'training', 'training_bots': True},
+                         calls[-1][1])
+
+    def test_create_platoon_uses_existing_connection_and_requires_host_start(self):
+        class Header(object):
+            def fightClick(self, map_id, action_name):
+                raise AssertionError('retail matchmaking was called')
+
+            def showSquad(self):
+                raise AssertionError('retail squad creation was called')
+
+            def _updatePrebattleControls(self):
+                pass
+
+        adapter = self.module.queue_ui.JoinButtonUI(
+            self.session.join, runtime=Header)
+        # A previous visit to Training must not turn this ordinary room into
+        # a no-rewards training round or start it implicitly.
+        self.session._training_mode = True
+        adapter.install()
+        try:
+            Header().showSquad()
+            self.emit('welcome', {'phase': 'waiting',
+                                  'map_pool': ['01_karelia']})
+            Header().showSquad()
+            self.assertEqual(1, len(self.clients))
+            self.assertEqual(1, self.client.start_calls)
+            self.assertTrue(self.session._picker_open)
+            self.assertFalse(self.session._training_mode)
+            self.assertEqual([], self.client.requests)
+            self.assertTrue(self.session.request_start('01_karelia'))
+            self.assertEqual(['01_karelia'], self.client.requests)
+        finally:
+            adapter.uninstall()
 
     def test_leave_room_leaves_the_stock_queue(self):
         self.emit('welcome', {'phase': 'waiting', 'map_pool': ['01_karelia']})
@@ -2295,7 +2441,7 @@ class LANSessionTests(unittest.TestCase):
             'round_id': 7, 'message': 'invalid entity property',
             'lobby_restored': True})
 
-        self.client.leave_battle.assert_called_once_with()
+        self.client.leave_battle.assert_called_once_with(voluntary=False)
         self.assertTrue(self.session._stopped)
         self.assertEqual(1, self.client.stop_calls)
         self.assertEqual([], self.battle_runtime.stopped)

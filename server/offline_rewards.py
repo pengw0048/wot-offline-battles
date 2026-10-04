@@ -137,6 +137,17 @@ def compute_offline_rewards(statistics, won, participated=True,
                spotted * 20 + capture * 2 + dropped_capture * 2)
     combat_xp = (base_xp * OFFLINE_WIN_XP_FACTOR_100 // 100 if won
                  else base_xp)
+    # Retail publishes XP penalties, but not their proprietary coefficient.
+    # Use this offline economy's existing damage/kill valuation in reverse;
+    # these are explicitly reconstructed balance values, not retail constants.
+    # Only eligible, actually applied friendly damage enters these counters.
+    penalty_terms = (value("team_damage_penalized") * tier_permille + 4999) // 5000
+    penalty_terms += (value("team_killed_durability") * tier_permille +
+                      KILL_XP_DURABILITY_DIVISOR * 1000 - 1) // (
+                          KILL_XP_DURABILITY_DIVISOR * 1000)
+    xp_penalty = min(combat_xp, penalty_terms * (
+        OFFLINE_WIN_XP_FACTOR_100 if won else 100) // 100)
+    combat_xp -= xp_penalty
 
     # Only the participation payment carries the victory multiplier, and only
     # it scales with vehicle tier.
@@ -158,10 +169,13 @@ def compute_offline_rewards(statistics, won, participated=True,
         damage * OFFLINE_DAMAGE_CREDITS_PER_POINT +
         spotting_credits +
         capture_credits)
-    return {
+    result = {
         "credits": int(credits),
         "xp": int(combat_xp),
         "free_xp": int(combat_xp * OFFLINE_FREE_XP_PERCENT // 100),
         "repair_cost": 0,
         "ammo_cost": 0,
     }
+    if xp_penalty:
+        result["xp_penalty"] = int(xp_penalty)
+    return result

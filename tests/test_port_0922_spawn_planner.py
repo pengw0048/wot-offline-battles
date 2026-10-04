@@ -25,6 +25,28 @@ def formation_graph():
 
 
 class SpawnPlannerTests(unittest.TestCase):
+    def test_runtime_uses_one_mapping_for_humans_and_bots_and_resets_next_round(self):
+        import types
+        from gui.mods.offline_lan_0922.battle_runtime import BattleRuntime
+        battle = BattleRuntime.__new__(BattleRuntime)
+        battle._spawn_planner = SpawnPlanner(navigation_graph=formation_graph())
+        battle._spawn_cache = {(1, 12): ((999, 999, 999), 0)}
+        battle._start_message = {
+            'players': [{'id': 1, 'team': 1, 'slot': 12, 'vehicle': 'spg'},
+                        {'id': 0, 'team': 1, 'slot': 0, 'vehicle': 'spg'}],
+            'bots': [{'id': 2, 'team': 1, 'slot': 14}]}
+        battle._bot_vehicle_assignments = {(1, 14): 'spg'}
+        battle._resolve_descriptor = lambda name: types.SimpleNamespace(
+            type=types.SimpleNamespace(tags=('SPG' if name == 'spg' else 'heavyTank',)))
+        battle._prepare_spawn_assignments()
+        self.assertEqual(battle._spawn_planner.pose(1, 0), battle._formation_pose(1, 12))
+        self.assertEqual(battle._spawn_planner.pose(1, 1), battle._formation_pose(1, 14))
+        self.assertEqual(battle._spawn_planner.pose(1, 12), battle._formation_pose(1, 0))
+        battle._start_message['players'][0]['vehicle'] = 'heavy'
+        battle._bot_vehicle_assignments[(1, 14)] = 'heavy'
+        battle._prepare_spawn_assignments()
+        self.assertEqual(battle._spawn_planner.pose(1, 12), battle._formation_pose(1, 12))
+
     def test_exact_baked_slot_and_height_are_returned_unchanged(self):
         graph = formation_graph()
         planner = SpawnPlanner(navigation_graph=graph)
@@ -70,6 +92,35 @@ class SpawnPlannerTests(unittest.TestCase):
             planner.pose(3, 0)
         with self.assertRaisesRegex(ValueError, 'no spawn slot 15'):
             planner.pose(1, 15)
+
+    def test_three_artillery_take_rear_slots_on_both_teams(self):
+        planner = SpawnPlanner(navigation_graph=formation_graph())
+        classes = dict(((team, slot), 'SPG')
+                       for team in (1, 2) for slot in (9, 12, 14))
+        mapping = planner.assign_artillery_rear(classes)
+        for team in (1, 2):
+            self.assertEqual([0, 1, 2],
+                             [mapping[team, slot] for slot in (9, 12, 14)])
+            self.assertEqual(list(range(15)), sorted(
+                mapping[team, slot] for slot in range(15)))
+            self.assertEqual(4, mapping[team, 4])
+            self.assertEqual(9, mapping[team, 0])
+
+    def test_rear_assignment_is_independent_of_slot_number_and_input_order(self):
+        graph = formation_graph()
+        for points in graph['spawn_formations'].values():
+            points.reverse()
+        planner = SpawnPlanner(navigation_graph=graph)
+        first = planner.assign_artillery_rear({(1, 1): 'SPG', (1, 3): 'SPG'})
+        second = planner.assign_artillery_rear({(1, 3): 'SPG', (1, 1): 'SPG'})
+        self.assertEqual(first, second)
+        self.assertEqual([10, 11], [first[1, slot] for slot in (1, 3)])
+
+    def test_no_artillery_preserves_every_authored_slot(self):
+        planner = SpawnPlanner(navigation_graph=formation_graph())
+        self.assertEqual(dict(((team, slot), slot)
+                              for team in (1, 2) for slot in range(15)),
+                         planner.assign_artillery_rear({}))
 
 
 if __name__ == '__main__':

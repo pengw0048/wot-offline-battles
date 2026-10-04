@@ -432,7 +432,8 @@ class FoliageMap(object):
 		self.fallen_tree_cells[identity] = cell_keys
 		return True
 
-	def camouflage_bonus(self, observer, target, fired_recently=False):
+	def camouflage_bonus(self, observer, target, fired_recently=False,
+			start=None, end=None):
 		"""Return additive camouflage for this observer-target pair.
 
 		Cover within the transparency radius of the observer is transparent to
@@ -440,10 +441,10 @@ class FoliageMap(object):
 		blinding it. Retain the existing full removal of cover that close to
 		a target that has just fired; more distant cover is unaffected.
 		"""
-		start = (float(observer[0]),
+		start = start if start is not None else (float(observer[0]),
 			float(observer[1]) + OBSERVER_EYE_HEIGHT,
 			float(observer[2]))
-		end = (float(target[0]), float(target[1]) + TARGET_CHECK_HEIGHT,
+		end = end if end is not None else (float(target[0]), float(target[1]) + TARGET_CHECK_HEIGHT,
 			float(target[2]))
 		candidate_ids = []
 		seen = set()

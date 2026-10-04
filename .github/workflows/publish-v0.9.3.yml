@@ -1,0 +1,228 @@
+name: Publish v0.9.3 release
+# Resume the completed build after correcting the version-substring false positive.
+# Reuse is allowed only while every file except this workflow matches the tested tree.
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/publish-v0.9.3.yml"]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: publish-v0.9.3
+  cancel-in-progress: false
+jobs:
+  windows-launcher-and-release:
+    if: github.repository == 'colorfulmeans/wot-0.9.22-offline-battles'
+    permissions:
+      contents: write
+      actions: read
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      EXPECTED_BUILD_IDENTITY: colorfulmeans-35611837404-1
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - name: Prove unchanged build inputs and successful prerequisite jobs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          @'
+          import json, os, subprocess, urllib.request
+          tested = 'deefc793acfbc49ced720932c9c8c79268ac7836'
+          changed = subprocess.check_output(['git', 'diff', '--name-only', tested, 'HEAD'], text=True).splitlines()
+          assert changed == ['.github/workflows/publish-v0.9.3.yml'], changed
+          def api(path):
+              request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GH_REPO'] + path,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          for run_id in (35611837404, 35611837431):
+              run = api('/actions/runs/%d' % run_id)
+              assert run['head_sha'] == tested and run['status'] == 'completed', run_id
+          normal = api('/actions/runs/35611837431')
+          assert normal['conclusion'] == 'success', normal['conclusion']
+          jobs = api('/actions/runs/35611837404/jobs?per_page=100')['jobs']
+          for name in ('windows-server', 'client-payload'):
+              rows = [job for job in jobs if job['name'] == name]
+              assert len(rows) == 1 and rows[0]['conclusion'] == 'success', name
+          artifacts = api('/actions/runs/35611837404/artifacts?per_page=100')['artifacts']
+          rows = [item for item in artifacts if item['name'] == 'v093-launcher-input']
+          assert len(rows) == 1 and rows[0]['id'] == 10645111993 and not rows[0]['expired'], rows
+          print('All build inputs equal the tested Airfield-fixed tree; original client/server build and full CI passed.')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Verified payload prerequisites do not match' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: v093-launcher-input
+          path: dist
+          repository: ${{ github.repository }}
+          run-id: 35611837404
+          github-token: ${{ github.token }}
+      - name: Validate the downloaded Python 2.7 client package
+        shell: pwsh
+        run: |
+          $mod = Get-ChildItem -LiteralPath dist -Filter 'org.colorfulmeans.offline_lan_0922_*.wotmod'
+          if (@($mod).Count -ne 1) { throw 'Expected exactly one built mod' }
+          python tools/validate_wotmod.py $mod.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded mod validation failed' }
+      - name: Install pinned Windows packager
+        run: python -m pip install -r server/requirements-windows-build.txt
+      - name: Test launcher on Windows
+        working-directory: launcher
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify source branding and version
+        shell: pwsh
+        run: |
+          @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import wot_launcher
+          assert wot_launcher.LAUNCHER_VERSION == '0.9.3'
+          assert wot_launcher.WINDOW_TITLE == 'wot-0.9.22-offline-battles v0.9.3'
+          print(wot_launcher.WINDOW_TITLE)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Source version check failed' }
+      - name: Build launcher distribution from the verified payload
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify actual versions, source payload and complete literal constants
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appRoot = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles'
+          $launcher = Join-Path $appRoot 'wot-0.9.22-offline-battles.exe'
+          foreach ($exe in @($launcher, (Join-Path $PWD 'dist/server/WoT-0.9.22-LAN-Server.exe'))) {
+              $version = (Get-Item -LiteralPath $exe).VersionInfo
+              if ($version.FileVersion -ne '0.9.3' -or $version.ProductVersion -ne '0.9.3' -or
+                      $version.FileMajorPart -ne 0 -or $version.FileMinorPart -ne 9 -or
+                      $version.FileBuildPart -ne 3 -or $version.FilePrivatePart -ne 0) {
+                  throw "Incorrect EXE version: $exe"
+              }
+              Write-Host "EXE version verified: $exe 0.9.3"
+          }
+          Copy-Item -LiteralPath 'docs/releases/v0.9.3.md' -Destination (Join-Path $appRoot 'UPDATE_NOTES.md')
+          @'
+          import ast, io, os, struct, sys
+          from pathlib import Path
+          from zipfile import ZipFile
+          import xml.etree.ElementTree as ET
+          sys.path.insert(0, str(Path.cwd() / 'launcher'))
+          import core
+          base = Path('launcher/dist/wot-0.9.22-offline-battles/_internal')
+          identity = core.bundled_payload_identity(core.PORT_0_9_22, base_dir=str(base))
+          assert identity == {'schema': 1, 'semanticVersion': '0.9.3',
+              'buildIdentity': os.environ['EXPECTED_BUILD_IDENTITY']}, identity
+          # Python 2.7 marshal encodes strings with a type and exact length.
+          # A substring rejection of 0.9.2 also rejected TARGET_CLIENT_VERSION=0.9.22.0.1.
+          def has_literal(data, value):
+              return any(tag + struct.pack('<I', len(value)) + value in data for tag in (b's', b't'))
+          def correct_version(data):
+              return (data[:4] == b'\x03\xf3\r\n' and has_literal(data, b'0.9.3') and
+                  has_literal(data, b'0.9.22.0.1') and not has_literal(data, b'0.9.2'))
+          with ZipFile(base / 'client/0.9.22.zip') as payload:
+              assert payload.testzip() is None
+              mods = [name for name in payload.namelist() if name.endswith('.wotmod')]
+              assert len(mods) == 1 and mods[0].endswith('_0.9.3.wotmod'), mods
+              with ZipFile(io.BytesIO(payload.read(mods[0]))) as mod:
+                  assert mod.testzip() is None
+                  assert ET.fromstring(mod.read('meta.xml')).findtext('version') == '0.9.3'
+                  data = mod.read('res/scripts/client/gui/mods/offline_lan_0922/__init__.pyc')
+                  assert correct_version(data), 'Compiled version constants mismatch'
+                  old = data.replace(b's\x05\x00\x00\x000.9.3', b's\x05\x00\x00\x000.9.2')
+                  assert old != data and not correct_version(old), 'Old-version regression was not rejected'
+                  assert not correct_version(data + b't\x05\x00\x00\x000.9.2'), 'Interned old literal accepted'
+                  for filename, needle in (('battle_runtime.pyc', b'planning_support_below_soft_roof'),
+                          ('destructibles_sensor.pyc', b'_planning_catalog_candidate_1513')):
+                      assert needle in mod.read('res/scripts/client/gui/mods/offline_lan_0922/' + filename)
+          source_root = base / 'servers/0.9.22'
+          sources = list(source_root.rglob('*.py'))
+          assert len(sources) == 144, len(sources)
+          for source in sources:
+              relative = source.relative_to(source_root)
+              assert source.read_bytes() == Path(relative).read_bytes(), str(relative)
+          init_tree = ast.parse((source_root / 'src/res/scripts/client/gui/mods/offline_lan_0922/__init__.py').read_text(encoding='utf-8'))
+          fields = {node.targets[0].id: ast.literal_eval(node.value) for node in init_tree.body if isinstance(node, ast.Assign)}
+          assert fields == {'PORT_VERSION': '0.9.3', 'TARGET_CLIENT_VERSION': '0.9.22.0.1', 'TARGET_CLIENT_BUILD': '1513'}, fields
+          server_tree = ast.parse((source_root / 'server/windows_server.py').read_text(encoding='utf-8'))
+          versions = [ast.literal_eval(node.value) for node in server_tree.body if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == 'SERVER_VERSION' for target in node.targets)]
+          assert versions == ['0.9.3'], versions
+          print('Version literal regression checks passed; 144 payload sources match; Airfield fix is compiled.')
+          print(core.payload_identity_text(identity))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled version/source validation failed' }
+      - name: Package and inspect the complete flat release ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appRoot = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles'
+          Compress-Archive -Force -Path (Join-Path $appRoot '*') -DestinationPath 'wot-0.9.22-offline-battles-0.9.3-Windows-x64.zip'
+          @'
+          import io, struct
+          from pathlib import PurePosixPath
+          from zipfile import ZipFile
+          def require_x64(data):
+              assert data[:2] == b'MZ'
+              at = struct.unpack_from('<I', data, 0x3c)[0]
+              assert data[at:at+4] == b'PE\0\0'
+              assert struct.unpack_from('<H', data, at+4)[0] == 0x8664
+          with ZipFile('wot-0.9.22-offline-battles-0.9.3-Windows-x64.zip') as archive:
+              names = archive.namelist()
+              assert archive.testzip() is None and len(names) == len(set(names))
+              for name in names:
+                  path = PurePosixPath(name)
+                  assert not path.is_absolute() and '..' not in path.parts and '\\' not in name
+              require_x64(archive.read('wot-0.9.22-offline-battles.exe'))
+              require_x64(open('dist/server/WoT-0.9.22-LAN-Server.exe', 'rb').read())
+              assert '_internal/servers/0.9.22/server/windows_server.py' in names
+              with ZipFile(io.BytesIO(archive.read('_internal/client/0.9.22.zip'))) as payload:
+                  assert payload.testzip() is None
+              assert archive.read('UPDATE_NOTES.md') == open('docs/releases/v0.9.3.md', 'rb').read()
+              assert not [name for name in names if name.endswith('.zip') and '/' not in name]
+          print('Final release ZIP passed CRC, architecture, layout and English-note checks.')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Final release ZIP verification failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v093-release-package
+          path: wot-0.9.22-offline-battles-0.9.3-Windows-x64.zip
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish v0.9.3 with the verified Windows package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseZip = 'wot-0.9.22-offline-battles-0.9.3-Windows-x64.zip'
+          $notes = 'docs/releases/v0.9.3.md'
+          $title = 'wot-0.9.22-offline-battles v0.9.3'
+          $releases = gh api "repos/$env:GH_REPO/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot check existing releases' }
+          $existing = @($releases | ConvertFrom-Json | Where-Object { $_.tag_name -eq 'v0.9.3' })
+          if ($existing.Count -gt 0) {
+              $release = $existing[0]
+              if (-not $release.draft -or $release.target_commitish -ne $env:GITHUB_SHA) {
+                  throw 'Refusing to replace a published release or another commit draft'
+              }
+              gh release upload v0.9.3 $releaseZip --clobber
+              if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed' }
+              gh release edit v0.9.3 --title $title --notes-file $notes
+          } else {
+              gh release create v0.9.3 $releaseZip --draft --target $env:GITHUB_SHA --title $title --notes-file $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release draft preparation failed' }
+          gh release edit v0.9.3 --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

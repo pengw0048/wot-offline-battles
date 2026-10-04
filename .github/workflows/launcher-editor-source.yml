@@ -1,0 +1,21 @@
+name: Verify launcher editor transport
+on:
+  push:
+    branches: [fix/094-launcher-bot-editor-20260924]
+    paths: [.github/workflows/launcher-editor-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-editor-transport
+          path: tools/bot_editor.patch.*.b64
+          if-no-files-found: error
+          retention-days: 7

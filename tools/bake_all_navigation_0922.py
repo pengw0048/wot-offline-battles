@@ -28,6 +28,10 @@ def _bake_one(client_root, output_root, map_name):
     path = os.path.join(output_root, map_name + '.json')
     graph = baker.bake_map_graph(client_root, map_name, path)
     schema.validate_graph(graph, map_name)
+    bake = graph.get('bake', {})
+    if (bake.get('navigation_collision_policy') != baker.NAVIGATION_COLLISION_POLICY or
+            bake.get('original_destructible_surfaces_excluded') is not True):
+        raise ValueError('navigation batch requires a fresh compiled-surface bake')
     with open(path, 'rb') as stream:
         digest = hashlib.sha256(stream.read()).hexdigest()
     return map_name, digest

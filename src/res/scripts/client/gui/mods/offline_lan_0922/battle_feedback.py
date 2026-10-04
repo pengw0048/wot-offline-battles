@@ -17,6 +17,7 @@ import sys
 # second Sixth Sense notification.
 OBSERVATION_SECONDS = 10.0
 SIXTH_SENSE_DELAY_SECONDS = 3.0
+SIXTH_DIAGNOSTIC_DETAIL_LIMIT = 16
 
 
 class VehicleStatePresenter(object):
@@ -45,7 +46,7 @@ class SixthSenseController(object):
     """
 
     def __init__(self, schedule, cancel, generation, has_sixth_sense,
-                 is_alive, is_battle, presenter):
+                 is_alive, is_battle, presenter, delay=SIXTH_SENSE_DELAY_SECONDS):
         required = (schedule, cancel, generation, has_sixth_sense,
                     is_alive, is_battle)
         if not all(callable(value) for value in required):
@@ -60,8 +61,41 @@ class SixthSenseController(object):
         self._is_alive = is_alive
         self._is_battle = is_battle
         self._presenter = presenter
+        self._delay = float(delay)
         self._observed_until = 0.0
         self._pending_callback = None
+        # These counters are deliberately silent until the battle owner
+        # prints its teardown summary.  In particular, scheduling a Sixth
+        # Sense callback must not turn the Python log into an early spotting
+        # warning before the stock three-second presentation boundary.
+        self._diagnostics = {
+            'scheduled': 0,
+            'presented': 0,
+            'presentation_failed': 0,
+            'suppressed_generation': 0,
+            'suppressed_dead': 0,
+            'suppressed_not_battle': 0,
+            'suppressed_skill': 0,
+            'suppressed_reset': 0,
+            'detail_dropped': 0,
+        }
+
+    def _report_presented(self):
+        """Log only information the stock HUD has already disclosed."""
+        if self._diagnostics['presented'] > SIXTH_DIAGNOSTIC_DETAIL_LIMIT:
+            self._diagnostics['detail_dropped'] += 1
+            return False
+        try:
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] SIXTH result=presented\n')
+        except Exception:
+            # Diagnostics must never replace the successful native callback.
+            return False
+        return True
+
+    def diagnostic_summary(self):
+        """Return bounded counters without exposing an observing vehicle."""
+        return dict(self._diagnostics)
 
     def reset(self):
         """Cancel delayed work before the owning battle generation is retired."""
@@ -69,6 +103,7 @@ class SixthSenseController(object):
         self._pending_callback = None
         self._observed_until = 0.0
         if callback is not None:
+            self._diagnostics['suppressed_reset'] += 1
             self._cancel(callback)
 
     def observe(self, visible_to_enemy, now):
@@ -91,14 +126,29 @@ class SixthSenseController(object):
             if callback == self._pending_callback:
                 self._pending_callback = None
             if self._generation() != expected_generation:
+                self._diagnostics['suppressed_generation'] += 1
                 return
-            if not self._is_alive() or not self._is_battle():
+            if not self._is_alive():
+                self._diagnostics['suppressed_dead'] += 1
                 return
-            self._presenter.notify_observed_by_enemy(True)
+            if not self._is_battle():
+                self._diagnostics['suppressed_not_battle'] += 1
+                return
+            if not self._has_sixth_sense():
+                self._diagnostics['suppressed_skill'] += 1
+                return
+            try:
+                self._presenter.notify_observed_by_enemy(True)
+            except Exception:
+                self._diagnostics['presentation_failed'] += 1
+                raise
+            self._diagnostics['presented'] += 1
+            self._report_presented()
 
-        callback = self._schedule(SIXTH_SENSE_DELAY_SECONDS, _deliver)
+        callback = self._schedule(self._delay, _deliver)
         holder[0] = callback
         self._pending_callback = callback
+        self._diagnostics['scheduled'] += 1
         return True
 
 

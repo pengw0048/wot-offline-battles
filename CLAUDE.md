@@ -5,9 +5,9 @@ This file is the single source of truth for repository-wide agent guidance.
 receive the same instructions. Do not duplicate or independently edit the
 symlink target. Read this file before investigating or changing the repository.
 
-## Working with Peng
+## Working with colorfulmeans
 
-- Discuss plans, evidence, tradeoffs, progress, and results with Peng in
+- Discuss plans, evidence, tradeoffs, progress, and results with colorfulmeans in
   Chinese. Keep code, comments, commit messages, logs, and shared repository
   documentation in English.
 - Lead with the observed outcome and supporting evidence. Separate a confirmed
@@ -22,16 +22,16 @@ symlink target. Read this file before investigating or changing the repository.
 - Present meaningful tradeoffs instead of silently choosing one. If empirical
   behavior contradicts documentation or a prior conclusion, reproduce the
   behavior first and update the conclusion.
-- Treat Peng's gameplay observations as runtime evidence. A screenshot may be
+- Treat colorfulmeans's gameplay observations as runtime evidence. A screenshot may be
   ambiguous, but do not dismiss the observation because the screenshot is
   ambiguous; inspect the exact map, client data, logs, and lifecycle.
 - Fix an in-scope bug directly rather than handing it to an imaginary future
   owner. Preserve unrelated user changes in a dirty worktree.
 - Land a change on a branch and open a pull request. That is the default even
-  for a fix Peng asked for directly, because he reads the change there before
+  for a fix colorfulmeans asked for directly, because he reads the change there before
   it reaches `main`. Push `main` directly only when he asks for it in that
   task; then say so in the handoff. Never force-push. Create a tag or publish
-  a release only when Peng explicitly requests it. Keep validation
+  a release only when colorfulmeans explicitly requests it. Keep validation
   proportional to his instruction: report missing Windows evidence honestly,
   but do not invent an extra review, full-CI, or native-acceptance gate after
   he explicitly asks to commit, package, or release without it.
@@ -71,7 +71,7 @@ committed; remove only exact generated targets after verifying what they are.
   restored.
 - The launcher, server, tests, and package build support only this exact client.
   Do not add compatibility machinery for another client without an explicit
-  product decision from Peng.
+  product decision from colorfulmeans.
 - Historical references to 0.8.2 describe provenance of retained gameplay
   laws, not a supported runtime, package, source tree, or protocol peer.
 
@@ -109,7 +109,7 @@ python3 tools/inspect_client.py "$WOT_0922_CLIENT"
 
 The pinned compatible build/audit interpreter is CPython 2.7.18. It reads the
 same Python 2.7 PYC format, but it is not the embedded 2.7.7 game runtime. On
-Peng's Mac, resolve it through pyenv when available:
+colorfulmeans's Mac, resolve it through pyenv when available:
 
 ```bash
 PY27="$(PYENV_VERSION=2.7.18 pyenv which python2.7)"
@@ -304,13 +304,13 @@ source hash in this instruction file.
   change.
 - Test the narrow failure first, then the relevant subsystem, and run a broader
   gate only when the risk or explicit request requires it. Use
-  `PYTHONDONTWRITEBYTECODE=1` for Python tests where possible. If Peng asks for
+  `PYTHONDONTWRITEBYTECODE=1` for Python tests where possible. If colorfulmeans asks for
   no review, no CI, or an immediate commit/package, obey rather than adding
   process theatre.
 - For asynchronous tests, wait for a state transition or acknowledgement. Do
   not use a small fixed sleep as proof that a handler or worker consumed a
   message.
-- Unless Peng explicitly asks to skip them, inspect the staged diff, run the
+- Unless colorfulmeans explicitly asks to skip them, inspect the staged diff, run the
   proportional checks, commit one coherent change, open its pull request, and
   verify the exact pushed commit's relevant CI for runtime, packaging, CI, or
   release behavior.
@@ -328,9 +328,9 @@ A useful final handoff records:
 Never describe a task as complete merely because the static tree is green when
 the stated acceptance requires native Windows evidence.
 
-## Peng's Windows VM, diagnostics, and release delivery
+## colorfulmeans's Windows VM, diagnostics, and release delivery
 
-- Windows `C:\\Mac\\Home\\Desktop` maps to macOS `/Users/peng/Desktop`.
+- Windows `C:\\Mac\\Home\\Desktop` maps to macOS `/Users/<username>/Desktop`.
   Shared-folder writes can leave files owned by root on macOS. If a precise
   replacement is blocked, use `prlctl exec` to perform it from Windows rather
   than weakening permissions broadly.

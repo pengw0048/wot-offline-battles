@@ -1,0 +1,210 @@
+from __future__ import absolute_import
+
+"""Generated from spg_positions/positions_0922.json; do not edit by hand."""
+
+import json
+
+CATALOG = json.loads(r'''
+{
+  "coordinate_system": "minimap rows ABCDEFGHJK north-to-south; columns 1234567890 west-to-east",
+  "game_version": "0.9.22.0.1-cn-1513",
+  "maps": {
+    "08_ruinberg": {
+      "bounds": [
+        -400,
+        -400,
+        400,
+        400
+      ],
+      "mode": "regular",
+      "name": "Ruinberg",
+      "spawn_side_source": "Native #1513 navgraph bases (not inferred from team numbers).",
+      "spawn_sides": {
+        "1": "north",
+        "2": "south"
+      },
+      "unencoded_notes": [
+        "Other K/0-line locations are described but are not expanded into an invented whole-map position list."
+      ],
+      "zones": [
+        {
+          "cells": [
+            "A1"
+          ],
+          "condition": "",
+          "face_cell": "F1",
+          "id": "north_city_lane",
+          "priority": 0,
+          "side": "north",
+          "source": "guru_ruinberg_archived"
+        },
+        {
+          "cells": [
+            "A3",
+            "A4"
+          ],
+          "condition": "",
+          "face_cell": null,
+          "id": "north_safe_backfield",
+          "priority": 0,
+          "side": "north",
+          "source": "guru_ruinberg_archived"
+        },
+        {
+          "cells": [
+            "A5",
+            "A6",
+            "A7"
+          ],
+          "condition": "More exposed to scouts; a source risk warning, not a guarantee of protection.",
+          "face_cell": "F3",
+          "id": "north_centre_support",
+          "priority": 1,
+          "side": "north",
+          "source": "guru_ruinberg_archived"
+        },
+        {
+          "cells": [
+            "A0",
+            "B0"
+          ],
+          "condition": "Use behind a strong friendly field group.",
+          "face_cell": "F3",
+          "id": "north_east_flank",
+          "priority": 2,
+          "requires_support": {
+            "columns": [
+              "7",
+              "8",
+              "9",
+              "0"
+            ],
+            "minimum": 3
+          },
+          "side": "north",
+          "source": "guru_ruinberg_archived"
+        },
+        {
+          "cells": [
+            "K1"
+          ],
+          "condition": "",
+          "face_cell": "C3",
+          "id": "south_city_lane",
+          "priority": 0,
+          "side": "south",
+          "source": "guru_ruinberg_archived"
+        },
+        {
+          "cells": [
+            "K5",
+            "K6"
+          ],
+          "condition": "",
+          "face_cell": "D3",
+          "id": "south_centre_support",
+          "priority": 0,
+          "side": "south",
+          "source": "guru_ruinberg_archived"
+        }
+      ]
+    },
+    "35_steppes": {
+      "bounds": [
+        -500,
+        -500,
+        500,
+        500
+      ],
+      "mode": "regular",
+      "name": "Steppes",
+      "spawn_side_source": "Native #1513 navgraph bases (not inferred from team numbers).",
+      "spawn_sides": {
+        "1": "south",
+        "2": "north"
+      },
+      "unencoded_notes": [
+        "Preferred northern railway area is a descriptive source location only. Historical marked archive/image is needed before assigning its cells. D1 is the explicitly sourced northern alternative, not claimed to be the best universal position."
+      ],
+      "zones": [
+        {
+          "cells": [
+            "K5"
+          ],
+          "condition": "",
+          "face_cell": null,
+          "id": "south_west_backfield",
+          "priority": 0,
+          "side": "south",
+          "source": "guru_steppes_archived"
+        },
+        {
+          "cells": [
+            "K7"
+          ],
+          "condition": "",
+          "face_cell": null,
+          "id": "south_centre_backfield",
+          "priority": 0,
+          "side": "south",
+          "source": "guru_steppes_archived"
+        },
+        {
+          "cells": [
+            "K0"
+          ],
+          "condition": "",
+          "face_cell": null,
+          "id": "south_east_backfield",
+          "priority": 0,
+          "side": "south",
+          "source": "guru_steppes_archived"
+        },
+        {
+          "cells": [
+            "D1"
+          ],
+          "condition": "",
+          "face_cell": null,
+          "id": "north_west_alternative",
+          "priority": 0,
+          "side": "north",
+          "source": "guru_steppes_archived"
+        }
+      ]
+    }
+  },
+  "native_gameplay_verified": false,
+  "revision": "0922-spg-initial-1",
+  "schema": 1,
+  "source_policy": "Community candidate AREAS, not official exact coordinates or a recovered Hawg archive. Runtime must resolve existing safe/reachable graph cells within these areas.",
+  "sources": {
+    "guru_ruinberg_archived": {
+      "author": "World of Tanks Guru",
+      "kind": "community_guide_mirror",
+      "locator": "Side 1 SPGs; Side 2 SPGs",
+      "original_url": "https://wotguru.com/map-strategy-ruinberg/",
+      "source_era": "2015-12 archive URL; exact original publication date unknown",
+      "url": "https://game.lhg100.com/Article/onlinegame/WorldofTanks/201512/22093.html",
+      "use": "Grid areas transcribed from explicit SPG text; source has no #1513 certification."
+    },
+    "guru_steppes_archived": {
+      "author": "World of Tanks Guru",
+      "kind": "community_guide_mirror",
+      "locator": "Side 1 Arty; Side 2 Arty",
+      "original_url": "https://wotguru.com/map-strategy-steppes/",
+      "source_era": "2015-12 archive URL; exact original publication date unknown",
+      "url": "https://game.lhg100.com/Article/onlinegame/WorldofTanks/201512/22097.html",
+      "use": "K5/K7/K0 and D1 explicitly named. The descriptive north railway area is deliberately not assigned invented grid coordinates."
+    },
+    "hawg_forum_lineage": {
+      "author": "Hawg / PigBrains",
+      "date": "2018-01-10",
+      "kind": "forum",
+      "url": "https://koreanrandom.com/forum/topic/43190-hawgs-spg-td-passive-scout-tactical-minimaps/",
+      "use": "Source lineage only: the author names Maps Tactics and Guru maps. The 9.22 archive has not been retrieved; no positions are attributed to unseen files."
+    }
+  }
+}
+'''
+)

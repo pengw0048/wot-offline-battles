@@ -1,0 +1,3550 @@
+[
+  {
+    "ray_start": [
+      5.23488187789917,
+      55.990718841552734,
+      48.739990234375
+    ],
+    "ray_end": [
+      2.89339280128479,
+      56.00950622558594,
+      45.77006149291992
+    ],
+    "hit": [
+      2.915093421936035,
+      56.00933074951172,
+      45.797584533691406
+    ],
+    "normal": [
+      -0.5710465312004089,
+      0.4463028013706207,
+      -0.6889989376068115
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.915093421936035,
+            56.00933074951172,
+            45.797584533691406
+          ],
+          "normal": [
+            -0.5710465312004089,
+            0.4463028013706207,
+            -0.6889989376068115
+          ],
+          "start": [
+            5.23488187789917,
+            55.990718841552734,
+            48.739990234375
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            2.89339280128479,
+            56.00950622558594,
+            45.77006149291992
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.915093421936035,
+            56.00933074951172,
+            45.797584533691406
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.5710465312004089,
+            0.4463028013706207,
+            -0.6889989376068115
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:40:53.434"
+  },
+  {
+    "ray_start": [
+      5.219411849975586,
+      55.9872932434082,
+      48.720367431640625
+    ],
+    "ray_end": [
+      2.9064078330993652,
+      56.011470794677734,
+      45.78657150268555
+    ],
+    "hit": [
+      2.9157238006591797,
+      56.01137161254883,
+      45.79838943481445
+    ],
+    "normal": [
+      -0.5710465312004089,
+      0.4463028013706207,
+      -0.6889989376068115
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.9157238006591797,
+            56.01137161254883,
+            45.79838943481445
+          ],
+          "normal": [
+            -0.5710465312004089,
+            0.4463028013706207,
+            -0.6889989376068115
+          ],
+          "start": [
+            5.219411849975586,
+            55.9872932434082,
+            48.720367431640625
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            2.9064078330993652,
+            56.011470794677734,
+            45.78657150268555
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.9157238006591797,
+            56.01137161254883,
+            45.79838943481445
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.5710465312004089,
+            0.4463028013706207,
+            -0.6889989376068115
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:40:55.664"
+  },
+  {
+    "ray_start": [
+      6.817316055297852,
+      55.00686264038086,
+      48.526123046875
+    ],
+    "ray_end": [
+      3.8444716930389404,
+      55.0881233215332,
+      46.23835754394531
+    ],
+    "hit": [
+      3.8895316123962402,
+      55.086891174316406,
+      46.273033142089844
+    ],
+    "normal": [
+      0.769932746887207,
+      0.0,
+      -0.6381250023841858
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            3.8895316123962402,
+            55.086891174316406,
+            46.273033142089844
+          ],
+          "normal": [
+            0.769932746887207,
+            0.0,
+            -0.6381250023841858
+          ],
+          "start": [
+            6.817316055297852,
+            55.00686264038086,
+            48.526123046875
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            3.8444716930389404,
+            55.0881233215332,
+            46.23835754394531
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            3.8895316123962402,
+            55.086891174316406,
+            46.273033142089844
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            0.769932746887207,
+            0.0,
+            -0.6381250023841858
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:40:58.192"
+  },
+  {
+    "ray_start": [
+      9.246505737304688,
+      55.8536262512207,
+      49.805152893066406
+    ],
+    "ray_end": [
+      5.729262828826904,
+      55.93463134765625,
+      48.6752815246582
+    ],
+    "hit": [
+      5.8570556640625,
+      55.93168640136719,
+      48.716331481933594
+    ],
+    "normal": [
+      0.9003510475158691,
+      0.12474319338798523,
+      0.41690191626548767
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.21660497784614563,
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.0,
+                  0.9041949510574341,
+                  0.0
+                ],
+                [
+                  0.0,
+                  0.0,
+                  0.21660497784614563
+                ]
+              ],
+              "center": [
+                0.44992098212242126,
+                55.43895721435547,
+                50.95927429199219
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            74
+          ],
+          "filename": "content/environment/env030_milkcans/normal/lod0/env030_milkcans1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  0.0,
+                  -0.6141031384468079
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.652343988418579,
+                  0.0,
+                  1.9279073476791382
+                ]
+              ],
+              "center": [
+                9.663784980773926,
+                55.205936431884766,
+                53.512245178222656
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            47
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "structure",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.6150453090667725,
+                  0.0,
+                  -2.11540150642395
+                ],
+                [
+                  0.0,
+                  4.371150970458984,
+                  0.0
+                ],
+                [
+                  1.896615982055664,
+                  0.0,
+                  2.3445842266082764
+                ]
+              ],
+              "center": [
+                -1.249786376953125,
+                58.0438117980957,
+                56.44111633300781
+              ],
+              "material": 73,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            },
+            {
+              "axes": [
+                [
+                  2.4849636554718018,
+                  0.0,
+                  -2.010173797607422
+                ],
+                [
+                  0.0,
+                  4.371148586273193,
+                  0.0
+                ],
+                [
+                  1.8945770263671875,
+                  0.0,
+                  2.3420636653900146
+                ]
+              ],
+              "center": [
+                2.052337646484375,
+                58.0438117980957,
+                53.85735321044922
+              ],
+              "material": 74,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            81
+          ],
+          "filename": "content/buildings/bld705_shed/normal/lod0/bld705_shed.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.6046550273895264,
+                  0.0,
+                  0.7245089411735535
+                ],
+                [
+                  0.0,
+                  0.9999949336051941,
+                  9.99999883788405e-07
+                ],
+                [
+                  -1.9494086503982544,
+                  -2.5391223061888013e-06,
+                  1.626922369003296
+                ]
+              ],
+              "center": [
+                9.389851570129395,
+                55.28335189819336,
+                56.5933837890625
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            14
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            5.8570556640625,
+            55.93168640136719,
+            48.716331481933594
+          ],
+          "normal": [
+            0.9003510475158691,
+            0.12474319338798523,
+            0.41690191626548767
+          ],
+          "start": [
+            9.246505737304688,
+            55.8536262512207,
+            49.805152893066406
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            5.729262828826904,
+            55.93463134765625,
+            48.6752815246582
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            5.8570556640625,
+            55.93168640136719,
+            48.716331481933594
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            0.9003510475158691,
+            0.12474319338798523,
+            0.41690191626548767
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:00.183"
+  },
+  {
+    "ray_start": [
+      5.178971767425537,
+      56.21959686279297,
+      46.4588623046875
+    ],
+    "ray_end": [
+      1.5969882011413574,
+      56.21959686279297,
+      45.12034225463867
+    ],
+    "hit": [
+      3.286755084991455,
+      56.21959686279297,
+      45.75177764892578
+    ],
+    "normal": [
+      0.34128665924072266,
+      0.8963890671730042,
+      -0.28286048769950867
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": false,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            3.286755084991455,
+            56.21959686279297,
+            45.75177764892578
+          ],
+          "normal": [
+            0.34128665924072266,
+            0.8963890671730042,
+            -0.28286048769950867
+          ],
+          "start": [
+            5.178971767425537,
+            56.21959686279297,
+            46.4588623046875
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            1.5969882011413574,
+            56.21959686279297,
+            45.12034225463867
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            3.286755084991455,
+            56.21959686279297,
+            45.75177764892578
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            0.34128665924072266,
+            0.8963890671730042,
+            -0.28286048769950867
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:04.727"
+  },
+  {
+    "ray_start": [
+      2.239743709564209,
+      55.3200569152832,
+      45.29766845703125
+    ],
+    "ray_end": [
+      5.47564172744751,
+      55.129573822021484,
+      46.85187530517578
+    ],
+    "hit": [
+      2.9214775562286377,
+      55.27992630004883,
+      45.62510681152344
+    ],
+    "normal": [
+      -0.6364513635635376,
+      -0.07236803323030472,
+      -0.767914354801178
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.9214775562286377,
+            55.27992630004883,
+            45.62510681152344
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ],
+          "start": [
+            2.239743709564209,
+            55.3200569152832,
+            45.29766845703125
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            5.47564172744751,
+            55.129573822021484,
+            46.85187530517578
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.9214775562286377,
+            55.27992630004883,
+            45.62510681152344
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:06.737"
+  },
+  {
+    "ray_start": [
+      2.239743709564209,
+      55.31866455078125,
+      45.29766845703125
+    ],
+    "ray_end": [
+      5.4759979248046875,
+      55.123390197753906,
+      46.852046966552734
+    ],
+    "hit": [
+      2.9216511249542236,
+      55.27751922607422,
+      45.62519073486328
+    ],
+    "normal": [
+      -0.6364513635635376,
+      -0.07236803323030472,
+      -0.767914354801178
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.9216511249542236,
+            55.27751922607422,
+            45.62519073486328
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ],
+          "start": [
+            2.239743709564209,
+            55.31866455078125,
+            45.29766845703125
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            5.4759979248046875,
+            55.123390197753906,
+            46.852046966552734
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.9216511249542236,
+            55.27751922607422,
+            45.62519073486328
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:08.747"
+  },
+  {
+    "ray_start": [
+      3.141160726547241,
+      56.25418472290039,
+      45.730621337890625
+    ],
+    "ray_end": [
+      -0.1898348182439804,
+      56.45606994628906,
+      44.1307373046875
+    ],
+    "hit": [
+      3.1210579872131348,
+      56.255401611328125,
+      45.72096633911133
+    ],
+    "normal": [
+      -0.638124942779541,
+      -2.6456714294909034e-06,
+      -0.769932746887207
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            3.1210579872131348,
+            56.255401611328125,
+            45.72096633911133
+          ],
+          "normal": [
+            -0.638124942779541,
+            -2.6456714294909034e-06,
+            -0.769932746887207
+          ],
+          "start": [
+            3.141160726547241,
+            56.25418472290039,
+            45.730621337890625
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            -0.1898348182439804,
+            56.45606994628906,
+            44.1307373046875
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            3.1210579872131348,
+            56.255401611328125,
+            45.72096633911133
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.638124942779541,
+            -2.6456714294909034e-06,
+            -0.769932746887207
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:10.752"
+  },
+  {
+    "ray_start": [
+      2.239743709564209,
+      55.318389892578125,
+      45.29766845703125
+    ],
+    "ray_end": [
+      5.47662878036499,
+      55.122161865234375,
+      46.85234832763672
+    ],
+    "hit": [
+      2.921685218811035,
+      55.27705001831055,
+      45.625205993652344
+    ],
+    "normal": [
+      -0.6364513635635376,
+      -0.07236803323030472,
+      -0.767914354801178
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.921685218811035,
+            55.27705001831055,
+            45.625205993652344
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ],
+          "start": [
+            2.239743709564209,
+            55.318389892578125,
+            45.29766845703125
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            5.47662878036499,
+            55.122161865234375,
+            46.85234832763672
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.921685218811035,
+            55.27705001831055,
+            45.625205993652344
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:12.752"
+  },
+  {
+    "ray_start": [
+      2.239743709564209,
+      55.31838607788086,
+      45.29766845703125
+    ],
+    "ray_end": [
+      5.477970123291016,
+      55.12212371826172,
+      46.85299301147461
+    ],
+    "hit": [
+      2.921684503555298,
+      55.27705383300781,
+      45.625205993652344
+    ],
+    "normal": [
+      -0.6364513635635376,
+      -0.07236803323030472,
+      -0.767914354801178
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.921684503555298,
+            55.27705383300781,
+            45.625205993652344
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ],
+          "start": [
+            2.239743709564209,
+            55.31838607788086,
+            45.29766845703125
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            5.477970123291016,
+            55.12212371826172,
+            46.85299301147461
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.921684503555298,
+            55.27705383300781,
+            45.625205993652344
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:14.770"
+  },
+  {
+    "ray_start": [
+      2.239743709564209,
+      55.318382263183594,
+      45.29766845703125
+    ],
+    "ray_end": [
+      5.474808692932129,
+      55.12211227416992,
+      46.85147476196289
+    ],
+    "hit": [
+      2.921687602996826,
+      55.277008056640625,
+      45.625205993652344
+    ],
+    "normal": [
+      -0.6364513635635376,
+      -0.07236803323030472,
+      -0.767914354801178
+    ],
+    "native_contact_evidence": {
+      "surface_columns": "material,flags,item,chunk",
+      "replay_clear": false,
+      "nearby_owners": [
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7265661358833313,
+                  0.0,
+                  -0.6021826267242432
+                ],
+                [
+                  0.014109998941421509,
+                  0.9997509121894836,
+                  0.017024997621774673
+                ],
+                [
+                  1.6198736429214478,
+                  -0.0561450757086277,
+                  1.9544665813446045
+                ]
+              ],
+              "center": [
+                1.8802233934402466,
+                55.32066345214844,
+                44.328433990478516
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            45
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  2.4673573970794678,
+                  0.0,
+                  2.584123134613037
+                ],
+                [
+                  0.0,
+                  0.8474259376525879,
+                  0.0
+                ],
+                [
+                  -0.934016764163971,
+                  0.0,
+                  0.8918123841285706
+                ]
+              ],
+              "center": [
+                0.2891097664833069,
+                55.30126953125,
+                44.051265716552734
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": true
+            }
+          ],
+          "identity": [
+            32639,
+            55
+          ],
+          "filename": "content/environment/env208_log_firewood/normal/lod0/env208_log_firewood05.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7248168587684631,
+                  0.0,
+                  -0.6770378947257996
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6900080442428589,
+                  0.0,
+                  0.7387023568153381
+                ]
+              ],
+              "center": [
+                0.6564236879348755,
+                55.32408905029297,
+                42.736900329589844
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            53
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7680651545524597,
+                  0.0,
+                  -0.6275449991226196
+                ],
+                [
+                  0.0,
+                  1.309593677520752,
+                  0.0
+                ],
+                [
+                  0.6395670175552368,
+                  0.0,
+                  0.7827791571617126
+                ]
+              ],
+              "center": [
+                5.770648956298828,
+                55.26423263549805,
+                48.895938873291016
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            49
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonegatesend1.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7062968611717224,
+                  0.0,
+                  -0.6258330941200256
+                ],
+                [
+                  0.0,
+                  0.9999969601631165,
+                  0.0
+                ],
+                [
+                  1.6839052438735962,
+                  0.0,
+                  1.9004061222076416
+                ]
+              ],
+              "center": [
+                -0.7246551513671875,
+                55.351158142089844,
+                41.24495315551758
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": false,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32383,
+            190
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        },
+        {
+          "isolated": false,
+          "kind": "fragile",
+          "boxes": [
+            {
+              "axes": [
+                [
+                  0.7165178656578064,
+                  9.436794243811164e-07,
+                  -0.6141022443771362
+                ],
+                [
+                  0.015481999143958092,
+                  0.9997139573097229,
+                  0.01806499809026718
+                ],
+                [
+                  1.651874303817749,
+                  -0.06041080132126808,
+                  1.9273614883422852
+                ]
+              ],
+              "center": [
+                7.087871074676514,
+                55.250343322753906,
+                50.511478424072266
+              ],
+              "material": null,
+              "broken": true,
+              "predicted": true,
+              "contains_hit": false
+            }
+          ],
+          "identity": [
+            32639,
+            17
+          ],
+          "filename": "content/gatesandfences/gaf018_stonefence/normal/lod0/gaf018_stonefencetile.model"
+        }
+      ],
+      "queries": [
+        {
+          "hit": [
+            2.921687602996826,
+            55.277008056640625,
+            45.625205993652344
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ],
+          "start": [
+            2.239743709564209,
+            55.318382263183594,
+            45.29766845703125
+          ],
+          "candidates": [
+            [
+              73,
+              0,
+              8,
+              32639
+            ]
+          ],
+          "excluded": [],
+          "end": [
+            5.474808692932129,
+            55.12211227416992,
+            46.85147476196289
+          ]
+        }
+      ],
+      "replay_contact_distance": 0.0,
+      "budget_exhausted": false,
+      "owners_omitted": 0,
+      "surface_witnesses": [
+        {
+          "contact_distance": 0.0,
+          "hit": [
+            2.921687602996826,
+            55.277008056640625,
+            45.625205993652344
+          ],
+          "key": [
+            73,
+            0,
+            8,
+            32639
+          ],
+          "normal": [
+            -0.6364513635635376,
+            -0.07236803323030472,
+            -0.767914354801178
+          ]
+        }
+      ]
+    },
+    "log_time": "2026-09-21 11:41:16.766"
+  }
+]

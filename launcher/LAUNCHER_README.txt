@@ -1,170 +1,39 @@
-WoT Offline Battles Launcher
-================================
+wot-0.9.22-offline-battles v0.9.7
 
-The launcher prepares one battle before the game starts. It installs the mod,
-writes the server address, runs the LAN server when you host, starts World of
-Tanks, and stops that server when the game closes. Its bundled client and
-server payloads are only for the exact #1513 client described below; it does
-not install or start earlier client lines.
+Supported client: Chinese HD World of Tanks 0.9.22.0.1 #1513 (32-bit).
+The launcher and bundled server require 64-bit Windows.
 
-1. Start WoT-Offline-Battles-Launcher.exe from this folder. Keep the folder
-   together; the launcher needs the files beside it.
-2. Select your World of Tanks folder. The list holds the folders you used
-   before, plus any game the launcher finds in the usual install locations.
-   Use Browse... for a folder that is not in the list. The launcher reports
-   which client it found. The only supported client is the exact Chinese HD
-   0.9.22.0.1 #1513 build; another build is not compatible.
-3. Select a mode:
-   - Single player: you play alone against bots. The launcher runs the LAN
-     server for you, because every battle is a server battle.
-   - Host a LAN battle on this PC: other players join this PC. The launcher
-     prints the address they should type.
-   - Join a LAN battle: type the address of the PC that hosts the battle, for
-     example 192.168.1.20 or 192.168.1.20:28782.
-4. Type a player name. Other players see it in the LAN room. Test connection
-   checks the address you typed, or reports whether port 28782 on this PC is
-   already taken when you host.
-5. Click Start game. The launcher removes older mod files, installs the mod
-   for that client, and starts the game. This takes a few seconds. It validates
-   and stages the complete package before replacing the old mod, and restores
-   the previous mod if that replacement fails.
+Extract the complete ZIP into a new empty folder. Keep _internal and licenses
+beside wot-0.9.22-offline-battles.exe, run the launcher and select the game.
+Use the existing save and vehicle profile. An update does not require resetting
+saves, recordings or settings. Do not mix old and new launcher files or install
+another mod copy manually; the launcher installs its matching client payload.
 
-In the game, fit a tank and click Battle!. Everyone lands in the LAN waiting
-room, drawn over the stock battle queue screen. The room host selects the map
-and the total tanks for each team, including human players, from 1 through 15,
-then clicks START BATTLE. The room settings can be changed there without
-restarting the game or LAN server. LEAVE closes the room and returns you to
-the garage.
+All LAN participants must update together and restart the room/server. A room
+explicitly hosted by the launcher remains open until Stop room or launcher exit;
+leaving one player client does not terminate the other players' room.
 
-On the 0.9.22 client the garage works offline. Every vehicle is owned and every
-module in its own tech tree is unlocked, each vehicle arrives with its top
-modules and three consumables, and every item costs nothing. Change modules,
-optional devices, consumables, shells, camouflage and crew skills; the garage
-is saved after each change and the battle uses what you fitted.
+Closing the visible single-player game also closes its hidden simulation worker
+and temporary server. Cleanup normally takes a few seconds and may wait longer
+while a recording finishes. The launcher itself stays open.
 
-The Tools tab also edits vehicle data directly. A vehicle data profile is a
-named set of Packed XML field changes (health, damage, penetration, armour,
-speeds, reload and other values) made in the editor window; it never changes
-scripts.pkg. In single player the selected profile is activated only for that
-session and removed again when the game closes. When you start a LAN room on
-the Online tab, the selected profile is pinned for the whole room: the room
-server shares the modified package members with every player who joins, their
-launcher installs the same temporary overlay before the game starts, and
-original vehicle data is restored after the session. A room whose profile was
-changed after it was started must be restarted before Start game accepts it.
+Set replay recording to Off, Last or All in the game. Recordings are saved under
+replays/offline in the game folder. Open .wotlanreplay files from the launcher's
+Replay tab. Playback is forward 1x with a manual camera; pause, seeking, speed
+controls and native .wotreplay export are not available. Retain the recording's
+original vehicle profile. Playback does not award battle rewards.
 
-For the exact 0.9.22 client, Repair startup validates the mod configuration
-and reinstalls the package while retaining the saved endpoint, garage,
-vehicle-data overrides, account progress, battle results and isolated client
-preferences. Reset all offline data is a separate confirmed operation. It
-deletes the endpoint, account, garage, post-battle, configuration and isolated
-client-preference files; it does not delete vehicle-data overrides, other mods
-or the normal World of Tanks profile. Both operations require the game to be
-closed and leave unrelated mods alone.
+Use the launcher's built-in vehicle editor and error-report controls. The player
+download contains no loose test scripts or historical diagnostic packages.
 
-If a normal, current World of Tanks client is stuck while loading, the repair
-tab can move its shared `%APPDATA%\Wargaming.net\WorldOfTanks\preferences.xml`
-aside. The launcher keeps the old file beside it as a timestamped backup; it
-does not delete the file or change offline saved data.
+English release notes:
+https://github.com/colorfulmeans/wot-0.9.22-offline-battles/releases/tag/v0.9.7
 
-The launcher gives the exact 0.9.22 client its own graphics, window, zoom and
-input settings. It creates a complete res_mods engine-config overlay from the
-installed stock file, changing only the preferences location to
-%LOCALAPPDATA%\WoTOfflineBattles\client_profiles\0.9.22\preferences.xml.
-The stock engine_config.xml and the profile used by another World of Tanks
-installation are never changed. The first offline launch therefore starts
-with a new profile and needs its settings chosen once. An existing
-engine_config.xml overlay from another tool is reported as a conflict and is
-left unchanged.
-
-The client sometimes closes its first process and starts another one while it
-starts up. The launcher waits half a minute after the last game process before
-it stops the server, so that restart does not end your battle.
-
-Your 0.9.22 saved address, account state, garage, pending post-battle results
-and configuration stay in
-mods\configs\offline_lan_0922. Other authors' .wotmod files stay where they
-are.
-
-One limit to expect. The exact #1513 client is 32-bit; its executable is
-large-address-aware and can normally address about 4 GB on 64-bit Windows, but
-a very long session can still run out of memory and exit. Restart the client
-between long sessions.
-
-When you host, approve the UAC prompt that opens TCP 28782 for this launcher.
-Cancelling is nonfatal, but other PCs may remain unable to connect. Run this
-trusted-LAN server only on a network you trust.
-
-The launcher keeps its settings in
-%LOCALAPPDATA%\WoTOfflineBattles\launcher.json. For the exact 0.9.22 client,
-crash report collection is enabled by default on the launch page. It monitors
-both the visible client and the hidden simulation client. If either one closes
-unexpectedly, the launcher creates a ZIP and asks whether you want to report
-the crash. Choosing Yes only selects that ZIP in Windows Explorer; the launcher
-never uploads it. Choosing No deletes that newly created ZIP.
-
-Before each game starts, launcher and participating client logs larger than
-16 MiB are trimmed to their newest complete lines within 4 MiB. Trimming
-happens before the new report boundary is recorded, never during gameplay.
-Server logs retain at most 1 MiB during each run.
-
-"Create error report" and automatic crash reports copy only the exact log
-slices from the latest launcher game session into a ZIP in
-%LOCALAPPDATA%\WoTOfflineBattles\reports. A confirmed crash report can also
-contain debugging information from the crashing client. Configuration,
-vehicle profiles, and saved results are not copied as separate files.
-
-If the hosted server never opens port 28782, another server may already use
-that port. Close it and start the game again.
-
-License, source, and bundled runtimes
-=====================================
-
-This launcher is part of wot-offline-battles and is distributed under GNU GPL
-version 3, without warranty. LICENSE and THIRD_PARTY_NOTICES.md are included
-beside this file. The corresponding source is available at:
-
-https://github.com/pengw0048/wot-offline-battles
-
-The executable bundles CPython 3.11.9, distributed under the Python Software
-Foundation License Version 2 and the licenses/notices for software incorporated
-into Python. The complete terms and corresponding source release are available
-at:
-
-https://docs.python.org/3.11/license.html
-https://www.python.org/downloads/release/python-3119/
-
-The launcher window uses Tk. The executable therefore also bundles Tcl/Tk 8.6,
-distributed under the Tcl/Tk license, a BSD-style license. The complete terms
-are available at:
-
-https://www.tcl-lang.org/software/tcltk/license.html
-
-The executable is produced with PyInstaller 6.21.0. Its embedded bootloader and
-loader use GPL-2.0-or-later with the PyInstaller bootloader exception; runtime
-hooks are under Apache License 2.0, and the isolated helper is also available
-under MIT. The complete PyInstaller 6.21.0 licensing terms are available at:
-
-https://github.com/pyinstaller/pyinstaller/blob/v6.21.0/COPYING.txt
-
-Microsoft Sysinternals ProcDump is not included in this launcher. The first
-time the launcher asks about native crash dumps, choosing Enable downloads the
-32-bit ProcDump executable directly from Microsoft's official site to
-%LOCALAPPDATA%\WoTOfflineBattles\tools\procdump.exe. Choosing Enable also
-accepts Microsoft's license terms. If the download fails, crash-dump collection
-stays disabled and the game can still be launched normally.
-
-The optional full-memory checkbox changes future captures from ProcDump's Mini
-format to Full format. It is off by default because Full dumps can be very
-large; enable it only when a difficult crash needs deeper diagnosis.
-
-https://learn.microsoft.com/en-us/sysinternals/downloads/procdump
-https://learn.microsoft.com/en-us/sysinternals/license-faq
-https://learn.microsoft.com/en-us/sysinternals/license-terms
-
-World of Tanks and its assets are not included with this server. This project
-is unofficial and is not endorsed by Wargaming.
-
+This mod is free; resale is prohibited. World of Tanks game assets are not
+included. This unofficial project is not endorsed by Wargaming.
+See LICENSE, THIRD_PARTY_NOTICES.md and licenses for license terms. The optional
+crash recorder downloads Microsoft ProcDump only with the launcher's consent
+setting. The bundled replay runtime is CPython 3.11.9 from python.org.
 
 CPython 3.11.9 license
 ======================

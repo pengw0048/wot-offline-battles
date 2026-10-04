@@ -11,6 +11,8 @@ import subprocess
 import sys
 import traceback
 
+from retired_vehicles import RETIRED_BOT_VEHICLES_0922
+
 SERVER_HOST = "0.0.0.0"
 SERVER_LOOPBACK_HOST = "127.0.0.1"
 SERVER_PORT = 28782
@@ -24,6 +26,7 @@ SERVER_BOT_EXCLUDED_VEHICLES_ENV = "WOT_0922_BOT_EXCLUDED_VEHICLES"
 SERVER_LOOPBACK_ONLY_ENV = "WOT_0922_LOOPBACK_ONLY"
 SERVER_VEHICLE_OVERLAY_ROOT_ENV = "WOT_0922_VEHICLE_OVERLAY_ROOT"
 BUILD_SEMANTIC_VERSION_ENV = "WOT_OFFLINE_SEMANTIC_VERSION"
+SERVER_VERSION = "0.9.7"
 BUILD_IDENTITY_ENV = "WOT_OFFLINE_BUILD_IDENTITY"
 WINDOWS_FIREWALL_RULE_PREFIX = "WoT 0.9.22 LAN Server"
 # Get-NetFirewallRule can take many seconds on a busy machine.
@@ -218,7 +221,17 @@ def _bot_lineup_from_environment(environment=None):
         raise ValueError("invalid exact Bot lineup JSON: %s" % error)
     if not isinstance(value, list):
         raise ValueError("the exact Bot lineup must be a JSON list")
-    return value
+    result = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            result.append(raw)
+            continue
+        entry = dict(raw)
+        if entry.get("vehicle") in RETIRED_BOT_VEHICLES_0922:
+            entry.pop("vehicle", None)
+        if "vehicle" in entry or "skill" in entry:
+            result.append(entry)
+    return result
 
 
 def _vehicle_overlay_root_from_environment(environment=None):
@@ -234,22 +247,23 @@ def _bot_excluded_vehicles_from_environment(environment=None):
     environment = os.environ if environment is None else environment
     raw_value = environment.get(SERVER_BOT_EXCLUDED_VEHICLES_ENV)
     if raw_value is None:
-        return []
-    try:
-        value = json.loads(raw_value)
-    except (TypeError, ValueError) as error:
-        raise ValueError("invalid Bot vehicle exclusions JSON: %s" % error)
-    if not isinstance(value, list):
-        raise ValueError("Bot vehicle exclusions must be a JSON list")
-    return value
+        value = []
+    else:
+        try:
+            value = json.loads(raw_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid Bot vehicle exclusions JSON: %s" % error)
+        if not isinstance(value, list):
+            raise ValueError("Bot vehicle exclusions must be a JSON list")
+    return sorted(set(value).union(RETIRED_BOT_VEHICLES_0922))
 
 
 def _session_identity(environment=None):
     """Return launcher-supplied diagnostic labels without validating peers."""
     environment = os.environ if environment is None else environment
     semantic_version = str(
-        environment.get(BUILD_SEMANTIC_VERSION_ENV, "unknown") or
-        "unknown").strip()
+        environment.get(BUILD_SEMANTIC_VERSION_ENV, SERVER_VERSION) or
+        SERVER_VERSION).strip()
     build_identity = str(
         environment.get(BUILD_IDENTITY_ENV, "unknown") or
         "unknown").strip()
@@ -277,6 +291,9 @@ def main():
         vehicle_overlay_root = _vehicle_overlay_root_from_environment()
         if not loopback_only:
             _ensure_windows_firewall_rule(SERVER_PORT)
+        tactics_options = {}
+        if os.environ.get('WOT_0922_BOT_TACTICS_PATH'):
+            tactics_options['bot_tactics_path'] = os.environ['WOT_0922_BOT_TACTICS_PATH']
         run_server(
             server_host, SERVER_PORT, default_map, SERVER_MAX_PLAYERS,
             team_size=SERVER_TEAM_SIZE,
@@ -285,6 +302,7 @@ def main():
             bot_lineup=bot_lineup,
             bot_excluded_vehicles=bot_excluded_vehicles,
             vehicle_overlay_root=vehicle_overlay_root,
+            **tactics_options
         )
     except Exception:
         traceback.print_exc()

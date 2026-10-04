@@ -1,0 +1,166 @@
+name: Build Bot editor localization Windows test
+on:
+  push:
+    branches: [fix/094-bot-editor-i18n-20260924]
+    paths: [.github/workflows/build-094-bot-editor-i18n.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: bot-editor-i18n-20260924
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/094-bot-editor-i18n-20260924'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Require the already tested launcher source and build-helper-only correction
+        shell: python
+        run: |
+          import hashlib, pathlib, subprocess
+          implemented = 'a0607b0262f24d3683d9a965a2d64e1e1fa34527'
+          subprocess.run(['git','merge-base','--is-ancestor',implemented,'HEAD'],check=True)
+          changed = set(subprocess.check_output(['git','diff','--name-only',implemented,'HEAD'],text=True).splitlines())
+          assert changed <= {'tools/bot_editor_localization_build.py','.github/workflows/build-094-bot-editor-i18n.yml'}, sorted(changed)
+          hashes = {
+            'launcher/bot_tactics_labels.py':'b035b9d2bbd6e186237cfc372929c9aad0f076a5ceae74e022f1ad33290d17e7',
+            'launcher/bot_tactics_smoke.py':'ac7f7183e2057918e2f28942aa2b4d333033043427625ee71a8b2c0f40192867',
+            'launcher/bot_tactics_store.py':'08562cdcbc7a807438da7f720724bb2e94ac58dc296128ebfbc39a4539ecb507',
+            'launcher/bot_tactics_ui.py':'d8e785181ae35f716988f560e2843559d7daf6731b7966e8e526216b9a54b39b',
+            'launcher/wot_launcher.py':'c86009d1a267110b63f9011b0c1c24b9c592e293f04992831df729817a1962d9'}
+          for name, digest in hashes.items():
+              assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() == digest, name
+          subprocess.run(['python','tools/bot_editor_localization_build.py','verify'],check=True)
+          subprocess.run(['python','-m','py_compile','tools/bot_editor_localization_build.py']+list(hashes),check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+      - name: Record exact source without rewriting tested production code
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > build-evidence/source-sha.txt
+          git diff c584fa591ccff2429c3850d92bafb1d4d6afbd1a -- > build-evidence/final-source.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot-editor-i18n-source-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r launcher/requirements-build.txt
+      - name: Retrieve the already verified unchanged game payload
+        uses: actions/download-artifact@v4
+        with:
+          name: wot-094-bot-editor-35995108297-Windows
+          run-id: 35995108297
+          github-token: ${{ github.token }}
+          path: .baseline-artifact
+      - name: Verify baseline and prepare original client bytes
+        shell: pwsh
+        run: |
+          python tools/bot_editor_localization_build.py verify
+          if ($LASTEXITCODE -ne 0) { throw 'Localization scope failed' }
+          python tools/bot_editor_localization_build.py prepare .baseline-artifact/wot-0.9.22-offline-battles-0.9.4-bot-editor-test-20260924-Windows-x64.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Original payload verification failed' }
+      - name: Test all labels and live main-language changes on real Tk
+        shell: pwsh
+        run: |
+          $repoRoot = $PWD.Path
+          $env:PYTHONPATH = "$repoRoot/launcher;$repoRoot/tests;$repoRoot/server;$repoRoot/tools"
+          python -m unittest discover -s launcher/tests -p 'test_bot_tactics_localization.py' -v 2>&1 | Tee-Object -FilePath build-evidence/localization-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Localization regression failed' }
+          python -m unittest discover -s launcher/tests -p 'test_bot_tactics_ui.py' -v 2>&1 | Tee-Object -FilePath build-evidence/retained-editor-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Existing editor regression failed' }
+          python -m unittest discover -s launcher/tests -p 'test_launcher*.py' -v 2>&1 | Tee-Object -FilePath build-evidence/launcher-regressions.log
+          if ($LASTEXITCODE -ne 0) { throw 'Existing launcher regression failed' }
+      - name: Build the Windows launcher
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Require identical client and server runtime payloads
+        run: python tools/bot_editor_localization_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check version and exercise the actual packaged multilingual editor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $v = (Get-Item $exe).VersionInfo
+          if ($v.FileVersion -ne '0.9.4' -or $v.ProductVersion -ne '0.9.4') { throw 'Incorrect launcher version' }
+          $receipt = Join-Path $PWD 'build-evidence/packaged-editor-smoke.json'
+          $process = Start-Process -FilePath $exe -ArgumentList '--verify-bot-editor',("`""+$receipt+"`"") -PassThru
+          if (-not $process.WaitForExit(90000)) { & taskkill.exe /PID $process.Id /T /F | Out-Null; throw 'Editor smoke timed out' }
+          $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+          if (-not $result.ok -or -not $result.localization_checked -or -not $result.language_switch_preserves_active) { throw (Get-Content $receipt -Raw) }
+          Write-Host (Get-Content $receipt -Raw)
+      - name: Start packaged server and verify readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { throw 'Server exited before readiness' }
+              $probe | python -
+              if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw 'Server readiness failed' }
+          } finally {
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+            $global:LASTEXITCODE = 0
+          }
+          python -c "import json; from pathlib import Path; Path('build-evidence/server-readiness.json').write_text(json.dumps({'ready': True, 'native_gameplay_tested': False, 'port': 28782}))"
+          if ($LASTEXITCODE -ne 0) { throw 'Server readiness receipt failed' }
+      - name: Package complete Windows localization build
+        run: python tools/bot_editor_localization_build.py package launcher/dist/wot-0.9.22-offline-battles
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot-editor-i18n-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-094-bot-editor-i18n-${{ github.run_id }}-Windows
+          path: |
+            wot-0.9.22-offline-battles-0.9.4-bot-editor-i18n-20260924-Windows-x64.zip
+            wot-0.9.22-offline-battles-0.9.4-bot-editor-i18n-20260924-Windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

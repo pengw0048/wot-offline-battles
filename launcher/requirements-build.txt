@@ -1,0 +1,2 @@
+-r ../server/requirements-windows-build.txt
+Pillow==12.3.0

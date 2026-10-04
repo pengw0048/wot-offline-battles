@@ -32,6 +32,9 @@ class WorkerGarageLoadoutTests(unittest.TestCase):
     def _battle(worker):
         battle = BattleRuntime.__new__(BattleRuntime)
         battle._worker_mode = bool(worker)
+        battle._start_message = None
+        battle._runtime = types.SimpleNamespace(
+            compatibility=types.SimpleNamespace(garage_state=lambda: None))
         battle._garage_loadout = None
         battle._arena_type = types.SimpleNamespace(
             vehicleCamouflageKind='summer')
@@ -93,6 +96,7 @@ class WorkerGarageLoadoutTests(unittest.TestCase):
         self.assertIsNone(snapshot['camouflage_id'])
         self.assertEqual('', snapshot['outfit'])
         self.assertIsNone(snapshot['fitting'])
+        self.assertEqual((), snapshot['personal_mission_ids'])
 
     def test_visible_client_keeps_every_field_from_its_mounted_vehicle(self):
         crew = ((0, 'commander'), (1, 'loader'))
@@ -111,6 +115,7 @@ class WorkerGarageLoadoutTests(unittest.TestCase):
         self.assertEqual(
             (b'wz111g-ft-fitting', 'china:Ch37_WZ111G_FT'),
             snapshot['fitting'])
+        self.assertEqual((), snapshot['personal_mission_ids'])
 
     def test_worker_uses_target_default_crew_for_any_garage_role_shape(self):
         target_type = types.SimpleNamespace(

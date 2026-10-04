@@ -1,0 +1,224 @@
+name: Build Bot080 radio visibility fix
+on:
+  push:
+    branches: [fix/093-bot080-radio-visibility-20260923]
+    paths: [.github/workflows/build-bot080-radio.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bot080-radio-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/093-bot080-radio-visibility-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Reproduce and apply only the radio producer and relay fix
+        id: source
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          pwd
+          git status --short --branch
+          git worktree list
+          git log -5 --oneline --decorate
+          git rev-parse HEAD
+          git rev-parse origin/main
+          mkdir -p build-evidence
+          if python -m unittest test_bot080_radio_integration > build-evidence/radio-before.log 2>&1; then
+            echo 'Expected the pinned broken radio producer to fail regression' >&2
+            exit 1
+          fi
+          python tools/apply_bot080_radio_fix.py
+          python -c 'import full_bot080_build; full_bot080_build.audit()'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/res/scripts/client/gui/mods/offline_lan_0922/bot_runtime.py server/server_bot_ai.py docs/testing/full-bot080-proof.json tools/full_bot080_build.py
+          git diff --cached --stat
+          git diff --cached > build-evidence/radio-fix.patch
+          git commit -m 'Restore radio observer leases and relay metadata while retaining v0.8.0 driving and maps'
+          git push origin HEAD:refs/heads/fix/093-bot080-radio-visibility-20260923
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > build-evidence/source-sha.txt
+      - name: Test production radio chain, old driving and retained boundaries
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          python -m unittest test_bot080_radio_integration test_port_0922_spotting_radio test_port_0922_radio_server.RadioRelayTests.test_radio_links_relay_and_empty_batch_clear_coverage test_port_0922_radio_server.RadioRelayTests.test_invalid_recipient_rejects_whole_batch_without_committing test_port_0922_radio_server.RadioRelayTests.test_unknown_enemy_self_and_duplicate_radio_links_are_rejected test_port_0922_radio_server.RadioRelayTests.test_known_ally_dying_in_flight_is_pruned 2>&1 | tee build-evidence/radio-integration.log
+          python tools/test_bot080_radio_contract.py 2>&1 | tee build-evidence/radio-contract.log
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/roster.log
+          python -m unittest test_bot080_pinned_startup test_port_0922_battle_runtime.BattleRuntimeContractTests.test_bot_roster_uses_complete_catalog_without_persistent_pool test_port_0922_battle_runtime.BattleRuntimeContractTests.test_all_clients_preload_the_same_server_roster 2>&1 | tee build-evidence/startup.log
+          python tools/full_bot080_build.py source-tests 2>&1 | tee build-evidence/historical-driving.log
+          python -m unittest test_port_0922_world_collision test_port_0922_vehicle_physics test_port_0922 2>&1 | tee build-evidence/retained-physics.log
+          cp docs/testing/full-bot080-proof.json build-evidence/
+          git archive --format=zip --output=build-evidence/source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot080-radio-source-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-radio-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 3
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot080-radio-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and verify actual Python 2.7 radio producer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-bot080-radio-${{ github.run_id }}-${{ github.run_attempt }}" \
+            python:2.7.18 sh -c 'python build_wotmod.py && python tools/full_bot080_build.py bytecode && python tools/test_bot080_radio_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod' 2>&1 | tee build-evidence/compiled-tests.log
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-radio-compiled-tests-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-radio-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-launcher:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-bot080-radio-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot080-radio-client-${{ github.run_id }}
+          path: dist
+      - name: Test normal installation and build launcher
+        shell: pwsh
+        run: |
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher tests failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Verify radio bytecode, unchanged old maps and installation
+        run: python tools/full_bot080_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check built server readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $ready = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) { throw 'Server exited before readiness' }
+                  $probe | python -
+                  if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $ready) { throw 'Server readiness failed' }
+          }
+          finally {
+              if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+              $global:LASTEXITCODE = 0
+          }
+      - name: Keep evidence outside the playable download
+        shell: python
+        run: |
+          import json, os, shutil
+          from pathlib import Path
+          app=Path('launcher/dist/wot-0.9.22-offline-battles')
+          evidence=Path('build-evidence');evidence.mkdir(exist_ok=True)
+          extras={'FULL_BOT080_BUILD_EVIDENCE.json','FULL_BOT080_TEST_README.txt','full-bot080-python27-image.json','SERVER_SMOKE_TEST.txt','server.log','TESTING_20260916_GROUP1_ZH.md'}
+          moved=[]
+          for name in sorted(extras):
+              p=app/name
+              if p.is_file():
+                  shutil.move(str(p),str(evidence/name));moved.append(name)
+          allowed={'wot-0.9.22-offline-battles.exe','_internal','README.txt','LICENSE','THIRD_PARTY_NOTICES.md','licenses'}
+          assert set(p.name for p in app.iterdir())==allowed, list(app.iterdir())
+          (evidence/'clean-package.json').write_text(json.dumps({'source':os.environ['FULL_BOT080_SOURCE_SHA'],'identity':os.environ['WOT_OFFLINE_BUILD_IDENTITY'],'root':sorted(allowed),'moved_to_evidence':moved,'server_readiness':True,'native_game_tested':False},indent=2))
+          shutil.copy('dist/full-bot080-bytecode.json',evidence/'bytecode.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-radio-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-bot080-radio-clean-${{ github.run_id }}-Windows
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30

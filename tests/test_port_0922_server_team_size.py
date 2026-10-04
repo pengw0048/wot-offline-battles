@@ -76,6 +76,32 @@ def _attach_worker(state):
 
 
 class ServerTeamSizeTests(unittest.TestCase):
+    def test_training_starts_a_room_without_matchmaking_or_forced_bots(self):
+        state = BattleState(team_size=15)
+        _attach_worker(state)
+        player, error = state.add_player(_Connection(), ('127.0.0.1', 1001), _hello(1))
+        self.assertIsNone(error)
+        start, error = state.request_start(player.player_id, battle_mode='training')
+        self.assertIsNone(error)
+        self.assertEqual('training', start['battle_mode'])
+        self.assertEqual([], start['bots'])
+        self.assertEqual('loading', state.phase)
+        state.phase = 'battle'
+        self.assertEqual('training', state.current_battle_message()['battle_mode'])
+
+    def test_training_can_fill_bots_and_regular_next_round_restores_rewards_mode(self):
+        state = BattleState(team_size=2)
+        _attach_worker(state)
+        player, error = state.add_player(_Connection(), ('127.0.0.1', 1001), _hello(1))
+        start, error = state.request_start(player.player_id, battle_mode='training', training_bots=True)
+        self.assertIsNone(error)
+        self.assertEqual(3, len(start['bots']))
+        state._reset_round()
+        start, error = state.request_start(player.player_id)
+        self.assertIsNone(error)
+        self.assertEqual('regular', start['battle_mode'])
+        self.assertEqual(3, len(start['bots']))
+
     def test_profile_bot_exclusions_survive_every_battle_start_delivery(self):
         excluded = ['ussr:R11_MS-1', 'germany:G12_Ltraktor']
         state = BattleState(team_size=2, bot_excluded_vehicles=excluded)
@@ -154,6 +180,28 @@ class ServerTeamSizeTests(unittest.TestCase):
         self.assertEqual((False, 'host_only'), state.set_bot_tier_mode(
             guest.player_id, 'same'))
         self.assertEqual('random', state.bot_tier_mode)
+
+    def test_two_tier_offset_presets_survive_lobby_and_battle_delivery(self):
+        for mode in ('0_plus2', 'minus2_0'):
+            state = BattleState(team_size=2, bot_tier_mode=mode)
+            worker = _attach_worker(state)
+            host, error = state.add_player(
+                _Connection(), ('10.0.0.1', 1000), _hello(1))
+            self.assertIsNone(error)
+            self.assertEqual((True, None), state.set_bot_tier_mode(
+                host.player_id, mode))
+            self.assertEqual(mode, state.lobby_message()['bot_tier_mode'])
+            start, error = state.request_start(host.player_id)
+            self.assertIsNone(error)
+            self.assertEqual(mode, start['bot_tier_mode'])
+            with mock.patch.object(host, 'offer_reliable', return_value=True) \
+                    as visible_offer, mock.patch.object(
+                        worker, 'offer_reliable', return_value=True) as worker_offer:
+                self.assertTrue(state.broadcast_loading_transition(start))
+            for offer in (visible_offer, worker_offer):
+                self.assertEqual(mode, offer.call_args.args[0]['bot_tier_mode'])
+            state.phase = 'battle'
+            self.assertEqual(mode, state.current_battle_message()['bot_tier_mode'])
 
     def test_host_can_select_a_bot_skill_preset(self):
         self.assertIn('set_bot_skill_mode', MODERN_VISIBLE_MESSAGE_TYPES)

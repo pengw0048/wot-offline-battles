@@ -142,6 +142,13 @@ def validate_graph(graph, map_name):
 		raise ValueError('navigation graph cell size is invalid')
 	_team_points(graph, 'spawn_anchors')
 	_team_points(graph, 'objective_bases')
+	radii = graph.get('objective_base_radii')
+	if radii is not None:
+		if not isinstance(radii, (list, tuple)) or len(radii) != 2:
+			raise ValueError('objective base radii must contain two teams')
+		for radius in radii:
+			if _finite(radius, 'objective base radius') <= 0.0:
+				raise ValueError('objective base radius must be positive')
 	_spawn_formations(graph)
 	_routes(graph)
 	return graph

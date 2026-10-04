@@ -54,7 +54,7 @@ _SEMANTIC_VERSION_PATTERN = re.compile(
 _BUILD_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 _MOD_MARKER_0_9_22 = os.path.join(
-    "mods", "0.9.22.0.1", "org.peng.offline_lan_0922*.wotmod")
+    "mods", "0.9.22.0.1", "*offline_lan_0922*.wotmod")
 
 SERVER_TEAM_SIZE_ENV_0922 = "WOT_0922_TEAM_SIZE"
 SERVER_TEAM1_SIZE_ENV_0922 = "WOT_0922_TEAM1_SIZE"
@@ -568,7 +568,7 @@ _CLIENT_INSTALL = {
             "mods/configs/offline_lan_0922/%s" % name
             for name in _DATASETS_0_9_22),
         "prune": (
-            ("mods/0.9.22.0.1", "org.peng.offline_lan_0922*"),
+            ("mods/0.9.22.0.1", "*offline_lan_0922*"),
             ("mods/configs/offline_lan_0922",
              BUILD_IDENTITY_FILENAME_0922),
         ),
@@ -589,7 +589,7 @@ _CLIENT_INSTALL = {
             (BUILD_IDENTITY_RELATIVE_PATH_0922,) +
             _CLIENT_RUNTIME_FILES_0_9_22),
         "package_pattern": (
-            "mods/0.9.22.0.1/org.peng.offline_lan_0922*.wotmod"),
+            "mods/0.9.22.0.1/*offline_lan_0922*.wotmod"),
     },
 }
 
@@ -938,7 +938,7 @@ def _payload_release(path, port_version):
         packages = sorted(
             os.path.basename(name) for name in archive.namelist()
             if name.lower().endswith(".wotmod") and
-            "org.peng.offline_lan_0922" in os.path.basename(name))
+            "offline_lan_0922" in os.path.basename(name))
     if packages:
         return "%s:%s" % (port_version, ",".join(packages))
     stat_result = os.stat(path)

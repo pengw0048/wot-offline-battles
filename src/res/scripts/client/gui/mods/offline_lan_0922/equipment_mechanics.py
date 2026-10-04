@@ -11,6 +11,18 @@ BigWorld nor battle runtime code, so the server and desktop tests can use it.
 import math
 
 
+# The exact activation-target vocabulary shared by both wire endpoints.
+# Crew extra names retain their native numbered identity; UI labels are not
+# accepted here. Keep unrelated critical-damage compatibility aliases local.
+ACTIVATION_DEVICE_NAMES = frozenset((
+    'engineHealth', 'ammoBayHealth', 'fuelTankHealth', 'radioHealth',
+    'leftTrackHealth', 'rightTrackHealth', 'gunHealth',
+    'turretRotatorHealth', 'surveyingDeviceHealth'))
+ACTIVATION_CREW_NAMES = frozenset((
+    'commander', 'driver', 'gunner1', 'gunner2', 'loader1',
+    'loader2', 'radioman1', 'radioman2'))
+
+
 DEFAULT_BOT_CONSUMABLE_NAMES = (
     'autoExtinguishers', 'largeMedkit', 'largeRepairkit')
 
@@ -31,6 +43,7 @@ EQUIPMENT_CONTRACT_FIELDS = (
 EQUIPMENT_SNAPSHOT_FIELDS = (
     'equipment', 'usesLeft', 'cooldownTimeLeft', 'active',
     'autoPendingElapsed', 'aiPendingElapsed')
+STUN_RESISTANCE_FIELDS = ('stunResistanceDuration', 'stunResistanceEffect')
 
 
 def _value(source, name, default=None):
@@ -142,6 +155,10 @@ def project_equipment(descriptor, reaction_seconds=None):
                 descriptor, 'engineHpLossPerSecond'), 0.0)),
         'autoReactionSeconds': max(0.0, _number(reaction_seconds, 0.0)),
     }
+    for name in STUN_RESISTANCE_FIELDS:
+        value = _value(descriptor, name)
+        if value is not None:
+            result[name] = _number(value)
     return result
 
 
@@ -167,7 +184,7 @@ def _validate_contract(contract):
     """Return one strict JSON-safe projection used by runtime state."""
     if not isinstance(contract, dict):
         raise ValueError('equipment contract is not an object')
-    if set(contract) != set(EQUIPMENT_CONTRACT_FIELDS):
+    if set(contract) - set(STUN_RESISTANCE_FIELDS) != set(EQUIPMENT_CONTRACT_FIELDS):
         raise ValueError('equipment contract fields are incomplete')
     name = str(contract.get('name') or '')
     kind = str(contract.get('kind') or '')
@@ -203,6 +220,12 @@ def _validate_contract(contract):
         'autoReactionSeconds': _number(
             contract.get('autoReactionSeconds'), -1.0),
     }
+    for key in STUN_RESISTANCE_FIELDS:
+        if key in contract:
+            raw = contract[key]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0.0 <= raw <= 1.0:
+                raise ValueError('equipment stun resistance is invalid')
+            result[key] = float(raw)
     if (result['id'] < 0 or result['compactDescr'] < 0 or
             result['cooldownSeconds'] < 0.0 or
             result['fireStartingChanceFactor'] < 0.0 or
@@ -331,6 +354,23 @@ def _projection(value):
     if isinstance(value, dict) and isinstance(value.get('equipment'), dict):
         return value['equipment']
     return value
+
+
+def consumed_in_battle(value, activated=False, destroyed=False):
+    """Whether this supported regular item contributes one settlement charge.
+
+    Food and fuel apply for the entire battle without an activation request.
+    Repair/medical kits and extinguishers cost one item only when used, even
+    if their battle charge is reusable. The requested offline governor rule
+    charges only an active switch at destruction, never activation alone.
+    Unknown passive kinds must not acquire an invented bill.
+    This policy does not change remaining uses, cooldown or passive effects.
+    """
+    kind = str(_value(_projection(value), 'kind', '') or '')
+    if kind == 'rpm_limiter':
+        return bool(destroyed and _value(value, 'active', False))
+    return (kind in ('stimulator', 'fuel') or
+            bool(activated and kind in ('repairkit', 'medkit', 'extinguisher')))
 
 
 def _remaining_uses(value):

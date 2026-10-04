@@ -64,6 +64,34 @@ class LoadoutLawTests(unittest.TestCase):
         self.assertAlmostEqual(
             1.0 / (0.57 + 0.0043 * 132.0), values['crew_multiplier'])
 
+    def test_food_shortens_the_initial_reload_without_an_activation_step(self):
+        descriptor = types.SimpleNamespace(
+            optionalDevices=[],
+            gun={'shots': [{'shell': {'damage': (100.0,)}}],
+                 'shotDispersionAngle': 0.1,
+                 'shotDispersionFactors': {'afterShot': 1.5,
+                                           'turretRotation': 1.0},
+                 'aimingTime': 2.0, 'reloadTime': 10.0,
+                 'clip': (1, 2.0), 'maxAmmo': 40},
+            chassis={'shotDispersionFactors': (0.1, 0.1)},
+            turret={'maxAmmo': 40}, maxAmmo=40, activeGunShotIndex=0)
+
+        plain_modifiers = loadout.modifiers(descriptor)
+        ration_modifiers = loadout.modifiers(
+            descriptor, equipments=[_device('chocolate')])
+        plain = gun_mechanics.GunState(descriptor, plain_modifiers)
+        rationed = gun_mechanics.GunState(descriptor, ration_modifiers)
+
+        self.assertFalse(plain_modifiers['has_rations'])
+        self.assertTrue(ration_modifiers['has_rations'])
+        self.assertLess(rationed.reload, plain.reload)
+        # Food adds ten crew-level points from the first gun state.  It is not
+        # a flat ten-percent reload bonus and there is no later activation.
+        self.assertAlmostEqual(
+            (0.57 + 0.0043 * 110.0) /
+            (0.57 + 0.0043 * 121.0),
+            rationed.reload / plain.reload)
+
     def test_brotherhood_needs_every_crew_member(self):
         crew = _crew(['brotherhood'], ['repair'])
 

@@ -2,6 +2,14 @@ name: Build Windows launcher
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - fix/0922-cliff-gravity-hull-damage
+      - fix/0922-battle-followup-20260914
+      - fix/0922-bonds-crew-grand-battles
+      - fix/0922-native-offers-training-reserves-20260917
+      - fix/094-pr40-gameplay-20260925
+      - release/v0.9.5
 
 permissions:
   contents: read
@@ -25,6 +33,15 @@ jobs:
         run: >-
           pwsh -NoProfile -File
           server/build_windows_server.ps1
+      - name: Verify v0.9.5 server executable version
+        if: github.ref == 'refs/heads/release/v0.9.5'
+        shell: pwsh
+        run: |
+          $version = (Get-Item -LiteralPath 'dist/server/WoT-0.9.22-LAN-Server.exe').VersionInfo
+          if ($version.FileVersion -ne '0.9.5' -or
+              $version.ProductVersion -ne '0.9.5') {
+            throw 'Incorrect Windows server executable version'
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: launcher-manual-server-input
@@ -50,16 +67,18 @@ jobs:
         with:
           name: launcher-manual-server-input
           path: dist/server
+      - name: Reproduce the verified recorder resource
+        run: python tools/build_replay_runtime.py
       - name: Build Python 2.7 0.9.22 client package
         run: >-
           docker run --rm --platform linux/amd64 -v "$PWD:/work"
-          -e WOT_OFFLINE_BUILD_IDENTITY="github-${{ github.run_id }}-${{ github.run_attempt }}"
+          -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}"
           -w /work python:2.7.18
           python build_wotmod.py
       - name: Validate 0.9.22 client package
         run: >-
           python tools/validate_wotmod.py
-          dist/org.peng.offline_lan_0922_*.wotmod
+          dist/org.colorfulmeans.offline_lan_0922_*.wotmod
       - uses: actions/upload-artifact@v4
         with:
           name: launcher-build-input
@@ -80,7 +99,7 @@ jobs:
       - name: Install pinned Windows packager
         run: >-
           python -m pip install
-          -r server/requirements-windows-build.txt
+          -r launcher/requirements-build.txt
       - uses: actions/download-artifact@v4
         with:
           name: launcher-build-input
@@ -93,14 +112,59 @@ jobs:
       - name: Build launcher distribution
         shell: pwsh
         run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify v0.9.5 launcher and client versions
+        if: github.ref == 'refs/heads/release/v0.9.5'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $app = "launcher/dist/wot-0.9.22-offline-battles"
+          $archive = "$app/_internal/client/0.9.22.zip"
+          $version = (Get-Item -LiteralPath "$app/wot-0.9.22-offline-battles.exe").VersionInfo
+          if ($version.FileVersion -ne '0.9.5' -or
+              $version.ProductVersion -ne '0.9.5') {
+            throw 'Incorrect Windows launcher executable version'
+          }
+          @'
+          import io, json, sys, zipfile
+          from xml.etree import ElementTree
+          with zipfile.ZipFile(sys.argv[1]) as client:
+              identity = json.loads(client.read(
+                  'mods/configs/offline_lan_0922/build_identity.json'))
+              assert identity['semanticVersion'] == '0.9.5', identity
+              mods = [name for name in client.namelist() if name.endswith('.wotmod')]
+              assert len(mods) == 1 and mods[0].endswith('_0.9.5.wotmod'), mods
+              with zipfile.ZipFile(io.BytesIO(client.read(mods[0]))) as mod:
+                  assert mod.testzip() is None
+                  assert ElementTree.fromstring(mod.read('meta.xml')).findtext('version') == '0.9.5'
+          print('Verified v0.9.5 client build identity and mod.')
+          '@ | python - $archive
+          if ($LASTEXITCODE -ne 0) { throw "Client release version check failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-offline-battles-windows-${{ github.run_number }}
+          # Upload the runnable folder; Actions supplies the only outer ZIP.
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Extract the actual download once
+        uses: actions/download-artifact@v4
+        with:
+          name: wot-0.9.22-offline-battles-windows-${{ github.run_number }}
+          path: ${{ runner.temp }}/launcher-download
       - name: Verify payload, fake-client install, and bundled servers
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $appName = "WoT-Offline-Battles-Launcher"
-          $appRoot = Join-Path $PWD "launcher\dist\$appName"
+          $appName = "wot-0.9.22-offline-battles"
+          $appRoot = Join-Path $env:RUNNER_TEMP "launcher-download"
           $launcher = Join-Path $appRoot "$appName.exe"
           $payload = Join-Path $appRoot "_internal"
+          if (-not (Test-Path -LiteralPath $launcher) -or
+                  (Get-ChildItem -LiteralPath $appRoot -Filter *.zip)) {
+              throw "Launcher download must run after one ZIP extraction"
+          }
+          Write-Host "Downloaded launcher is runnable after one ZIP extraction"
           $fakeRoot = Join-Path $env:RUNNER_TEMP "WoT 假客户端"
           $fake082 = Join-Path $fakeRoot "0.8.2"
           $fake0922 = Join-Path $fakeRoot "0.9.22 #1513"
@@ -194,10 +258,3 @@ jobs:
                   Start-Sleep -Seconds 2
               }
           }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wot-offline-battles-launcher-windows-${{ github.run_number }}
-          path: launcher/dist/WoT-Offline-Battles-Launcher-Windows.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 30

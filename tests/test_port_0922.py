@@ -1,3 +1,4 @@
+import ast
 import base64
 import importlib.util
 import contextlib
@@ -241,7 +242,7 @@ class WotmodValidatorTests(unittest.TestCase):
             for index in range(1, len(parts) + 1):
                 directories.add('/'.join(parts[:index]) + '/')
         meta = (
-            '<root><id>org.peng.offline_lan_0922</id>'
+            '<root><id>org.colorfulmeans.offline_lan_0922</id>'
             '<version>0.6.1</version></root>')
         with zipfile.ZipFile(path, 'w', compression) as archive:
             if include_directories:
@@ -349,12 +350,27 @@ class PortSourceTests(unittest.TestCase):
         build_script = (PORT_ROOT / 'build_for_client.sh').read_text(
             encoding='utf-8')
 
-        self.assertEqual('0.7.7', packager.MOD_VERSION)
+        self.assertEqual('0.9.7', packager.MOD_VERSION)
         self.assertEqual(packager.MOD_VERSION, package.PORT_VERSION)
         self.assertEqual(packager.MOD_VERSION, meta_version)
         self.assertIn(
-            'org.peng.offline_lan_0922_%s.wotmod' % packager.MOD_VERSION,
+            'org.colorfulmeans.offline_lan_0922_%s.wotmod' % packager.MOD_VERSION,
             build_script)
+        for filename, constant in (
+                ('launcher/wot_launcher.py', 'LAUNCHER_VERSION'),
+                ('server/windows_server.py', 'SERVER_VERSION')):
+            tree = ast.parse((PORT_ROOT / filename).read_text(encoding='utf-8'))
+            values = [ast.literal_eval(node.value) for node in tree.body
+                      if isinstance(node, ast.Assign) and any(
+                          isinstance(target, ast.Name) and target.id == constant
+                          for target in node.targets)]
+            self.assertEqual([packager.MOD_VERSION], values, filename)
+        for directory in ('launcher', 'server'):
+            source = (PORT_ROOT / directory / 'version_info.txt').read_text()
+            self.assertIn("StringStruct('FileVersion', '0.9.7')", source)
+            self.assertIn("StringStruct('ProductVersion', '0.9.7')", source)
+            self.assertIn('filevers=(0, 9, 7, 0)', source)
+            self.assertIn('prodvers=(0, 9, 7, 0)', source)
 
     def test_port_sources_are_python_2_compatible_syntax(self):
         source_root = PORT_ROOT / 'src'
@@ -474,7 +490,7 @@ class PortSourceTests(unittest.TestCase):
                 config_path.parent / packager.BUILD_IDENTITY_FILENAME
             ).read_text(encoding='utf-8'))
             self.assertEqual(1, identity['schema'])
-            self.assertEqual('0.7.7', identity['semanticVersion'])
+            self.assertEqual('0.9.7', identity['semanticVersion'])
             self.assertRegex(
                 identity['buildIdentity'],
                 r'^local-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$')
@@ -566,9 +582,9 @@ class PortSourceTests(unittest.TestCase):
         spec.loader.exec_module(packager)
 
         self.assertEqual(
-            'github-12345-2',
+            'colorfulmeans-12345-2',
             packager._generated_build_identity({
-                packager.BUILD_IDENTITY_ENV: 'github-12345-2'}))
+                packager.BUILD_IDENTITY_ENV: 'colorfulmeans-12345-2'}))
         self.assertEqual(
             'local-19700101T000000Z-abcdef012345',
             packager._generated_build_identity(
@@ -1691,6 +1707,137 @@ def _fake_account_settings(accounts=None):
     return root, module, package, settings
 
 
+class BattleDeathMessageTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_port_source('compat')
+        self.format = '<font color="#{0:02X}{1:02X}{2:02X}">{3:>s}</font>'
+        # Relevant #1513 guards: missing extended AND base keys display no
+        # message; SELF_ENEMY colors the entire line gold; environment has
+        # SUICIDE templates but no UNKNOWN templates.
+        templates = {}
+        self.codes = ('DEATH_FROM_SHOT', 'DEATH_FROM_RAMMING', 'DEATH_FROM_DROWNING',
+                      'DEATH_FROM_WORLD_COLLISION', 'DEATH_FROM_OVERTURN',
+                      'DEATH_FROM_DEATH_ZONE')
+        for code in self.codes:
+            for relation in ('ALLY', 'ENEMY'):
+                color = 'red' if relation == 'ALLY' else 'green'
+                templates[code + '_' + relation + '_SUICIDE'] = (
+                    '%(target)s destroyed', color)
+                for attacker in ('ALLY', 'ENEMY'):
+                    templates[code + '_' + attacker + '_' + relation] = (
+                        '%(attacker)s destroys %(target)s', color)
+            templates[code + '_SELF_ENEMY'] = ('%(target)s destroyed', 'self')
+        for relation in ('ALLY', 'ENEMY'):
+            templates['DEATH_FROM_SHOT_UNKNOWN_' + relation] = (
+                '%(target)s destroyed', 'red' if relation == 'ALLY' else 'green')
+        self.panel = types.SimpleNamespace(
+            _FadingMessages__messages=templates,
+            sessionProvider=types.SimpleNamespace(getCtx=lambda:
+                types.SimpleNamespace(isSquadMan=lambda vID: vID == 2)),
+            app=types.SimpleNamespace(colorManager=types.SimpleNamespace(
+                getRGBA=lambda name: (255, 215, 0, 255))))
+
+    @staticmethod
+    def original(panel, key, args, extra, postfix):
+        template = panel._FadingMessages__messages.get(key + '_' + str(postfix))
+        if template is None:
+            template = panel._FadingMessages__messages.get(key)
+        if template is None:
+            return None
+        return template[1], template[0] % args, extra
+
+    def show(self, code, postfix, victim, killer):
+        args = {'target': 'Victim (Tank V)', 'attacker': 'Killer (Tank K)'}
+        result = self.module._show_lan_death_message(
+            self.panel, self.original, 1, self.format, code, args,
+            (('target', victim), ('attacker', killer)), postfix)
+        self.assertEqual('Victim (Tank V)', args['target'])
+        self.assertEqual('Killer (Tank K)', args['attacker'])
+        return result
+
+    def test_environment_templates_cover_squad_allies_enemies_and_bots(self):
+        for code in self.codes:
+            for victim, relation in ((1, 'SELF'), (2, 'ALLY'), (3, 'ALLY'),
+                                     (4, 'ENEMY'), (5, 'ENEMY')):
+                for killer, attacker in ((0, 'UNKNOWN'), (victim, relation)):
+                    with self.subTest(code=code, victim=victim, killer=killer):
+                        postfix = (attacker + '_SUICIDE' if killer else
+                                   attacker + '_' + relation)
+                        result = self.show(code, postfix, victim, killer)
+                        if victim == 1:
+                            self.assertIsNone(result)
+                            continue
+                        self.assertIsNotNone(result)
+                        color, text, extra = result
+                        self.assertEqual('green' if relation == 'ENEMY' else
+                                         'red', color)
+                        self.assertIn('Victim (Tank V)', text)
+                        self.assertNotIn('Killer (Tank K)', text)
+                        self.assertEqual(victim == 2, '#FFD700' in text)
+
+    def test_self_kills_keep_native_style_while_only_squad_names_are_gold(self):
+        for code in self.codes:
+            for personal, relation in ((1, 'SELF'), (2, 'ALLY')):
+                for dies in (False, True):
+                    with self.subTest(code=code, personal=personal, dies=dies):
+                        victim, killer = ((personal, 4) if dies else (4, personal))
+                        postfix = ('ENEMY_' + relation if dies else
+                                   relation + '_ENEMY')
+                        result = self.show(code, postfix, victim, killer)
+                        if personal == 1:
+                            if dies:
+                                self.assertIsNone(result)
+                            else:
+                                color, text, extra = result
+                                self.assertEqual('self', color)
+                                self.assertEqual('Victim (Tank V) destroyed', text)
+                                self.assertNotIn('<font', text)
+                            continue
+                        color, text, extra = result
+                        self.assertEqual('red' if dies else 'green', color)
+                        name = 'Victim (Tank V)' if dies else 'Killer (Tank K)'
+                        self.assertIn(self.format.format(255, 215, 0, name), text)
+                        self.assertEqual(1, text.count('<font'))
+                        self.assertEqual((('attacker', 4),) if dies else
+                                         (('target', 4),), extra)
+
+    def test_friendly_hit_is_red_with_only_squad_name_gold(self):
+        self.panel._FadingMessages__messages['ALLY_HIT'] = (
+            'You hit ally [%(entity)s]', 'red')
+        for victim in (2, 3):
+            with self.subTest(victim=victim):
+                args = {'entity': 'Victim (Tank V)'}
+                color, text, extra = self.module._show_lan_death_message(
+                    self.panel, self.original, 1, self.format, 'ALLY_HIT',
+                    args, (('entity', victim),))
+                self.assertEqual('red', color)
+                self.assertEqual(victim == 2, '#FFD700' in text)
+                self.assertIn('Victim (Tank V)', text)
+                self.assertNotIn(('entity', 2), extra)
+
+    def test_non_death_message_keeps_original_arguments(self):
+        original = mock.Mock()
+        args, extra = {}, (('target', 1),)
+        self.module._show_lan_death_message(
+            self.panel, original, 1, self.format,
+            'RELOADING', args, extra, None)
+        original.assert_called_once_with(self.panel, 'RELOADING', args, extra, None)
+
+    def test_unknown_shot_translation_is_neutral_and_restored_on_failure(self):
+        key = 'DEATH_FROM_SHOT_UNKNOWN_ALLY'
+        templates = self.panel._FadingMessages__messages
+        templates[key] = ('untranslated-key', 'red')
+        previous = templates[key]
+        self.assertEqual('red', self.show('DEATH_FROM_SHOT', 'UNKNOWN_ALLY', 2, 0)[0])
+        self.assertIs(previous, templates[key])
+        with self.assertRaises(RuntimeError):
+            self.module._show_lan_death_message(
+                self.panel, mock.Mock(side_effect=RuntimeError('UI retired')),
+                1, self.format, 'DEATH_FROM_SHOT', {'target': 'V'},
+                (('target', 2),), 'UNKNOWN_ALLY')
+        self.assertIs(previous, templates[key])
+
+
 class OfflineCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.preferences, module, package, settings = _fake_account_settings()
@@ -1765,6 +1912,52 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertEqual(500.0, runtime.bigworld.serverTime())
         compatibility.fini()
         self.assertIs(original, runtime.bigworld.__class__.serverTime)
+
+    def test_lan_squad_range_covers_room_and_restores_native_setting(self):
+        module = _load_port_source('compat')
+        runtime, unused = self._runtime()
+        original = range(2, 4)
+        runtime.arena_info_settings = types.SimpleNamespace(
+            SQUAD_RANGE_TO_SHOW=original)
+        compatibility = module.OfflineCompatibility(runtime)
+        compatibility.install()
+        compatibility.install()
+        try:
+            self.assertEqual(tuple(range(2, 31)),
+                runtime.arena_info_settings.SQUAD_RANGE_TO_SHOW)
+        finally:
+            compatibility.fini()
+        self.assertIs(original, runtime.arena_info_settings.SQUAD_RANGE_TO_SHOW)
+
+    def test_death_message_adapter_restores_owned_or_inherited_method(self):
+        for owns in (True, False):
+            with self.subTest(owns=owns):
+                class Base(object):
+                    showMessage = mock.Mock()
+                class PlayerMessages(Base):
+                    pass
+                if owns:
+                    PlayerMessages.showMessage = mock.Mock()
+                original = PlayerMessages.showMessage
+                module = _load_port_source('compat')
+                runtime, unused = self._runtime()
+                runtime.player_messages_type = PlayerMessages
+                runtime.battle_message_color_format = ''
+                runtime.bigworld.player = lambda: types.SimpleNamespace(
+                    playerVehicleID=1)
+                compatibility = module.OfflineCompatibility(runtime)
+                compatibility.install()
+                installed = PlayerMessages.__dict__['showMessage']
+                compatibility.install()
+                self.assertIs(installed, PlayerMessages.__dict__['showMessage'])
+                panel = PlayerMessages()
+                panel.showMessage('RELOADING')
+                original.assert_called_once_with(
+                    panel, 'RELOADING', None, None, None)
+                compatibility.fini()
+                compatibility.fini()
+                self.assertIs(original, PlayerMessages.showMessage)
+                self.assertEqual(owns, 'showMessage' in PlayerMessages.__dict__)
 
     def test_offline_current_shell_change_defers_stock_optimistic_update(self):
         compatibility_module = _load_port_source('compat')
@@ -1843,6 +2036,58 @@ class OfflineCompatibilityTests(unittest.TestCase):
 
         compatibility.fini()
         self.assertIs(original, AmmoController.__dict__['changeSetting'])
+
+    def test_ammo_panel_initialization_accepts_native_attribute_only_gun_shots(self):
+        compatibility_module = _load_port_source('compat')
+        runtime, unused_operations = self._runtime()
+        shells = [types.SimpleNamespace(compactDescr=n) for n in (13066, 13578)]
+
+        class GunShot(object):
+            # The #1513 client uses NoLegacyStuff, unlike our old dict fixture.
+            def __init__(self, shell, speed):
+                self.shell, self.speed = shell, speed
+
+            def get(self, *unused):
+                raise AssertionError('Operation is not allowed')
+
+            __getitem__ = get
+
+        class ConsumablesPanel(object):
+            def __makeShellTooltip(self, descriptor, piercing_power):
+                return '{HEADER}shell{/HEADER}\n/{BODY}damage{/BODY}'
+
+            def onShellsAdded(self, descriptor):
+                text = self.__makeShellTooltip(descriptor, (175, 150))
+                self.added.append(text)
+
+        runtime.consumables_panel_type = ConsumablesPanel
+        original = ConsumablesPanel._ConsumablesPanel__makeShellTooltip
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.install()
+        self.addCleanup(compatibility.fini)
+        compatibility.configure_battle()
+        vehicle = types.SimpleNamespace(typeDescriptor=types.SimpleNamespace(
+            gun=types.SimpleNamespace(shots=[GunShot(shells[0], 780), GunShot(shells[1], 570)])))
+        runtime.bigworld.player = lambda: types.SimpleNamespace(playerVehicleID=10)
+        runtime.bigworld.entity = lambda unused: vehicle
+        panel = ConsumablesPanel()
+        panel.added = []
+        for shell in shells:
+            panel.onShellsAdded(shell)
+        self.assertEqual(2, len(panel.added))
+        self.assertIn('780', panel.added[0])
+        self.assertIn('570', panel.added[1])
+
+        # An optional display failure must not unwind the stock ammo event
+        # chain and make BattleRuntime._ammo_tick tear down the battle.
+        from gui.mods.offline_lan_0922 import battle_shell_tooltip
+        with mock.patch.object(battle_shell_tooltip, 'append_speed',
+                               side_effect=AssertionError('Operation is not allowed')):
+            panel.onShellsAdded(shells[0])
+        self.assertEqual(3, len(panel.added))
+        self.assertEqual(original(panel, shells[0], (175, 150)), panel.added[-1])
+        compatibility.fini()
+        self.assertIs(original, ConsumablesPanel._ConsumablesPanel__makeShellTooltip)
 
     def test_offline_battle_debug_panel_uses_lan_transport_health(self):
         compatibility_module = _load_port_source('compat')
@@ -2331,6 +2576,102 @@ class OfflineCompatibilityTests(unittest.TestCase):
         self.assertNotIn(
             'destroy', runtime.sound_groups_module.g_instance.__dict__)
         self.assertIs(zombie, runtime.bigworld.player())
+
+    def _tutorial_shutdown_fixture(self):
+        operations = []
+
+        class ApplicationEffect(object):
+            # Exact #1513 ApplicationEffect._getTutorialLayout, including its
+            # missing expired-weakref guard. The native-bytecode audit also
+            # executes the retail accessor and SetTriggerEffect.stop.
+            def _getTutorialLayout(self):
+                if self._app is None:
+                    return None
+                return self._app.tutorialManager
+
+            def stop(self):
+                layout = self._getTutorialLayout()
+                if layout is not None:
+                    layout.clearTriggers('hint')
+                operations.append('effect-stopped')
+
+        def loader_fini():
+            for effect in effects:
+                effect.stop()
+            operations.append('tutorial-finished')
+
+        effects = []
+        game = types.SimpleNamespace(tutorialLoaderFini=loader_fini)
+        module = types.SimpleNamespace(ApplicationEffect=ApplicationEffect)
+        return game, module, effects, operations
+
+    def test_late_tutorial_cleanup_survives_expired_gui_weakrefs(self):
+        compatibility_module = _load_port_source('compat')
+        runtime, unused_operations = self._runtime()
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        compatibility.install()
+        game, module, effects, operations = self._tutorial_shutdown_fixture()
+        original_fini = game.tutorialLoaderFini
+        original_layout = module.ApplicationEffect._getTutorialLayout
+
+        class App(object):
+            pass
+
+        app = App()
+        app.tutorialManager = types.SimpleNamespace(
+            clearTriggers=lambda item: operations.append(('clear', item)))
+        live = module.ApplicationEffect()
+        live._app = weakref.proxy(app)
+        expired_app = App()
+        dead = module.ApplicationEffect()
+        dead._app = weakref.proxy(expired_app)
+        del expired_app
+        absent = module.ApplicationEffect()
+        absent._app = None
+        effects.extend([dead, live, absent])
+        with self.assertRaises(ReferenceError):
+            game.tutorialLoaderFini()
+        with mock.patch.dict(sys.modules, {
+                'game': game,
+                'tutorial.gui.Scaleform.effects_player': module}):
+            compatibility.fini()
+            compatibility.fini()
+            # Mod rollback must not remove the late cleanup wrapper.
+            game.tutorialLoaderFini()
+            operations.extend(['replay-destroy', 'sound-destroy', 'save-settings'])
+        self.assertEqual([
+            'effect-stopped', ('clear', 'hint'), 'effect-stopped',
+            'effect-stopped', 'tutorial-finished', 'replay-destroy',
+            'sound-destroy', 'save-settings'], operations)
+        self.assertIs(original_fini, game.tutorialLoaderFini)
+        self.assertIs(original_layout, module.ApplicationEffect._getTutorialLayout)
+        self.assertIs(app.tutorialManager, live._getTutorialLayout())
+
+    def test_tutorial_shutdown_does_not_hide_unrelated_errors(self):
+        compatibility_module = _load_port_source('compat')
+        runtime, unused_operations = self._runtime()
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        game, module, effects, operations = self._tutorial_shutdown_fixture()
+        original_fini = game.tutorialLoaderFini
+        original_layout = module.ApplicationEffect._getTutorialLayout
+        # Missing _app is a programming error, not an expired GUI owner.
+        effects.append(module.ApplicationEffect())
+        with mock.patch.dict(sys.modules, {
+                'game': game,
+                'tutorial.gui.Scaleform.effects_player': module}):
+            self.assertTrue(compatibility._arm_tutorial_shutdown_guard())
+            with self.assertRaises(AttributeError):
+                game.tutorialLoaderFini()
+        self.assertEqual([], operations)
+        self.assertIs(original_fini, game.tutorialLoaderFini)
+        self.assertIs(original_layout, module.ApplicationEffect._getTutorialLayout)
+
+    def test_tutorial_shutdown_skips_partial_startup_without_loading_gui(self):
+        compatibility_module = _load_port_source('compat')
+        compatibility = compatibility_module.OfflineCompatibility()
+        with mock.patch.dict(sys.modules, {
+                'tutorial.gui.Scaleform.effects_player': None}):
+            self.assertFalse(compatibility._arm_tutorial_shutdown_guard())
 
     def test_control_mode_listener_runs_after_completed_native_transition(self):
         compatibility_module = _load_port_source('compat')
@@ -3631,6 +3972,25 @@ class OfflineCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(92, compatibility.clear_postmortem_vehicle())
         self.assertEqual(0, compatibility._postmortem_vehicle_id)
+
+    def test_hidden_killer_clear_uses_the_guarded_stock_camera_boundary(self):
+        compatibility_module = _load_port_source('compat')
+        runtime, unused_operations = self._runtime()
+        compatibility = compatibility_module.OfflineCompatibility(runtime)
+        setter = mock.Mock()
+        avatar = types.SimpleNamespace(inputHandler=types.SimpleNamespace(
+            setKillerVehicleID=setter))
+
+        with self.assertRaisesRegex(RuntimeError, 'active battle'):
+            compatibility.clear_postmortem_killer(avatar)
+
+        compatibility._battle_active = True
+        self.assertTrue(compatibility.clear_postmortem_killer(avatar))
+        setter.assert_called_once_with(None)
+
+        avatar.inputHandler = types.SimpleNamespace()
+        with self.assertRaisesRegex(RuntimeError, 'boundary is unavailable'):
+            compatibility.clear_postmortem_killer(avatar)
 
     def test_offline_vehicle_pose_overlay_preserves_native_entity_transform(self):
         compatibility_module = _load_port_source('compat')
@@ -5636,7 +5996,7 @@ class OfflineCompatibilityTests(unittest.TestCase):
                 filename = base64.b32encode(('%s;%s;%s' % (
                     server, account_name, class_name)).encode('ascii'))
                 cache_path = ntpath.join(
-                    r'C:\Users\peng\AppData\Roaming\Wargaming.net\WorldOfTanks',
+                    r'C:\Users\player\AppData\Roaming\Wargaming.net\WorldOfTanks',
                     'dossier_cache', filename.decode('ascii') + '.dat')
                 self.assertLess(len(cache_path), 260)
 
@@ -6574,6 +6934,8 @@ class BootstrapContractTests(unittest.TestCase):
         account_rpc_package = types.ModuleType(
             'gui.mods.offline_lan_0922.account_rpc')
         account_rpc_package.economy = economy
+        account_rpc_package.data = types.ModuleType(
+            'gui.mods.offline_lan_0922.account_rpc.data')
         instance_guard = types.ModuleType(
             'gui.mods.offline_lan_0922.instance_guard')
         instance_guard.release_if_requested = mock.Mock(return_value=False)
@@ -6588,10 +6950,16 @@ class BootstrapContractTests(unittest.TestCase):
         lobby_entry = mock.Mock()
         lobby_entry.attach_mock(session.install, 'install')
         lobby_entry.attach_mock(compatibility.connect, 'connect')
+        services_ui_module = types.ModuleType(
+            'gui.mods.offline_lan_0922.offline_services_ui')
+        services_ui_module.install = mock.Mock()
+        services_ui_module.uninstall = mock.Mock()
+        lobby_entry.attach_mock(services_ui_module.install, 'install_services')
         compatibility_module = types.ModuleType(
             'gui.mods.offline_lan_0922.compat')
         compatibility_module.g_compatibility = compatibility
         account_state = types.SimpleNamespace()
+        garage_store = object()
         state_module = types.ModuleType(
             'gui.mods.offline_lan_0922.account_rpc.state')
         state_module.AccountState = mock.Mock(return_value=account_state)
@@ -6666,6 +7034,7 @@ class BootstrapContractTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.price_catalogue': price_catalogue,
             'gui.mods.offline_lan_0922.account_rpc': account_rpc_package,
             'gui.mods.offline_lan_0922.account_rpc.economy': economy,
+            'gui.mods.offline_lan_0922.account_rpc.data': account_rpc_package.data,
             'gui.mods.offline_lan_0922.compat': compatibility_module,
             'gui.mods.offline_lan_0922.config': config,
             'gui.mods.offline_lan_0922.instance_guard': instance_guard,
@@ -6677,6 +7046,7 @@ class BootstrapContractTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.account_rpc.postbattle_store':
                 postbattle_module,
             'gui.mods.offline_lan_0922.lan_session': lan_session,
+            'gui.mods.offline_lan_0922.offline_services_ui': services_ui_module,
             'gui.mods.offline_lan_0922.lobby_ui': lobby_ui_module,
             'gui.mods.offline_lan_0922.worker_presentation':
                 worker_presentation_module,
@@ -6691,6 +7061,9 @@ class BootstrapContractTests(unittest.TestCase):
                 'bootstrap0922', bootstrap_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            # Store availability must not depend on which other tests have
+            # imported the real garage module during unittest discovery.
+            module._garage_store = mock.Mock(return_value=garage_store)
             module._selected_vehicle = lambda value: {
                 'id': 1, 'compDescr': 12345}
             module._signal_worker_ready = mock.Mock(return_value=True)
@@ -6735,11 +7108,12 @@ class BootstrapContractTests(unittest.TestCase):
                 session.install.assert_called_once_with()
                 compatibility.connect.assert_called_once()
                 self.assertEqual(
-                    [mock.call.install(), mock.call.connect(
+                    [mock.call.install(), mock.call.install_services(),
+                     mock.call.connect(
                         show_lobby=True,
                         account_context={'selected_vehicle': {
                             'id': 1, 'compDescr': 12345},
-                            'garage_store': None,
+                            'garage_store': garage_store,
                             'on_inventory_refreshed': module._on_inventory_refreshed,
                             'account_state': account_state})],
                     lobby_entry.mock_calls)
@@ -6760,6 +7134,7 @@ class BootstrapContractTests(unittest.TestCase):
             module.fini()
             self.assertFalse(module._started)
             module._signal_player_ready.assert_called_once_with()
+            services_ui_module.uninstall.assert_called_once_with()
 
             # A lobby-stage timeout must fully undo the connection adapter
             # and listener, then allow a clean init.  Keep the hangar not
@@ -6851,6 +7226,7 @@ class BootstrapContractTests(unittest.TestCase):
             [expected_session, expected_session],
             lan_session.LANSession.call_args_list)
         self.assertEqual(2, session.install.call_count)
+        self.assertEqual(2, services_ui_module.install.call_count)
         self.assertEqual(2, announcement_ui.install.call_count)
         self.assertEqual(2, announcement_ui.uninstall.call_count)
         self.assertEqual(5, intro_skip.install.call_count)
@@ -6865,7 +7241,7 @@ class BootstrapContractTests(unittest.TestCase):
             show_lobby=True,
             account_context={'selected_vehicle': {
                 'id': 1, 'compDescr': 12345},
-                'garage_store': None,
+                'garage_store': garage_store,
                 'on_inventory_refreshed': module._on_inventory_refreshed,
                 'account_state': account_state})
         self.assertEqual([expected_connect, expected_connect],

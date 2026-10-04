@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import math
 import random
+from gui.mods.offline_lan_0922 import stun_mechanics
 
 
 # The hull resolver also accepts already-crossed destructible loss before the
@@ -447,6 +448,9 @@ def _legacy_shell(shell):
         kind = getattr(getattr(shell, 'type', None), 'name', None)
         if kind is not None:
             result['kind'] = kind
+    stun = stun_mechanics.shell_component(getattr(shell, 'stun', None))
+    if stun is not None:
+        result['stun'] = stun
     return result
 
 

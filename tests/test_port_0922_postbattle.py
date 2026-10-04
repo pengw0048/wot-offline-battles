@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import itertools
 import os
 import pickle
 import shutil
@@ -92,16 +93,41 @@ class _Replay(object):
         # embedded CPython 2.7, which rounds a half away from zero.
         self.connector.values[self.record_name] = int(
             self.connector.values[self.record_name] *
-            self.connector.values[other] / 100.0 + 0.5)
+            self.connector.values[other] /
+            (100.0 if 'Factor100' in other else 10.0) + 0.5)
         self.chain.append('MUL:%s' % other)
         _Replay.steps.append((self.record_name, 'MUL', other))
         return self
 
+    def addMultipliedValue(self, other, factor):
+        value = int(self.connector.values[other] *
+                    self.connector.values[factor] / 10.0 + 0.5)
+        self.connector.values[self.record_name] += value
+        self.chain.append('ADDCOEFF:%s:%s' % (other, factor))
+        return self
+
+    def subMultipliedValue(self, other, factor):
+        value = int(self.connector.values[other] *
+                    self.connector.values[factor] / 10.0 + 0.5)
+        self.connector.values[self.record_name] -= value
+        self.chain.append('SUBCOEFF:%s:%s' % (other, factor))
+        return self
+
     def __add__(self, other):
-        self.connector.values[self.record_name] += self.connector.values[
-            other]
+        if other.startswith('eventCrystalList_'):
+            value = dict(self.connector.values['eventCrystalList'])[
+                other.split('eventCrystalList_', 1)[1]]
+        else:
+            value = self.connector.values[other]
+        self.connector.values[self.record_name] += value
         self.chain.append('ADD:%s' % other)
         _Replay.steps.append((self.record_name, 'ADD', other))
+        return self
+
+    def __sub__(self, other):
+        self.connector.values[self.record_name] -= self.connector.values[other]
+        self.chain.append('SUB:%s' % other)
+        _Replay.steps.append((self.record_name, 'SUB', other))
         return self
 
     def pack(self):
@@ -193,6 +219,53 @@ def _latest_receipt(state, account_key):
 
 
 class PostBattleContractTests(unittest.TestCase):
+
+    def test_native_premium_first_win_replays_equal_durable_awards(self):
+        # Exercise half-integer rounding, reserve stacking, premium vehicles
+        # and penalties with save multipliers; the replay must match banking
+        # while keeping extra earnings out of the original gross XP row.
+        for premium, first_win, penalty, percent in itertools.product(
+                (False, True), (False, True), (0, 1, 2), (50, 100, 150, 200)):
+            with self.subTest(premium=premium, first_win=first_win,
+                              penalty=penalty, percent=percent):
+                receipt = _receipt()
+                original = {'credits': 1001, 'xp': 101, 'free_xp': 5, 'crystal': 0}
+                base = postbattle_store.economy.scale_rewards(
+                    original, credits_percent=percent, experience_percent=percent)
+                reserves = {'credits': 500, 'xp': 50, 'free_xp': 10, 'crew_xp': 202}
+                awarded, crew, income = postbattle_store.economy.battle_income(
+                    base, reserves, premium, first_win, 10, penalty, original)
+                receipt.update({'awarded': awarded, 'income': income,
+                    'friendly_fire': {'victims': [], 'received_damage': 0,
+                                      'xp_penalty': penalty}})
+                vehicle = _packed_vehicle(receipt)
+                self.assertEqual(min(101, base['xp']) + penalty, vehicle['originalXP'])
+                self.assertEqual(premium, vehicle['isPremium'])
+                self.assertEqual(20 if first_win else 10, vehicle['dailyXPFactor10'])
+                for key, native in (('credits', 'credits'), ('xp', 'xp'), ('free_xp', 'freeXP')):
+                    self.assertEqual(awarded[key], vehicle[native])
+                self.assertIn('appliedPremiumXPFactor10', vehicle['xpReplay'].decode())
+
+    def test_training_receipt_has_no_rewards_medals_or_lifetime_progress(self):
+        state = BattleState(map_name='01_karelia')
+        state.client_build = CLIENT_BUILD_0922
+        state.phase = 'battle'
+        state.battle_mode = 'training'
+        player = Player(1, _Socket(), ('127.0.0.1', 1), name='Alice',
+                        vehicle='ussr:R11_MS-1', team=1, account_key='a' * 32)
+        state.players[1] = player
+        state._statistics_row('player', 1)['damage_dealt'] = 9000
+        self.assertTrue(state._finish_battle(1, 'elimination'))
+        receipt = _latest_receipt(state, player.account_key)
+        self.assertEqual('training', receipt['battle_mode'])
+        self.assertFalse(any(receipt['rewards'].values()))
+        self.assertEqual([], receipt['public_results'][0]['achievements'])
+        store = postbattle_store.PostBattleStore(path=None)
+        before = json.dumps(store._progress, sort_keys=True)
+        store._apply_progress(postbattle_store._receipt(receipt))
+        self.assertEqual(before, json.dumps(store._progress, sort_keys=True))
+
+
     def test_vehicle_dossier_uses_native_builder_and_change_time_filter(self):
         built = []
 
@@ -467,7 +540,8 @@ class PostBattleContractTests(unittest.TestCase):
                     'arenaTypeID', 'arenaCreateTime', 'playerVehicles',
                     'xp', 'credits', 'crystal', 'creditsToDraw',
                     'isWinner', 'team', 'winnerIfDraw', 'guiType',
-                    'arenaUniqueID',
+                    'arenaUniqueID', 'offlineDailyMissions',
+                    'offlinePersonalMissions',
                 }, set(service_data))
                 self.assertEqual(receipt['arena_unique_id'],
                                  service_data['arenaUniqueID'])
@@ -1156,16 +1230,99 @@ class PostBattleContractTests(unittest.TestCase):
         state.round_id = 7
         player = Player(1, _Socket(), ('127.0.0.1', 1), name='Alice',
                         vehicle='ussr:R11_MS-1', team=1, account_key='a' * 32)
-        player.participating = False
         state.players[1] = player
+        state._freeze_round_participants((player,))
         state._statistics_row('player', 1)['damage_dealt'] = 900
-        self.assertTrue(state._finish_battle(1, 'elimination'))
+        self.assertTrue(state.leave_battle(1, {'round_id': 7}))
         receipt = _latest_receipt(state, player.account_key)
         self.assertTrue(receipt['premature_leave'])
         self.assertEqual(state.round_start_time,
                          receipt['arena_unique_id'] & 0xffffffff)
         self.assertFalse(state._finish_battle(1, 'duplicate'))
         self.assertEqual(receipt, _latest_receipt(state, player.account_key))
+
+    def test_exit_warning_and_watching_are_separate_receipt_facts(self):
+        from gui.mods.offline_lan_0922 import offline_services
+
+        for action, alive, abandoned, watched in (
+                ('leave', True, True, False),
+                ('leave', False, False, False),
+                ('overturn_caution', True, False, False),
+                ('overturn_danger', True, False, False),
+                ('failure', True, False, False),
+                ('disconnect', True, False, False),
+                ('disconnect', False, False, False),
+                ('finish', True, False, True),
+                ('finish', False, False, True)):
+            with self.subTest(action=action, alive=alive):
+                state = BattleState(map_name='01_karelia')
+                state.client_build = CLIENT_BUILD_0922
+                state.phase = 'battle'
+                player = Player(1, _Socket(), ('127.0.0.1', 1),
+                                name='Alice', vehicle='ussr:R11_MS-1',
+                                team=1, account_key='a' * 32)
+                player.alive = alive
+                player.health = 100 if alive else 0
+                state.players[1] = player
+                state._freeze_round_participants((player,))
+                state._statistics_row('player', 1)['damage_dealt'] = 1
+                # Preserve a live remainder on both teams. The ordinary
+                # no-human adjudication selects the stronger allied team.
+                state.bot_manifest = [dict(
+                    id=index, team=index, slot=0, name='Bot-%d' % index,
+                    vehicle='ussr:R11_MS-1', max_health=100,
+                    health=100 if index == 1 else 50)
+                    for index in (1, 2)]
+                state.bot_states = dict((row['id'], dict(row, alive=True))
+                                        for row in state.bot_manifest)
+                if action == 'finish':
+                    self.assertTrue(state._finish_battle(1, 'elimination'))
+                elif action == 'disconnect':
+                    state.remove_player(1)
+                else:
+                    if action.startswith('overturn_'):
+                        state.player_overturn_state[1] = {
+                            'level': 1 if action == 'overturn_caution' else 2,
+                            'check': 1.0, 'time': 1.0}
+                    message = {'round_id': state.round_id,
+                               'voluntary': action != 'failure'}
+                    self.assertTrue(state.leave_battle(1, message))
+                    # Retrying leave after the server retires the vehicle
+                    # must not replace a live abandonment with a dead exit.
+                    self.assertTrue(state.leave_battle(1, message))
+                receipt = _latest_receipt(state, player.account_key)
+                self.assertEqual(abandoned, receipt['premature_leave'])
+                self.assertEqual(watched, receipt['watched_battle_to_end'])
+                self.assertTrue(lan_client_module._valid_battle_receipt(receipt))
+                self.assertEqual(receipt, lan_server_module.
+                                 _persisted_result_receipt(dict(receipt)))
+                snapshot = {'dailyMissions': {
+                    'day': 1, 'battles': 2, 'damage': 2999,
+                    'wins': 0, 'claimed': []}}
+                applied = []
+                store = postbattle_store.PostBattleStore(path=None)
+                store._account_key = player.account_key
+                def settle(row):
+                    applied.append(row['receipt_id'])
+                    return {'daily_reserves': offline_services.advance_daily(
+                        snapshot, {'premature_leave': row['premature_leave'],
+                                   'damage': row['stats']['damage'],
+                                   'won': row['winner'] == row['team']}, 86402)}
+                store.set_progress_applier(settle)
+                self.assertTrue(store.accept(receipt))
+                self.assertFalse(store.accept(receipt))
+                self.assertEqual([receipt['receipt_id']], applied)
+                self.assertEqual(2 if abandoned else 3,
+                                 snapshot['dailyMissions']['battles'])
+                self.assertEqual([] if abandoned else ['battles', 'damage', 'wins'],
+                                 snapshot['dailyMissions']['claimed'])
+                self.assertEqual(watched, store.should_show_immediately(
+                    receipt['arena_unique_id']))
+                stats = store.progress()['vehicles'][player.vehicle]
+                self.assertEqual(int(alive and watched), stats['survivedBattles'])
+                packed = _packed_vehicle(receipt)
+                self.assertEqual(abandoned, packed['isPrematureLeave'])
+                self.assertEqual(watched, packed['watchedBattleToTheEnd'])
 
     def test_server_receipt_reuses_complete_round_roster_and_statistics(self):
         state = BattleState(map_name='01_karelia', team_size=2)
@@ -1361,7 +1518,8 @@ class PostBattleContractTests(unittest.TestCase):
         state.remove_player(first.player_id)
         state._finish_battle(2, 'team_eliminated')
         original = _latest_receipt(state, first.account_key)
-        self.assertTrue(original['premature_leave'])
+        self.assertFalse(original['premature_leave'])
+        self.assertFalse(original['watched_battle_to_end'])
 
         state._reset_round()
         rejoined, error = state.add_player(
@@ -1422,7 +1580,8 @@ class PostBattleContractTests(unittest.TestCase):
 
             self.assertIsNotNone(state.battle_result)
             minted = _latest_receipt(state, account_key)
-            self.assertTrue(minted['premature_leave'])
+            self.assertFalse(minted['premature_leave'])
+            self.assertFalse(minted['watched_battle_to_end'])
             # The ledger is on disk before anything could have been sent.
             self.assertTrue(Path(ledger).is_file())
 

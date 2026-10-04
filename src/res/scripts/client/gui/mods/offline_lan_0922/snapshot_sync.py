@@ -2,7 +2,9 @@ from __future__ import print_function
 
 """Engine-free translation of LAN v5 snapshots into entity lifecycle data."""
 
+import copy
 import math
+from gui.mods.offline_lan_0922 import ram_history
 
 
 PREDICTION_SECONDS = 0.05
@@ -194,7 +196,7 @@ class SnapshotSync(object):
         return message.get('sequence', message.get('server_tick'))
 
     def _set_remote_target(self, record, pose, now, sample_time_us=None,
-                           sample_age=0.0, live_timeline_started=False):
+                           sample_age=0.0, live_timeline_started=False, sample_revision=None):
         previous = record['target']
         previous_time = record['target_time']
         previous_sample_time_us = record.get('target_sample_time_us')
@@ -325,11 +327,13 @@ class SnapshotSync(object):
             else:
                 record['interpolation_delay_us'] = None
             record['timed_samples'].append({
-                'time_us': sample_time_us, 'pose': dict(pose)})
+                'time_us': sample_time_us, 'pose': dict(pose),
+                'revision': sample_revision})
         record['target'] = pose
         record['velocity'] = velocity
         record['target_time'] = now
         record['target_sample_time_us'] = sample_time_us
+        record['target_sample_revision'] = sample_revision
         record['target_age'] = max(0.0, float(sample_age)) if timed else 0.0
         record['timed_prediction'] = timed
         record['timed_teleport'] = timed_teleport
@@ -366,7 +370,7 @@ class SnapshotSync(object):
     def _upsert(self, kind, state, now, output, update_remote_pose=True,
                 sample_time_us=None, sample_age=0.0, motion_time_us=None,
                 motion_anchor_local_time=None,
-                live_timeline_started=False):
+                live_timeline_started=False, sample_revision=None):
         key = _entity_key(kind, state)
         if key is None:
             return
@@ -396,6 +400,7 @@ class SnapshotSync(object):
         if not alive:
             if not record['dead']:
                 record['dead'] = True
+                record['wreck_state'] = copy.deepcopy(state)
                 record['wreck_settled'] = True
                 if pose is not None:
                     record['current'] = dict(pose)
@@ -411,6 +416,17 @@ class SnapshotSync(object):
                 record['target'] = dict(pose)
                 record['target_time'] = now
                 record['timed_prediction'] = False
+            # A dead hull still has canonical velocity, mass and contact
+            # acknowledgements. Pose-only chase left its consumer at the
+            # death checkpoint: already-spent momentum then looked pending
+            # forever and suppressed the next shove. Advance state atomically
+            # while advance() remains the sole writer of its displayed pose.
+            # Copy the nested ledgers for comparison; callers may reuse them.
+            if state != record.get('wreck_state'):
+                record['wreck_state'] = copy.deepcopy(state)
+                self._emit({'type': 'update', 'entity': key, 'kind': kind,
+                            'id': state['id'], 'state': _copy_state(state),
+                            'pose': None, 'remote': True}, output)
             return
         if record['dead']:
             return
@@ -435,7 +451,7 @@ class SnapshotSync(object):
             update_remote_pose or record['target'] is None)
         snapped = (self._set_remote_target(
                        record, pose, now, sample_time_us, sample_age,
-                       live_timeline_started)
+                       live_timeline_started, sample_revision)
                    if pose is not None and update_remote_pose else False)
         target = (dict(record['target'])
                   if record['target'] is not None else None)
@@ -592,7 +608,8 @@ class SnapshotSync(object):
                         motion_anchor_local_time
                         if kind == 'bot' and timed_bot_poses else None),
                     live_timeline_started=(
-                        kind == 'bot' and live_timeline_started))
+                        kind == 'bot' and live_timeline_started),
+                    sample_revision=(revision if kind == 'bot' else None))
         if live_timeline_started:
             self._live_timeline_reset_pending = False
         for key, record in list(self._entities.items()):
@@ -628,9 +645,8 @@ class SnapshotSync(object):
         delta_z = target['z'] - current['z']
         angle_error = max(
             [abs(_angle_delta(current[axis], target[axis]))
-             for axis in ('yaw', 'aim_yaw')] +
-            [abs(target[axis] - current[axis])
-             for axis in ('pitch', 'roll', 'gun_pitch')])
+             for axis in ('yaw', 'aim_yaw', 'pitch', 'roll')] +
+            [abs(target['gun_pitch'] - current['gun_pitch'])])
         if (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z <=
                 WRECK_SETTLE_DISTANCE * WRECK_SETTLE_DISTANCE and
                 angle_error <= WRECK_SETTLE_ANGLE):
@@ -642,11 +658,9 @@ class SnapshotSync(object):
             current = dict(current)
             for axis in ('x', 'y', 'z'):
                 current[axis] += (target[axis] - current[axis]) * alpha
-            for axis in ('yaw', 'aim_yaw'):
+            for axis in ('yaw', 'aim_yaw', 'pitch', 'roll'):
                 current[axis] += _angle_delta(
                     current[axis], target[axis]) * alpha
-            for axis in ('pitch', 'roll'):
-                current[axis] += (target[axis] - current[axis]) * alpha
             current['gun_pitch'] += (
                 target['gun_pitch'] - current['gun_pitch']) * alpha
             record['current'] = current
@@ -744,6 +758,8 @@ class SnapshotSync(object):
                         previous_sample = samples[index - 1]
                         target_sample = samples[index]
                         break
+                record['presentation_bracket'] = ram_history.presentation_bracket(
+                    previous_sample, target_sample)
                 previous = previous_sample['pose']
                 segment_target = target_sample['pose']
                 previous_time_us = previous_sample['time_us']
@@ -756,12 +772,9 @@ class SnapshotSync(object):
                 for axis in ('x', 'y', 'z'):
                     desired[axis] += (
                         segment_target[axis] - previous[axis]) * progress
-                for axis in ('yaw', 'aim_yaw'):
+                for axis in ('yaw', 'aim_yaw', 'pitch', 'roll'):
                     desired[axis] += _angle_delta(
                         previous[axis], segment_target[axis]) * progress
-                for axis in ('pitch', 'roll'):
-                    desired[axis] += (
-                        segment_target[axis] - previous[axis]) * progress
                 desired['gun_pitch'] += (
                     segment_target['gun_pitch'] -
                     previous['gun_pitch']) * progress
@@ -769,6 +782,9 @@ class SnapshotSync(object):
                 # A late join or the first timed sample has no confirmed
                 # segment to interpolate. Materialise that sample directly.
                 desired = dict(target)
+                endpoint = {'time_us': record.get('target_sample_time_us'),
+                            'revision': record.get('target_sample_revision')}
+                record['presentation_bracket'] = ram_history.presentation_bracket(endpoint, endpoint)
                 if record.get('presentation_time_us') is None:
                     record['presentation_time_us'] = \
                         record.get('target_sample_time_us')
@@ -806,7 +822,10 @@ class SnapshotSync(object):
                     # pre-teleport path on the following render frame.
                     record['timed_samples'] = [{
                         'time_us': record['target_sample_time_us'],
-                        'pose': dict(target)}]
+                        'pose': dict(target),
+                        'revision': record.get('target_sample_revision')}]
+                    record['presentation_bracket'] = ram_history.presentation_bracket(
+                        record['timed_samples'][0], record['timed_samples'][0])
                     record['presentation_time_us'] = (
                         record['target_sample_time_us'])
                     record['interpolation_delay_us'] = None
@@ -824,12 +843,9 @@ class SnapshotSync(object):
                 current = dict(current)
                 for axis in ('x', 'y', 'z'):
                     current[axis] += (desired[axis] - current[axis]) * alpha
-                for axis in ('yaw', 'aim_yaw'):
+                for axis in ('yaw', 'aim_yaw', 'pitch', 'roll'):
                     current[axis] += _angle_delta(
                         current[axis], desired[axis]) * alpha
-                for axis in ('pitch', 'roll'):
-                    current[axis] += (
-                        desired[axis] - current[axis]) * alpha
                 current['gun_pitch'] += (
                     desired['gun_pitch'] - current['gun_pitch']) * alpha
                 snapped = False
@@ -841,5 +857,6 @@ class SnapshotSync(object):
                             if timed and
                             record.get('presentation_time_us') is not None
                             else None),
+                        'presentation_bracket': (record.get('presentation_bracket') if timed else None),
                         'interpolated': True, 'snap': snapped}, output)
         return output

@@ -16,6 +16,7 @@ transactions; this one proves the payload reaches them with every value in the
 position the client actually sends it.
 """
 
+import contextlib
 import sys
 from pathlib import Path
 import unittest
@@ -50,8 +51,11 @@ class _RecordingGarage(object):
     def snapshot(self):
         return {}
 
+    def _transaction(self):
+        return contextlib.nullcontext()
+
     # Shop.buyTankman's callback reads the new id out of the response.
-    RESULTS = {'buy_tankman': 100005}
+    RESULTS = {'buy_tankman': 100005, 'change_tankman_role': 0}
 
     def __getattr__(self, name):
         def record(*args, **kwargs):
@@ -296,6 +300,14 @@ class EconomyPayloadTests(unittest.TestCase):
             [('change_tankman_role', (100005, 3, 50002), {})],
             self._dispatch(
                 commands.CMD_TMAN_CHANGE_ROLE, (17, 100005, 3, 50002)))
+
+    def test_role_change_returns_installation_result_to_the_stock_callback(self):
+        result = self._respond(
+            commands.CMD_TMAN_CHANGE_ROLE, (17, 100005, 3, 50002))
+
+        self.assertEqual(commands.RES_SUCCESS, result.result_id)
+        self.assertEqual(0, result.ext)
+        self.assertIsNotNone(result.ext)
 
     def test_a_passport_carries_ten_values_with_minus_one_for_unchanged(self):
         # Inventory.__replacePassport_onShopSynced -> _doCmdIntArr(

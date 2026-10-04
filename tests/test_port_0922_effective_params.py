@@ -240,11 +240,32 @@ class EffectiveParamsContractTests(unittest.TestCase):
         self.assertTrue(player.critical['fire'])
         self.assertEqual(revision, player.equipment_revision)
         self.assertEqual(after_use, mounted.snapshot(player.equipment_clock))
-        for invalid in (-1, False, 65536):
+        for sequence, invalid in enumerate((-1, False, 65536), 3):
             self.assertIsNone(client.send_equipment_intent(
                 invalid, activation_code=65536))
-            forged = dict(messages[0], equipment_id=invalid, intent_seq=3)
-            self.assertFalse(state.submit_equipment_intent(player.player_id, forged))
+            forged = dict(messages[0], equipment_id=invalid, intent_seq=sequence)
+            # Handled is not accepted: reject the operation but preserve the
+            # ordered request frontier instead of poisoning subsequent input.
+            self.assertTrue(state.submit_equipment_intent(player.player_id, forged))
+            self.assertEqual({
+                'intent_seq': sequence, 'accepted': False,
+                'reason': 'invalid_activation_code'}, player.equipment_intent_result)
+            self.assertTrue(player.critical['fire'])
+            self.assertEqual(revision, player.equipment_revision)
+            self.assertEqual(after_use, mounted.snapshot(player.equipment_clock))
+            self.assertEqual({'251': 1}, state._statistics_row(
+                'player', player.player_id)['equipment_used'])
+        # A legitimate request after the rejected raw payloads must still
+        # extinguish once the existing cooldown expires, without a new bill.
+        from lan_battle_server import TICK_HZ
+        state.tick += 91 * TICK_HZ
+        following = dict(messages[0], intent_seq=6)
+        self.assertTrue(state.submit_equipment_intent(player.player_id, following))
+        self.assertTrue(player.equipment_intent_result['accepted'])
+        self.assertFalse(player.critical['fire'])
+        self.assertEqual(revision + 1, player.equipment_revision)
+        self.assertEqual({'251': 1}, state._statistics_row(
+            'player', player.player_id)['equipment_used'])
 
     def test_extinguisher_activation_rejects_invalid_codes_targets_and_modes(self):
         from gui.mods.offline_lan_0922 import equipment_mechanics
@@ -316,6 +337,37 @@ class EffectiveParamsContractTests(unittest.TestCase):
             loadout.dynamic_spotting_ratios(healthy, injured))
 
     def test_garage_builder_uses_exact_client_final_value_providers(self):
+        self._assert_garage_builder()
+
+    def test_requalified_gunner_can_keep_disabled_radio_skills(self):
+        # The original client separates perk activity from role enablement.
+        # A trained radio perk can remain active but disabled on a gunner.
+        for name, level, active in (
+                ('radioman_finder', 63.0, True),
+                ('radioman_inventor', 100.0, True),
+                ('radioman_retransmitter', 100.0, True),
+                ('radioman_lasteffort', 100.0, True),
+                ('radioman_lasteffort', 63.0, False)):
+            with self.subTest(name=name, level=level, active=active):
+                self._assert_garage_builder((types.SimpleNamespace(
+                    name=name, level=level, isActive=active,
+                    isEnable=False),))
+
+    def test_requalification_preserves_other_disabled_specialties(self):
+        for name in ('commander_sixthsense', 'driver_rammingmaster',
+                     'loader_intuition'):
+            with self.subTest(name=name):
+                self._assert_garage_builder((types.SimpleNamespace(
+                    name=name, level=100.0, isActive=True,
+                    isEnable=False),))
+
+    def test_enabled_wrong_specialty_is_still_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'does not match its slot'):
+            self._assert_garage_builder((types.SimpleNamespace(
+                name='radioman_lasteffort', level=100.0, isActive=True,
+                isEnable=True),))
+
+    def _assert_garage_builder(self, inherited_skills=()):
         expected = effective_params()
         expected['ramming']['ramming_bonus'] = 0.15
         descriptor = types.SimpleNamespace()
@@ -355,6 +407,8 @@ class EffectiveParamsContractTests(unittest.TestCase):
                 skill('loader_intuition'),
                 skill('radioman_lasteffort')]),
         ]
+        crew[1].skills.extend(inherited_skills)
+        original_skills = copy.deepcopy(crew[1].skills)
         equipment_descriptor = types.SimpleNamespace(
             name='ration', id=(0, 9), compactDescr=1009,
             reuseCount=-1, cooldownSeconds=0.0,
@@ -362,10 +416,17 @@ class EffectiveParamsContractTests(unittest.TestCase):
         consumables = types.SimpleNamespace(
             getInstalledItems=lambda: (
                 types.SimpleNamespace(intCD=1009),))
+        directive = types.SimpleNamespace(
+            compactDescr=11003, skillName='commander_sixthSense', delay=2.0,
+            updateVehicleAttrFactors=lambda *args: None)
+        booster_slots = types.SimpleNamespace(getInstalledItems=lambda: (
+            types.SimpleNamespace(descriptor=directive),))
         item = types.SimpleNamespace(
             descriptor=descriptor,
             crew=crew,
-            equipment=types.SimpleNamespace(regularConsumables=consumables),
+            equipment=types.SimpleNamespace(
+                regularConsumables=consumables,
+                battleBoosterConsumables=booster_slots),
             shells=(types.SimpleNamespace(intCD=2, count=10),
                     types.SimpleNamespace(intCD=1, count=20)),
             getBonusCamo=lambda: types.SimpleNamespace(id=7))
@@ -416,7 +477,17 @@ class EffectiveParamsContractTests(unittest.TestCase):
                     return_value=expected['ramming']):
             result = lan_session._selected_vehicle_effective_params()
 
+        # Projection must not reset or rewrite the account's learned skills.
+        self.assertEqual(original_skills, crew[1].skills)
+        self.assertEqual(
+            ['gunner_rancorous', 'gunner_sniper'],
+            [entry['name'] for entry in result['crew']['members'][1]['skills']])
         self.assertEqual(33, attribute_factors.call_count)
+        self.assertTrue(all(call.args[2] == (equipment_descriptor, directive)
+                            for call in attribute_factors.call_args_list))
+        self.assertEqual({'compact_descr': 11003,
+                          'skill_overrides': {'sixth_sense_delay': 2.0}},
+                         result['battle_booster'])
         self.assertTrue(all(
             call.args[0] is descriptor
             for call in attribute_factors.call_args_list))
@@ -445,7 +516,7 @@ class EffectiveParamsContractTests(unittest.TestCase):
         self.assertTrue(result['skills']['last_effort'])
         self.assertTrue(result['loadout']['has_sixth_sense'])
         self.assertEqual(2, result['gun']['clip_size'])
-        self.assertEqual([1, 2], [
+        self.assertEqual([2, 1], [
             shot['compact_descr'] for shot in result['gun']['shots']])
         self.assertTrue(all(
             shot['source_shot']['deadeye']

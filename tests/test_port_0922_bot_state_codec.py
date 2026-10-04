@@ -76,6 +76,12 @@ def _bot_state(**overrides):
 
 class BotStateCodecTest(unittest.TestCase):
 
+    def test_service_brake_intent_survives_both_wire_states(self):
+        for active in (True,False):
+            state = _bot_state(service_brake=active)
+            decoded = codec.decode_row(codec.encode_row(state), STATIC)
+            self.assertIs(active, decoded['service_brake'])
+
     def test_round_trip_preserves_every_contract_field(self):
         state = _bot_state()
         decoded = codec.decode_row(codec.encode_row(state), STATIC)
@@ -112,13 +118,13 @@ class BotStateCodecTest(unittest.TestCase):
 
     def test_out_of_contract_values_are_clamped_not_rejected(self):
         state = _bot_state(x=9000.0, z=-9000.0, gun_pitch=3.0, speed=500.0,
-                           pitch=-2.0)
+                           pitch=-5.0)
         decoded = codec.decode_row(codec.encode_row(state), STATIC)
         self.assertEqual(decoded['x'], 2000.0)
         self.assertEqual(decoded['z'], -2000.0)
         self.assertEqual(decoded['gun_pitch'], 1.2)
         self.assertEqual(decoded['speed'], 80.0)
-        self.assertEqual(decoded['pitch'], -0.61)
+        self.assertAlmostEqual(decoded['pitch'], 2 * math.pi - 5.0, places=5)
 
     def test_shot_angles_are_an_atomic_optional_pair(self):
         state = _bot_state()

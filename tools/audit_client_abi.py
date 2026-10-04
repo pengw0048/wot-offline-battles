@@ -25,7 +25,13 @@ except ImportError:
 
 
 EXPECTED_ABI = {
+    'scripts/client/tutorial/gui/Scaleform/effects_player.pyc': {
+        'ApplicationEffect._getTutorialLayout': ('self',),
+        'SetTriggerEffect.stop': ('self', 'effectID'),
+        'EffectsPlayer.stopAll': ('self',),
+    },
     'scripts/client/game.pyc': {
+        'fini': (),
         'wg_onChunkLoad': (
             'spaceID', 'chunkID', 'numDestructibles', 'isOutside'),
         'wg_onChunkLoose': ('spaceID', 'chunkID', 'isOutside'),
@@ -86,11 +92,19 @@ EXPECTED_ABI = {
         '_PersonalMissionsProgressRequester._response': (
             'self', 'resID', 'value', 'callback'),
     },
+    'scripts/common/potapov_quests.pyc': {
+        'PQStorage.__init__': ('self', 'compDescr', 'storage'),
+        'PQStorage.makeCompDescr': ('self',),
+    },
+    'scripts/client/gui/shared/gui_items/badge.pyc': {
+        'Badge.__init__': ('self', 'data', 'proxy'),
+    },
     'scripts/common/items/tankmen.pyc': {
         'generateTankmen': (
             'nationID', 'vehicleTypeID', 'roles', 'isPremium',
             'roleLevel', 'skillsMask', 'isPreview'),
         'TankmanDescr.__init__': ('self', 'compactDescr', 'battleOnly'),
+        'TankmanDescr.skillLevel': ('self', 'skillName'),
     },
     'scripts/common/items/__init__.pyc': {
         'ItemsPrices.__init__': ('self', 'prices'),
@@ -120,6 +134,10 @@ EXPECTED_ABI = {
     },
     'scripts/common/physics_shared.pyc': {
         'configurePhysicsMode': ('cfg', 'typeDesc', 'gravityFactor'),
+        'initVehiclePhysicsClient': ('physics', 'typeDesc'),
+        '_computeCenterOfMassShift': ('mass', 'enginePower'),
+        '_powerCurve': ('arg', 'argMin', 'argMid', 'argMax',
+                        'valMin', 'valMid', 'valMax'),
     },
     'scripts/common/items/components/legacy_stuff.pyc': {
         'NoLegacyStuff.get': ('self', 'k', 'd'),
@@ -213,6 +231,8 @@ EXPECTED_ABI = {
     },
     'scripts/client/gui/battle_control/controllers/feedback_adaptor.pyc': {
         'BattleFeedbackAdaptor.__init__': ('self', 'setup'),
+        'BattleFeedbackAdaptor.setTargetInFocus': (
+            'self', 'vehicleID', 'isInFocus'),
         'BattleFeedbackAdaptor.handleBattleEvents': ('self', 'events'),
         'BattleFeedbackAdaptor.startVehicleVisual': (
             'self', 'vProxy', 'isImmediate'),
@@ -405,12 +425,25 @@ EXPECTED_ABI = {
         'Shell.count': ('self',),
     },
     'scripts/client/gui/shared/gui_items/vehicle_equipment.pyc': {
+        'EquipmentLayoutHelper.__init__': (
+            'self', 'vehicle', 'eqsLayout', 'battleBoosterLayout'),
+        'EquipmentLayoutHelper.getRawLayout': ('self',),
         'VehicleEquipment.regularConsumables': ('self',),
         # Appends the battle-booster slot, so an equipment payload is four
         # wide while the published garage holds three regular slots.
         'VehicleEquipment.getConsumablesIntCDs': ('self', 'default'),
         '_VehicleConsumables.getIntCDs': ('self', 'default'),
         '_VehicleConsumables.getInstalledItems': ('self',),
+    },
+    'scripts/client/gui/shared/gui_items/processors/module.pyc': {
+        'getInstallerProcessor': (
+            'vehicle', 'newComponentItem', 'slotIdx', 'install',
+            'isUseMoney', 'conflictedEqs', 'skipConfirm'),
+    },
+    'scripts/client/gui/shared/gui_items/processors/vehicle.pyc': {
+        'VehicleBattleBoosterLayoutProcessor.__init__': (
+            'self', 'vehicle', 'battleBooster', 'eqsLayout', 'skipConfirm'),
+        'VehicleLayoutProcessor._request': ('self', 'callback'),
     },
     'scripts/client/account_helpers/Inventory.pyc': {
         'Inventory.equipEquipments': ('self', 'vehInvID', 'eqs', 'callback'),
@@ -1124,6 +1157,19 @@ EXPECTED_CODE_LITERALS = {
 # string payload literals cannot express.  They are the exact #1513 APIs the
 # offline Account preservation and native lobby-ready gate depend on.
 EXPECTED_CODE_NAMES = {
+    'scripts/client/tutorial/gui/Scaleform/effects_player.pyc': {
+        'ApplicationEffect._getTutorialLayout': ('_app', 'tutorialManager'),
+        'SetTriggerEffect.stop': ('_itemsIDs', '_getTutorialLayout', 'clearTriggers'),
+        'EffectsPlayer.stopAll': ('_effects', 'itervalues', 'stop'),
+    },
+    'scripts/common/items/tankmen.pyc': {
+        'TankmanDescr.skillLevel': (
+            'skills', 'MAX_SKILL_LEVEL', '_TankmanDescr__lastSkillLevel'),
+    },
+    'scripts/client/gui/shared/gui_items/Tankman.pyc': {
+        'Tankman.getSkillsToLearn': (
+            'COMMON_SKILLS', 'SKILLS_BY_ROLES', 'combinedRoles'),
+    },
     'scripts/client/game.pyc': {
         'wg_onChunkLoad': (
             'AreaDestructibles', 'g_destructiblesManager', 'getSpaceID',
@@ -1150,6 +1196,10 @@ EXPECTED_CODE_NAMES = {
             'VEHICLE_SIEGE_STATE', 'SWITCHING_ON', 'SWITCHING_OFF'),
         'VehicleDescriptor.getHitTesters': (
             'chassis', 'hull', 'turrets', 'hitTester', 'append'),
+        'VehicleDescriptor.__updateAttributes': (
+            'IS_CELLAPP', 'hullPosition', 'hitTester', 'bbox',
+            'turretPositions', 'gunPosition', 'visibilityCheckPoints',
+            'observerPosOnChassis', 'observerPosOnTurret'),
         'CompositeVehicleDescriptor.onSiegeStateChanged': (
             'VEHICLE_SIEGE_STATE', 'ENABLED', 'VEHICLE_MODE', 'SIEGE',
             'DEFAULT'),
@@ -1157,6 +1207,13 @@ EXPECTED_CODE_NAMES = {
     'scripts/common/physics_shared.pyc': {
         'configurePhysicsMode': (
             'chassis', 'hull', 'hitTester', 'bbox', 'hullPosition'),
+        'initVehiclePhysicsClient': (
+            'physics', 'hull', 'hitTester', 'bbox', 'chassis',
+            'hullPosition', '_computeCenterOfMassShift', 'centerOfMass'),
+        '_computeCenterOfMassShift': (
+            '_powerCurve', 'DYN_RATIO_MIN', 'DYN_RATIO_MID', 'DYN_RATIO_MAX',
+            'CMY_MIN', 'CMY_MID', 'CMY_MAX'),
+        '_powerCurve': ('_clamp', 'math', 'log', 'pow'),
     },
     'scripts/common/items/components/legacy_stuff.pyc': {
         'NoLegacyStuff.get': ('AssertionError',),
@@ -2208,6 +2265,8 @@ EXPECTED_PACKED_XML_PATH_VALUES = {
 EXPECTED_GLOBALS = {
     'scripts/common/physics_shared.pyc': {
         'WEIGHT_SCALE': 0.001,
+        'CMY_MIN': -0.15, 'CMY_MID': -0.2, 'CMY_MAX': -0.3,
+        'DYN_RATIO_MIN': 9.5, 'DYN_RATIO_MID': 13.0, 'DYN_RATIO_MAX': 21.0,
     },
     'scripts/client/vehicle_systems/CompoundAppearance.pyc': {
         # The effects LOD runs on this cadence and measures the camera, not

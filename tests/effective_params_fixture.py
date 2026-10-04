@@ -42,7 +42,7 @@ def effective_params():
             'brakeDecel': 15.9,
             'trackCenter': 1.5,
             'minPlaneNormalY': 0.906,
-            'nativePowerRatio': 1.0,
+            'nativePowerRatio': 1.0, 'rotationIsAroundCenter': True,
         },
         'spotting': {
             'commander_level': 100.0,

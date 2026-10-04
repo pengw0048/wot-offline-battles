@@ -1,0 +1,258 @@
+name: Build upstream Bot077 and no-yield comparison
+on:
+  push:
+    branches: [fix/093-bot077-restore-20260923]
+    paths: [.github/workflows/build-bot077-compare.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bot077-comparison-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/093-bot077-restore-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.source.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Restore pinned upstream behavior and make explicit no-yield branch
+        id: source
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git cat-file -e 54603d6e68d345c45c9aaa5e6a2cd45200c5436b^{commit}
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p build-evidence
+          python tools/bot077_build.py integrate original
+          git diff --cached > build-evidence/original.patch
+          git commit -m 'Restore upstream v0.7.7 Bot source; preserve radio visibility, startup fixes and original maps'
+          git push origin HEAD:refs/heads/fix/093-bot077-restore-20260923
+          original=$(git rev-parse HEAD)
+          git archive --format=zip --output=build-evidence/original-source.zip HEAD
+          python tools/bot077_build.py integrate noyield
+          git diff --cached > build-evidence/noyield.patch
+          git commit -m 'Remove proactive mutual yielding and post-contact waiting from the Bot077 comparison'
+          git push origin HEAD:refs/heads/fix/093-bot077-no-yield-20260923
+          noyield=$(git rev-parse HEAD)
+          git archive --format=zip --output=build-evidence/noyield-source.zip HEAD
+          echo "matrix={\"include\":[{\"variant\":\"original\",\"source\":\"$original\"},{\"variant\":\"noyield\",\"source\":\"$noyield\"}]}" >> "$GITHUB_OUTPUT"
+          printf '%s original\n%s noyield\n' "$original" "$noyield" > build-evidence/source-shas.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot077-sources-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+  tests:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tests:server:tools
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify upstream driving, radio and real roster startup boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/bot077_build.py source-tests 2>&1 | tee build-evidence/historical-driving.log
+          python -m unittest test_bot080_radio_integration test_port_0922_spotting_radio test_port_0922_radio_server.RadioRelayTests.test_radio_links_relay_and_empty_batch_clear_coverage test_port_0922_radio_server.RadioRelayTests.test_invalid_recipient_rejects_whole_batch_without_committing test_port_0922_radio_server.RadioRelayTests.test_unknown_enemy_self_and_duplicate_radio_links_are_rejected test_port_0922_radio_server.RadioRelayTests.test_known_ally_dying_in_flight_is_pruned 2>&1 | tee build-evidence/radio-integration.log
+          python tools/test_bot080_radio_contract.py 2>&1 | tee build-evidence/radio-contract.log
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/roster.log
+          python -m unittest test_bot080_pinned_startup test_port_0922_battle_runtime.BattleRuntimeContractTests.test_bot_roster_uses_complete_catalog_without_persistent_pool test_port_0922_battle_runtime.BattleRuntimeContractTests.test_all_clients_preload_the_same_server_roster 2>&1 | tee build-evidence/startup.log
+          python -m unittest test_port_0922_world_collision test_port_0922_vehicle_physics test_port_0922 2>&1 | tee build-evidence/retained-physics.log
+          cp docs/testing/bot077-proof.json build-evidence/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot077-${{ matrix.variant }}-tests-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+  windows-server:
+    needs: [prepare, tests]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot077-${{ matrix.variant }}-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 3
+  client-payload:
+    needs: [prepare, windows-server]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot077-${{ matrix.variant }}-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and verify actual Python 2.7 Bot and compatibility contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-bot077-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}" \
+            python:2.7.18 sh -c 'python build_wotmod.py && python tools/bot077_build.py bytecode && python tools/test_bot080_radio_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod' 2>&1 | tee build-evidence/compiled-tests.log
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot077-${{ matrix.variant }}-compiled-tests-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot077-${{ matrix.variant }}-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-launcher:
+    needs: [prepare, client-payload]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ matrix.source }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-bot077-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+      BOT077_VARIANT: ${{ matrix.variant }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot077-${{ matrix.variant }}-client-${{ github.run_id }}
+          path: dist
+      - name: Test normal installation and build launcher
+        shell: pwsh
+        run: |
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher tests failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Verify upstream source, original maps, bytecode and installation
+        run: python tools/bot077_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check built server readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $ready = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) { throw 'Server exited before readiness' }
+                  $probe | python -
+                  if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $ready) { throw 'Server readiness failed' }
+          }
+          finally {
+              if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+              $global:LASTEXITCODE = 0
+          }
+      - name: Keep evidence separate and retain the normal clean layout
+        shell: python
+        run: |
+          import json, os, shutil
+          from pathlib import Path
+          app=Path('launcher/dist/wot-0.9.22-offline-battles')
+          evidence=Path('build-evidence');evidence.mkdir(exist_ok=True)
+          allowed={'wot-0.9.22-offline-battles.exe','_internal','README.txt','LICENSE','THIRD_PARTY_NOTICES.md','licenses'}
+          for p in list(app.iterdir()):
+              if p.name not in allowed:
+                  assert p.is_file(),p
+                  shutil.move(str(p),str(evidence/p.name))
+          assert set(p.name for p in app.iterdir())==allowed
+          variant=os.environ['BOT077_VARIANT']
+          with (app/'README.txt').open('a',encoding='utf8') as f:
+              f.write('\n\nBot comparison test: upstream v0.7.7, variant='+variant+'\n')
+              f.write('Source: '+os.environ['FULL_BOT080_SOURCE_SHA']+'\n')
+              f.write('Build: '+os.environ['WOT_OFFLINE_BUILD_IDENTITY']+'\n')
+              f.write('Original map assets, current radio/startup fixes and non-Bot game systems retained.\n')
+              f.write('noyield additionally removes active mutual yielding and contact waiting; real collisions and geometric clearance remain.\n')
+          (evidence/'clean-package.json').write_text(json.dumps({'source':os.environ['FULL_BOT080_SOURCE_SHA'],'identity':os.environ['WOT_OFFLINE_BUILD_IDENTITY'],'variant':variant,'root':sorted(allowed),'server_readiness':True,'native_game_tested':False},indent=2))
+          shutil.copy('dist/full-bot080-bytecode.json',evidence/'bytecode.json')
+          shutil.copy('docs/testing/bot077-proof.json',evidence/'bot077-proof.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot077-${{ matrix.variant }}-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-bot077-${{ matrix.variant }}-clean-${{ github.run_id }}-Windows
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30

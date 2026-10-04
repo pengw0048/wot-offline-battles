@@ -3,10 +3,13 @@ from __future__ import print_function
 import base64
 import json
 import math
+from gui.mods.offline_lan_0922 import stun_mechanics
 import socket
 import threading
 import time
 import uuid
+
+from gui.mods.offline_lan_0922 import state_transfer
 
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922.battle_achievements import (
@@ -14,7 +17,10 @@ from gui.mods.offline_lan_0922.battle_achievements import (
 from gui.mods.offline_lan_0922 import bot_gunnery
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
+from gui.mods.offline_lan_0922 import friendly_fire
+from gui.mods.offline_lan_0922 import mission_events
 from gui.mods.offline_lan_0922 import siege_mechanics
+from gui.mods.offline_lan_0922 import server_aim
 from gui.mods.offline_lan_0922 import spotting
 from gui.mods.offline_lan_0922 import turret_obstacle_schema
 
@@ -44,6 +50,7 @@ PLAYER_ENVIRONMENT_CAPABILITY = 'player_environment_v2'
 EFFECTIVE_PARAMS_CAPABILITY = effective_params_wire.CAPABILITY
 SIMULATION_WORKER_CAPABILITY = 'simulation_worker_v1'
 CLIENT_CAPABILITIES = (
+    state_transfer.CAPABILITY,
     PROJECTILE_LEDGER_CAPABILITY,
     RICOCHET_CONTINUATION_CAPABILITY,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
@@ -102,7 +109,7 @@ MAX_PLAYER_RELOAD_SECONDS = 3600.0
 # client queues must already satisfy the same envelope.
 MAX_PLAYER_INPUT_SPEED = 200.0
 MAX_PLAYER_GUN_PITCH = 1.2
-MAX_PLAYER_INPUT_ATTITUDE = 0.61
+MAX_PLAYER_INPUT_ATTITUDE = math.pi
 PLAYER_INPUT_WORLD_BOUNDS = (2000.0, 1000.0, 2000.0)
 MAX_PLAYER_RAM_CONTACTS = 16
 MAX_PLAYER_DESTRUCTIBLE_CONTACTS = 16
@@ -144,9 +151,14 @@ RESULT_INTERACTION_LIMITS = {
     'ricochets_received': (0, 65535),
     'no_damage_direct_hits_received': (0, 65535),
     'target_kills': (0, 255),
+    'damage_events': (0, 65535),
+    'kills_assisted_stun': (0, 1),
+    'kills_assisted_track': (0, 1),
+    'kills_assisted_radio': (0, 1),
 }
 BOT_TIER_MODES = frozenset((
-    'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus1'))
+    'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus1',
+    '0_plus2', 'minus2_0'))
 BOT_SKILL_MODES = frozenset(bot_gunnery.SKILL_MODES)
 SENDER_JOIN_TIMEOUT = 0.1
 SEND_STALL_TIMEOUT = 5.0
@@ -390,12 +402,14 @@ def _valid_player_siege_contract(player):
 def _canonical_angle(value, default=0.0):
     """Return one mathematically equivalent angle inside [-pi, pi].
 
-    Yaw is periodic, so an accumulated turret plus hull sum is normalized
+    Body and turret angles are periodic, so an accumulated angle is normalized
     rather than clipped: clipping would silently point the reported gun
     somewhere the player is not aiming, while normalization reports the exact
     same orientation inside the server's ordered-input contract.
     """
     angle = _finite_float(value, default)
+    if -math.pi <= angle < math.pi:
+        return angle
     period = 2.0 * math.pi
     angle = math.fmod(angle + math.pi, period)
     if angle < 0.0:
@@ -448,6 +462,8 @@ def _valid_player_gun_checkpoint_contract(player):
     """Require one checkpoint for every admitted modern player input."""
     if not isinstance(player, dict):
         return False
+    if not _valid_player_gun_aim_contract(player):
+        return False
     input_seq = _exact_int(player.get('input_seq'))
     has_seq = 'gun_checkpoint_seq' in player
     has_checkpoint = 'gun_checkpoint' in player
@@ -464,6 +480,27 @@ def _valid_player_gun_checkpoint_contract(player):
         checkpoint_seq == input_seq and
         _canonical_human_gun_checkpoint(
             player.get('gun_checkpoint')) is not None)
+
+
+def _valid_player_gun_aim_contract(player):
+    """An optional native checkpoint and worker result share input identity."""
+    input_seq = _exact_int(player.get('input_seq'))
+    has_seq = 'gun_aim_checkpoint_seq' in player
+    has_checkpoint = 'gun_aim_checkpoint' in player
+    if has_seq != has_checkpoint:
+        return False
+    if has_checkpoint:
+        sequence = _exact_int(player.get('gun_aim_checkpoint_seq'))
+        if (input_seq is None or input_seq <= 0 or sequence != input_seq or
+                server_aim.canonical_checkpoint(
+                    player.get('gun_aim_checkpoint')) is None):
+            return False
+    if 'gun_marker' in player:
+        sample = server_aim.canonical_sample(player.get('gun_marker'))
+        if (sample is None or not has_checkpoint or input_seq is None or
+                sample['input_seq'] > input_seq):
+            return False
+    return True
 
 
 def _valid_player_equipment_contract(state, required=False):
@@ -559,6 +596,12 @@ def _canonical_runtime_vehicle_row(value):
         if parsed is None:
             return None
         result[name] = parsed
+    if result.get('stun_factors'):
+        try:
+            result['stun_factors'] = stun_mechanics.canonical_factors(
+                result['stun_factors'])
+        except (TypeError, ValueError, OverflowError):
+            return None
     if 'velocity' in result:
         velocity = result.get('velocity')
         if not isinstance(velocity, (list, tuple)) or len(velocity) < 3:
@@ -707,7 +750,7 @@ def _strict_projectile_source_shot(value):
     shell_fields = set(shell) if isinstance(shell, dict) else set()
     base_shell_fields = {'kind', 'caliber', 'damage', 'explosionRadius'}
     if (not isinstance(shell, dict) or
-            shell_fields not in (
+            shell_fields - {'stun'} not in (
                 base_shell_fields,
                 base_shell_fields | PROJECTILE_HE_FACTOR_FIELDS)):
         return None
@@ -773,6 +816,13 @@ def _strict_projectile_source_shot(value):
     }
     if he_factors is not None:
         result['shell'].update(he_factors)
+    if 'stun' in shell:
+        try:
+            if kind != 'HIGH_EXPLOSIVE' or shell['stun'] is None:
+                return None
+            result['shell']['stun'] = stun_mechanics.shell_component(shell['stun'])
+        except (TypeError, ValueError, KeyError):
+            return None
     return result
 
 
@@ -960,6 +1010,10 @@ def _strict_projectile_effect(value):
         'critical', 'critical_target_base_revision',
         'critical_target_ack_seq', 'hull_damage', 'critical_delta'))
     stun_fields = frozenset(('stun_end_server_time_ms',))
+    if 'stun_factors' in value:
+        stun_fields |= frozenset(('stun_factors',))
+    if 'stun_duration_ms' in value:
+        stun_fields |= frozenset(('stun_duration_ms',))
     target_pose_fields = frozenset(('target_x', 'target_y', 'target_z'))
     damage_sticker_fields = frozenset(('damage_sticker',))
     potential_fields = frozenset(('potential_damage',))
@@ -1041,6 +1095,17 @@ def _strict_projectile_effect(value):
         if stun_end is None:
             return None
         result['stun_end_server_time_ms'] = stun_end
+        if 'stun_duration_ms' in value:
+            duration = _projectile_int_range(value['stun_duration_ms'], 0, stun_end)
+            if duration is None:
+                return None
+            result['stun_duration_ms'] = duration
+        if 'stun_factors' in value:
+            try:
+                result['stun_factors'] = stun_mechanics.canonical_factors(
+                    value['stun_factors'])
+            except (TypeError, ValueError):
+                return None
     if has_damage_sticker:
         damage_sticker = _projectile_int_range(
             value.get('damage_sticker'), 0,
@@ -1297,21 +1362,53 @@ def _valid_battle_receipt(message):
             winner not in (0, 1, 2) or duration is None or duration < 0 or
             not isinstance(message.get('premature_leave'), bool)):
         return False
+    if ('watched_battle_to_end' in message and not isinstance(
+            message['watched_battle_to_end'], bool)):
+        return False
+    if message.get('battle_mode', 'regular') not in ('regular', 'training'):
+        return False
+    if ('vehicle_compact_descr' in message and
+            _canonical_vehicle_compact_descr(message['vehicle_compact_descr']) is None):
+        return False
+    if ('max_health' in message and
+            (type(message['max_health']) not in integer_types or
+             not 1 <= message['max_health'] <= 100000)):
+        return False
+    if ('vehicle_outfits' in message and
+            (not isinstance(message['vehicle_outfits'], dict) or
+             _canonical_wire_outfits(message['vehicle_outfits']) is None)):
+        return False
     stats = message.get('stats')
     rewards = message.get('rewards')
     stat_names = RECEIPT_STAT_NAMES
     reward_names = ('credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost')
     if not isinstance(stats, dict) or not isinstance(rewards, dict):
         return False
-    # Statistics added after a receipt was recorded default to zero, exactly
-    # as the durable store treats them.
+    # Missing optional statistics are valid legacy wire data. Evidence-bearing
+    # mission fields remain absent when the durable store normalizes them.
     if any(_exact_int(stats.get(name, 0)) is None or
            _exact_int(stats.get(name, 0)) < 0 for name in stat_names):
         return False
+    if 'max_piercing_series' in stats:
+        series = stats['max_piercing_series']
+        if (type(series) not in integer_types or series > min(
+                _exact_int(stats.get('shots', 0)),
+                _exact_int(stats.get('piercings', 0)))):
+            return False
     if any(_exact_int(rewards.get(name)) is None or
            _exact_int(rewards.get(name)) < 0 for name in reward_names):
         return False
+    if (_exact_int(rewards.get('crystal', 0)) is None or
+            rewards.get('crystal', 0) < 0):
+        return False
+    if (_exact_int(message.get('battle_booster', 0)) is None or
+            not 0 <= message.get('battle_booster', 0) <= 2 ** 31 - 1):
+        return False
     if rewards.get('repair_cost') != 0 or rewards.get('ammo_cost') != 0:
+        return False
+    try:
+        friendly_fire.facts(message.get('friendly_fire'))
+    except (TypeError, ValueError, OverflowError):
         return False
     # What the battle drew, by the shell's index in the gun's own shot order.
     # A receipt from a server that does not send it fired nothing.
@@ -1374,6 +1471,12 @@ def _valid_battle_receipt(message):
                _exact_int(row_stats.get(stat_name, 0)) < 0
                for stat_name in stat_names):
             return False
+        if 'max_piercing_series' in row_stats:
+            series = row_stats['max_piercing_series']
+            if (type(series) not in integer_types or series > min(
+                    _exact_int(row_stats.get('shots', 0)),
+                    _exact_int(row_stats.get('piercings', 0)))):
+                return False
         # Receipts recorded before offline achievements shipped omit the list.
         achievements = row.get('achievements', [])
         if (not isinstance(achievements, list) or
@@ -1391,11 +1494,20 @@ def _valid_battle_receipt(message):
             len(interactions) > len(public_rows)):
         return False
     interaction_keys = set(RESULT_INTERACTION_LIMITS) | {
-        'target_kind', 'target_id'}
+        'target_kind', 'target_id'} | mission_events.FIELDS
+    optional_interactions = {'damage_events', 'kills_assisted_stun',
+                             'kills_assisted_track', 'kills_assisted_radio'} | mission_events.FIELDS
+    required_interactions = interaction_keys - optional_interactions
     interaction_targets = set()
+    mission_event_count = 0
     for interaction in interactions:
         if (not isinstance(interaction, dict) or
-                set(interaction) != interaction_keys):
+                set(interaction) - interaction_keys or
+                not required_interactions.issubset(interaction) or
+                not mission_events.valid(interaction)):
+            return False
+        mission_event_count += len(interaction.get('mission_events', ()))
+        if mission_event_count > mission_events.MAX_EVENTS:
             return False
         target = (
             interaction.get('target_kind'),
@@ -1405,7 +1517,17 @@ def _valid_battle_receipt(message):
                 row_teams[target] == team):
             return False
         for name, (minimum, maximum) in RESULT_INTERACTION_LIMITS.items():
-            field = _exact_int(interaction.get(name))
+            if name in optional_interactions and name not in interaction:
+                continue
+            raw = interaction.get(name)
+            if name == 'stun_duration':
+                if (isinstance(raw, bool) or
+                        not isinstance(raw, integer_types + (float,)) or
+                        not minimum <= raw <= maximum):
+                    return False
+                field = float(raw)
+            else:
+                field = _exact_int(raw)
             if field is None or field < minimum or field > maximum:
                 return False
         interaction_targets.add(target)
@@ -1584,6 +1706,11 @@ class LANClient(object):
         self.last_error = None
         self.rtt_ms = None
         self.minimum_rtt_ms = None
+        self.worker_rtt_ms = None
+        self.worker_frame_ms = None
+        self._worker_ping_started = None
+        self._worker_pong_time = None
+        self._worker_ping_scope = None
         self.combat_phase = 'loading'
         self.combat_deadline = None
         self.combat_end_deadline = None
@@ -1651,6 +1778,11 @@ class LANClient(object):
             self.server_time_ms = None
             self.rtt_ms = None
             self.minimum_rtt_ms = None
+            self.worker_rtt_ms = None
+            self.worker_frame_ms = None
+            self._worker_ping_started = None
+            self._worker_pong_time = None
+            self._worker_ping_scope = None
             self._input_seq = 0
             self._input_seq_round = None
             self._landing_observation_seq = 0
@@ -1705,6 +1837,8 @@ class LANClient(object):
         return payload
 
     def stop(self):
+        from gui.mods.offline_lan_0922 import offline_replay
+        offline_replay.finish(self, 'transport_stop')
         with self._outbound_lock:
             if (not self.running and self.sock is None and
                     self._poll_callback is None and
@@ -1783,11 +1917,16 @@ class LANClient(object):
                     if not is_alive():
                         self._sender_thread = None
 
-    def request_start(self, map_name=None, round_seconds=None):
+    def request_start(self, map_name=None, round_seconds=None,
+                      battle_mode='regular', training_bots=False):
         if (not self.ready or self.phase != 'waiting' or
                 self.player_id != self.host_player_id):
             return False
+        if battle_mode not in ('regular', 'training') or not isinstance(training_bots, bool):
+            return False
         message = {'type': 'start_battle', 'round_id': self.round_id}
+        if battle_mode == 'training':
+            message.update(battle_mode=battle_mode, training_bots=training_bots)
         if round_seconds is not None:
             round_seconds = _exact_int(round_seconds)
             if (round_seconds is None or
@@ -2031,13 +2170,14 @@ class LANClient(object):
                 self.player_id is not None and
                 self.player_id == self.host_player_id)
 
-    def leave_battle(self):
-        """Retire this player from the current round without closing TCP."""
+    def leave_battle(self, voluntary=True):
+        """Retire this round; native failures do not confirm desertion."""
         if not self.ready or self.phase not in ('loading', 'battle'):
             return False
         return self._send({
             'type': 'leave_battle',
             'round_id': self.round_id,
+            'voluntary': bool(voluntary),
         })
 
     def send_input(self, forward, turn, aim_yaw=0.0, gun_pitch=0.0,
@@ -2047,11 +2187,12 @@ class LANClient(object):
                    next_shell_index=None,
                    shell_change_pending=None,
                    pose_time_us=None,
-                   ram_contacts=None,
+                   ram_contacts=None, tank_pushes=None, turret_pushes=None,
                    destructible_contacts=None,
                    siege_enabled=None,
                    pitch=None, roll=None,
-                   gun_checkpoint=None, up_cosine=None):
+                   gun_checkpoint=None, up_cosine=None,
+                   gun_aim_checkpoint=None):
         if not self.ready or self.phase != 'battle':
             return False
         if self._input_seq_round != self.round_id:
@@ -2108,13 +2249,9 @@ class LANClient(object):
             message['x'], message['y'], message['z'] = coordinates
             message['yaw'] = _canonical_angle(yaw)
             if pitch is not None:
-                message['pitch'] = max(
-                    -MAX_PLAYER_INPUT_ATTITUDE,
-                    min(MAX_PLAYER_INPUT_ATTITUDE, _finite_float(pitch)))
+                message['pitch'] = _canonical_angle(pitch)
             if roll is not None:
-                message['roll'] = max(
-                    -MAX_PLAYER_INPUT_ATTITUDE,
-                    min(MAX_PLAYER_INPUT_ATTITUDE, _finite_float(roll)))
+                message['roll'] = _canonical_angle(roll)
             if up_cosine is not None:
                 if (isinstance(up_cosine, bool) or
                         not isinstance(up_cosine, integer_types + (float,))):
@@ -2165,6 +2302,17 @@ class LANClient(object):
                     'shell_change_pending' not in message):
                 return False
             message['gun_checkpoint'] = parsed_checkpoint
+        if gun_aim_checkpoint is not None:
+            parsed_aim = server_aim.canonical_checkpoint(gun_aim_checkpoint)
+            if (parsed_aim is None or parsed_checkpoint is None or
+                    not timeline_enabled or
+                    not all(key in message for key in ('x', 'y', 'z'))):
+                return False
+            message['gun_aim_checkpoint'] = parsed_aim
+        if tank_pushes is not None:
+            message['tank_pushes'] = tank_pushes
+        if turret_pushes is not None:
+            message['turret_pushes'] = turret_pushes
         if isinstance(ram_contacts, list):
             message['ram_contacts'] = [
                 dict(value) for value in ram_contacts[
@@ -2611,7 +2759,9 @@ class LANClient(object):
             return None
         if selected is not None:
             if (not isinstance(selected, string_types) or not selected or
-                    len(selected) > 64):
+                    len(selected) > 64 or
+                    selected not in equipment_mechanics.ACTIVATION_DEVICE_NAMES and
+                    selected not in equipment_mechanics.ACTIVATION_CREW_NAMES):
                 return None
             selected = str(selected)
         if (requested_active is not None and
@@ -3164,7 +3314,7 @@ class LANClient(object):
         message['authority_epoch'] = self.authority_epoch
 
     def _adopt_detached_turrets(self, message):
-        """Retain immutable server records until the accepted round changes."""
+        """Retain the newest server revision until the accepted round changes."""
         round_id = message.get('round_id')
         if self._detached_turret_round_id != round_id:
             self._detached_turret_round_id = round_id
@@ -3176,9 +3326,11 @@ class LANClient(object):
                 if row is None:
                     continue
                 key = turret_obstacle_schema.row_key(row)
-                if (key not in self._detached_turrets and
-                        len(self._detached_turrets) <
-                        turret_obstacle_schema.MAX_ACTIVE_TURRETS):
+                previous = self._detached_turrets.get(key)
+                if ((previous is None and len(self._detached_turrets) <
+                     turret_obstacle_schema.MAX_ACTIVE_TURRETS) or
+                        (previous is not None and row.get('motion_seq', 0) >
+                         previous.get('motion_seq', 0))):
                     self._detached_turrets[key] = row
         if 'detached_turrets' not in message and not self._detached_turrets:
             return message
@@ -3319,13 +3471,16 @@ class LANClient(object):
         self._team_chat_seq = sequence
         return sequence
 
-    def send_bot_observation(self, contacts, affordances=None):
+    def send_bot_observation(self, contacts, affordances=None, radio_links=None,
+                             player_vision_ranges=None):
         if not self.is_bot_authority():
             return False
         return self._send({'type': 'bot_observation',
                            'round_id': self.round_id,
+                           'player_vision_ranges': list(player_vision_ranges or ())[:30],
                            'contacts': list(contacts or ())[:64],
-                           'affordances': list(affordances or ())[:16]})
+                           'affordances': list(affordances or ())[:16],
+                           'radio_links': list(radio_links or ())[:30]})
 
     def send_descriptor_catalog(self, vehicles):
         if not self.ready:
@@ -3410,11 +3565,16 @@ class LANClient(object):
                 raise
         return True
 
+    @staticmethod
+    def _state_transfer_diagnostic(stage, fields):
+        print('[Offline LAN 0.9.22] STATE_TRANSFER %s %s' % (
+            stage, json.dumps(fields, sort_keys=True, separators=(',', ':'))))
+
     def _worker(self, generation=None):
         if generation is None:
             generation = self._transport_generation
         sock = None
-        recv_buffer = u''
+        decoder = state_transfer.StreamDecoder(self._state_transfer_diagnostic)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3.0)
@@ -3452,32 +3612,16 @@ class LANClient(object):
                 try:
                     chunk = sock.recv(8192)
                 except socket.timeout:
+                    decoder.check_timeout(_monotonic_time())
                     continue
                 if generation != self._transport_generation:
                     break
                 if not chunk:
+                    decoder.finish()
                     self._record_peer_close(generation, sock)
                     break
                 received_time = _monotonic_time()
-                try:
-                    recv_buffer += chunk.decode('utf-8')
-                except UnicodeError:
-                    self._record_transport_error(
-                        'server sent invalid UTF-8', generation, sock)
-                    break
-                if len(recv_buffer) > MAX_BUFFER_BYTES:
-                    self._record_transport_error(
-                        'server message buffer exceeded limit',
-                        generation, sock)
-                    break
-                while u'\n' in recv_buffer:
-                    line, recv_buffer = recv_buffer.split(u'\n', 1)
-                    if not line:
-                        continue
-                    try:
-                        message = json.loads(line)
-                    except (TypeError, ValueError):
-                        continue
+                for message in decoder.feed(chunk, received_time):
                     if isinstance(message, dict):
                         # Frame stalls must not inflate RTT or countdown
                         # projection: both end in this network thread, not
@@ -3517,12 +3661,39 @@ class LANClient(object):
             return None
         lineage = (
             message.get('round_id'), message.get('authority_epoch'),
-            message.get('bot_authority_id'))
+            message.get('bot_authority_id'), message.get('map'))
         try:
             hash(lineage)
         except TypeError:
             return None
         return lineage
+
+    @staticmethod
+    def _snapshot_order_revision(message):
+        if (not isinstance(message, dict) or
+                _strict_mapping_list(message.get('bot_orders'), 30) is None):
+            return None
+        revision = _exact_int(message.get('bot_order_revision'))
+        return revision if revision is not None and revision >= 0 else None
+
+    def _merge_snapshot_orders(self, previous, message):
+        """Carry a sparse order section without retaining an old motion frame."""
+        lineage = self._snapshot_lineage(previous)
+        if lineage is None or lineage != self._snapshot_lineage(message):
+            return message
+        previous_revision = self._snapshot_order_revision(previous)
+        if previous_revision is None:
+            return message
+        revision = self._snapshot_order_revision(message)
+        if 'bot_orders' in message and (
+                revision is None or revision >= previous_revision):
+            # An explicit empty list clears orders too. Leave malformed new
+            # sections intact for the normal payload validator to contain.
+            return message
+        merged = dict(message)
+        merged['bot_orders'] = previous['bot_orders']
+        merged['bot_order_revision'] = previous_revision
+        return merged
 
     def _queue_message(self, message, generation=None):
         if not isinstance(message, dict):
@@ -3533,16 +3704,35 @@ class LANClient(object):
                      self._stopping or not self.running)):
                 return
             if len(self._pending) >= MAX_PENDING_MESSAGES:
+                # Move only the sparse orders through consecutive snapshots.
+                # A lifecycle/event message ends this run; it must observe the
+                # preceding state before later orders can replace it.
+                incoming_lineage = self._snapshot_lineage(message)
+                if incoming_lineage is not None:
+                    for value in reversed(self._pending):
+                        if self._snapshot_lineage(value) != incoming_lineage:
+                            break
+                        message = self._merge_snapshot_orders(value, message)
                 latest_manifests = {}
                 latest_turrets = {}
+                latest_orders = {}
+                snapshot_run = 0
                 for index, value in enumerate(self._pending):
                     lineage = self._snapshot_lineage(value)
+                    if lineage is None:
+                        snapshot_run += 1
                     if (lineage is not None and
                             'bot_manifest' in value):
                         latest_manifests[lineage] = index
                     if lineage is not None and value.get('detached_turrets'):
                         latest_turrets[lineage] = index
-                incoming_lineage = self._snapshot_lineage(message)
+                    revision = self._snapshot_order_revision(value)
+                    if lineage is not None and revision is not None:
+                        order_key = (snapshot_run, lineage)
+                        previous_order = latest_orders.get(order_key)
+                        if (previous_order is None or
+                                revision >= previous_order[0]):
+                            latest_orders[order_key] = (revision, index)
                 if (incoming_lineage is not None and
                         'bot_manifest' in message):
                     # The incoming full snapshot supersedes an older barrier
@@ -3553,8 +3743,17 @@ class LANClient(object):
                         self._pending[turret_index].get('detached_turrets') ==
                         message.get('detached_turrets')):
                     latest_turrets.pop(incoming_lineage, None)
+                incoming_revision = self._snapshot_order_revision(message)
+                incoming_order_key = (snapshot_run, incoming_lineage)
+                previous_order = latest_orders.get(incoming_order_key)
+                if (incoming_revision is not None and
+                        previous_order is not None and
+                        incoming_revision >= previous_order[0]):
+                    latest_orders.pop(incoming_order_key, None)
                 protected_snapshots = set(latest_manifests.values())
                 protected_snapshots.update(latest_turrets.values())
+                protected_snapshots.update(
+                    value[1] for value in latest_orders.values())
                 snapshot_index = next((
                     index for index, value in enumerate(self._pending)
                     if (index not in protected_snapshots and
@@ -3896,7 +4095,11 @@ class LANClient(object):
                     latest_snapshot = None
                     if not self.running:
                         break
-                latest_snapshot = message
+                # The server omits orders after their socket write succeeds.
+                # A later lean frame therefore supersedes motion, but cannot
+                # supersede an order section still waiting for this poll.
+                latest_snapshot = self._merge_snapshot_orders(
+                    latest_snapshot, message)
             elif (message.get('type') == 'events' and
                   latest_snapshot is not None and
                   message.get('round_id') ==
@@ -3928,6 +4131,19 @@ class LANClient(object):
                 'seq': self._ping_seq,
                 'client_time': now,
             })
+            scope = (self.round_id, self.authority_epoch)
+            if self._worker_ping_scope != scope:
+                self._worker_ping_scope = scope
+                self.worker_rtt_ms = None
+                self.worker_frame_ms = None
+                self._worker_ping_started = None
+                self._worker_pong_time = None
+            if (self.round_id is not None and
+                    self.player_id != WORKER_AUTHORITY_ID):
+                if self._worker_ping_started is None:
+                    self._worker_ping_started = now
+                self._send({'type': 'worker_ping', 'seq': self._ping_seq,
+                            'client_time': now})
         if self.last_error is not None:
             self._notify('error', {'message': self.last_error})
             self.last_error = None
@@ -3992,6 +4208,24 @@ class LANClient(object):
         self._combat_timing_round_id = round_id
         self._combat_timing_tick = server_tick
         return True
+
+    def worker_ping_display(self, now=None):
+        now = _monotonic_time() if now is None else float(now)
+        if not self.connected:
+            return 999, True
+        reference = self._worker_pong_time
+        if reference is None:
+            reference = self._worker_ping_started
+        if reference is None:
+            return 0, False
+        age = max(0.0, now - reference)
+        stale = age > max(2.0, PING_INTERVAL * 2.0)
+        sample = self.worker_frame_ms
+        if stale:
+            sample = max(sample or 0.0, age * 1000.0)
+        elif sample is None:
+            sample = 0.0
+        return int(round(max(0.0, min(sample, 999.0)))), stale
 
     def _report_snapshot_stall(self, now):
         """Say out loud that the replica is drawing a frozen world.
@@ -4148,6 +4382,10 @@ class LANClient(object):
     def _handle_message(self, message, trusted_player_static=None):
         if not isinstance(message, dict):
             return
+        replay_hint = None
+        if getattr(self, '_offline_replay_recorder', None) is not None:
+            from gui.mods.offline_lan_0922 import offline_replay
+            replay_hint = offline_replay.sparse_hint(message)
         kind = message.get('type')
         if kind == 'battle_receipt':
             if (not _valid_battle_receipt(message) or
@@ -5100,7 +5338,7 @@ class LANClient(object):
                 isinstance(contact.get('fresh'), bool) and
                 _projectile_float_range(
                     contact.get('time_left'), 0.0,
-                    spotting.DESIGNATED_SPOT_MEMORY_SECONDS) is not None and
+                    spotting.MAX_SPOT_MEMORY_SECONDS) is not None and
                 bool(contact.get('visible')) == (
                     float(contact.get('time_left')) > 0.0) and
                 isinstance(contact.get('visible_by_bot_ids'),
@@ -5150,6 +5388,21 @@ class LANClient(object):
             if 'server_time_ms' in message:
                 self.server_time_ms = _projectile_int_range(
                     message.get('server_time_ms'), 0, MAX_PROJECTILE_ID)
+        elif kind == 'worker_pong':
+            if ((message.get('round_id'), message.get('authority_epoch')) !=
+                    (self.round_id, self.authority_epoch)):
+                return
+            client_time = _finite_float(message.get('client_time'), 0.0)
+            received_time = _finite_float(
+                message.get('_client_received_time'), _monotonic_time())
+            if client_time <= 0.0 or received_time < client_time:
+                return
+            sample = (received_time - client_time) * 1000.0
+            self.worker_rtt_ms = (sample if self.worker_rtt_ms is None else
+                                  self.worker_rtt_ms * 0.5 + sample * 0.5)
+            frame_ms = _finite_float(message.get('frame_ms'), -1.0)
+            self.worker_frame_ms = frame_ms if frame_ms > 0.0 else None
+            self._worker_pong_time = received_time
         elif kind == 'pong':
             client_time = _finite_float(message.get('client_time'), 0.0)
             if client_time > 0.0:
@@ -5176,9 +5429,11 @@ class LANClient(object):
             message = self._adopt_detached_turrets(message)
             if kind == 'snapshot':
                 self.last_snapshot = message
-        self._notify(kind, message)
+        self._notify(kind, message, replay_hint=replay_hint)
 
-    def _notify(self, kind, message):
+    def _notify(self, kind, message, replay_hint=None):
+        from gui.mods.offline_lan_0922 import offline_replay
+        offline_replay.observe_wire(self, message, replay_hint)
         if self.on_event is not None and kind is not None:
             if (isinstance(message, dict) and
                     '_client_received_time' in message):

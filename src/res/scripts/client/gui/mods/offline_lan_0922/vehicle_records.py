@@ -91,14 +91,15 @@ def offers_in_random_battle(descriptor):
 
     #1513 tags the artillery and airstrike consumables ``avatar`` and drives
     them through ``Avatar.activateAvatarEquipment``, which this port does not
-    implement.  Battle boosters carry a non-regular ``equipmentType`` and the
-    published garage has no slot for them.
+    implement. Regular consumables and battle boosters use their separate
+    stock slots and are both offered.
     """
     from items import EQUIPMENT_TYPES
     if 'avatar' in (getattr(descriptor, 'tags', None) or ()):
         return False
     equipment_type = getattr(descriptor, 'equipmentType', None)
-    return equipment_type in (None, EQUIPMENT_TYPES.regular)
+    return equipment_type in (None, EQUIPMENT_TYPES.regular,
+                              EQUIPMENT_TYPES.battleBoosters)
 
 
 def vehicle_type_modules(descriptor):

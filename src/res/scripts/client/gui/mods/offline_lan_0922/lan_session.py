@@ -6,6 +6,7 @@ import base64
 import math
 import sys
 import time
+import traceback
 
 from gui.mods.offline_lan_0922.ui_i18n import as_text, tr
 
@@ -50,6 +51,10 @@ def _show_status(message):
 
 
 def _load_client():
+    from gui.mods.offline_lan_0922 import offline_replay
+    if offline_replay.replay_request():
+        from gui.mods.offline_lan_0922.replay_transport import ReplayClient
+        return ReplayClient
     from gui.mods.offline_lan_0922.lan_client import LANClient
     return LANClient
 
@@ -186,6 +191,7 @@ def _selected_vehicle_effective_params():
     from gui.mods.offline_lan_0922 import descriptor_donation
     from gui.mods.offline_lan_0922 import effective_params
     from gui.mods.offline_lan_0922 import equipment_mechanics
+    from gui.mods.offline_lan_0922 import gun_mechanics
     from gui.mods.offline_lan_0922 import loadout
     from gui.mods.offline_lan_0922 import tank_collision
     from gui.mods.offline_lan_0922 import player_critical_mechanics
@@ -209,10 +215,38 @@ def _selected_vehicle_effective_params():
                 'a mounted garage equipment descriptor is unavailable')
         equipments.append(equipment)
     equipments = tuple(equipments)
+    booster_slots = getattr(getattr(item, 'equipment', None),
+                            'battleBoosterConsumables', None)
+    boosters = tuple(loadout._artefact(value, vehicles) for value in
+                     (() if booster_slots is None else
+                      booster_slots.getInstalledItems()))
+    if any(value is None for value in boosters):
+        raise ValueError('a mounted directive descriptor is unavailable')
+    if len(boosters) > 1:
+        raise ValueError('a vehicle can carry only one directive')
+    booster_projection = None
+    if boosters:
+        booster = boosters[0]
+        overrides = {}
+        skill_name = str(getattr(booster, 'skillName', '')).lower()
+        # An untrained perk receives its ordinary completed effect. Only a
+        # completed perk receives the directive's improved timing/sector.
+        if loadout.finished_skill_count(crew, skill_name):
+            if skill_name == 'commander_sixthsense':
+                overrides['sixth_sense_delay'] = float(booster.delay)
+            elif skill_name == 'gunner_rancorous':
+                overrides['designated_target_duration'] = float(booster.duration)
+                overrides['designated_target_sector'] = float(booster.sectorHalfAngle)
+            elif skill_name == 'radioman_lasteffort':
+                overrides['last_effort_duration'] = float(booster.duration)
+        booster_projection = {
+            'compact_descr': int(booster.compactDescr),
+            'skill_overrides': overrides,
+        }
     # A Removed RPM Limiter is trigger-only.  Supplying it to the passive
     # attribute-factor chain would claim it is permanently enabled.
     factor_equipments = tuple(
-        equipment for equipment in equipments
+        equipment for equipment in equipments + boosters
         if not any('removedrpmlimiter' in name for name in
                    loadout.equipment_names((equipment,))))
     factors = loadout.attribute_factors(
@@ -236,9 +270,12 @@ def _selected_vehicle_effective_params():
         descriptor, loadout.ramming_bonus(crew))
 
     ammo = []
+    shell_order = []
     for shell in (getattr(item, 'shells', None) or ()):
         try:
-            ammo.append([int(shell.intCD), max(0, int(shell.count))])
+            compact_descr = int(shell.intCD)
+            ammo.append([compact_descr, max(0, int(shell.count))])
+            shell_order.append(compact_descr)
         except (AttributeError, TypeError, ValueError):
             raise ValueError('the selected vehicle ammunition is invalid')
     ammo.sort(key=lambda entry: entry[0])
@@ -267,7 +304,8 @@ def _selected_vehicle_effective_params():
     except (IndexError, TypeError, ValueError):
         raise ValueError('the selected vehicle gun clip is invalid')
     shots = []
-    for shot in (_field(gun, 'shots', ()) or ()):
+    for shot in gun_mechanics.mounted_shot_order(
+            _field(gun, 'shots', ()), shell_order):
         try:
             compact_descr = int(_field(_field(shot, 'shell'), 'compactDescr'))
         except (AttributeError, TypeError, ValueError):
@@ -281,7 +319,7 @@ def _selected_vehicle_effective_params():
     equipment_contracts = [
         equipment_mechanics.project_equipment(equipment)
         for equipment in equipments]
-    critical_profile = player_critical_mechanics.project_profile(descriptor)
+    critical_profile = player_critical_mechanics.project_profile(descriptor, factors)
     members = _ordered_crew_members(crew)
     roles = tuple(getattr(
         getattr(descriptor, 'type', None), 'crewRoles', ()) or ())
@@ -305,9 +343,30 @@ def _selected_vehicle_effective_params():
                 projected['name'])
             if (required_role is not None and
                     required_role not in member_roles):
+                # Legacy saved descriptors can contain a former specialty.
+                # The native isEnable flag disables it even when a trained
+                # perk still reports isActive. Omit only these
+                # disabled skills from the battle projection; never reset the
+                # account's skill descriptor or admit an enabled wrong role.
+                if not projected['enabled']:
+                    continue
                 raise ValueError(
                     'a mounted crew skill does not match its slot roles')
             projected_skills.append(projected)
+        for booster in boosters:
+            skill_name = str(getattr(booster, 'skillName', '')).lower()
+            if skill_name not in effective_params.DISCRETE_SKILL_ROLES:
+                continue
+            required_role = effective_params.skill_required_role(skill_name)
+            if not skill_name or (required_role is not None and
+                                  required_role not in member_roles):
+                continue
+            existing = next((value for value in projected_skills
+                             if value['name'] == skill_name), None)
+            if existing is None:
+                existing = {'name': skill_name}
+                projected_skills.append(existing)
+            existing.update(level=100.0, active=True, enabled=True)
         projected_skills.sort(key=lambda entry: entry['name'])
         projected_members.append({
             'instance': roster[index],
@@ -339,6 +398,7 @@ def _selected_vehicle_effective_params():
                 raise ValueError(
                     'the exact dynamic camouflage values are invalid')
             row = {
+                'battle_factors': loadout.crew_battle.from_native(dynamic),
                 'vision': float(ratios['vision']),
                 'signal': float(ratios['signal']),
                 'camouflage': float(ratios['camouflage']),
@@ -363,11 +423,12 @@ def _selected_vehicle_effective_params():
         },
     }
     healthy_skills = effective_params.skill_summary(crew_projection)
+    loadout_values['has_sixth_sense'] = healthy_skills['sixth_sense']
     if effective_params._canonical_equipment(equipment_contracts) is None:
         raise ValueError('the selected vehicle equipment projection is invalid')
     if effective_params._canonical_critical(critical_profile) is None:
         raise ValueError('the selected vehicle critical profile is invalid')
-    result = effective_params.canonical({
+    projected = {
         'version': effective_params.SCHEMA_VERSION,
         'loadout': loadout_values,
         'physics': physics_values,
@@ -388,7 +449,10 @@ def _selected_vehicle_effective_params():
         },
         'equipment': equipment_contracts,
         'critical': critical_profile,
-    })
+    }
+    if booster_projection is not None:
+        projected['battle_booster'] = booster_projection
+    result = effective_params.canonical(projected)
     if result is None:
         raise ValueError('the selected vehicle effective parameters are invalid')
     return result
@@ -452,6 +516,8 @@ class LANSession(object):
             self._effective_params_provider = \
                 _selected_vehicle_effective_params
         self._postbattle_store = postbattle_store
+        self._training_mode = False
+        self._training_bots = False
         self._room_preferences = port_config.load_waiting_room_state()
         self._restored_team_generation = None
         self._restored_team_sizes_generation = None
@@ -461,6 +527,9 @@ class LANSession(object):
         self._requested_results = set()
         self._completed_results = set()
         self._notified_results = set()
+        self._battle_messages_sent = set()
+        self._campaign_notifications_sent = set()
+        self._campaign_notification_error_reported = False
         self._archived_result_replayed = False
         # UI intent is process-local and belongs to one live round. Durable
         # receipts describe rewards, not permission to open a window later.
@@ -773,6 +842,7 @@ class LANSession(object):
                 return
             self._publish_postbattle_progress()
             self._publish_postbattle_results()
+            self._publish_campaign_notifications()
 
         callback_id = self._callback(POSTBATTLE_RETRY_DELAY, retry)
         if self._postbattle_token is token:
@@ -783,30 +853,47 @@ class LANSession(object):
         """Inject one exact #1513 clickable service-channel result message."""
         if arena_unique_id in self._notified_results:
             return False
-        try:
-            from chat_shared import SYS_MESSAGE_IMPORTANCE, SYS_MESSAGE_TYPE
-            from messenger import MessengerEntry
-            timestamp = int(time.time())
-            chat_action = {
-                'sentTime': timestamp,
-                'data': {
-                    'messageID': int(arena_unique_id),
-                    'user_id': 0,
-                    'type': SYS_MESSAGE_TYPE.battleResults.index(),
-                    'importance': SYS_MESSAGE_IMPORTANCE.normal.index(),
-                    'active': True,
-                    'started_at': timestamp,
-                    'finished_at': None,
-                    'created_at': timestamp,
-                    'data': dict(result_data),
-                },
-            }
-            MessengerEntry.g_instance.protos.BW.serviceChannel.onReceiveSysMessage(
-                chat_action)
-        except Exception as error:
-            self._report_postbattle_notification_error(
-                arena_unique_id, error)
-            return False
+        if arena_unique_id not in self._battle_messages_sent:
+            try:
+                from chat_shared import SYS_MESSAGE_IMPORTANCE, SYS_MESSAGE_TYPE
+                from messenger import MessengerEntry
+                timestamp = int(time.time())
+                chat_action = {
+                    'sentTime': timestamp,
+                    'data': {
+                        'messageID': int(arena_unique_id),
+                        'user_id': 0,
+                        'type': SYS_MESSAGE_TYPE.battleResults.index(),
+                        'importance': SYS_MESSAGE_IMPORTANCE.normal.index(),
+                        'active': True,
+                        'started_at': timestamp,
+                        'finished_at': None,
+                        'created_at': timestamp,
+                        'data': dict(result_data),
+                    },
+                }
+                MessengerEntry.g_instance.protos.BW.serviceChannel.onReceiveSysMessage(
+                    chat_action)
+            except Exception as error:
+                self._report_postbattle_notification_error(
+                    arena_unique_id, error)
+                return False
+            self._battle_messages_sent.add(arena_unique_id)
+            if result_data.get('offlineDailyMissions'):
+                try:
+                    from gui.mods.offline_lan_0922.offline_services_ui import notify_missions
+                    notify_missions(result_data['offlineDailyMissions'])
+                except Exception as error:
+                    self._report_postbattle_notification_error(arena_unique_id, error)
+        # A mission-message failure may retry without replaying the battle
+        # result or daily reward notice already admitted to the native channel.
+        if result_data.get('offlinePersonalMissions'):
+            try:
+                from gui.mods.offline_lan_0922.personal_campaign_ui import notify
+                notify(result_data['offlinePersonalMissions'])
+            except Exception as error:
+                self._report_postbattle_notification_error(arena_unique_id, error)
+                return False
         self._notified_results.add(arena_unique_id)
         return True
 
@@ -833,6 +920,37 @@ class LANSession(object):
         self._published_progress_battles = battles
         return True
 
+    def _publish_campaign_notifications(self):
+        """Show persisted launcher rewards only when the lobby is ready."""
+        if self._stopped:
+            return False
+        try:
+            import BigWorld
+        except ImportError:
+            return False
+        try:
+            publisher = getattr(
+                getattr(BigWorld.player(), 'fakeServer', None),
+                'publish_campaign_notifications', None)
+            if not callable(publisher):
+                return False
+            if self._battle_started or not self._lobby_ready():
+                self._schedule_postbattle_publish()
+                return False
+            published, pending = publisher(self._campaign_notifications_sent)
+            self._campaign_notification_error_reported = False
+            if pending:
+                self._schedule_postbattle_publish()
+            return bool(published)
+        except Exception as error:
+            if not self._campaign_notification_error_reported:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] personal mission notifications '
+                    'could not be published: %s\n' % error)
+                self._campaign_notification_error_reported = True
+            self._schedule_postbattle_publish()
+            return False
+
     def on_lobby_view_loaded(self):
         """Drain a completed battle as soon as the rebuilt lobby can do so.
 
@@ -845,7 +963,8 @@ class LANSession(object):
             return False
         progress_published = self._publish_postbattle_progress()
         results_published = self._publish_postbattle_results()
-        return bool(progress_published or results_published)
+        campaign_published = self._publish_campaign_notifications()
+        return bool(progress_published or results_published or campaign_published)
 
     def _publish_selected_vehicle(self):
         """Send the current garage tank so the next round uses it."""
@@ -933,6 +1052,7 @@ class LANSession(object):
         # stock result service became available. Drain it as soon as this
         # lobby finishes loading, without requiring another LAN join.
         self._publish_postbattle_results()
+        self._publish_campaign_notifications()
         return True
 
     def revive(self):
@@ -1051,6 +1171,7 @@ class LANSession(object):
         nor a message is what makes the button look dead after a round.
         """
         self._postbattle_return = None
+        self._training_mode = unused_action_name == 'training'
         if self._stopped or self.state in ('error', 'stopped'):
             sys.stdout.write(
                 '[Offline LAN 0.9.22] LAN session was %s; rebuilding it\n' %
@@ -1680,6 +1801,8 @@ class LANSession(object):
                     'on_map_selected': self._remember_map,
                     'open_map_picker': self._open_map_window,
                     'round_seconds': self._round_seconds_value,
+                    'training_status': lambda: (self._training_mode, self._training_bots),
+                    'toggle_training_bots': self._toggle_training_bots,
                 })
             room = self._room_factory(
                 self.request_start, self._map_pool_value, **options)
@@ -1846,9 +1969,11 @@ class LANSession(object):
             # The stock map window can only present the elected room host.
             return False
         # As in 0.8.2, the stock queue screen loads under the room.
-        screen = self._ensure_queue_screen()
+        screen = None if self._training_mode else self._ensure_queue_screen()
         if screen is not None:
             screen.open()
+        elif self._training_mode and self._queue_screen is not None:
+            self._leave_queue_screen()
         self._picker_open = bool(self._open_surface(surface))
         if self._picker_open:
             sys.stdout.write(
@@ -2031,6 +2156,11 @@ class LANSession(object):
             self._close_picker_after_event()
         return accepted
 
+    def _toggle_training_bots(self):
+        if self._is_local_host() and self._training_mode:
+            self._training_bots = not self._training_bots
+        return self._training_bots
+
     def _send_start_request(self, map_name):
         if _garage_inventory_refresh_pending():
             self._status_notifier(tr(
@@ -2041,6 +2171,10 @@ class LANSession(object):
         if not self._publish_selected_vehicle():
             self._status_notifier(tr(VEHICLE_SELECTION_WARNING))
             return False
+        if self._training_mode:
+            return bool(self.client.request_start(
+                map_name, self._round_seconds, battle_mode='training',
+                training_bots=self._training_bots))
         return bool(self.client.request_start(map_name, self._round_seconds))
 
     def _stop_active_round(self):
@@ -2225,12 +2359,24 @@ class LANSession(object):
         if self._battle_runtime is None:
             self._battle_runtime = _load_battle_runtime()
         config = dict(self._config)
+        if getattr(self.client, 'is_offline_replay', False):
+            config.update(self.client.replay_config)
+            from gui.mods.offline_lan_0922 import replay_exit
+            replay_exit.install(self)
         config.update({'map': map_name, 'spawn': spawn, 'vehicle': vehicle})
         if 'startupTimeoutSeconds' not in config:
             config['startupTimeoutSeconds'] = 30.0
         # The runtime can report a synchronous native failure from inside
         # start().  Record ownership before entering it, then only commit the
         # active round if that ownership token survived the callback.
+        if not getattr(self.client, 'is_offline_replay', False):
+            for player in message.get('players') or ():
+                if player.get('id') == getattr(self.client, 'player_id', None):
+                    receipt_id = player.get('crew_receipt_id')
+                    capture = getattr(self._postbattle_store, 'capture_participants', None)
+                    if receipt_id and callable(capture):
+                        capture(receipt_id, vehicle)
+                    break
         self._starting_round_id = round_id
         returning = {'round_id': round_id, 'arena_unique_id': None,
                      'returned': False, 'generation': self._client_generation}
@@ -2272,6 +2418,9 @@ class LANSession(object):
         """Retire one local round while retaining the waiting-room socket."""
         if self._stopped or not self._battle_started:
             return False
+        if getattr(self.client, 'is_offline_replay', False):
+            from gui.mods.offline_lan_0922 import replay_exit
+            return replay_exit.request(self, 'leave')
         self._postbattle_return = None
         sys.stdout.write(
             '[Offline LAN 0.9.22] local player left LAN round %r\n' %
@@ -2327,10 +2476,23 @@ class LANSession(object):
             (round_id, reason,
              bool(_message_value(message, 'lobby_restored', False))))
 
+        if getattr(self.client, 'is_offline_replay', False):
+            # BattleRuntime already retired the failing Avatar. There is no
+            # LAN room to leave, reconnect to, or await; the replay owns only
+            # its reader/callbacks. Preserve the original playback failure and
+            # do not turn a second leave_battle signature error into 'LAN lost'.
+            self._postbattle_return = None
+            self.state = 'error'
+            self._status_notifier(
+                tr('Replay playback stopped (%s).') % as_text(reason))
+            from gui.mods.offline_lan_0922 import replay_exit
+            replay_exit.request(self, 'runtime_error', reason)
+            return False
+
         if bool(_message_value(message, 'lobby_restored', False)):
             leave = getattr(self.client, 'leave_battle', None)
             try:
-                if not callable(leave) or not leave():
+                if not callable(leave) or not leave(voluntary=False):
                     raise RuntimeError(
                         'LAN server did not accept failed battle leave')
             except Exception:
@@ -2455,8 +2617,21 @@ class LANSession(object):
                   'accepted by the transport (%d rows)' % len(rows))
 
     def _on_event(self, kind, message):
-        if self._stopped:
+        if self._stopped or getattr(self, '_replay_exit_requested', False):
             return
+        if getattr(self.client, 'is_offline_replay', False):
+            # Playback is read-only. Never reopen a room picker or settle a
+            # reward, including through an accidentally forwarded message.
+            if kind in ('welcome', 'roster', 'battle_receipt'):
+                return
+            if kind == 'replay_local':
+                if self._battle_started and self._battle_runtime is not None:
+                    self._battle_runtime.apply_replay_local(message)
+                return
+            if kind in ('replay_finished', 'replay_error'):
+                from gui.mods.offline_lan_0922 import replay_exit
+                replay_exit.request(self, kind, message.get('error'))
+                return
         if kind in ('welcome', 'roster'):
             if kind == 'welcome':
                 self._send_vehicle_catalog()
@@ -2611,13 +2786,23 @@ class LANSession(object):
             store = self._postbattle_store
             if store is None:
                 return
+            started = time.time()
             try:
                 accepted = store.accept(message)
             except Exception as error:
                 sys.stdout.write(
-                    '[Offline LAN 0.9.22] battle receipt was rejected: %s\n'
-                    % error)
+                    '[Offline LAN 0.9.22] battle receipt was rejected: %s '
+                    'receipt_id=%s elapsed_ms=%.3f\n' % (
+                        error, _message_value(message, 'receipt_id'),
+                        max(0.0, time.time() - started) * 1000.0))
+                traceback.print_exc(file=sys.stdout)
                 return
+            if accepted:
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] battle receipt accepted '
+                    'receipt_id=%s elapsed_ms=%.3f\n' % (
+                        _message_value(message, 'receipt_id'),
+                        max(0.0, time.time() - started) * 1000.0))
             # Store.accept() returns only after its atomic JSON replacement.
             # Ack duplicates too: they already exist in durable local state,
             # and the server may be retrying because an earlier ACK was lost.
@@ -2631,7 +2816,10 @@ class LANSession(object):
                         returning['generation'] == self._client_generation and
                         _message_value(message, 'round_id') ==
                         returning['round_id'] and
-                        not _message_value(message, 'premature_leave', False)):
+                        _message_value(
+                            message, 'watched_battle_to_end',
+                            not _message_value(
+                                message, 'premature_leave', False))):
                     returning['arena_unique_id'] = _message_value(
                         message, 'arena_unique_id')
                 self._publish_postbattle_progress()

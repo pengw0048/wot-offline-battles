@@ -6,6 +6,7 @@ import unittest
 from test_port_0922_turret_detachment import (
     _BigWorld, _Math, _POSE, _Vector, _Vehicle, _flat_ground)
 from gui.mods.offline_lan_0922 import shot_geometry
+from gui.mods.offline_lan_0922 import vehicle_physics
 from gui.mods.offline_lan_0922.entities import detached_turret
 from gui.mods.offline_lan_0922.entities import turret_obstacles
 
@@ -64,6 +65,28 @@ def pose(x=0, y=1, z=0, yaw=0, pitch=0, roll=0):
 
 
 class TurretObstacleTests(unittest.TestCase):
+    def test_visual_flight_keeps_one_frozen_arc_without_rigid_time_debt(self):
+        vehicle = _Vehicle()
+        vehicle.typeDescriptor = descriptor()
+        queries = []
+        def floor(start, end):
+            queries.append((start, end))
+            if start[1] >= 0. and end[1] <= 0.:
+                t = start[1]/(start[1]-end[1])
+                return tuple(start[i]+t*(end[i]-start[i]) for i in range(3))
+            return None
+        proposed = detached_turret.freeze_visual_plan(vehicle, _POSE, 555, floor)
+        self.assertNotIn('body', proposed['flight'])
+        self.assertTrue(proposed['flight']['landed'])
+        self.assertLess(len(queries), 250)
+        from gui.mods.offline_lan_0922 import turret_detachment, turret_obstacle_schema
+        self.assertIsNotNone(turret_obstacle_schema.normalize_proposal(
+            dict(proposed, actor_kind='bot', actor_id=17)))
+        args = (proposed['flight'], proposed['attitude'], proposed['spin'])
+        after = turret_detachment.pose_at(*(args+(30.,)))
+        self.assertEqual(after, turret_detachment.pose_at(*(args+(60.,))))
+        self.assertEqual(tuple(proposed['flight']['rest']), after[0])
+
     def obstacle(self, accepted=None, td=None):
         obstacles = detached_turret.DetachedTurretObstacles(_Math())
         self.assertTrue(obstacles.add('bot:17', accepted or row(), td or descriptor()))
@@ -78,19 +101,25 @@ class TurretObstacleTests(unittest.TestCase):
             vehicle, _POSE, 7, lambda *args: called.append(args)))
         self.assertEqual(called, [])
 
-    def test_proposal_supports_the_final_rotated_gun_and_turret(self):
+    def test_proposal_starts_one_body_without_precomputing_a_superseded_arc(self):
         vehicle = _Vehicle()
         vehicle.typeDescriptor = descriptor()
         vehicle.typeDescriptor.gun.hitTester = BoxTester((-0.2, -0.2, 0), (0.2, 3, 1))
-        proposed = detached_turret.freeze_obstacle_plan(vehicle, _POSE, 555, _flat_ground())
+        vehicle.typeDescriptor.turret.weight = 4000.
+        vehicle.typeDescriptor.gun.weight = 1000.
+        def unexpected_query(*args):
+            self.fail('death callback must not pre-cast the rigid body flight')
+        proposed = detached_turret.freeze_obstacle_plan(vehicle, _POSE, 555, unexpected_query)
         self.assertIsNotNone(proposed)
         flight = proposed['flight']
-        attitude = detached_turret.turret_detachment.rest_attitude(
-            proposed['attitude'], proposed['spin'], flight['duration'])
-        ys = [flight['rest'][1] + shot_geometry.transform_vehicle_vector(corner, *attitude)[1]
-              for _, _, offset, bounds in turret_obstacles.turret_components(vehicle.typeDescriptor)
-              for corner in turret_obstacles._corners(bounds, offset)]
-        self.assertAlmostEqual(min(ys), flight['contact'][1])
+        self.assertFalse(flight['landed'])
+        self.assertIsNone(flight['contact'])
+        self.assertEqual(flight['origin'], flight['body']['position'])
+        self.assertGreater(flight['body']['velocity'][1], 0.)
+        self.assertGreater(flight['body']['centre'][2], 0.)
+        from gui.mods.offline_lan_0922 import turret_obstacle_schema
+        self.assertIsNotNone(turret_obstacle_schema.normalize_proposal(
+            dict(proposed, actor_kind='bot', actor_id=17)))
 
     def test_landing_clock_and_historical_chord_hit_time(self):
         obstacles = self.obstacle()
@@ -146,6 +175,56 @@ class TurretObstacleTests(unittest.TestCase):
         self.assertFalse(obstacles.sweep_blocks(pose(yaw=-math.pi/4), pose(yaw=-math.pi/4), td, 4000))
         self.assertTrue(obstacles.sweep_blocks(pose(yaw=-math.pi/4), pose(yaw=math.pi/4), td, 4000))
 
+    def test_track_pivot_arc_hits_turret_outside_endpoint_chord(self):
+        td = descriptor()
+        td.chassis.rotationIsAroundCenter = False
+        td.physics = {'trackCenterOffset': 1.5}
+        td.chassis.hitTester = BoxTester((-.05, -.05, -.05), (.05, .05, .05))
+        td.hull.hitTester = td.chassis.hitTester
+        fixed = descriptor()
+        fixed.turret.hitTester = BoxTester((-.06, -.06, -.06), (.06, .06, .06))
+        fixed.turret.gunPosition = _Vector(0, 0, 0)
+        fixed.gun.hitTester = fixed.turret.hitTester
+        a, b = -math.pi / 3., math.pi / 3.
+        start = pose(yaw=a)
+        finish = vehicle_physics.track_pivot_position((0., 1., 0.), a, b, 1.5)
+        end = pose(*finish, yaw=b)
+        middle = vehicle_physics.track_pivot_position((0., 1., 0.), a, 0., 1.5)
+        obstacles = self.obstacle(row(rest=middle), fixed)
+        self.assertFalse(obstacles.sweep_blocks(start, start, td, 4000))
+        self.assertFalse(obstacles.sweep_blocks(end, end, td, 4000))
+        self.assertTrue(obstacles.sweep_blocks(start, end, td, 4000))
+        # The same endpoint chord does not meet the detached turret. The
+        # descriptor flag, not ordinary changing-yaw travel, admits the arc.
+        td.chassis.rotationIsAroundCenter = True
+        self.assertFalse(obstacles.sweep_blocks(start, end, td, 4000))
+        td.chassis.rotationIsAroundCenter = False
+        overhead = self.obstacle(row(rest=(middle[0], middle[1] + .5, middle[2])), fixed)
+        self.assertFalse(overhead.sweep_blocks(start, end, td, 4000))
+
+    def test_track_pivot_arc_preserves_separate_hydraulic_hull_origin(self):
+        td = descriptor()
+        td.chassis.rotationIsAroundCenter = False
+        td.physics = {'trackCenterOffset': 1.5}
+        td.chassis.hitTester = BoxTester((-.05, -.05, -.05), (.05, .05, .05))
+        td.hull.hitTester = td.chassis.hitTester
+        fixed = descriptor()
+        fixed.turret.hitTester = BoxTester((-.06, -.06, -.06), (.06, .06, .06))
+        fixed.turret.gunPosition = _Vector(0, 0, 0)
+        fixed.gun.hitTester = fixed.turret.hitTester
+        a, b = -math.pi / 3., math.pi / 3.
+        origin = (0., 1., 0.)
+        def split_at(yaw):
+            chassis = vehicle_physics.track_pivot_position(origin, a, yaw, 1.5)
+            body = shot_geometry.transform_vehicle_point((0., 1., 2.), chassis, yaw)
+            return dict(pose(*chassis, yaw=yaw), hull=pose(*body, yaw=yaw))
+        start, end, middle = split_at(a), split_at(b), split_at(0.)
+        body = middle['hull']
+        obstacles = self.obstacle(row(rest=(body['x'], body['y'], body['z'])), fixed)
+        self.assertFalse(obstacles.sweep_blocks(start, start, td, 4000))
+        self.assertFalse(obstacles.sweep_blocks(end, end, td, 4000))
+        self.assertTrue(obstacles.sweep_blocks(start, end, td, 4000))
+
     def test_pitch_and_roll_are_part_of_contact_volume(self):
         td = descriptor()
         td.chassis.hitTester = BoxTester((-0.1, -0.1, -2), (0.1, 0.1, 2))
@@ -163,6 +242,44 @@ class TurretObstacleTests(unittest.TestCase):
         self.assertFalse(obstacles.sweep_blocks(pose(x=1.25), pose(x=1.4), descriptor(), 4000))
         self.assertTrue(obstacles.sweep_blocks(pose(x=1.25), pose(x=1.1), descriptor(), 4000))
         self.assertTrue(obstacles.sweep_blocks(pose(x=1.25), pose(x=-3), descriptor(), 4000))
+
+    def test_overhead_overlap_can_be_shed_by_horizontal_driving(self):
+        # The hull roof is at 1.5 and the turret underside at 1.4. The
+        # shallowest exit points into the ground, so the old solver rejected
+        # every horizontal input after this landing.
+        for x, z in ((0.1, 0.0), (-0.1, 0.0),
+                     (0.0, 0.1), (0.0, -0.1)):
+            with self.subTest(x=x, z=z):
+                obstacles = self.obstacle(row(rest=(0, 2.4, 0)))
+                self.assertFalse(obstacles.sweep_blocks(
+                    pose(), pose(x=x, z=z), descriptor(), 4000))
+
+    def test_overhead_escape_survives_an_unchanged_suspension_guard(self):
+        obstacles = self.obstacle(row(rest=(0, 2.4, 0)))
+        after = pose(x=0.1)
+        self.assertFalse(obstacles.sweep_blocks(
+            pose(), after, descriptor(), 4000))
+        # Bot vertical integration rechecks this pose after the horizontal
+        # move. A blocked no-op zeros speed and prevents the next escape step.
+        self.assertFalse(obstacles.sweep_blocks(
+            after, after, descriptor(), 4000))
+        self.assertFalse(obstacles.sweep_blocks(
+            after, pose(x=0.2), descriptor(), 4000))
+
+    def test_overhead_escape_cannot_climb_deeper_into_the_turret(self):
+        obstacles = self.obstacle(row(rest=(0, 2.4, 0)))
+        self.assertTrue(obstacles.sweep_blocks(
+            pose(), pose(x=0.1, y=1.1), descriptor(), 4000))
+        self.assertTrue(obstacles.sweep_blocks(
+            pose(), pose(x=0.1, roll=0.3), descriptor(), 4000))
+
+    def test_overhead_escape_still_collides_with_another_turret(self):
+        obstacles = self.obstacle(row(rest=(0, 2.4, 0)))
+        other = row(rest=(3, 1, 0))
+        other['actor_id'] = 18
+        self.assertTrue(obstacles.add('bot:18', other, descriptor()))
+        self.assertTrue(obstacles.sweep_blocks(
+            pose(), pose(x=6), descriptor(), 4000))
 
     def test_hydraulic_body_and_chassis_use_separate_frames(self):
         td = descriptor()
@@ -224,6 +341,27 @@ class CanonicalTurretPresentationTests(unittest.TestCase):
         self.assertEqual(len(world.created), 1)
         presentation.advance(100.1)
         self.assertEqual(world.entity(901).model.matrix.translation, _Vector(15, 3, 10))
+
+    def test_support_revision_updates_existing_native_entity_in_place(self):
+        world = _BigWorld()
+        presentation = self.presentation(world)
+        vehicle = _Vehicle()
+        accepted = row(rest=(15, 1, 10))
+        plan = presentation.prepare_canonical(vehicle, accepted)
+        self.assertTrue(presentation.launch_canonical(plan, accepted, 100, 10))
+        presentation.advance(100.1)
+        supported = copy.deepcopy(accepted)
+        supported.update(motion_seq=1, motion_time_ms=100100,
+                         created_time_ms=100100, support_key='player:1')
+        supported['flight'].update(duration=0, rest=(15, 4, 10),
+                                    rest_attitude=(0, -.153, .088))
+        self.assertTrue(presentation.launch_canonical(plan, supported, 100.2, .1))
+        presentation.advance(100.2)
+        self.assertEqual(1, len(world.created))
+        self.assertEqual(_Vector(15, 4, 10), world.entity(901).model.matrix.translation)
+        self.assertFalse(presentation.launch_canonical(plan, accepted, 100.3, 10.3))
+        presentation.advance(100.3)
+        self.assertEqual(_Vector(15, 4, 10), world.entity(901).model.matrix.translation)
 
     def test_failed_creation_has_cooldown_without_permanent_abandonment(self):
         world = _BigWorld(fail_create=True)

@@ -1,0 +1,226 @@
+name: Build SPG targeting and close-wall Windows test
+on:
+  push:
+    branches: [fix/094-spg-targeting-20260924]
+    paths: [.github/workflows/build-spg-tracking-test.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: spg-targeting-test-20260924
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/094-spg-targeting-20260924'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tests:server:tools
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Apply the exact reviewed patch on the pinned baseline
+        shell: python
+        run: |
+          import base64, hashlib, pathlib, subprocess, zlib
+          base = 'c675b21611afc20f008b832740cd3f8559319cb9'
+          subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
+          parts = ['tools/spg_tracking.patch.%d.b64' % i for i in range(4)]
+          allowed = set(parts + ['.github/workflows/build-spg-tracking-test.yml'])
+          changed = set(subprocess.check_output(['git','diff','--name-only',base,'HEAD','--'],text=True).splitlines())
+          assert changed <= allowed, sorted(changed-allowed)
+          patch = zlib.decompress(base64.b64decode(''.join(pathlib.Path(p).read_text().strip() for p in parts),validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'bb49cc8b06abf697dede8128963e28f0081a7ae74192b53a4dcd2513de7b334b'
+          pathlib.Path('build-evidence').mkdir(exist_ok=True)
+          target = pathlib.Path('build-evidence/reviewed-spg.patch')
+          target.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(target)],check=True)
+          subprocess.run(['git','apply',str(target)],check=True)
+          subprocess.run(['python','tools/spg_tracking_build.py','verify'],check=True)
+      - name: Test new mechanics and retained account driving and battle contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest test_port_0922_spg_tracking -v 2>&1 | tee build-evidence/spg-tracking-regressions.log
+          python tools/test_094_repairs.py 2>&1 | tee build-evidence/targeted-regressions.log
+          python tools/test_bot080_radio_contract.py 2>&1 | tee build-evidence/radio-contract.log
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/startup-contract.log
+      - name: Commit verified sources only on the test branch
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add docs/testing/094-spg-targeting.md server/server_bot_ai.py src/res/scripts/client/gui/mods/offline_lan_0922/artillery_arc_queue.py src/res/scripts/client/gui/mods/offline_lan_0922/artillery_controller.py src/res/scripts/client/gui/mods/offline_lan_0922/battle_runtime.py src/res/scripts/client/gui/mods/offline_lan_0922/bot_runtime.py tests/test_port_0922_spg_tracking.py tools/spg_tracking_build.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Break SPG target-proof feedback loop and handle proven close walls [skip ci]'
+          git push origin HEAD:refs/heads/fix/094-spg-targeting-20260924
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > build-evidence/source-sha.txt
+          git diff c675b21611afc20f008b832740cd3f8559319cb9 -- > build-evidence/final-source.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spg-source-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spg-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: spg-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and compare actual Python 2.7 payload against verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/spg_tracking_build.py verify
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-v094-spg-targeting-${{ github.run_id }}-${{ github.run_attempt }}" \
+            python:2.7.18 sh -c 'python build_wotmod.py && python tools/spg_tracking_build.py bytecode && python tools/test_bot080_radio_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod' 2>&1 | tee build-evidence/compiled-tests.log
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spg-compiled-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spg-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-package:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-v094-spg-targeting-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: spg-client-${{ github.run_id }}
+          path: dist
+      - name: Verify source, test launcher and build Windows executable
+        shell: pwsh
+        run: |
+          python tools/spg_tracking_build.py verify
+          if ($LASTEXITCODE -ne 0) { throw 'Source verification failed' }
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher core tests failed' }
+          python -m unittest discover -s tests -p 'test_launcher_window.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher window tests failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed' }
+      - name: Verify installed payload, exact bytecode and original maps
+        run: python tools/spg_tracking_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check executable versions
+        shell: pwsh
+        run: |
+          foreach ($exe in @('launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe','dist/server/WoT-0.9.22-LAN-Server.exe')) {
+            $v = (Get-Item $exe).VersionInfo
+            if ($v.FileVersion -ne '0.9.4' -or $v.ProductVersion -ne '0.9.4' -or $v.FileMajorPart -ne 0 -or $v.FileMinorPart -ne 9 -or $v.FileBuildPart -ne 4 -or $v.FilePrivatePart -ne 0) { throw "Incorrect version: $exe" }
+            Write-Host "Verified $exe version 0.9.4"
+          }
+      - name: Start the built executable and verify server readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { throw 'Server exited before readiness' }
+              $probe | python -
+              if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw 'Server readiness test failed' }
+          } finally {
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+            $global:LASTEXITCODE = 0
+          }
+          python -c "import json; from pathlib import Path; Path('build-evidence/server-readiness.json').write_text(json.dumps({'ready': True, 'native_game_tested': False, 'port': 28782}))"
+          if ($LASTEXITCODE -ne 0) { throw 'Readiness receipt failed' }
+      - name: Package clean flat ZIP with test-build identity
+        run: python tools/spg_tracking_build.py package launcher/dist/wot-0.9.22-offline-battles
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spg-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-094-spg-targeting-test-${{ github.run_id }}-Windows
+          path: |
+            wot-0.9.22-offline-battles-0.9.4-spg-targeting-test-20260924-Windows-x64.zip
+            wot-0.9.22-offline-battles-0.9.4-spg-targeting-test-20260924-Windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

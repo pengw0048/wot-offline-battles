@@ -3,6 +3,7 @@
 import math
 
 from gui.mods.offline_lan_0922 import turret_detachment
+from gui.mods.offline_lan_0922 import turret_contact_ledger
 
 
 MAX_ACTIVE_TURRETS = 12
@@ -70,7 +71,7 @@ def _flight(value):
     if (not isinstance(landed, bool) or
             landed != (contact is not None)):
         raise ValueError('invalid landing outcome')
-    return {
+    result = {
         'origin': _vector(value['origin'], MAX_POSITION),
         'velocity': _vector(value['velocity'], MAX_VELOCITY),
         'segments': parts,
@@ -82,6 +83,31 @@ def _flight(value):
         'energy': _number(value['energy'], 0.0, MAX_ENERGY),
         'landed': landed,
     }
+    if 'rest_attitude' in value:
+        result['rest_attitude'] = _vector(value['rest_attitude'], MAX_ANGULAR_COMPONENT)
+    if 'body' in value:
+        body = value['body']
+        if not isinstance(body, dict):
+            raise ValueError('invalid detached rigid body')
+        if not all(isinstance(body.get(k), bool) for k in ('grounded', 'sleeping')):
+            raise ValueError('invalid detached contact state')
+        frame = dict((k, _vector(body[k], bound)) for k, bound in (
+            ('position', MAX_POSITION), ('attitude', MAX_ANGULAR_COMPONENT),
+            ('centre', MAX_POSITION), ('velocity', MAX_VELOCITY),
+            ('angular_velocity', MAX_ANGULAR_COMPONENT)))
+        frame.update(grounded=body['grounded'], sleeping=body['sleeping'],
+                     impact_serial=_integer(body['impact_serial'], 0, MAX_ACTOR_ID),
+                     acks=list(turret_contact_ledger.normalize(body['acks']).values()), impact=None)
+        if body.get('impact') is not None:
+            impact = body['impact']
+            frame['impact'] = {
+                'point': _vector(impact['point'], MAX_POSITION),
+                'normal': _vector(impact['normal'], 1.0),
+                'velocity': _vector(impact['velocity'], MAX_VELOCITY),
+                'energy': _number(impact['energy'], 0.0, MAX_ENERGY),
+            }
+        result['body'] = frame
+    return result
 
 
 def normalize_proposal(value):
@@ -92,13 +118,27 @@ def normalize_proposal(value):
         kind = value['actor_kind']
         if kind not in ('bot', 'player'):
             return None
-        return {
+        result = {
             'actor_kind': kind,
             'actor_id': _integer(value['actor_id'], 1, MAX_ACTOR_ID),
             'flight': _flight(value['flight']),
             'attitude': _vector(value['attitude'], MAX_ANGULAR_COMPONENT),
             'spin': _vector(value['spin'], MAX_ANGULAR_COMPONENT),
         }
+        if 'motion_seq' in value:
+            result['motion_seq'] = _integer(value['motion_seq'], 1, MAX_ACTOR_ID)
+            result['motion_time_ms'] = _integer(value['motion_time_ms'], 0, MAX_ACTOR_ID)
+            support = value.get('support_key')
+            if support is not None:
+                if not isinstance(support, type('')) and not isinstance(support, type(u'')):
+                    return None
+                parts = support.split(':')
+                if len(parts) != 2 or parts[0] not in ('bot', 'player'):
+                    return None
+                if not 1 <= int(parts[1]) <= MAX_ACTOR_ID:
+                    return None
+            result['support_key'] = support
+        return result
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
 

@@ -75,3 +75,13 @@ assets, trademarks, or other intellectual property.
 This work includes trademarks and/or copyrighted works that are the exclusive
 property of Wargaming. All rights reserved by Wargaming. This work is
 unofficial and is not endorsed by Wargaming.
+
+## Launcher Bot tactics image reader
+
+The Bot tactics editor uses Pillow 12.3.0 to read an installed client's DDS
+minimap and user-selected raster backgrounds. The distribution includes the
+complete license directory from the exact installed Pillow wheel under
+`licenses/Pillow/`, including the wheel's imaging-library notices.
+Pillow source and license: https://github.com/python-pillow/Pillow/tree/12.3.0
+Map artwork is read from the user's original game installation and is not
+included in tactics profiles or in this project's distribution.

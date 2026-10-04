@@ -1,0 +1,74 @@
+[
+  {
+    "name": "regular_1_1_5",
+    "operation": 1,
+    "chain": 1,
+    "number": 5,
+    "qid": 5,
+    "main": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>1</greaterOrEqual></results><results><key>damagedVehicleCntAssistedRadio</key><greaterOrEqual>2</greaterOrEqual></results></and></postBattle>"
+  },
+  {
+    "name": "regular_1_4_2",
+    "operation": 1,
+    "chain": 4,
+    "number": 2,
+    "qid": 47,
+    "main": "<postBattle><and><results><key>innerModuleDestrCount</key><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>innerModuleDestrCount</key><greaterOrEqual>1</greaterOrEqual></results><isAlive /><results><key>isAnyOurCrittedInnerModules</key><equal>0</equal></results></and></postBattle>"
+  },
+  {
+    "name": "regular_2_1_5",
+    "operation": 2,
+    "chain": 1,
+    "number": 5,
+    "qid": 80,
+    "main": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>2</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>2</greaterOrEqual></results><results><key>damagedVehicleCntAssistedRadio</key><greaterOrEqual>4</greaterOrEqual></results></and></postBattle>"
+  },
+  {
+    "name": "regular_2_4_2",
+    "operation": 2,
+    "chain": 4,
+    "number": 2,
+    "qid": 122,
+    "main": "<postBattle><and><results><key>damageDealt</key><greaterOrEqual>1000</greaterOrEqual></results><results><key>innerModuleDestrCount</key><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>damageDealt</key><greaterOrEqual>1000</greaterOrEqual></results><results><key>innerModuleDestrCount</key><greaterOrEqual>1</greaterOrEqual></results><isAlive /><results><key>isAnyOurCrittedInnerModules</key><equal>0</equal></results></and></postBattle>"
+  },
+  {
+    "name": "regular_3_1_5",
+    "operation": 3,
+    "chain": 1,
+    "number": 5,
+    "qid": 155,
+    "main": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>3</greaterOrEqual></results><results><key>damagedVehicleCntAssistedRadio</key><greaterOrEqual>5</greaterOrEqual></results></and></postBattle>"
+  },
+  {
+    "name": "regular_3_4_2",
+    "operation": 3,
+    "chain": 4,
+    "number": 2,
+    "qid": 197,
+    "main": "<postBattle><and><results><key>damageDealt</key><greaterOrEqual>2000</greaterOrEqual></results><results><key>innerModuleDestrCount</key><greaterOrEqual>2</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>damageDealt</key><greaterOrEqual>2000</greaterOrEqual></results><results><key>innerModuleDestrCount</key><greaterOrEqual>2</greaterOrEqual></results><results><key>isAnyOurCrittedInnerModules</key><equal>0</equal></results><isAlive /></and></postBattle>"
+  },
+  {
+    "name": "regular_4_1_5",
+    "operation": 4,
+    "chain": 1,
+    "number": 5,
+    "qid": 230,
+    "main": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>3</greaterOrEqual></results><isAlive /></and></postBattle>",
+    "add": "<postBattle><and><results><key>killsAssistedRadio</key><greaterOrEqual>3</greaterOrEqual></results><isAlive /><results><key>damagedVehicleCntAssistedRadio</key><greaterOrEqual>6</greaterOrEqual></results></and></postBattle>"
+  },
+  {
+    "name": "regular_4_4_2",
+    "operation": 4,
+    "chain": 4,
+    "number": 2,
+    "qid": 272,
+    "main": "<postBattle><and><results><key>damageDealt</key><greaterOrEqual>5000</greaterOrEqual></results><results><key>innerModuleDestrCount</key><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>damageDealt</key><greaterOrEqual>5000</greaterOrEqual></results><results><key>innerModuleDestrCount</key><greaterOrEqual>3</greaterOrEqual></results><results><key>isAnyOurCrittedInnerModules</key><equal>0</equal></results><isAlive /></and></postBattle>"
+  }
+]

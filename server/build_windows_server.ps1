@@ -20,6 +20,7 @@ python -m PyInstaller `
     --onefile `
     --console `
     --noupx `
+    --version-file (Join-Path $ServerRoot "version_info.txt") `
     --name "WoT-0.9.22-LAN-Server" `
     --distpath $DistRoot `
     --workpath $WorkRoot `

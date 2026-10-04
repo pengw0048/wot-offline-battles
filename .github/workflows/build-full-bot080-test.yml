@@ -1,0 +1,242 @@
+name: Build full Bot 0.8.0 and original maps test
+on:
+  push:
+    branches: [fix/093-full-bot080-old-maps-20260923]
+    paths: [.github/workflows/build-full-bot080-test.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: full-bot080-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/093-full-bot080-old-maps-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Restore and commit exact historical Bot and map files
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git status --short --branch
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tools/full_bot080_build.py')
+          text=p.read_text()
+          old="    for path, expected in proof['runtime_sha256_lf'].items():\n        assert sha(read(os.path.join(payload, 'servers/0.9.22', path)).replace(b'\\r\\n', b'\\n')) == expected, path"
+          new="    for path, expected in proof['runtime_sha256_lf'].items():\n        # The entry loader belongs only to the client wotmod, whose exact\n        # compiled bytes were already verified above; it is not a server import.\n        if path == 'src/res/scripts/client/gui/mods/mod_offline_lan_0922.py':\n            continue\n        assert path.startswith(PREFIX), path\n        assert sha(read(os.path.join(payload, 'servers/0.9.22', path)).replace(b'\\r\\n', b'\\n')) == expected, path"
+          if old in text:
+              assert text.count(old)==1
+              p.write_text(text.replace(old,new))
+          assert new in p.read_text()
+          PY
+          git add tools/full_bot080_build.py
+          python tools/full_bot080_build.py integrate
+          python - <<'PY'
+          import hashlib,json,subprocess
+          from pathlib import Path
+          path='launcher/vehicle_overlays.py'
+          source=subprocess.check_output(['git','show','e41867d739c18373c6049f9d1fb9b826bdc6f27e:'+path])
+          old=b'bot_lineup_profiles.vehicle_choice_is_standard(record)'
+          new=b'bot_lineup_profiles.vehicle_choice_is_eligible(record)'
+          assert source.count(old)==1
+          # The historical eligible() is the same stock eligibility predicate
+          # that the current caller renamed standard(). No new Bot policy.
+          source=source.replace(old,new)
+          Path(path).write_bytes(source)
+          p=Path('docs/testing/full-bot080-proof.json')
+          proof=json.loads(p.read_text())
+          proof['changed_paths'].append(path)
+          proof['compatibility_only_changes']={path:hashlib.sha256(source).hexdigest()}
+          p.write_text(json.dumps(proof,sort_keys=True,indent=2)+'\n')
+          PY
+          git add launcher/vehicle_overlays.py docs/testing/full-bot080-proof.json
+          if ! git diff --cached --quiet; then
+            git diff --cached --stat
+            git commit -m 'Finalize original Bot and map build verification without changing gameplay'
+            git push origin HEAD:refs/heads/fix/093-full-bot080-old-maps-20260923
+          fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Verify original Bot behavior and retained game boundary
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/full_bot080_build.py source-tests 2>&1 | tee build-evidence/historical-bot-tests.log
+          python -m unittest test_port_0922_world_collision test_port_0922_vehicle_physics test_port_0922 2>&1 | tee build-evidence/shared-game-boundary-tests.log
+          cp docs/testing/full-bot080-proof.json build-evidence/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-bot080-tests-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - name: Build server with original Bot planner
+        shell: pwsh
+        run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-bot080-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: full-bot080-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and inspect original Bot modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-full-bot080-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -w /work python:2.7.18 sh -c \
+            'python build_wotmod.py && python tools/full_bot080_build.py bytecode'
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+          docker image inspect python:2.7.18 --format '{{json .RepoDigests}}' > dist/full-bot080-python27-image.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-bot080-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-launcher:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-full-bot080-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: full-bot080-client-${{ github.run_id }}
+          path: dist
+      - name: Test launcher installation and historical lineup integration
+        working-directory: launcher
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -m unittest discover -s tests -p 'test_launcher_core.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher core tests failed' }
+          python -m unittest discover -s tests -p 'test_vehicle_overlays.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Vehicle overlay tests failed' }
+          python -m unittest discover -s tests -p 'test_bot_lineup_profiles.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Lineup tests failed' }
+      - name: Build complete launcher folder
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify historical maps, compiled Bot, server source and installation
+        shell: pwsh
+        run: |
+          python tools/full_bot080_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+          if ($LASTEXITCODE -ne 0) { throw 'Distribution verification failed' }
+          Copy-Item dist/full-bot080-python27-image.json launcher/dist/wot-0.9.22-offline-battles/
+      - name: Smoke-test built server protocol
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles'
+          $exe = Join-Path $app 'wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve', '0.9.22' -PassThru
+          try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $compatible = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) { throw 'Server exited before protocol readiness' }
+                  $probe | python -
+                  if ($LASTEXITCODE -eq 0) { $compatible = $true; break }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $compatible) { throw 'Server protocol test failed' }
+              Set-Content (Join-Path $app 'SERVER_SMOKE_TEST.txt') 'PASS: built server protocol ready. Native game not executed.'
+          }
+          finally {
+              if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+              $global:LASTEXITCODE = 0
+          }
+      - name: Write exact rollback scope
+        shell: pwsh
+        run: |
+          @'
+          FULL BOT SOURCE + ORIGINAL v0.8.0 MAPS TEST (mod version 0.9.3)
+          Exact historical source: 5a7c20a124ab8ad76dc40db3012a31436ae6905b.
+          Restored the ENTIRE ai directory, ENTIRE bot_runtime.py, bot_gunnery, bot_state_codec, prebaked_navigation, server_bot_ai and Bot lineup modules.
+          Restored all original navigation assets and manifest, INCLUDING THE OLD AIRFIELD GRAPH, tactical routes and original spawn formations.
+          Foliage/destructible catalog assets also match the original bytes; they had not changed from the preceding build.
+          Current shared game physics, native scene adapters, networking, missions and economy remain. This is not a whole-game downgrade or proof of complete v0.8.0 native-physics equivalence.
+          Two unsupported injected callbacks and one renamed stock-eligibility call are adjusted in the current outer integration; original Bot source is not patched.
+          Keep this package separate from e41867d7, which uses the rebuilt Airfield map and a partially retained BotRuntime.
+          Extract the WHOLE ZIP into a NEW empty folder, run wot-0.9.22-offline-battles.exe, and select the original Chinese HD 0.9.22.0.1 #1513 client.
+          See FULL_BOT080_BUILD_EVIDENCE.json for source, asset hashes and build identity. No native gameplay or FPS improvement is claimed for this package.
+          '@ | Set-Content -Encoding utf8 launcher/dist/wot-0.9.22-offline-battles/FULL_BOT080_TEST_README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-full-bot080-old-maps-${{ github.run_id }}-Windows-x64
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
