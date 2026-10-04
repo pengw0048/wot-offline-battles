@@ -37,7 +37,7 @@ class WorkerStarterTests(unittest.TestCase):
 
         self.assertIn('CreateMutexW(0, TRUE, WORKER_MUTEX_NAME)', source)
         self.assertIn('OFFLINE_LAN_0922_WORKER_READY_MARKER', source)
-        self.assertIn('wait_for_worker_ready(process.hProcess, stop_event)',
+        self.assertIn('wait_for_worker_ready(&process, job, game_path, stop_event)',
                       source)
         wait_body = source.split(
             'static int wait_for_worker_ready', 1)[1].split(
@@ -62,7 +62,7 @@ class WorkerStarterTests(unittest.TestCase):
             'result = launch_player(game_path, FALSE, stop_event);', source)
         self.assertIn('TerminateJobObject(job, ERROR_PROCESS_ABORTED)', source)
         main = source.split('int WINAPI wWinMain', 1)[1]
-        self.assertIn('wait_for_worker_ready(process.hProcess, stop_event)',
+        self.assertIn('wait_for_worker_ready(&process, job, game_path, stop_event)',
                       main)
         worker_path = main.split('if (!worker_only)', 1)[1]
         self.assertNotIn('launch_player(', worker_path)
@@ -380,16 +380,35 @@ class WorkerStarterTests(unittest.TestCase):
                 'static int launch_player', 1)[0]
 
         first_process_check = wait_body.index(
-            'WaitForSingleObject(worker_process, 0)')
+            'WaitForSingleObject(worker->hProcess, 0)')
         marker_check = wait_body.index(
-            'GetFileAttributesW(g_internal_ready_marker)')
+            'ready_id = worker_ready_process_id()')
         second_process_check = wait_body.index(
-            'WaitForSingleObject(worker_process, 0)',
+            'WaitForSingleObject(worker->hProcess, 0)',
             first_process_check + 1)
         self.assertLess(first_process_check, marker_check)
         self.assertLess(marker_check, second_process_check)
-        self.assertIn('worker_exited_after_ready', wait_body)
+        self.assertIn('ready_id == worker->dwProcessId', wait_body)
         self.assertNotIn('local_server_exited_before_worker_ready', wait_body)
+
+    def test_worker_startup_handoff_is_job_scoped_and_preserves_crashes(self):
+        source = SOURCE.read_text(encoding='utf-8')
+        adopt = source.split('static int adopt_worker_replacement', 1)[1].split(
+            'static DWORD worker_ready_process_id', 1)[0]
+        wait = source.split('static int wait_for_worker_ready', 1)[1].split(
+            'static int same_filetime', 1)[0]
+
+        self.assertIn('JobObjectBasicProcessIdList', adopt)
+        self.assertIn('open_matching_game_process(process_id, game_path)', adopt)
+        self.assertIn('IsProcessInJob(candidate, job, &in_job)', adopt)
+        self.assertLess(adopt.index('IsProcessInJob(candidate, job, &in_job)'),
+                        adopt.index('worker->hProcess = replacement;'))
+        self.assertIn('worker->hProcess = replacement;', adopt)
+        self.assertIn('worker->dwProcessId = replacement_id;', adopt)
+        self.assertIn('if (worker_exit_code == 0 &&', wait)
+        self.assertIn('adopt_worker_replacement(job, worker, game_path) == 1', wait)
+        self.assertIn('GetTickCount() - began <= WORKER_READY_TIMEOUT_MS', wait)
+        self.assertIn('worker_ready_other_process', wait)
 
     def test_lan_player_returns_before_any_worker_resource_is_created(self):
         source = SOURCE.read_text(encoding='utf-8')

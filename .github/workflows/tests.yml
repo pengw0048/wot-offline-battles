@@ -282,6 +282,11 @@ jobs:
         with:
           python-version: "3.11.9"
           architecture: "x64"
+      - name: Verify native starter readiness and process handoff
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/test_starter_lifetime.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Starter handoff tests failed" }
       - name: Install pinned Windows packager
         run: >-
           python -m pip install

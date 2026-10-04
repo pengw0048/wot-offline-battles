@@ -1,5 +1,7 @@
 import importlib.util
+import os
 from pathlib import Path
+import struct
 import tempfile
 import types
 import unittest
@@ -177,7 +179,7 @@ class WorkerPresentationTests(unittest.TestCase):
             self.assertTrue(self.module.signal_worker_ready({
                 self.module.WORKER_READY_MARKER_ENV: str(marker)}))
 
-            self.assertEqual(b'ready\n', marker.read_bytes())
+            self.assertEqual(struct.pack('<I', os.getpid()), marker.read_bytes())
             self.assertFalse(temporary.exists())
 
     def test_ready_marker_path_is_required(self):

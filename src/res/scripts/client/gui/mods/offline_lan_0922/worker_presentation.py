@@ -23,7 +23,7 @@ class WorkerPresentationError(RuntimeError):
     pass
 
 
-def _signal_ready_marker(variable, description, environ=None):
+def _signal_ready_marker(variable, description, environ=None, payload=b'ready\n'):
     """Atomically publish one native-starter readiness boundary."""
     environ = os.environ if environ is None else environ
     marker_path = environ.get(variable, '')
@@ -38,7 +38,7 @@ def _signal_ready_marker(variable, description, environ=None):
     try:
         stream = open(temporary_path, 'wb')
         try:
-            stream.write(b'ready\n')
+            stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         finally:
@@ -58,9 +58,10 @@ def _signal_ready_marker(variable, description, environ=None):
 
 
 def signal_worker_ready(environ=None):
-    """Publish full worker Hangar and LAN readiness to its starter."""
+    """Bind full worker Hangar and LAN readiness to this process."""
     return _signal_ready_marker(
-        WORKER_READY_MARKER_ENV, 'simulation worker', environ)
+        WORKER_READY_MARKER_ENV, 'simulation worker', environ,
+        struct.pack('<I', os.getpid()))
 
 
 def signal_player_ready(environ=None):

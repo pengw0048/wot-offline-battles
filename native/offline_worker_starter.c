@@ -677,39 +677,137 @@ static int publish_ready_marker(const WCHAR *marker_path)
 }
 
 
-static int wait_for_worker_ready(HANDLE worker_process, HANDLE stop_event)
+static HANDLE open_matching_game_process(DWORD process_id,
+		const WCHAR *game_path);
+
+
+static int adopt_worker_replacement(HANDLE job, PROCESS_INFORMATION *worker,
+		const WCHAR *game_path)
 {
-	DWORD elapsed = 0;
-	DWORD marker_attributes;
+	JobProcessSet processes;
+	HANDLE replacement = 0;
+	DWORD replacement_id = 0;
+	FILETIME replacement_created;
+	DWORD index;
+	ZeroMemory(&processes, sizeof(processes));
+	ZeroMemory(&replacement_created, sizeof(replacement_created));
+	if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList,
+			&processes, sizeof(processes), 0)) {
+		log_failure("QueryInformationJobObject(worker pids)", GetLastError());
+		return -1;
+	}
+	for (index = 0; index < processes.count; ++index) {
+		DWORD process_id = (DWORD)processes.ids[index];
+		HANDLE candidate;
+		BOOL in_job = FALSE;
+		FILETIME created, exited, kernel, user;
+		if (process_id == worker->dwProcessId) {
+			continue;
+		}
+		candidate = open_matching_game_process(process_id, game_path);
+		if (candidate == 0) {
+			continue;
+		}
+		/* PID enumeration is a snapshot. Validate the opened handle as well,
+		 * so PID reuse cannot claim a different launch's same-path client. */
+		if (!IsProcessInJob(candidate, job, &in_job) || !in_job) {
+			CloseHandle(candidate);
+			continue;
+		}
+		if (WaitForSingleObject(candidate, 0) != WAIT_TIMEOUT ||
+				!GetProcessTimes(candidate, &created, &exited, &kernel, &user)) {
+			CloseHandle(candidate);
+			continue;
+		}
+		/* Follow the next generation, even if it has already spawned another
+		 * replacement. Never claim a same-path process outside this Job. */
+		if (replacement == 0 || CompareFileTime(&created,
+				&replacement_created) < 0) {
+			if (replacement != 0) {
+				CloseHandle(replacement);
+			}
+			replacement = candidate;
+			replacement_id = process_id;
+			replacement_created = created;
+		} else {
+			CloseHandle(candidate);
+		}
+	}
+	if (replacement == 0) {
+		return 0;
+	}
+	CloseHandle(worker->hProcess);
+	worker->hProcess = replacement;
+	worker->dwProcessId = replacement_id;
+	log_status("worker_process_handoff", "pid", replacement_id);
+	return 1;
+}
+
+
+static DWORD worker_ready_process_id(void)
+{
+	HANDLE marker;
+	DWORD payload[2];
+	DWORD read_bytes = 0;
+	BOOL read_ok;
+	marker = CreateFileW(g_internal_ready_marker, GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	if (marker == INVALID_HANDLE_VALUE) {
+		return 0;
+	}
+	read_ok = ReadFile(marker, payload, sizeof(payload), &read_bytes, 0);
+	CloseHandle(marker);
+	return read_ok && read_bytes == sizeof(DWORD) ? payload[0] : 0;
+}
+
+
+static int wait_for_worker_ready(PROCESS_INFORMATION *worker, HANDLE job,
+		const WCHAR *game_path, HANDLE stop_event)
+{
+	DWORD began = GetTickCount();
+	DWORD previous_ready_id = 0;
+	DWORD ready_id;
 	DWORD worker_exit_code;
 	DWORD worker_state;
-	while (elapsed <= WORKER_READY_TIMEOUT_MS) {
+	while (GetTickCount() - began <= WORKER_READY_TIMEOUT_MS) {
 		if (stop_event != 0 &&
 				WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) {
 			return -1;
 		}
-		worker_state = WaitForSingleObject(worker_process, 0);
+		worker_state = WaitForSingleObject(worker->hProcess, 0);
 		if (worker_state != WAIT_TIMEOUT) {
 			if (worker_state == WAIT_FAILED) {
 				log_failure(
 					"WaitForSingleObject(worker before ready)",
 					GetLastError());
 			} else if (!GetExitCodeProcess(
-					worker_process, &worker_exit_code)) {
+					worker->hProcess, &worker_exit_code)) {
 				log_failure(
 					"GetExitCodeProcess(worker before ready)",
 					GetLastError());
 			} else {
+				/* The stock client may restart during startup. Its clean parent
+				 * exit is not terminal while a Job-owned replacement is alive.
+				 * A nonzero parent exit must remain a failure. */
+				if (worker_exit_code == 0 &&
+						adopt_worker_replacement(job, worker, game_path) == 1) {
+					continue;
+				}
 				log_process_exit(
 					"worker_exited_before_ready", worker_exit_code);
 			}
 			return 0;
 		}
-		marker_attributes = GetFileAttributesW(g_internal_ready_marker);
-		if (marker_attributes != INVALID_FILE_ATTRIBUTES &&
-				!(marker_attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-			/* Reject a marker published immediately before worker death. */
-			worker_state = WaitForSingleObject(worker_process, 0);
+		ready_id = worker_ready_process_id();
+		if (ready_id != 0 && ready_id != worker->dwProcessId &&
+				ready_id != previous_ready_id) {
+			log_status("worker_ready_other_process", "pid", ready_id);
+		}
+		previous_ready_id = ready_id;
+		if (ready_id == worker->dwProcessId) {
+			/* A previous generation's marker cannot make this process ready. */
+			worker_state = WaitForSingleObject(worker->hProcess, 0);
 			if (worker_state == WAIT_TIMEOUT) {
 				return 1;
 			}
@@ -717,22 +815,12 @@ static int wait_for_worker_ready(HANDLE worker_process, HANDLE stop_event)
 				log_failure(
 					"WaitForSingleObject(worker after ready)",
 					GetLastError());
-			} else if (!GetExitCodeProcess(
-					worker_process, &worker_exit_code)) {
-				log_failure(
-					"GetExitCodeProcess(worker after ready)",
-					GetLastError());
-			} else {
-				log_process_exit(
-					"worker_exited_after_ready", worker_exit_code);
+				return 0;
 			}
-			return 0;
-		}
-		if (elapsed == WORKER_READY_TIMEOUT_MS) {
-			break;
+			/* Recheck its exit and any replacement through the same path. */
+			continue;
 		}
 		Sleep(WORKER_READY_POLL_MS);
-		elapsed += WORKER_READY_POLL_MS;
 	}
 	log_failure("wait_for_worker_ready", WAIT_TIMEOUT);
 	return 0;
@@ -1579,7 +1667,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 		 * starter waits for that full Hangar+LAN boundary, attaches ProcDump,
 		 * rechecks liveness, and only then publishes the marker the launcher
 		 * observes. */
-		ready_state = wait_for_worker_ready(process.hProcess, stop_event);
+		ready_state = wait_for_worker_ready(&process, job, game_path, stop_event);
 		if (ready_state <= 0) {
 			if (ready_state < 0 && WaitForSingleObject(
 					process.hProcess, 0) == WAIT_TIMEOUT) {
