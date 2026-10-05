@@ -1730,3 +1730,134 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
 # Names mirror the current 0.8.2 helpers and keep adapter call sites explicit.
 _tank_chassis_shape = chassis_shape
 _tank_resolve = resolve_tank
+
+
+def contact_roster(tanks, owner_ids, dt, previous_ram_contacts):
+    """Return native contact rows or None for the existing Python chain."""
+    return native_math.contact_roster(tanks, owner_ids, dt, previous_ram_contacts)
+
+
+def finalize_contact_row(tank, by_id, row, now=None, ram_cooldowns=None,
+                         active_ram_contacts=None, contact_armor_probe=None):
+    """Settle native ram candidates at the original synchronous engine boundary.
+
+    Geometry uses frozen bodies. Only proven, nonzero damage latches a new
+    episode; the caller serializes owner rows and then applies world motion.
+    """
+    self_id = _tank_value(tank, 'id', -1)
+    x = float(_tank_value(tank, 'x', 0.0) or 0.0)
+    z = float(_tank_value(tank, 'z', 0.0) or 0.0)
+    yaw = float(_tank_value(tank, 'yaw', 0.0) or 0.0)
+    mass_self = max(float(_tank_value(tank, 'mass', 1.0) or 1.0), 1.0)
+    velocity_x = float(_tank_value(tank, 'vx', 0.0) or 0.0)
+    velocity_y = float(_tank_value(tank, 'vy', 0.0) or 0.0)
+    velocity_z = float(_tank_value(tank, 'vz', 0.0) or 0.0)
+    own_shape = _tank_shape(tank)
+    ram_events = []
+    ram_diagnostics = []
+    cooldowns = dict(ram_cooldowns or {})
+    previous_contacts = set(active_ram_contacts or ())
+    newly_damaging_pairs = set()
+    retained_contacts = set(row[6]) if now is not None else set()
+    for candidate in row[7] if now is not None else ():
+        other_id, impact_contact, closing_speed = candidate[:3]
+        other = by_id[other_id]
+        pair = (min(self_id, other_id), max(self_id, other_id))
+        if pair in previous_contacts:
+            retained_contacts.add(pair)
+            continue
+        if pair in newly_damaging_pairs:
+            continue
+        other_x = float(_tank_value(other, 'x', 0.0) or 0.0)
+        other_z = float(_tank_value(other, 'z', 0.0) or 0.0)
+        other_yaw = float(_tank_value(other, 'yaw', 0.0) or 0.0)
+        other_shape = _tank_shape(other)
+        mass_other = max(float(_tank_value(other, 'mass', 1.0) or 1.0), 1.0)
+        if _tank_value(other, 'immovable', False):
+            other_velocity_x = other_velocity_y = other_velocity_z = 0.0
+        else:
+            other_velocity_x = float(_tank_value(other, 'vx', 0.0) or 0.0)
+            other_velocity_y = float(_tank_value(other, 'vy', 0.0) or 0.0)
+            other_velocity_z = float(_tank_value(other, 'vz', 0.0) or 0.0)
+        own_ram_inputs = _contact_ram_inputs(tank)
+        other_ram_inputs = _contact_ram_inputs(other)
+        if ((own_ram_inputs is None or other_ram_inputs is None) and
+                callable(contact_armor_probe)):
+            probed = contact_armor_probe(tank, other, impact_contact)
+            if probed is not None:
+                if not isinstance(probed, (list, tuple)) or len(probed) != 2:
+                    raise RuntimeError(
+                        'tank contact armor probe result is invalid')
+                if own_ram_inputs is None:
+                    own_ram_inputs = _contact_ram_inputs(tank, probed[0])
+                if other_ram_inputs is None:
+                    other_ram_inputs = _contact_ram_inputs(other, probed[1])
+        if own_ram_inputs is None or other_ram_inputs is None:
+            ram_diagnostics.append({
+                'pair': pair,
+                'reason': 'contact_armor_unavailable',
+                'missing_self': own_ram_inputs is None,
+                'missing_other': other_ram_inputs is None,
+            })
+            continue
+        armor_self, spall_self, bonus_self = own_ram_inputs
+        armor_other, spall_other, bonus_other = other_ram_inputs
+        relative_speed = candidate[3]
+        damage_other, damage_self = ram_damage(
+            closing_speed, mass_self, mass_other,
+            armor_self, armor_other,
+            spall_self, spall_other,
+            bonus_self, bonus_other,
+            candidate[4], candidate[5])
+        if not damage_other and not damage_self:
+            continue
+        newly_damaging_pairs.add(pair)
+        # A retail ram consumes the relative kinetic impulse at contact.  A
+        # pair remains armed until the hulls separate, even if compression
+        # briefly falls below the damage threshold. A harmless initial touch
+        # is not an impact and must not suppress a later acceleration into the
+        # other hull.
+        cooldowns[pair] = float(now)
+        ram_events.append({
+            'pair': pair,
+            'self_id': self_id,
+            'other_id': other_id,
+            'contact_positions': (x, z, other_x, other_z),
+            'self_vehicle': str(
+                _tank_value(tank, 'vehicle', '') or ''),
+            'other_vehicle': str(
+                _tank_value(other, 'vehicle', '') or ''),
+            'mass_self': mass_self,
+            'mass_other': mass_other,
+            'velocity_self': (velocity_x, velocity_z),
+            'velocity_other': (other_velocity_x, other_velocity_z),
+            'velocity_y_self': velocity_y,
+            'velocity_y_other': other_velocity_y,
+            'yaw_self': yaw,
+            'yaw_other': other_yaw,
+            'shape_self': own_shape,
+            'shape_other': other_shape,
+            'contact_normal': (impact_contact[0], impact_contact[1]),
+            'contact_penetration': impact_contact[2],
+            'closing_speed': closing_speed,
+            'relative_speed': relative_speed,
+            'impact_speed': closing_speed,
+            'armor_self': armor_self,
+            'armor_other': armor_other,
+            'spall_self': spall_self,
+            'spall_other': spall_other,
+            'ramming_bonus_self': bonus_self,
+            'ramming_bonus_other': bonus_other,
+            'damage_to_other': damage_other,
+            'damage_to_self': damage_self,
+        })
+
+    return {
+        'correction': row[1],
+        'delta_velocity': row[2],
+        'delta_yaw': row[3],
+        'ram_events': tuple(ram_events),
+        'ram_diagnostics': tuple(ram_diagnostics),
+        'cooldowns': cooldowns,
+        'contacts': frozenset(retained_contacts | newly_damaging_pairs),
+    }

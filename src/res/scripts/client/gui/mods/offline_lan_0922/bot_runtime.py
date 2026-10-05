@@ -9274,27 +9274,37 @@ class BotRuntime(object):
             })
 
         by_id = dict((tank['id'], tank) for tank in tanks)
-        physical_results = tank_collision.resolve_pairs(tanks, step)
-        traverse_bodies = tank_collision.post_contact_velocity_bodies(
-            tanks, physical_results)
-        for actor, delta in tank_collision.traverse_impulses(
-                traverse_bodies, step, angular_results=physical_results).items():
-            result = physical_results[actor]
-            result['delta_velocity'] = tuple(result['delta_velocity'][i]+delta[i]
-                                              for i in range(2))
-        collision_bodies = {}
-        collision_radii = {}
-        maximum_radius = 4.0
-        for tank in tanks:
-            shape = tank_collision._tank_shape(tank)
-            radius = math.sqrt(
-                shape[0] * shape[0] + shape[1] * shape[1])
-            maximum_radius = max(maximum_radius, radius)
-            collision_radii[tank['id']] = radius
-            collision_bodies[tank['id']] = {
-                'position': (tank['x'], tank['y'], tank['z'])}
-        collision_index = tank_collision.build_spatial_index(
-            collision_bodies, maximum_radius * 2.0 + 4.0)
+        # Preserve CPython 2 dictionary bucket order for ram peer traversal.
+        contact_rows = tank_collision.contact_roster(
+            list(by_id.values()), [int(state['id']) for state in self._ordered_states()],
+            step, self._ram_contacts)
+        if contact_rows is not None:
+            contact_rows = dict((row[0], row) for row in contact_rows)
+            physical_results = dict((actor, {
+                'correction': row[1], 'delta_velocity': row[2],
+                'delta_yaw': row[3]}) for actor, row in contact_rows.items())
+        else:
+            physical_results = tank_collision.resolve_pairs(tanks, step)
+            traverse_bodies = tank_collision.post_contact_velocity_bodies(
+                tanks, physical_results)
+            for actor, delta in tank_collision.traverse_impulses(
+                    traverse_bodies, step, angular_results=physical_results).items():
+                result = physical_results[actor]
+                result['delta_velocity'] = tuple(result['delta_velocity'][i]+delta[i]
+                                                  for i in range(2))
+            collision_bodies = {}
+            collision_radii = {}
+            maximum_radius = 4.0
+            for tank in tanks:
+                shape = tank_collision._tank_shape(tank)
+                radius = math.sqrt(
+                    shape[0] * shape[0] + shape[1] * shape[1])
+                maximum_radius = max(maximum_radius, radius)
+                collision_radii[tank['id']] = radius
+                collision_bodies[tank['id']] = {
+                    'position': (tank['x'], tank['y'], tank['z'])}
+            collision_index = tank_collision.build_spatial_index(
+                collision_bodies, maximum_radius * 2.0 + 4.0)
         contacted_bot_ids = set()
         reports = self._resolve_human_ram_receipts(players, now)
         previous_ram_contacts = self._ram_contacts
@@ -9329,30 +9339,35 @@ class BotRuntime(object):
             own = by_id.get(int(state['id']))
             if own is None:
                 continue
-            candidate_ids = tank_collision.nearby_ids(
-                collision_index, own['x'], own['z'])
-            own_radius = collision_radii[own['id']]
-            others = []
-            for tank_id in candidate_ids:
-                if tank_id == own['id'] or tank_id not in by_id:
-                    continue
-                pair = (min(own['id'], tank_id), max(own['id'], tank_id))
-                # Historical receipts settle HP, never current motion.
-                # Keep the physical pair even when its receipt arrived in
-                # this slice so a sustained push still slows the Bot.
-                other = by_id[tank_id]
-                # The spatial bucket is deliberately conservative. Apply the
-                # resolver's existing circle exclusion using radii computed
-                # once for these frozen bodies, before parsing each distant
-                # peer again for every observing hull.
-                dx = own['x'] - other['x']
-                dz = own['z'] - other['z']
-                reach = (own_radius + collision_radii[tank_id] +
-                         tank_collision.CONTACT_BROADPHASE_PADDING)
-                if dx * dx + dz * dz > reach * reach:
-                    continue
-                others.append(other)
-            if not others:
+            contact_row = (contact_rows.get(own['id'])
+                           if contact_rows is not None else None)
+            if contact_row is not None:
+                others = None
+            else:
+                candidate_ids = tank_collision.nearby_ids(
+                    collision_index, own['x'], own['z'])
+                own_radius = collision_radii[own['id']]
+                others = []
+                for tank_id in candidate_ids:
+                    if tank_id == own['id'] or tank_id not in by_id:
+                        continue
+                    pair = (min(own['id'], tank_id), max(own['id'], tank_id))
+                    # Historical receipts settle HP, never current motion.
+                    # Keep the physical pair even when its receipt arrived in
+                    # this slice so a sustained push still slows the Bot.
+                    other = by_id[tank_id]
+                    # The spatial bucket is deliberately conservative. Apply the
+                    # resolver's existing circle exclusion using radii computed
+                    # once for these frozen bodies, before parsing each distant
+                    # peer again for every observing hull.
+                    dx = own['x'] - other['x']
+                    dz = own['z'] - other['z']
+                    reach = (own_radius + collision_radii[tank_id] +
+                             tank_collision.CONTACT_BROADPHASE_PADDING)
+                    if dx * dx + dz * dz > reach * reach:
+                        continue
+                    others.append(other)
+            if not (contact_row[4] if contact_row is not None else others):
                 # A separated tank still owns residual contact momentum and
                 # must advance/decay it through the same world collision gate.
                 if (state.get('push_x', 0.0) or state.get('push_z', 0.0) or
@@ -9368,8 +9383,9 @@ class BotRuntime(object):
             if not state_alive and not (
                     self._wreck_is_active(state) or
                     state.get('push_x', 0.0) or state.get('push_z', 0.0) or
-                    any(other.get('alive', True) or other['vx'] or
-                        other['vz'] or other.get('push_yaw') for other in others)):
+                    (contact_row[5] if contact_row is not None else
+                     any(other.get('alive', True) or other['vx'] or
+                         other['vz'] or other.get('push_yaw') for other in others))):
                 # Nothing in reach can move this wreck and it carries no
                 # momentum of its own. Two settled wrecks left overlapping by
                 # their death poses must not re-solve each other every tick
@@ -9390,8 +9406,12 @@ class BotRuntime(object):
                 # disabling ram admission, so a shoved wreck can never open a
                 # damage episode or consume an armour probe.
                 resolve_kwargs = {'now': None}
-            result = tank_collision.resolve_tank(
-                own, others, dt=step, **resolve_kwargs)
+            if contact_row is None:
+                result = tank_collision.resolve_tank(
+                    own, others, dt=step, **resolve_kwargs)
+            else:
+                result = tank_collision.finalize_contact_row(
+                    own, by_id, contact_row, **resolve_kwargs)
             result.update(physical_results[own['id']])
             if state_alive:
                 self._ram_cooldowns = result['cooldowns']

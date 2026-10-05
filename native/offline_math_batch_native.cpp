@@ -27,6 +27,7 @@ struct PyMethodDef {
 #include "offline_math_batch.h"
 #include "offline_navigation.h"
 #include "offline_visibility.h"
+#include "offline_contact_roster.h"
 
 namespace {
 using offline_math::Body;
@@ -51,9 +52,13 @@ const void *float_type = 0, *int_type = 0, *bool_type = 0;
 void *string_lookup = 0;
 PyObject *none_object = 0;
 
-enum Field { ID, X, Y, Z, YAW, PITCH, ROLL, SHAPE, DESCRIPTOR, DIMS, POSITION, FIELD_COUNT };
+enum Field { ID, X, Y, Z, YAW, PITCH, ROLL, SHAPE, DESCRIPTOR, DIMS, POSITION,
+    MASS, VX, VY, VZ, PUSH_YAW, GRIP, TRAVERSE_SPEED, TRAVERSE_TORQUE, TEAM,
+    ALIVE, IMMOVABLE, IMPULSE, POSITION_FIXED, FIELD_COUNT };
 const char *const field_names[] = {
-    "id", "x", "y", "z", "yaw", "pitch", "roll", "shape", "descriptor", "dims", "position"
+    "id", "x", "y", "z", "yaw", "pitch", "roll", "shape", "descriptor", "dims", "position",
+    "mass", "vx", "vy", "vz", "push_yaw", "contact_decel", "traverse_speed",
+    "traverse_torque", "team", "alive", "immovable", "impulse", "position_fixed"
 };
 // Fixed owned string references, retained with this process-lived module.
 PyObject *field_keys[FIELD_COUNT] = {};
@@ -282,8 +287,10 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
 
 #include "offline_navigation_python.inc"
 #include "offline_visibility_python.inc"
+#include "offline_contact_roster_python.inc"
 
 PyMethodDef methods[] = {
+    {"contact_roster", contact_roster, 0x0001, "Solve one complete roster contact stage over frozen bodies."},
     {"vis_open", vis_open, 0x0001, "Load immutable foliage for asynchronous visibility."},
     {"vis_update", vis_update, 0x0001, "Publish changed foliage rows to future jobs."},
     {"vis_submit", vis_submit, 0x0001, "Prepare complete pair geometry and foliage on a worker."},

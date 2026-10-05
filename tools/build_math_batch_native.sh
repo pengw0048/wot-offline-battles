@@ -18,6 +18,7 @@ build_bridge() {
         "$PORT_ROOT/native/offline_navigation.cpp" \
         "$PORT_ROOT/native/native_visibility_core.cpp" \
         "$PORT_ROOT/native/offline_visibility.cpp" \
+        "$PORT_ROOT/native/offline_contact_roster.cpp" \
         "$PORT_ROOT/native/offline_math_batch_native.cpp"
     PE_INFO=$(i686-w64-mingw32-objdump -p "$OUTPUT")
     echo "$PE_INFO" | grep -q 'file format pei-i386'

@@ -9,7 +9,7 @@ MODULE_NAME = 'offline_math_batch_native'
 _backend = None
 _attempted = sys.platform != 'win32'
 _calls = {'translation_fraction': 0, 'slide_translation': 0,
-          'rotation_fraction': 0}
+          'rotation_fraction': 0, 'contact_roster': 0}
 _fallbacks = 0
 _reported_failure = False
 
@@ -43,6 +43,8 @@ def call(method, *args):
     global _fallbacks
     backend = _load()
     if backend is None:
+        if method == 'contact_roster':
+            _fallbacks += 1
         return None
     try:
         result = getattr(backend, method)(*args)
@@ -64,3 +66,9 @@ def snapshot():
     result = dict(_calls)
     result.update(loaded=_backend is not None, fallbacks=_fallbacks)
     return result
+
+
+def contact_roster(tanks, owner_ids, dt, previous_ram_contacts):
+    """Synchronously compute frozen roster geometry; never call the engine."""
+    return call('contact_roster', tanks, owner_ids, dt,
+                list(previous_ram_contacts or ()))

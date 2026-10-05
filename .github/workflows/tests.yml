@@ -28,11 +28,14 @@ jobs:
               native/offline_navigation.cpp \
               native/native_visibility_core.cpp \
               native/offline_visibility.cpp \
+              native/offline_contact_roster.cpp \
               native/offline_math_batch_native.cpp \
               -o /tmp/offline_math_batch_native.so
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_math.py \
               /tmp/offline_math_batch_native.so /src/src/res/scripts/client
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_workers.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_contacts.py \
               /tmp/offline_math_batch_native.so /src/src/res/scripts/client
           '
   test:

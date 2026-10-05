@@ -1894,6 +1894,15 @@ simulation ordering and authoritative state remain with their existing owners.
 There is no serialized body packet, shared mutable body cache or background
 callback. Clear and zero-motion operations retain the Python fast return.
 
+The `contact_roster` method handles the entire frozen roster in one synchronous
+call: four ordered normal/contact passes, post-contact velocities, traverse
+torque, spatial candidates and first-impact ram geometry. Physics retains actor
+ID order; ram candidates retain the caller's owner and spatial-bucket order.
+The main thread still performs armor probes, admits damage episodes only after
+nonzero damage, and applies motion through the existing world gates. Human ram
+receipts keep their separate authoritative settlement path. A contact batch
+does not introduce a delayed physics step or invoke an engine callback.
+
 The embedded interpreter does not export its C API. The bridge binds the
 reviewed #1513 `Py_InitModule4`, `PyDict_GetItem`, `PyString_FromString`,
 `PyFloat_FromDouble`, `PyTuple_New` and `PyInt_FromLong` entry points after one load-time check
@@ -1903,8 +1912,8 @@ Borrowed object storage is consumed before allocating results; a new private
 tuple takes ownership of its two new float references. Unsupported existing
 representations use the Python operation locally.
 
-Host conformance covers physical outcomes, unchanged inputs, live-pose reuse
-boundaries and reference ownership. Ordinary floating-point rounding differences
+Host conformance covers physical outcomes, unchanged inputs, live-pose reuse,
+ordered armor/damage settlement and reference ownership. Ordinary floating-point rounding differences
 are permitted; bit identity across CRT implementations is not required. These
 checks and complete-caller timing do not establish Windows frame pacing or
 embedded-process lifetime safety; those require the installed #1513 test build.

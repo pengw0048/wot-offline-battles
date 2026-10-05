@@ -253,7 +253,9 @@ class TrafficCoordinator(object):
                               traffic_mode='head_on_blocked')
                 self._held[bot_id] = now
                 continue
-            lease['blocked_until'] = None
+            # One peer's clear departure does not prove that the other hull's
+            # swing is clear. Keep this pair's original deadline until its
+            # footprints separate; either call order must permit recovery.
             delta = (target - body['yaw'] + math.pi) % (2.0 * math.pi) - math.pi
             result.update(turn=max(-1.0, min(1.0, delta / 0.58)),
                           target_yaw=target, traffic_mode='head_on')

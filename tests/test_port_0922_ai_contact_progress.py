@@ -1,5 +1,6 @@
 """Intermittent physical contacts must not indefinitely disable recovery."""
 from pathlib import Path
+import math
 import sys
 import unittest
 
@@ -8,10 +9,31 @@ sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
 from gui.mods.offline_lan_0922.ai.adapter import BotAdapter
 from gui.mods.offline_lan_0922.ai.driver import LocalDriver
 from gui.mods.offline_lan_0922.ai.navigation import TerrainNavigator
+from gui.mods.offline_lan_0922.ai.traffic import TrafficCoordinator, YIELD_SECONDS
 from gui.mods.offline_lan_0922.bot_runtime import BotRuntime
 
 
 class ContactProgressTests(unittest.TestCase):
+    def test_clear_peer_cannot_renew_the_blocked_head_on_lease(self):
+        first = dict(id=1, team=1, alive=True, position=(0., 0., 0.), yaw=0.,
+                     velocity=(0., 0., 0.), half_width=1.5, half_length=3.5)
+        second = dict(first, id=2, position=(0., 0., 7.5), yaw=math.pi)
+        for reverse in (False, True):
+            coordinator = TrafficCoordinator()
+            actors = ((first, second, False), (second, first, True))
+            if reverse:
+                actors = tuple(reversed(actors))
+            for frame in range(151):
+                now = frame * .2
+                for own, peer, clear in actors:
+                    result = coordinator.adjust(own['id'], own,
+                        dict(throttle=1., turn=0., target_yaw=own['yaw'],
+                             recovery_mode='drive'), [peer], now,
+                        lambda yaw, clear=clear: clear)
+                    if own is first:
+                        self.assertEqual(result['throttle'],
+                                         0. if now < YIELD_SECONDS else 1.)
+
     def test_intermittent_contacts_allow_real_driver_and_navigator_recovery(self):
         navigator = TerrainNavigator(lambda *args: 0., cell_size=1.)
         adapter = BotAdapter.__new__(BotAdapter)
