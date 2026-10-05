@@ -2116,6 +2116,7 @@ class BotRuntime(object):
         # update() temporarily clears this flag only for physical catch-up
         # slices inside the same render callback.
         self._refresh_control_this_step = True
+        self._control_evaluation_time = None
         self._publish_control_this_step = True
         self._last_update_control_steps = 0
         self._last_update_max_control_step = 0.0
@@ -2144,6 +2145,7 @@ class BotRuntime(object):
         self.round_id = None
         self.states = {}
         self._accumulator = 0.0
+        self._control_refresh_accumulator = 0.0
         # This is the pose's simulation clock, not the wall clock observed
         # after native probes and JSON preparation have finished.  The server
         # maps it onto its own motion epoch so variable worker execution time
@@ -3289,6 +3291,7 @@ class BotRuntime(object):
             self.round_id = round_id
             self.states = {}
             self._accumulator = 0.0
+            self._control_refresh_accumulator = 0.0
             self._sample_time_us = 0
             self._publication_edge_signature = None
             self._manifest_sent = False
@@ -3450,6 +3453,9 @@ class BotRuntime(object):
             self._next_shot_lane_refresh = 0.0
             self._next_cover_refresh = 0.0
             self._next_publication = 0.0
+            # The new owner has no decision cache. Its first physical slice
+            # must refresh even when carried time or a burst makes it short.
+            self._control_refresh_accumulator = self._control_seconds
         if authority_handoff:
             # The takeover manifest is an explicit server-authority boundary.
             # Existing combat sync entries may still be based on an older
@@ -4576,6 +4582,12 @@ class BotRuntime(object):
             self._motion_probe_cache.pop(bot_id, None)
         self._server_orders = accepted
         self._order_revision = revision
+        if (changed_ids and self._fixed_control and
+                self._control_refresh_accumulator + 1.0e-9 <
+                self._control_seconds):
+            # An explicit new order invalidates cached commands. Rebuild on
+            # the next physical slice, retaining the normal fractional phase.
+            self._control_refresh_accumulator += self._control_seconds
         return True
 
     def _manifest_entry(self, state):
@@ -5092,6 +5104,9 @@ class BotRuntime(object):
             return None
 
     def _visibility_decision_due(self, state, now):
+        control_now = self._control_evaluation_time
+        if control_now is not None:
+            now = control_now
         server_order = self._server_orders.get(state['id'])
         cache_key = (('server', self._server_order_tokens.get(
                           state['id'], 0))
@@ -11741,13 +11756,28 @@ class BotRuntime(object):
             result = min(result, due)
         return result
 
+    def _bank_control_step(self, available):
+        """Keep a sub-control remainder unless an armed round is due in it."""
+        available = max(0.0, float(available))
+        if available <= 1.0e-12:
+            return 0.0
+        if available + 1.0e-9 < self._control_seconds:
+            if not any(burst.active and
+                       max(0.0, float(burst.time_left)) <= available + 1.0e-9
+                       for burst in self._burst_states.values()):
+                return 0.0
+        return self._bounded_burst_step(
+            min(available, MAX_CONTROL_ELAPSED_SECONDS))
+
     @timed('bot.update')
     def update(self, dt, now, players=None, neighbours=None):
-        """Advance Bot motion in real time with one control refresh per frame.
+        """Advance Bot motion in real time with bounded control refreshes.
 
-        Fixed-control workers consume every elapsed second in bounded physical
-        slices. The first slice may think and observe; later slices keep its
-        command until the next render callback. Physical corridor proofs may
+        Fixed-control workers bank elapsed time and consume bounded physical
+        slices, retaining a sub-control remainder for the next callback. The
+        first slice may think and observe when the control period is due;
+        later slices keep its command until the next control refresh.
+        Physical corridor proofs may
         still follow an ongoing turn, without re-entering the planner. Burst
         edges can shorten any slice, so accepted rounds and their frozen launch
         poses are never skipped when a callback is late.
@@ -11763,6 +11793,8 @@ class BotRuntime(object):
             return []
         elapsed_input = max(0.0, float(dt))
         self._accumulator += elapsed_input
+        if self._fixed_control:
+            self._control_refresh_accumulator += elapsed_input
         now = float(now)
         navigator_begin = getattr(self.navigator, 'begin_frame', None)
         navigator_end = getattr(self.navigator, 'end_frame', None)
@@ -11779,7 +11811,7 @@ class BotRuntime(object):
                 if (self._accumulator <= 0.0 or
                         now + 1e-9 < self._next_publication):
                     return []
-            elif self._accumulator + 1e-9 < self._control_seconds:
+            elif self._bank_control_step(self._accumulator) <= 0.0:
                 return []
             if self._combat_diagnostics is not None:
                 self._combat_diagnostics.begin_control()
@@ -11809,21 +11841,37 @@ class BotRuntime(object):
                             True))
                 else:
                     elapsed = self._accumulator
-                    self._accumulator = 0.0
-                    refresh_control = True
-                    while elapsed > 1e-12:
-                        frame_step = self._bounded_burst_step(
-                            min(elapsed, MAX_CONTROL_ELAPSED_SECONDS))
+                    # Burst-only callbacks consume physics time independently
+                    # of the normal decision phase. Coalesce overdue decisions
+                    # once, retaining their fractional phase for later frames.
+                    refresh_periods = int(
+                        (self._control_refresh_accumulator + 1.0e-9) /
+                        self._control_seconds)
+                    refresh_control = refresh_periods > 0
+                    if refresh_control:
+                        self._control_refresh_accumulator = max(
+                            0.0, self._control_refresh_accumulator -
+                            refresh_periods * self._control_seconds)
+                    while True:
+                        frame_step = self._bank_control_step(elapsed)
+                        if frame_step <= 0.0:
+                            break
                         elapsed = max(0.0, elapsed - frame_step)
+                        self._accumulator = elapsed
                         step_now = now - elapsed
+                        # The last consumed slice publishes even with a banked
+                        # tail. A burst can create/cancel more due edges inside
+                        # this slice, so publish each necessary short tail
+                        # rather than predicting its future clock state.
                         publish_step = bool(
-                            refresh_control or elapsed <= 1e-12)
+                            refresh_control or
+                            elapsed + 1.0e-9 < self._control_seconds)
                         self._last_update_control_steps += 1
                         self._last_update_max_control_step = max(
                             self._last_update_max_control_step, frame_step)
                         outgoing.extend(self._run_update_once(
                             frame_step, step_now, players, neighbours,
-                            refresh_control, publish_step))
+                            refresh_control, publish_step, now))
                         refresh_control = False
                 # Deliver once per render callback, after every bounded
                 # physical slice has contributed only its own contact time.
@@ -11870,19 +11918,24 @@ class BotRuntime(object):
         return scanned
 
     def _run_update_once(self, frame_step, now, players, neighbours,
-                         refresh_control, publish_step=True):
+                         refresh_control, publish_step=True, control_now=None):
         """Expose one per-callback control-refresh flag without changing seams."""
         previous = (
             self._refresh_control_this_step,
-            self._publish_control_this_step)
+            self._publish_control_this_step,
+            self._control_evaluation_time)
         self._refresh_control_this_step = bool(refresh_control)
         self._publish_control_this_step = bool(publish_step)
+        # Only decision deadline eligibility uses callback time. Physics,
+        # accepted round edges and all pose/probe clocks keep consumed time.
+        self._control_evaluation_time = control_now
         try:
             return self._update_once(
                 frame_step, now, players, neighbours)
         finally:
             (self._refresh_control_this_step,
-             self._publish_control_this_step) = previous
+             self._publish_control_this_step,
+             self._control_evaluation_time) = previous
 
     def _cover_job_current(self, job, now):
         unused_ready, bot_id, source, target, unused_route, unused_allies = job
@@ -12054,7 +12107,9 @@ class BotRuntime(object):
             decision_due = bool(
                 refresh_control and
                 (not decision_cache_valid or
-                 now >= decision_cache[1]))
+                 (self._control_evaluation_time
+                  if self._control_evaluation_time is not None else now) >=
+                 decision_cache[1]))
             if diagnostic is not None:
                 diagnostic.count(
                     'decision_refresh' if decision_due else

@@ -7409,11 +7409,15 @@ class BotRuntimeTests(unittest.TestCase):
                     int(round(step * 1000000.0))
                     for calls in callback_calls for step, unused in calls)
                 self.assertEqual({
-                    'accumulator_us': [0] * frame_count,
+                    # A 250ms callback banks its 50ms tail, then consumes
+                    # 300ms next callback. Total time and the 200ms cap hold.
+                    'accumulator_us': ([50000, 0] * (frame_count // 2)
+                                       if fps == 4 else [0] * frame_count),
                     'sample_time_us': wall_seconds * 1000000,
-                    'callback_elapsed_us': [
-                        int(round(frame_seconds * 1000000.0))
-                    ] * frame_count,
+                    'callback_elapsed_us': ([200000, 300000] * (frame_count // 2)
+                                            if fps == 4 else [
+                                                int(round(frame_seconds * 1000000.0))
+                                            ] * frame_count),
                     'refresh_counts': [1] * frame_count,
                     'refresh_ordered': True,
                     'step_bound_held': True,
@@ -7849,12 +7853,23 @@ class BotRuntimeTests(unittest.TestCase):
             'move_position': (100.0, 0.0, 100.0),
             'recovery_mode': 'drive', 'movement_intent': True,
         })
-        adapter = _FixedAdapter(command)
+        planning = [False]
+
+        class TrackedAdapter(_FixedAdapter):
+            def decide(self, *args, **kwargs):
+                planning[0] = True
+                try:
+                    return super(TrackedAdapter, self).decide(*args, **kwargs)
+                finally:
+                    planning[0] = False
+
+        adapter = TrackedAdapter(command)
         direction_calls = []
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),
             adapter_factory=lambda *unused, **kwargs: adapter,
-            direction_probe=lambda *unused: direction_calls.append(1) or {
+            direction_probe=lambda *unused: direction_calls.append(
+                'planner' if planning[0] else 'physics') or {
                 'clear': True, 'collision': False, 'slope': 0.0},
             ground_probe=lambda *unused: 0.0,
             physics_ground_probe=lambda *unused: 0.0,
@@ -7870,8 +7885,10 @@ class BotRuntimeTests(unittest.TestCase):
             lambda *unused, **unused_kwargs: True)
         try:
             samples = []
+            physical_slices = 0
             for frame in range(4):
                 runtime.update(0.25, (frame + 1) * 0.25)
+                physical_slices += runtime._last_update_control_steps
                 samples.append((
                     state['x'], state['z'], state['yaw'], state['speed'],
                     state['movement_dir']))
@@ -7886,7 +7903,12 @@ class BotRuntimeTests(unittest.TestCase):
             later[0] > earlier[0] and later[1] > earlier[1] and
             later[2] > earlier[2]
             for earlier, later in zip(samples, samples[1:])))
-        self.assertEqual(12, len(direction_calls))
+        # The two retained 50ms tails reduce eight roster slices to six;
+        # every consumed physical slice still makes its safety probe.
+        self.assertEqual(6, physical_slices)
+        self.assertEqual(4, direction_calls.count('planner'))
+        self.assertEqual(physical_slices, direction_calls.count('physics'))
+        self.assertEqual(10, len(direction_calls))
         self.assertEqual(1000000, runtime._sample_time_us)
         self.assertAlmostEqual(0.0, runtime._accumulator)
 
@@ -11788,11 +11810,13 @@ class BotRuntimeTests(unittest.TestCase):
                     step for calls in callback_calls
                     for step, unused in calls]
                 self.assertEqual({
-                    'accumulator_us': [0] * fps,
+                    'accumulator_us': ([50000, 0] * (fps // 2)
+                                       if fps == 4 else [0] * fps),
                     'sample_time_us': 1000000,
-                    'callback_elapsed_us': [
-                        int(round(frame_seconds * 1000000.0))
-                    ] * fps,
+                    'callback_elapsed_us': ([200000, 300000] * (fps // 2)
+                                            if fps == 4 else [
+                                                int(round(frame_seconds * 1000000.0))
+                                            ] * fps),
                     'refresh_counts': [1] * fps,
                     'refresh_ordered': True,
                     'step_bound_held': True,
