@@ -1884,6 +1884,31 @@ repeat installation and injected protection/cache failures. The native harness
 and package checks do not substitute for repeated battle-to-hangar acceptance
 on the exact Windows game client.
 
+### Direct native collision geometry
+
+`offline_math_batch_native.pyd` implements complete translation, sliding and
+rotation sweeps. Its three synchronous methods read the caller's existing
+dict/list/tuple objects under the GIL and return ordinary floats or tuples.
+The C++ geometry core owns only copied scalar values; BigWorld queries,
+simulation ordering and authoritative state remain with their existing owners.
+There is no serialized body packet, shared mutable body cache or background
+callback. Clear and zero-motion operations retain the Python fast return.
+
+The embedded interpreter does not export its C API. The bridge binds the
+reviewed #1513 `Py_InitModule4`, `PyDict_GetItem`, `PyString_FromString`,
+`PyFloat_FromDouble` and `PyTuple_New` entry points after one load-time check
+of the executable and required object layouts. Exact built-in containers and
+numeric objects can be read without invoking conversion or equality callbacks.
+Borrowed object storage is consumed before allocating results; a new private
+tuple takes ownership of its two new float references. Unsupported existing
+representations use the Python operation locally.
+
+Host conformance covers physical outcomes, unchanged inputs, live-pose reuse
+boundaries and reference ownership. Ordinary floating-point rounding differences
+are permitted; bit identity across CRT implementations is not required. These
+checks and complete-caller timing do not establish Windows frame pacing or
+embedded-process lifetime safety; those require the installed #1513 test build.
+
 ## First-chance exception trail
 
 #1513 installs its own `__try/__except` around the whole main loop at

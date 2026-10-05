@@ -23,6 +23,7 @@ spawn overlap is separated using inverse-mass weighting instead of becoming an
 """
 
 import math
+from gui.mods.offline_lan_0922 import native_math
 
 
 DEFAULT_SHAPE = (1.5, 3.5, -0.8, 2.0)
@@ -588,6 +589,11 @@ def rotation_fraction(position, yaw, candidate_yaw, shape, others,
     travel = abs(delta)*(radius+abs(pivot_offset)) + linear_travel
     if travel <= 1e-9:
         return 1.0
+    native = native_math.call('rotation_fraction', position, yaw,
+                              candidate_yaw, shape, others, pivot_offset,
+                              translation)
+    if native is not None:
+        return native
     samples = max(1, int(math.ceil(travel/(POSITION_SLOP*0.5))))
     fraction = 1.0
     for other in others:
@@ -962,6 +968,9 @@ def translation_fraction(body, movement, others):
     mx, mz = movement
     if abs(mx) + abs(mz) <= 1.0e-12:
         return 1.0
+    native = native_math.call('translation_fraction', body, movement, others)
+    if native is not None:
+        return native
     shape = _tank_shape(body)
     axes = _axes(body['yaw'])
     body_radius = math.hypot(*shape[:2])
@@ -1011,42 +1020,127 @@ def translation_fraction(body, movement, others):
     return fraction
 
 
-def slide_translation(body, movement, others, first_fraction=None):
-    """Retain tangential travel when another owned hull blocks the normal.
+def _slide_peers(body, others):
+    """Freeze vertical/shape data only for this synchronous translation."""
+    shape = _tank_shape(body)
+    radius = math.hypot(*shape[:2])
+    peers = []
+    for other in others:
+        if body['id'] == other['id']:
+            continue
+        peer_shape = _tank_shape(other)
+        if not vertical_overlap(
+                body.get('y'), shape, other.get('y'), peer_shape,
+                pitch_a=body.get('pitch', 0.0), roll_a=body.get('roll', 0.0),
+                pitch_b=other.get('pitch', 0.0), roll_b=other.get('roll', 0.0)):
+            continue
+        reach = radius + math.hypot(*peer_shape[:2])
+        peers.append([other['id'], other['x'], other['z'], reach,
+                      None, None, other['yaw'], peer_shape])
+    return peers
 
-    Replica positions stay solid until their owner moves them. Truncating
-    the entire vector at first contact also cancels the unconstrained tangent
-    and wedges oblique pushes. Project only the entering remainder, re-sweep
-    every projected segment, and leave momentum to the reciprocal solver.
-    The caller may reuse a first fraction computed for the same initial body,
-    movement and roster in this operation; later segments always sweep again.
+
+def _slide_projection(body, peer):
+    """Prepare fixed SAT geometry on the first nearby segment only."""
+    if peer[4] is None:
+        shape, peer_shape = _tank_shape(body), peer[7]
+        axes, peer_axes = _axes(body['yaw']), _axes(peer[6])
+        peer[4] = _obb_pair_projection(body['yaw'], shape, peer[6], peer_shape)
+        sweep = []
+        for nx, nz in axes + peer_axes:
+            # Keep the sweep's original four-term addition order.
+            axis_radius = sum(s[i]*abs(nx*a[i][0]+nz*a[i][1])
+                         for s, a in ((shape, axes), (peer_shape, peer_axes))
+                         for i in (0, 1)) - POSITION_SLOP
+            sweep.append((nx, nz, axis_radius))
+        peer[5] = tuple(sweep)
+    return peer[4], peer[5]
+
+
+def _slide_fraction(body, movement, peers):
+    mx, mz = movement
+    if abs(mx) + abs(mz) <= 1.0e-12:
+        return 1.0
+    fraction = 1.0
+    for peer in peers:
+        other_id, ox, oz, reach = peer[:4]
+        if (ox < body['x']+min(0.0, mx)-reach or
+                ox > body['x']+max(0.0, mx)+reach or
+                oz < body['z']+min(0.0, mz)-reach or
+                oz > body['z']+max(0.0, mz)+reach):
+            continue
+        projection, sweep = _slide_projection(body, peer)
+        dx, dz = body['x']-ox, body['z']-oz
+        contact = _obb_contact_projected(body['x'], body['z'], ox, oz, projection)
+        contact = _owner_oriented_contact(contact, dx, dz, body['id'], other_id)
+        if contact is not None and contact[2] >= POSITION_SLOP - 1.0e-9:
+            if mx*contact[0] + mz*contact[1] < -1.0e-9:
+                fraction = 0.0
+            continue
+        entry, leave = 0.0, 1.0
+        for nx, nz, axis_radius in sweep:
+            offset, travel = dx*nx + dz*nz, mx*nx + mz*nz
+            if abs(travel) <= 1.0e-12:
+                if abs(offset) >= axis_radius:
+                    entry = 2.0
+                    break
+                continue
+            first, last = sorted(((-axis_radius-offset)/travel,
+                                  (axis_radius-offset)/travel))
+            entry, leave = max(entry, first), min(leave, last)
+            if entry > leave:
+                break
+        if entry <= leave and leave >= 0.0:
+            fraction = min(fraction, max(0.0, entry))
+    return fraction
+
+
+def slide_translation(body, movement, others, first_fraction=None):
+    """Retain tangential travel and sweep every projected segment.
+
+    The caller may reuse the first fraction for this exact body, movement and
+    roster. Geometry prepared after a blocked segment belongs only to this
+    call; each segment still tests its current position in roster order.
     """
     current = dict(body)
     remaining = tuple(movement)
     total = [0.0, 0.0]
+    if (first_fraction is None or first_fraction < 1.0) and (
+            abs(remaining[0]) + abs(remaining[1]) > 1.0e-12):
+        native = native_math.call('slide_translation', body, remaining,
+                                  others, first_fraction)
+        if native is not None:
+            return native
+    peers = None
     for segment in range(4):
-        fraction = (first_fraction if segment == 0 and first_fraction is not None
-                    else translation_fraction(current, remaining, others))
+        if segment == 0:
+            fraction = (first_fraction if first_fraction is not None else
+                        translation_fraction(current, remaining, others))
+        else:
+            fraction = _slide_fraction(current, remaining, peers)
         accepted = (remaining[0]*fraction, remaining[1]*fraction)
         for i, key in enumerate(('x', 'z')):
             current[key] += accepted[i]
             total[i] += accepted[i]
         if fraction >= 1.0:
             break
+        if peers is None:
+            peers = _slide_peers(body, others)
         remaining = (remaining[0]*(1.0-fraction), remaining[1]*(1.0-fraction))
         changed = False
-        for other in others:
-            if current['id'] == other['id'] or not vertical_overlap(
-                    current.get('y'), _tank_shape(current), other.get('y'),
-                    _tank_shape(other), pitch_a=current.get('pitch', 0.0),
-                    roll_a=current.get('roll', 0.0), pitch_b=other.get('pitch', 0.0),
-                    roll_b=other.get('roll', 0.0)):
+        for peer in peers:
+            other_id, ox, oz, reach = peer[:4]
+            # A positive SAT overlap requires intersecting circumcircles.
+            # This bound is evaluated at the actual current pose, never a
+            # predicted maximum path; the exact SAT slop below is unchanged.
+            if (abs(current['x']-ox) > reach + 1.0e-7 or
+                    abs(current['z']-oz) > reach + 1.0e-7):
                 continue
-            contact = _obb_overlap(current['x'], current['z'], current['yaw'],
-                _tank_shape(current), other['x'], other['z'], other['yaw'], _tank_shape(other))
-            contact = _owner_oriented_contact(contact, current['x']-other['x'],
-                current['z']-other['z'], current['id'], other['id'])
-            if contact[2] < POSITION_SLOP-1.0e-7:
+            projection, unused_sweep = _slide_projection(body, peer)
+            contact = _obb_contact_projected(current['x'], current['z'], ox, oz, projection)
+            contact = _owner_oriented_contact(contact, current['x']-ox,
+                current['z']-oz, current['id'], other_id)
+            if contact is None or contact[2] < POSITION_SLOP-1.0e-7:
                 continue
             entering = remaining[0]*contact[0]+remaining[1]*contact[1]
             if entering < -1.0e-9:

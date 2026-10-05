@@ -34,20 +34,54 @@ class TranslationSweepTests(unittest.TestCase):
                 if second_obstacle:
                     others.append(_tank(3, 0., 7.2))
                 with mock.patch.object(contact, 'translation_fraction',
-                                       wraps=contact.translation_fraction) as sweep:
+                                       wraps=contact.translation_fraction) as sweep, \
+                        mock.patch.object(contact, '_slide_fraction',
+                                          wraps=contact._slide_fraction) as tangent:
                     expected = contact.slide_translation(moving, movement, others)
-                    self.assertEqual(2, sweep.call_count)
+                    self.assertEqual(1, sweep.call_count)
+                    self.assertEqual(1, tangent.call_count)
                     sweep.reset_mock()
+                    tangent.reset_mock()
                     fraction = contact.translation_fraction(moving, movement, others)
                     self.assertEqual(0., fraction)
                     sweep.reset_mock()
                     actual = contact.slide_translation(
                         moving, movement, others, first_fraction=fraction)
-                    self.assertEqual(1, sweep.call_count)
-                    self.assertEqual((0., 1.), sweep.call_args.args[1])
+                    self.assertEqual(0, sweep.call_count)
+                    self.assertEqual(1, tangent.call_count)
+                    self.assertEqual((0., 1.), tangent.call_args.args[1])
                 self.assertEqual(expected, actual)
                 self.assertEqual(0., actual[0])
                 self.assertAlmostEqual(.21 if second_obstacle else 1., actual[1])
+
+    def test_slide_geometry_expires_before_the_next_live_roster(self):
+        moving = _tank(1, 0., 0.)
+        side = _tank(2, 2.99, 0.)
+        ahead = _tank(3, 0., 7.2)
+        movement = (.2, 1.)
+        for ahead_z, ahead_y, expected in ((7.2, 0., .21),
+                                          (30., 0., 1.),
+                                          (7.2, 20., 1.),
+                                          (7.2, 0., .21)):
+            with self.subTest(ahead_z=ahead_z, ahead_y=ahead_y):
+                ahead.update(z=ahead_z, y=ahead_y)
+                accepted = contact.slide_translation(
+                    moving, movement, [side, ahead])
+                self.assertEqual(0., accepted[0])
+                self.assertAlmostEqual(expected, accepted[1])
+
+    def test_slide_far_peers_do_not_hide_a_later_tangent_blocker(self):
+        moving = _tank(1, 0., 0.)
+        side = _tank(2, 3., 0.)
+        ahead = _tank(3, 0., 12.)
+        movement = (8., 8.)
+        far = [_tank(i, 100. + i, -100.) for i in range(4, 31)]
+        for others in ([side] + far + [ahead], [ahead] + far + [side]):
+            fraction = contact.translation_fraction(moving, movement, others)
+            accepted = contact.slide_translation(
+                moving, movement, others, first_fraction=fraction)
+            self.assertAlmostEqual(.01, accepted[0])
+            self.assertAlmostEqual(5.01, accepted[1])
 
     def test_visible_drive_and_residual_push_stop_at_the_actual_remote_hull(self):
         import test_port_0922_battle_runtime as t

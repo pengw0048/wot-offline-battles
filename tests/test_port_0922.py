@@ -460,6 +460,7 @@ class PortSourceTests(unittest.TestCase):
             package = root / 'mod.wotmod'
             checksum = root / 'mod.wotmod.sha256'
             native_bridge = root / 'offline_instance_guard_native.pyd'
+            native_math = root / 'offline_math_batch_native.pyd'
             worker_starter = root / 'offline_worker_starter.exe'
             server_executable = root / 'WoT-0.9.22-LAN-Server.exe'
             graphs = root / 'navgraphs'
@@ -470,6 +471,7 @@ class PortSourceTests(unittest.TestCase):
             package.write_bytes(b'mod')
             checksum.write_text('checksum\n', encoding='ascii')
             native_bridge.write_bytes(b'native bridge')
+            native_math.write_bytes(b'native geometry')
             worker_starter.write_bytes(b'worker starter')
             server_executable.write_bytes(b'LAN server')
             overlay, archive = packager._write_client_overlay(
@@ -478,6 +480,7 @@ class PortSourceTests(unittest.TestCase):
                 str(PORT_ROOT / 'foliage'),
                 str(PORT_ROOT / 'destructibles'),
                 native_bridge_source=str(native_bridge),
+                native_math_source=str(native_math),
                 worker_starter_source=str(worker_starter),
                 server_executable_source=str(server_executable))
 
@@ -506,6 +509,9 @@ class PortSourceTests(unittest.TestCase):
                 Path(overlay) / 'mods' / '0.9.22.0.1' /
                 packager.NATIVE_BRIDGE_FILENAME)
             self.assertEqual(b'native bridge', packaged_bridge.read_bytes())
+            self.assertEqual(b'native geometry', (
+                Path(overlay) / 'mods' / '0.9.22.0.1' /
+                packager.NATIVE_MATH_FILENAME).read_bytes())
             packed_xml = _load_tool('packed_xml')
             for filename, preferences_leaf in packager.PREFERENCES_CONFIGS:
                 packaged_config = (
