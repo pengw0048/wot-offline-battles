@@ -11,6 +11,8 @@ import math
 import random
 import sys
 
+from .worker_diagnostics import observed
+
 
 CONFIG_FIELDS = (
     'fully_aimed_dispersion', 'after_shot', 'after_shot_in_burst',
@@ -406,6 +408,7 @@ class _Actor(object):
         self.sync(row)
         return result
 
+    @observed('frontier.weapon_mirror')
     def sync(self, row):
         self.gun._sync(row[0])
         self.ammo._sync(row[1])

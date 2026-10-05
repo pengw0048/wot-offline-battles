@@ -9,7 +9,8 @@ from collections import deque
 
 from gui.mods.offline_lan_0922.ai.navigation import TerrainNavigator
 from gui.mods.offline_lan_0922.native_navigation import NativeSearch
-from gui.mods.offline_lan_0922.worker_diagnostics import count as combat_count
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    count as combat_count, observed)
 
 
 BOT_POINT_FIELDS = (
@@ -630,6 +631,7 @@ class NativeNavigationCore(object):
         self._sync_receipts()
         return result[0]
 
+    @observed('frontier.navigation_receipts')
     def _sync_receipts(self):
         if not self._jobs:
             return

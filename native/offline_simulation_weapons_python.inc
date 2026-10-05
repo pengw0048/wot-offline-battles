@@ -131,122 +131,164 @@ PyObject *launch_result(const w::LaunchRecord &v) {
 }
 
 PyObject *WOT_CDECL sim_weapon_install(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_install);
     try {
         require_sequence(args,7,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));
         const auto key=weapon_bridge::key(p[1],p[2]);const auto config=weapon_bridge::config(p[3]);const auto ammo=weapon_bridge::ammo(p[4]);
-        ctx->weapons.install(key,config,ammo,weapon_bridge::wide(p[5]),finite_number(p[6]));return weapon_bridge::snapshot(ctx->weapons.at(key));
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+        profile.run(&weapon_bridge::w::Store::install,&ctx->weapons,key,config,ammo,weapon_bridge::wide(p[5]),finite_number(p[6]));
+        return weapon_bridge::snapshot(ctx->weapons.at(key));
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_snapshot(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_snapshot);
     try {
         require_sequence(args,3,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));
-        return weapon_bridge::snapshot(ctx->weapons.at(weapon_bridge::key(p[1],p[2])));
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+        const auto key=weapon_bridge::key(p[1],p[2]);
+            profile.output();
+        return weapon_bridge::snapshot(ctx->weapons.at(key));
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_remove(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_remove);
     try {
         require_sequence(args,3,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));
-        return int_new(ctx->weapons.remove(weapon_bridge::key(p[1],p[2])));
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+        return int_new(profile.run(&weapon_bridge::w::Store::remove,&ctx->weapons,weapon_bridge::key(p[1],p[2])));
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_command(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_command);
     try {
         require_sequence(args,5,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));
         const auto key=weapon_bridge::key(p[1],p[2]);const int op=weapon_bridge::integer(p[3]);
+        profile.opcode(op);
         require_sequence(p[4],0);auto **v=items(p[4]);auto &state=ctx->weapons.at(key);auto &g=state.gun;
         const auto argc=size(p[4]);double answer=1.;PyObject *special=0;
         const auto arity=[&](int count){if(argc!=count) throw Unsupported();};
         const auto n=[&](int i){return finite_number(v[i]);};const auto z=[&](int i){return weapon_bridge::integer(v[i]);};
         switch(op) {
-        case 1:arity(1);g.tick(n(0));break;
-        case 2:arity(6);g.tick_dispersion(n(0),n(1),n(2),n(3),n(4),n(5));break;
-        case 3:arity(2);g.bloom(n(0),z(1)!=0);break;
-        case 4:arity(1);answer=g.rescale(n(0));break;
-        case 5:arity(2);answer=g.complete(n(0),z(1));break;
-        case 6:arity(0);g.require_full();break;
-        case 7:arity(2);answer=g.begin(z(0),n(1));break;
-        case 8:arity(1);answer=g.consume(z(0)!=0);break;
-        case 9:arity(0);answer=g.cancel();break;
-        case 10:arity(9);g.restore(weapon_bridge::wide(v[0]),n(1),z(2)!=0,n(3),n(4),n(5),z(6)!=0,z(7),z(8));state.fire_seq=std::max<std::int64_t>(0,weapon_bridge::wide(v[0]));break;
-        case 11:arity(1);answer=g.adopt(weapon_bridge::config(v[0]));break;
-        case 12:arity(3);answer=state.ammo.stage(z(0),z(1)!=0,z(2)!=0);break;
-        case 13:arity(1);answer=state.ammo.consume(z(0)!=0);break;
-        case 14:{arity(1);auto ammo=weapon_bridge::ammo(v[0]);ammo.validate(g.config.shell_count);state.ammo=std::move(ammo);break;}
-        case 15:arity(4);answer=state.burst.start(weapon_bridge::wide(v[0]),z(1),n(2),z(3));break;
-        case 16:arity(1);special=weapon_bridge::edges(state.burst.advance(n(0)));break;
-        case 17:arity(1);answer=state.burst.cancel(z(0));break;
-        case 18:{arity(2);auto burst=weapon_bridge::burst(v[0]);burst.validate(weapon_bridge::wide(v[1]));state.burst=burst;break;}
-        case 19:arity(3);ctx->weapons.prepare(key,n(0),n(1),z(2));break;
-        case 20:arity(3);answer=ctx->weapons.begin(key,z(0),n(1),n(2));break;
-        case 21:arity(0);answer=ctx->weapons.cancel(key);break;
-        case 22:arity(1);if(z(0)<0 || z(0)>g.config.clip_size) throw Unsupported();g.burst_remaining=z(0);break;
-        case 23:{arity(4);state.aim.turret_yaw=n(0);state.aim.gun_pitch=n(1);state.aim.desired_gun_pitch=n(2);state.aim.aligned=z(3)!=0;break;}
-        case 24:arity(1);state.aim_config=weapon_bridge::aim_config(v[0]);state.has_aim=true;break;
-        case 25:{arity(7);auto aim=weapon_bridge::aim_input(v[0]);special=weapon_bridge::edges(ctx->weapons.after_motion(key,aim,n(1),n(2),n(3),n(4),n(5),z(6)!=0));break;}
-        case 26:{arity(1);const auto limits=weapon_bridge::w::pitch_limits(n(0),state.aim_config);special=world_numbers(limits.data(),2);break;}
+        case 1:arity(1);
+            profile.run(&weapon_bridge::w::GunState::tick,&g,n(0));break;
+        case 2:arity(6);
+            profile.run(&weapon_bridge::w::GunState::tick_dispersion,&g,n(0),n(1),n(2),n(3),n(4),n(5));break;
+        case 3:arity(2);
+            profile.run(&weapon_bridge::w::GunState::bloom,&g,n(0),z(1)!=0);break;
+        case 4:arity(1);answer=profile.run(&weapon_bridge::w::GunState::rescale,&g,n(0));break;
+        case 5:arity(2);answer=profile.run(&weapon_bridge::w::GunState::complete,&g,n(0),z(1));break;
+        case 6:arity(0);
+            profile.run(&weapon_bridge::w::GunState::require_full,&g);break;
+        case 7:arity(2);answer=profile.run(&weapon_bridge::w::GunState::begin,&g,z(0),n(1));break;
+        case 8:arity(1);answer=profile.run(&weapon_bridge::w::GunState::consume,&g,z(0)!=0);break;
+        case 9:arity(0);answer=profile.run(&weapon_bridge::w::GunState::cancel,&g);break;
+        case 10:{arity(9);
+            profile.run(&weapon_bridge::w::GunState::restore,&g,weapon_bridge::wide(v[0]),n(1),z(2)!=0,n(3),n(4),n(5),z(6)!=0,z(7),z(8));
+            profile.input();
+            const auto fire_seq=weapon_bridge::wide(v[0]);
+            profile.compute();state.fire_seq=std::max<std::int64_t>(0,fire_seq);break;}
+        case 11:arity(1);answer=profile.run(&weapon_bridge::w::GunState::adopt,&g,weapon_bridge::config(v[0]));break;
+        case 12:arity(3);answer=profile.run(&weapon_bridge::w::AmmoState::stage,&state.ammo,z(0),z(1)!=0,z(2)!=0);break;
+        case 13:arity(1);answer=profile.run(&weapon_bridge::w::AmmoState::consume,&state.ammo,z(0)!=0);break;
+        case 14:{arity(1);auto ammo=weapon_bridge::ammo(v[0]);
+            profile.compute();ammo.validate(g.config.shell_count);state.ammo=std::move(ammo);break;}
+        case 15:arity(4);answer=profile.run(&weapon_bridge::w::BurstState::start,&state.burst,weapon_bridge::wide(v[0]),z(1),n(2),z(3));break;
+        case 16:arity(1);special=weapon_bridge::edges(profile.run(&weapon_bridge::w::BurstState::advance,&state.burst,n(0)));break;
+        case 17:arity(1);answer=profile.run(&weapon_bridge::w::BurstState::cancel,&state.burst,z(0));break;
+        case 18:{arity(2);auto burst=weapon_bridge::burst(v[0]);
+            const auto fire_seq=weapon_bridge::wide(v[1]);
+            profile.compute();burst.validate(fire_seq);state.burst=burst;break;}
+        case 19:arity(3);
+            profile.run(&weapon_bridge::w::Store::prepare,&ctx->weapons,key,n(0),n(1),z(2));break;
+        case 20:arity(3);answer=profile.run(&weapon_bridge::w::Store::begin,&ctx->weapons,key,z(0),n(1),n(2));break;
+        case 21:arity(0);answer=profile.run(&weapon_bridge::w::Store::cancel,&ctx->weapons,key);break;
+        case 22:{arity(1);if(z(0)<0 || z(0)>g.config.clip_size) throw Unsupported();
+            const int remaining=z(0);
+            profile.compute();g.burst_remaining=remaining;break;}
+        case 23:{arity(4);const double yaw=n(0);
+            profile.compute();state.aim.turret_yaw=yaw;
+            profile.input();
+            const double pitch=n(1);
+            profile.compute();state.aim.gun_pitch=pitch;
+            profile.input();
+            const double desired=n(2);
+            profile.compute();state.aim.desired_gun_pitch=desired;
+            profile.input();
+            const bool aligned=z(3)!=0;
+            profile.compute();state.aim.aligned=aligned;break;}
+        case 24:{arity(1);auto config=weapon_bridge::aim_config(v[0]);
+            profile.compute();state.aim_config=std::move(config);state.has_aim=true;break;}
+        case 25:{arity(7);auto aim=weapon_bridge::aim_input(v[0]);special=weapon_bridge::edges(profile.run(&weapon_bridge::w::Store::after_motion,&ctx->weapons,key,aim,n(1),n(2),n(3),n(4),n(5),z(6)!=0));break;}
+        case 26:{arity(1);const auto limits=profile.run(&weapon_bridge::w::pitch_limits,n(0),state.aim_config);special=world_numbers(limits.data(),2);break;}
         case 27:{arity(11);auto copy=g;copy.clip=z(0);copy.elapsed=n(1);copy.reload_duration=n(2);copy.intra=z(3)!=0;
             copy.reload_factor=n(4);copy.burst_remaining=z(5);copy.current_dispersion_factor=n(6);copy.aiming_start_factor=n(7);
             copy.aiming_elapsed=n(8);copy.dispersion=n(9);copy.motion_dispersion_squared=n(10);
+            profile.compute();
             if(copy.clip<0 || copy.clip>g.config.clip_size || copy.burst_remaining<0 || copy.burst_remaining>copy.clip ||
                 copy.elapsed<0. || copy.reload_duration<0. || copy.reload_factor<0. || copy.current_dispersion_factor<=0. ||
                 copy.aiming_start_factor<=0. || copy.aiming_elapsed<0. || copy.dispersion<=0. || copy.motion_dispersion_squared<0.) throw Unsupported();
             g=copy;break;}
         default:throw Unsupported();
         }
+        profile.output();
         OwnedTuple result(2);result.set(0,special?special:float_new(answer));result.set(1,weapon_bridge::snapshot(state));return result.release();
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_aim(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_aim);
     try {
         require_sequence(args,4,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));
         auto &state=ctx->weapons.at(weapon_bridge::key(p[1],p[2]));if(!state.has_aim) throw Unsupported();
-        weapon_bridge::w::advance_aim(state.aim,state.aim_config,weapon_bridge::aim_input(p[3]));return weapon_bridge::snapshot(state);
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+        profile.run(&weapon_bridge::w::advance_aim,state.aim,state.aim_config,weapon_bridge::aim_input(p[3]));
+        return weapon_bridge::snapshot(state);
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_ballistic(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_ballistic);
     try {
         require_sequence(args,3,true);auto **p=items(args);simulation_context(weapon_bridge::wide(p[0]));
-        const int op=weapon_bridge::integer(p[1]);require_sequence(p[2],0);auto **v=items(p[2]);
+        const int op=weapon_bridge::integer(p[1]);
+            profile.opcode(op);require_sequence(p[2],0);auto **v=items(p[2]);
         if(op==0) {
             require_sequence(p[2],9,true);offline_simulation::Point start,target,velocity;
             world_array(v[0],start.data(),3);world_array(v[1],target.data(),3);world_array(v[2],velocity.data(),3);
-            const auto solution=weapon_bridge::w::ballistic_intercept(start,target,velocity,finite_number(v[3]),finite_number(v[4]),
+            const auto solution=profile.run(&weapon_bridge::w::ballistic_intercept,start,target,velocity,finite_number(v[3]),finite_number(v[4]),
                 finite_number(v[5]),finite_number(v[6]),weapon_bridge::integer(v[7])!=0,finite_number(v[8]));
             if(!solution.valid) {OwnedTuple empty(0);return empty.release();}
             OwnedTuple row(3);row.set(0,world_numbers(solution.aim.data(),3));row.set(1,float_new(solution.pitch));row.set(2,float_new(solution.time));return row.release();
         }
         if(op==1) {
             require_sequence(p[2],4,true);offline_simulation::Point direction;world_array(v[0],direction.data(),3);
-            const auto result=weapon_bridge::w::scatter(direction,finite_number(v[1]),finite_number(v[2]),weapon_bridge::integer(v[3])!=0);
+            const auto result=profile.run(&weapon_bridge::w::scatter,direction,finite_number(v[1]),finite_number(v[2]),weapon_bridge::integer(v[3])!=0);
             return world_numbers(result.data(),2);
         }
         if(op==2) {
             require_sequence(p[2],6,true);offline_simulation::Point start;world_array(v[0],start.data(),3);
-            const auto result=weapon_bridge::w::ballistic_position(start,finite_number(v[1]),finite_number(v[2]),finite_number(v[3]),finite_number(v[4]),finite_number(v[5]));
+            const auto result=profile.run(&weapon_bridge::w::ballistic_position,start,finite_number(v[1]),finite_number(v[2]),finite_number(v[3]),finite_number(v[4]),finite_number(v[5]));
             return world_numbers(result.data(),3);
         }
         throw Unsupported();
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_commit(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_commit);
     try {
         require_sequence(args,6,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));const auto key=weapon_bridge::key(p[1],p[2]);
         const auto launch=weapon_bridge::launch(p[3],key);const double factor=finite_number(p[4]);const bool debit=weapon_bridge::integer(p[5])!=0;
-        const bool result=debit?ctx->weapons.commit(key,launch,factor):ctx->weapons.enqueue(launch);
+        const bool result=debit?profile.run(&weapon_bridge::w::Store::commit,&ctx->weapons,key,launch,factor):profile.run(&weapon_bridge::w::Store::enqueue,&ctx->weapons,launch);
         OwnedTuple row(2);row.set(0,int_new(result));row.set(1,weapon_bridge::snapshot(ctx->weapons.at(key)));return row.release();
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_pending(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_pending);
     try {
         require_sequence(args,1,true);auto ctx=simulation_context(weapon_bridge::wide(items(args)[0]));
-        const auto &rows=ctx->weapons.pending();OwnedTuple result(rows.size());for(size_t i=0;i<rows.size();++i) result.set(i,weapon_bridge::launch_result(rows[i]));return result.release();
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+        profile.output();const auto &rows=ctx->weapons.pending();OwnedTuple result(rows.size());for(size_t i=0;i<rows.size();++i) result.set(i,weapon_bridge::launch_result(rows[i]));return result.release();
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL sim_weapon_ack(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_weapon_ack);
     try {
         require_sequence(args,4,true);auto **p=items(args);auto ctx=simulation_context(weapon_bridge::wide(p[0]));
-        return int_new(ctx->weapons.ack(weapon_bridge::key(p[1],p[2]),weapon_bridge::wide(p[3])));
-    }catch(const PythonAllocationFailed &){return 0;}catch(...){return fallback();}
+        return int_new(profile.run(&weapon_bridge::w::Store::ack,&ctx->weapons,weapon_bridge::key(p[1],p[2]),weapon_bridge::wide(p[3])));
+    }catch(const PythonAllocationFailed &){ profile.fail();return 0;}catch(...){ profile.fail();return fallback();}
 }
 
 #define WOT_SIM_WEAPON_METHODS \

@@ -32,6 +32,7 @@ struct PyMethodDef {
 #include "world_stage.h"
 #include "navigation_query_stage.h"
 #include "offline_simulation.h"
+#include "offline_simulation_diagnostics.h"
 #ifdef WOT_HOST_PYTHON
 #include <time.h>
 #endif
@@ -60,6 +61,19 @@ const void *dict_type = 0, *tuple_type = 0, *list_type = 0;
 const void *float_type = 0, *int_type = 0, *bool_type = 0;
 void *string_lookup = 0;
 PyObject *none_object = 0;
+
+using NativeCallback = offline_simulation::diagnostics::CallbackCode;
+using NativePhase = offline_simulation::diagnostics::Phase;
+using NativeProfilePhase = offline_simulation::diagnostics::PhaseScope;
+
+PyObject *profiled_object_call(NativeCallback family, const char *name,
+                              int opcode, std::uint64_t rows,
+                              PyObject *callable, PyObject *args) {
+    offline_simulation::diagnostics::Callback scope(family, name, opcode, rows);
+    PyObject *result = object_call(callable, args, 0);
+    if (!result) scope.fail();
+    return result;
+}
 
 enum Field { ID, X, Y, Z, YAW, PITCH, ROLL, SHAPE, DESCRIPTOR, DIMS, POSITION,
     MASS, VX, VY, VZ, PUSH_YAW, GRIP, TRAVERSE_SPEED, TRAVERSE_TORQUE, TEAM,
@@ -252,6 +266,7 @@ PyObject *fraction_result(double value) {
 }
 
 PyObject *WOT_CDECL translate(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(translate);
     try {
         require_sequence(args, 3, true);
         PyObject **values = items(args);
@@ -259,11 +274,12 @@ PyObject *WOT_CDECL translate(PyObject *, PyObject *args) {
         if (std::abs(move.x) + std::abs(move.z) <= 1.e-12) return float_new(1.);
         const Body owner = body_values(values[0], false);
         const auto peers = peer_values(values[2], false);
-        return fraction_result(offline_math::translation(owner, move, peers));
-    } catch (...) { return fallback(); }
+        return fraction_result(profile.run(offline_math::translation, owner, move, peers));
+    } catch (...) { profile.fail(); return fallback(); }
 }
 
 PyObject *WOT_CDECL slide(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(slide);
     try {
         require_sequence(args, 3);
         if (size(args) > 4) return fallback();
@@ -273,11 +289,12 @@ PyObject *WOT_CDECL slide(PyObject *, PyObject *args) {
         const double first = has_first ? number(values[3]) : 0.;
         const Body owner = body_values(values[0], false);
         const auto peers = peer_values(values[2], false);
-        return pair_result(offline_math::slide(owner, move, peers, has_first, first));
-    } catch (...) { return fallback(); }
+        return pair_result(profile.run(offline_math::slide, owner, move, peers, has_first, first));
+    } catch (...) { profile.fail(); return fallback(); }
 }
 
 PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(rotate);
     try {
         require_sequence(args, 5);
         if (size(args) > 7) return fallback();
@@ -290,8 +307,8 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
         const double pivot = size(args) >= 6 ? number(values[5]) : 0.;
         const Vec move = size(args) == 7 ? movement(values[6]) : Vec{0., 0.};
         const auto peers = peer_values(values[4], true);
-        return fraction_result(offline_math::rotation(owner, candidate, pivot, move, peers));
-    } catch (...) { return fallback(); }
+        return fraction_result(profile.run(offline_math::rotation, owner, candidate, pivot, move, peers));
+    } catch (...) { profile.fail(); return fallback(); }
 }
 
 #include "offline_navigation_python.inc"

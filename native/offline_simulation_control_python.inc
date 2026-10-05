@@ -44,6 +44,7 @@ std::vector<ActorKey> keys(PyObject *value) {
 SightProbe sight(const std::shared_ptr<SimulationContext> &context,
                  PyObject *dispatcher) {
   return [context, dispatcher](const SightRequest &request) {
+    NativeProfilePhase bridge(NativePhase::Pack);
     if (context->closed)
       throw Unsupported();
     OwnedTuple args(6);
@@ -58,7 +59,8 @@ SightProbe sight(const std::shared_ptr<SimulationContext> &context,
     args.set(4, world_numbers(values, 9));
     args.set(5, int_new(0));
     WorldObject arguments(args.release());
-    WorldObject output(object_call(dispatcher, arguments.get(), 0));
+    WorldObject output(profiled_object_call(NativeCallback::ControlSight, "control.sight", 0, 1, dispatcher, arguments.get()));
+    bridge.input();
     if (context->closed)
       throw Unsupported();
     require_sequence(output.get(), 5, true);
@@ -131,6 +133,7 @@ PyObject *command(const DriveCommand &value) {
 }
 bool probe(const std::shared_ptr<SimulationContext> &context,
            PyObject *dispatcher, int opcode, double yaw, double distance) {
+  NativeProfilePhase bridge(NativePhase::Pack);
   if (context->closed)
     throw Unsupported();
   OwnedTuple args(3);
@@ -138,7 +141,8 @@ bool probe(const std::shared_ptr<SimulationContext> &context,
   args.set(1, float_new(yaw));
   args.set(2, float_new(distance));
   WorldObject arguments(args.release());
-  WorldObject result(object_call(dispatcher, arguments.get(), 0));
+  WorldObject result(profiled_object_call(NativeCallback::ControlDriver, "control.driver", opcode, 1, dispatcher, arguments.get()));
+  bridge.input();
   if (context->closed)
     throw Unsupported();
   return index_value(result.get()) != 0;
@@ -230,13 +234,14 @@ DriverState state(PyObject *value) {
 }
 } // namespace sim_control_bridge
 #define CONTROL_CATCH                                                          \
-  catch (const PythonAllocationFailed &) {                                     \
+  catch (const PythonAllocationFailed &) { profile.fail();                     \
     return 0;                                                                  \
   }                                                                            \
-  catch (...) {                                                                \
+  catch (...) { profile.fail();                                                \
     return fallback();                                                         \
   }
 PyObject *WOT_CDECL sim_control_configure(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_configure);
   try {
     require_sequence(args, 2, true);
     auto context = simulation_context(identity(items(args)[0]));
@@ -272,12 +277,13 @@ PyObject *WOT_CDECL sim_control_configure(PyObject *, PyObject *args) {
         throw Unsupported();
       result.push_back(c);
     }
-    context->control.configure(result);
+    profile.run(&offline_simulation::control::Store::configure, &context->control, result);
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_update(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_update);
   try {
     require_sequence(args, 2, true);
     auto context = simulation_context(identity(items(args)[0]));
@@ -302,12 +308,13 @@ PyObject *WOT_CDECL sim_control_update(PyObject *, PyObject *args) {
         s.selected = sim_control_bridge::key(v[4]);
       result.push_back(s);
     }
-    context->control.update(result);
+    profile.run(&offline_simulation::control::Store::update, &context->control, result);
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_begin(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_begin);
   try {
     require_sequence(args, 7, true);
     auto v = items(args);
@@ -318,7 +325,7 @@ PyObject *WOT_CDECL sim_control_begin(PyObject *, PyObject *args) {
     offline_simulation::TickToken token{
         context->round, context->generation, identity(v[1]),
         static_cast<std::int64_t>(time * 1000000.)};
-    context->control.begin(token, sim_control_bridge::keys(v[3]),
+    profile.run(&offline_simulation::control::Store::begin, &context->control, token, sim_control_bridge::keys(v[3]),
                            index_value(v[4]), index_value(v[5]) != 0,
                            index_value(v[6]) != 0, time);
     return int_new(1);
@@ -326,12 +333,13 @@ PyObject *WOT_CDECL sim_control_begin(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_contacts(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_contacts);
   try {
     require_sequence(args, 3, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
     auto rows =
-        context->control.contacts(sim_control_bridge::key(v[1]),
+        profile.run(&offline_simulation::control::Store::contacts, &context->control, sim_control_bridge::key(v[1]),
                                   sim_control_bridge::sight(context, v[2]));
     OwnedTuple result(rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -350,20 +358,22 @@ PyObject *WOT_CDECL sim_control_contacts(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_humans(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_humans);
   try {
     require_sequence(args, 2, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
-    context->control.observe_humans(sim_control_bridge::sight(context, v[1]));
+    profile.run(&offline_simulation::control::Store::observe_humans, &context->control, sim_control_bridge::sight(context, v[1]));
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_observations(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_observations);
   try {
     require_sequence(args, 1, true);
     auto context = simulation_context(identity(items(args)[0]));
-    auto rows = context->control.take_observations();
+    auto rows = profile.run(&offline_simulation::control::Store::take_observations, &context->control);
     OwnedTuple result(rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
       const auto &o = rows[i];
@@ -380,10 +390,11 @@ PyObject *WOT_CDECL sim_control_observations(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_team_contacts(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_team_contacts);
   try {
     require_sequence(args, 1, true);
     auto context = simulation_context(identity(items(args)[0]));
-    auto rows = context->control.team_contacts();
+    auto rows = profile.run(&offline_simulation::control::Store::team_contacts, &context->control);
     OwnedTuple result(rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
       const auto &o = rows[i];
@@ -399,23 +410,28 @@ PyObject *WOT_CDECL sim_control_team_contacts(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_finish(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_finish);
   try {
     require_sequence(args, 1, true);
-    simulation_context(identity(items(args)[0]))->control.finish();
+    auto context = simulation_context(identity(items(args)[0]));
+    profile.run(&offline_simulation::control::Store::finish, &context->control);
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_forget(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_forget);
   try {
     require_sequence(args, 2, true);
-    simulation_context(identity(items(args)[0]))
-        ->control.forget(sim_control_bridge::key(items(args)[1]));
+    auto context = simulation_context(identity(items(args)[0]));
+    profile.run(&offline_simulation::control::Store::forget, &context->control,
+                sim_control_bridge::key(items(args)[1]));
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_drive(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_drive);
   try {
     require_sequence(args, 4, true);
     auto v = items(args);
@@ -448,7 +464,7 @@ PyObject *WOT_CDECL sim_control_drive(PyObject *, PyObject *args) {
     auto pose = [&](double yaw) {
       return sim_control_bridge::probe(context, v[3], 1, yaw, -1.);
     };
-    auto command = context->control.drive(in, peers, clear, pose);
+    auto command = profile.run(&offline_simulation::control::Store::drive, &context->control, in, peers, clear, pose);
     OwnedTuple output(2);
     output.set(0, sim_control_bridge::command(command));
     output.set(1, sim_control_bridge::state(
@@ -458,22 +474,24 @@ PyObject *WOT_CDECL sim_control_drive(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_driver_event(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_driver_event);
   try {
     require_sequence(args, 5, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
     auto id = identity(v[1]);
     int event = index_value(v[2]);
+    profile.opcode(event);
     double value = finite_number(v[3]), extra = finite_number(v[4]);
     if (event == 0)
-      context->control.remember_failure(id, value, extra);
+      profile.run(&offline_simulation::control::Store::remember_failure, &context->control, id, value, extra);
     else if (event == 1)
-      context->control.wait_for_traffic(id, value);
+      profile.run(&offline_simulation::control::Store::wait_for_traffic, &context->control, id, value);
     else if (event == 2) {
-      context->control.forget_driver(id);
+      profile.run(&offline_simulation::control::Store::forget_driver, &context->control, id);
       return int_new(1);
     } else if (event == 3) {
-      context->control.forget_traffic(id);
+      profile.run(&offline_simulation::control::Store::forget_traffic, &context->control, id);
       return int_new(1);
     } else
       throw Unsupported();
@@ -485,18 +503,20 @@ PyObject *WOT_CDECL sim_control_driver_event(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_driver_restore(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_driver_restore);
   try {
     require_sequence(args, 3, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
     auto state = sim_control_bridge::state(v[2]);
-    context->control.driver(identity(v[1]), state.slot, state.last_position) =
-        state;
+    const auto id = identity(v[1]);
+    profile.run([&] { context->control.driver(id, state.slot, state.last_position) = state; });
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_traffic(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_traffic);
   try {
     require_sequence(args, 7, true);
     auto v = items(args);
@@ -509,12 +529,13 @@ PyObject *WOT_CDECL sim_control_traffic(PyObject *, PyObject *args) {
     auto clear = [&](double yaw, double distance) {
       return sim_control_bridge::probe(context, v[6], 0, yaw, distance);
     };
-    return sim_control_bridge::command(context->control.adjust_traffic(
+    return sim_control_bridge::command(profile.run(&offline_simulation::control::Store::adjust_traffic, &context->control,
         body.id, body, command, peers, now, route, clear));
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_traffic_state(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_traffic_state);
   try {
     require_sequence(args, 2, true);
     auto v = items(args);
@@ -550,9 +571,10 @@ PyObject *WOT_CDECL sim_control_traffic_state(PyObject *, PyObject *args) {
         require_sequence(r, 2, true);
         held[identity(items(r)[0])] = finite_number(items(r)[1]);
       }
-      context->control.restore_traffic(pairs, held);
+      profile.run(&offline_simulation::control::Store::restore_traffic, &context->control, pairs, held);
       return int_new(1);
     }
+    profile.output();
     OwnedTuple result(2), pairs(context->control.traffic().size()),
         held(context->control.held().size());
     size_t i = 0;
@@ -801,29 +823,32 @@ PerceptionSnapshot snapshot(PyObject *value) {
 }
 } // namespace sim_control_bridge
 PyObject *WOT_CDECL sim_control_snapshot(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_snapshot);
   try {
     require_sequence(args, 2, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
     if (v[1] == none_object)
-      return sim_control_bridge::snapshot(context->control.snapshot());
-    context->control.restore(sim_control_bridge::snapshot(v[1]));
+      return sim_control_bridge::snapshot(profile.run(&offline_simulation::control::Store::snapshot, &context->control));
+    profile.run(&offline_simulation::control::Store::restore, &context->control, sim_control_bridge::snapshot(v[1]));
     return int_new(1);
   }
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_radio(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_radio);
   try {
     require_sequence(args, 5, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
     auto a = sim_control_bridge::key(v[2]), b = sim_control_bridge::key(v[3]);
     int op = index_value(v[1]);
+    profile.opcode(op);
     if (op == 1)
-      return int_new(context->control.radio_connected(a, b));
+      return int_new(profile.run(&offline_simulation::control::Store::radio_connected, &context->control, a, b));
     if (op != 0)
       throw Unsupported();
-    auto c = context->control.recipient_contact(a, b, finite_number(v[4]));
+    auto c = profile.run(&offline_simulation::control::Store::recipient_contact, &context->control, a, b, finite_number(v[4]));
     OwnedTuple row(3);
     row.set(0, float_new(c.remaining));
     row.set(1, int_new(c.fresh));
@@ -833,6 +858,7 @@ PyObject *WOT_CDECL sim_control_radio(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_radio_summaries(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_radio_summaries);
   try {
     require_sequence(args, 3, true);
     auto v = items(args);
@@ -840,12 +866,14 @@ PyObject *WOT_CDECL sim_control_radio_summaries(PyObject *, PyObject *args) {
     auto pairs = v[1];
     require_sequence(pairs, 0);
     const double now = finite_number(v[2]);
+    profile.output();
     OwnedTuple result(size(pairs));
     for (Py_ssize_t i = 0; i < size(pairs); ++i) {
+      profile.input();
       auto pair = items(pairs)[i];
       require_sequence(pair, 2, true);
       auto keys = items(pair);
-      const auto contact = context->control.recipient_contact(
+      const auto contact = profile.run(&offline_simulation::control::Store::recipient_contact, &context->control,
           sim_control_bridge::key(keys[0]), sim_control_bridge::key(keys[1]), now);
       OwnedTuple row(2);
       row.set(0, float_new(contact.remaining));
@@ -857,20 +885,22 @@ PyObject *WOT_CDECL sim_control_radio_summaries(PyObject *, PyObject *args) {
   CONTROL_CATCH
 }
 PyObject *WOT_CDECL sim_control_radio_actors(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_radio_actors);
   try {
     require_sequence(args, 1, true);
     auto context = simulation_context(identity(items(args)[0]));
-    return sim_control_bridge::radio_rows(context->control.radio_actors());
+    return sim_control_bridge::radio_rows(profile.run(&offline_simulation::control::Store::radio_actors, &context->control));
   }
   CONTROL_CATCH
 }
 
 PyObject *WOT_CDECL sim_control_source_still(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(sim_control_source_still);
   try {
     require_sequence(args, 4, true);
     auto v = items(args);
     auto context = simulation_context(identity(v[0]));
-    context->control.note_source_stillness(sim_control_bridge::key(v[1]),
+    profile.run(&offline_simulation::control::Store::note_source_stillness, &context->control, sim_control_bridge::key(v[1]),
                                            finite_number(v[2]),
                                            finite_number(v[3]));
     return int_new(1);

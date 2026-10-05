@@ -14,6 +14,70 @@ spec.loader.exec_module(diagnostics)
 
 
 class WorkerCombatDiagnosticsTests(unittest.TestCase):
+    def test_native_ledger_keeps_reentry_separate_from_python_stage_totals(self):
+        trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0)
+        entry = ('sim_motion_advance', -1, 2, 0,
+                 0.020, 0.001, 0.004, 0.002, 0.013, 0.0, 0)
+        callback = ('motion', 14, 3, 3, 0, 0.013, 0.010, 0.003)
+        for frame in (1, 2):
+            trace.begin_frame(frame, 20.0 + frame * 0.1, 'combat')
+            counters = (('contact.largest_island_actors', 1, frame + 1, frame + 1),)
+            trace.native_frontier((frame, 0.025, 3, 1, (entry,), (callback,), counters))
+            row = trace.finish_frame()
+            self.assertEqual({}, row['stages'])
+            native = row['native_frontier']
+            self.assertEqual(20.0, native['entries'][0][4])
+            self.assertEqual(10.0, native['callbacks'][0][6])
+            self.assertEqual(3.0, native['callbacks'][0][7])
+        trace.close()
+        native = trace.drain_completed()[0]['detail']['native_frontier']
+        self.assertEqual(2, native['frames'])
+        self.assertEqual(50.0, native['wall_ms'])
+        self.assertEqual(3, native['max_depth'])
+        self.assertEqual(4, native['entries'][0][2])
+        self.assertEqual(40.0, native['entries'][0][4])
+        self.assertEqual(20.0, native['callbacks'][0][6])
+        self.assertEqual(['contact.largest_island_actors', 2, 5, 3],
+                         native['counters'][0])
+
+    def test_native_ledger_wrong_frame_and_nonfinite_data_are_observational(self):
+        trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0)
+        trace.begin_frame(5, 20.0, 'combat')
+        trace.native_frontier((4, 0.025, 1, 0, (), (), ()))
+        trace.native_frontier((5, float('nan'), 1, 0, (), (), ()))
+        self.assertTrue(trace.enabled)
+        self.assertTrue(trace.active)
+        row = trace.finish_frame()
+        self.assertNotIn('native_frontier', row)
+        self.assertEqual(2, row['counts']['native_frontier_invalid'])
+
+    def test_native_ledger_does_not_collect_unsampled_control_callbacks(self):
+        trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0, detail_stride=4)
+        trace.begin_frame(1, 20.0, 'combat')
+        trace.native_frontier((1, 0.025, 1, 0, (), (), ()))
+        self.assertNotIn('native_frontier', trace.finish_frame())
+
+    def test_checkpoint_keeps_completed_frames_and_does_not_close_capture(self):
+        trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0)
+        trace.begin_frame(1, 20.0, 'combat')
+        trace.native_frontier((1, 0.025, 1, 0, (), (), ()))
+        self.assertIsNone(trace.checkpoint())
+        trace.finish_frame()
+        checkpoint = trace.checkpoint()
+        self.assertEqual(1, checkpoint['frames'])
+        self.assertEqual(25.0, checkpoint['detail']['native_frontier']['wall_ms'])
+        trace.begin_frame(2, 20.1)
+        trace.native_frontier((2, 0.050, 1, 0, (), (), ()))
+        self.assertEqual(1, trace.checkpoint()['frames'])
+        trace.finish_frame()
+        self.assertEqual(2, trace.checkpoint()['frames'])
+        self.assertEqual(1, checkpoint['frames'])
+        self.assertEqual(75.0, trace.checkpoint()['detail']['native_frontier']['wall_ms'])
+        self.assertFalse(trace.drain_completed())
+        trace.close()
+        self.assertIsNone(trace.checkpoint())
+        self.assertEqual(2, trace.drain_completed()[0]['frames'])
+
     def test_detail_sampling_cannot_alias_render_cadence_or_split_catchup(self):
         trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0, detail_stride=4)
         rows = []

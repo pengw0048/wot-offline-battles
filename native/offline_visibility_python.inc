@@ -64,6 +64,7 @@ native_visibility::PairInput visibility_pair(PyObject *object) {
     value.detection.shot_factor=finite_number(d[7]);return value;
 }
 PyObject *WOT_CDECL vis_open(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_open);
     try {
         require_sequence(args,1,true);PyObject *object=items(args)[0];require_sequence(object,5,true);
         PyObject **row=items(object);native_visibility::FoliageSnapshot snapshot;
@@ -75,10 +76,11 @@ PyObject *WOT_CDECL vis_open(PyObject *,PyObject *args) {
             snapshot.cells[entry.first]=std::move(entry.second);
         }
         snapshot.inactive_instances=foliage_inactive(row[4]);
-        return integer_result(offline_visibility::open(std::move(snapshot)));
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+        return integer_result(profile.run(offline_visibility::open,std::move(snapshot)));
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL vis_update(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_update);
     try {
         require_sequence(args,4,true);PyObject **row=items(args);offline_visibility::Update changes;
         require_sequence(row[1],0);changes.instances.reserve(static_cast<size_t>(size(row[1])));
@@ -87,18 +89,20 @@ PyObject *WOT_CDECL vis_update(PyObject *,PyObject *args) {
             changes.instances.emplace_back(foliage_index(items(item)[0]),foliage_volume(items(item)[1]));
         }
         changes.cells=foliage_cells(row[2]);changes.inactive=foliage_inactive(row[3]);
-        return int_new(offline_visibility::update(identity(row[0]),std::move(changes))?1:0);
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+        return int_new(profile.run(offline_visibility::update,identity(row[0]),std::move(changes))?1:0);
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL vis_submit(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_submit);
     try {
         require_sequence(args,3,true);PyObject **row=items(args);
-        return int_new(offline_visibility::submit(identity(row[0]),identity(row[1]),visibility_pair(row[2]))?1:0);
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+        return int_new(profile.run(offline_visibility::submit,identity(row[0]),identity(row[1]),visibility_pair(row[2]))?1:0);
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL vis_poll(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_poll);
     try {
-        require_sequence(args,1,true);const auto data=offline_visibility::poll(identity(items(args)[0]));OwnedTuple result(data.size());
+        require_sequence(args,1,true);const auto data=profile.run(offline_visibility::poll,identity(items(args)[0]));OwnedTuple result(data.size());
         for (size_t index=0;index<data.size();++index) {
             const auto &value=data[index];OwnedTuple row(4),rays(value.rays.size());
             row.set(0,integer_result(value.job_id));row.set(1,string_new(value.status==0?"done":value.status==1?"cancelled":"failed"));
@@ -109,27 +113,30 @@ PyObject *WOT_CDECL vis_poll(PyObject *,PyObject *args) {
             row.set(2,rays.release());row.set(3,float_new(value.worker_seconds));result.set(index,row.release());
         }
         return result.release();
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL vis_reduce(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_reduce);
     try {
         require_sequence(args,3,true);PyObject **row=items(args);require_sequence(row[2],0);std::vector<std::uint8_t> clear;
         clear.reserve(static_cast<size_t>(size(row[2])));
         for (Py_ssize_t index=0;index<size(row[2]);++index) clear.push_back(number(items(row[2])[index])!=0.);
         native_visibility::VisibilityResult value;
-        if (!offline_visibility::reduce(identity(row[0]),identity(row[1]),clear,value)) return fallback();
+        if (!profile.run(offline_visibility::reduce,identity(row[0]),identity(row[1]),clear,value)) return fallback();
         OwnedTuple result(5);result.set(0,int_new(value.line_of_sight?1:0));result.set(1,float_new(value.foliage_bonus));
         result.set(2,float_new(value.camouflage));result.set(3,int_new(value.detected?1:0));result.set(4,float_new(value.detection_distance));return result.release();
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL vis_cancel(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_cancel);
     try {
         require_sequence(args,2,true);PyObject **row=items(args);require_sequence(row[1],0);std::vector<int64_t> jobs;
         for (Py_ssize_t index=0;index<size(row[1]);++index) jobs.push_back(identity(items(row[1])[index]));
-        offline_visibility::cancel(identity(row[0]),jobs);return int_new(1);
-    } catch (...) {return fallback();}
+        profile.run(offline_visibility::cancel,identity(row[0]),jobs);return int_new(1);
+    } catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL vis_close(PyObject *,PyObject *args) {
-    try {require_sequence(args,1,true);offline_visibility::close(identity(items(args)[0]));return int_new(1);}
-    catch (...) {return fallback();}
+    NATIVE_PROFILE_ENTRY(vis_close);
+    try {require_sequence(args,1,true);profile.run(offline_visibility::close,identity(items(args)[0]));return int_new(1);}
+    catch (...) { profile.fail();return fallback();}
 }

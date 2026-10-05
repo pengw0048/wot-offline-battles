@@ -226,13 +226,15 @@ namespace sim_motion_bridge {
         void live(){
             if(context_->closed.load())throw Unsupported();
         }
-        WorldObject query(int opcode,OwnedTuple&rows){
+        WorldObject query(int opcode,OwnedTuple&rows,std::uint64_t request_count=1){
+            NativeProfilePhase bridge(NativePhase::Pack);
             live();
             OwnedTuple args(2);
             args.set(0,integer_result(opcode));
             args.set(1,rows.release());
             WorldObject arguments(args.release());
-            PyObject*out=object_call(dispatcher_,arguments.get(),0);
+            PyObject*out=profiled_object_call(NativeCallback::Motion, "motion", opcode, request_count, dispatcher_, arguments.get());
+            bridge.input();
             if(context_->closed.load()){
                 if(out)decref(out);
                 throw Unsupported();
@@ -244,6 +246,7 @@ namespace sim_motion_bridge {
             return WorldObject(out);
         }
         bool poses(int opcode,ActorKey k,const Pose&a,const Pose&b,bool flag){
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(opcode==12?5:4);
             row.set(0,key_result(k));
             row.set(1,pose_result(a));
@@ -261,12 +264,14 @@ namespace sim_motion_bridge {
                 row.set(4,orientation.release());
             }
             auto result=query(opcode,row);
+            bridge.input();
             return index_value(result.get())!=0;
         }
         public:  Engine(std::shared_ptr<SimulationContext>context,PyObject*dispatcher):context_(std::move(context)),dispatcher_(dispatcher){
             world_.dispatcher=dispatcher;
         }
         bool begin_world(ActorKey k,const State&s,const motion::Descriptor&d,const WorldSnapshot&q,bool commit,bool active,bool receipt_allowed)override {
+            NativeProfilePhase bridge(NativePhase::Pack);
             world_.exception=nullptr;
             world_error_=nullptr;
             OwnedTuple row(10);
@@ -283,12 +288,15 @@ namespace sim_motion_bridge {
             row.set(8,integer_result(s.rotation_dir));
             row.set(9,float_new(s.turn_speed));
             auto result=query(20,row);
+            bridge.input();
             return index_value(result.get())!=0;
         }
         int dispatch_world_impl(std::uint32_t op,const WorldRequest*q,std::uint32_t n,WorldResponse*r) {
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple rows(n);
             for(size_t i=0;i<n;++i)rows.set(i,world_request(op,q[i]));
-            auto result=query(op,rows);
+            auto result=query(op,rows,n);
+            bridge.input();
             if(op==WORLD_FILTER||op==WORLD_DEPARTING||op==WORLD_TRACE)return 1;
             require_sequence(result.get(),n,true);
             for(size_t i=0;i<n;++i){
@@ -323,6 +331,7 @@ namespace sim_motion_bridge {
             }
         }
         void end_world()override {
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(0);
             query(21,row);
             if(world_error_){
@@ -332,6 +341,7 @@ namespace sim_motion_bridge {
             }
         }
         motion::CatalogResult catalog(ActorKey k,const State&s,double speed,double yaw,double dt,bool passive,bool commit)override {
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(7);
             row.set(0,key_result(k));
             row.set(1,pose_result(s.pose));
@@ -341,6 +351,7 @@ namespace sim_motion_bridge {
             row.set(5,integer_result(passive));
             row.set(6,integer_result(commit));
             auto out=query(18,row);
+            bridge.input();
             require_sequence(out.get(),2,true);
             return {index_value(items(out.get())[0]),index_value(items(out.get())[1])!=0};
         }
@@ -351,6 +362,7 @@ namespace sim_motion_bridge {
             return poses(12,k,a,b,false);
         }
         bool corridor(ActorKey k,const State&s,double yaw,bool wet,bool shallow)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(6);
             row.set(0,key_result(k));
             row.set(1,pose_result(s.pose));
@@ -359,14 +371,17 @@ namespace sim_motion_bridge {
             row.set(4,integer_result((wet?1:0)|(shallow?2:0)));
             row.set(5,float_new(s.water_depth));
             auto out=query(13,row);
+            bridge.input();
             return index_value(out.get())!=0;
         }
         std::vector<motion::Support>ground(ActorKey k,const std::vector<Point>&points)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(2),batch(points.size());
             row.set(0,key_result(k));
             for(size_t i=0;i<points.size();++i)batch.set(i,point_result(points[i]));
             row.set(1,batch.release());
-            auto result=query(10,row);
+            auto result=query(10,row,points.size());
+            bridge.input();
             require_sequence(result.get(),static_cast<Py_ssize_t>(points.size()),true);
             std::vector<motion::Support>out;
             for(Py_ssize_t i=0;i<size(result.get());++i){
@@ -376,6 +391,7 @@ namespace sim_motion_bridge {
             return out;
         }
         bool support_path(ActorKey k,const Pose&a,const Pose&b,double y,double dt)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(5);
             row.set(0,key_result(k));
             row.set(1,pose_result(a));
@@ -383,23 +399,29 @@ namespace sim_motion_bridge {
             row.set(3,float_new(y));
             row.set(4,float_new(dt));
             auto result=query(14,row);
+            bridge.input();
             return index_value(result.get())!=0;
         }
         double water(ActorKey k,const Pose&p)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(2);
             row.set(0,key_result(k));
             row.set(1,pose_result(p));
             auto result=query(15,row);
+            bridge.input();
             return finite_number(result.get());
         }
         bool safe(ActorKey k,const Pose&p)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(2);
             row.set(0,key_result(k));
             row.set(1,pose_result(p));
             auto result=query(16,row);
+            bridge.input();
             return index_value(result.get())!=0;
         }
         bool wreck_rotation(ActorKey k,const Pose&a,const Pose&b,double dt,offline_math::Vec movement)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(5),move(2);
             row.set(0,key_result(k));
             row.set(1,pose_result(a));
@@ -409,17 +431,21 @@ namespace sim_motion_bridge {
             move.set(1,float_new(movement.z));
             row.set(4,move.release());
             auto result=query(19,row);
+            bridge.input();
             return index_value(result.get())!=0;
         }
         motion::EffectReceipt effect(const motion::Effect&e)override {
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(3);
             row.set(0,key_result(e.actor));
             row.set(1,integer_result(e.kind));
             row.set(2,float_new(e.value));
             auto result=query(17,row);
+            bridge.input();
             return {state(result.get())};
         }
         void motion_finished(ActorKey k,int status,double initial,double final,bool hard,const Pose&pose,double yaw,bool resolved)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(8);
             row.set(0,key_result(k));
             row.set(1,integer_result(status));
@@ -432,6 +458,7 @@ namespace sim_motion_bridge {
             query(24,row);
         }
         void begin_contacts(const std::vector<offline_contact::Body>&bodies)override{
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple rows(bodies.size());
             for(size_t i=0;i<bodies.size();++i){
                 const auto&b=bodies[i];
@@ -453,13 +480,15 @@ namespace sim_motion_bridge {
                 row.set(6,integer_result(0));
                 rows.set(i,row.release());
             }
-            query(23,rows);
+            query(23,rows,bodies.size());
         }
         std::vector<std::pair<std::int64_t,std::int64_t>> contact_finalize(ActorKey k,const offline_contact::Row&r)override {
+            NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(2);
             row.set(0,key_result(k));
             row.set(1,contact_result(r));
             auto result=query(22,row);
+            bridge.input();
             require_sequence(result.get(),0);
             std::vector<std::pair<std::int64_t,std::int64_t>>out;
             for(Py_ssize_t i=0;i<size(result.get());++i){
@@ -472,53 +501,57 @@ namespace sim_motion_bridge {
     };
 }
 PyObject*WOT_CDECL sim_motion_configure(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_configure);
     try{
         require_sequence(args,2,true);
         auto ctx=simulation_context(identity(items(args)[0]));
-        ctx->motion.configure(sim_motion_bridge::tuning(items(args)[1]));
+        profile.run(&offline_simulation::motion::Store::configure, &ctx->motion, sim_motion_bridge::tuning(items(args)[1]));
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_install(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_install);
     try{
         require_sequence(args,5,true);
         auto ctx=simulation_context(identity(items(args)[0]));
         const auto d=sim_motion_bridge::descriptor(items(args)[3]);
-        if(items(args)[4]==none_object)ctx->motion.install(sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[2]),d);
+        if(items(args)[4]==none_object)profile.run(&offline_simulation::motion::Store::install, &ctx->motion, sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[2]),d,nullptr);
         else{
             const auto siege=sim_motion_bridge::descriptor(items(args)[4]);
-            ctx->motion.install(sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[2]),d,&siege);
+            profile.run(&offline_simulation::motion::Store::install, &ctx->motion, sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[2]),d,&siege);
         }
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_patch(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_patch);
     try{
         require_sequence(args,3,true);
         auto ctx=simulation_context(identity(items(args)[0]));
-        ctx->motion.patch(sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[2]));
+        profile.run(&offline_simulation::motion::Store::patch, &ctx->motion, sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[2]));
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_begin(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_begin);
     try{
         require_sequence(args,8,true);
         auto ctx=simulation_context(identity(items(args)[0]));
@@ -570,57 +603,60 @@ PyObject*WOT_CDECL sim_motion_begin(PyObject*,PyObject*args){
         require_sequence(raw,0);
         std::vector<offline_simulation::ActorKey>settle_order;
         for(Py_ssize_t i=0;i<size(raw);++i)settle_order.push_back(sim_motion_bridge::key(items(raw)[i]));
-        ctx->motion.begin_slice(token,finite_number(items(args)[2]),finite_number(items(args)[3]),order,std::move(humans),std::move(contact_order),settle_order);
+        profile.run(&offline_simulation::motion::Store::begin_slice, &ctx->motion, token,finite_number(items(args)[2]),finite_number(items(args)[3]),order,std::move(humans),std::move(contact_order),settle_order);
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_prepare(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_prepare);
     try{
         require_sequence(args,3,true);
         auto ctx=simulation_context(identity(items(args)[0]));
         sim_motion_bridge::Engine engine(ctx,items(args)[2]);
-        return sim_motion_bridge::state_result(ctx->motion.prepare_actor(sim_motion_bridge::key(items(args)[1]),engine));
+        return sim_motion_bridge::state_result(profile.run(&offline_simulation::motion::Store::prepare_actor, &ctx->motion, sim_motion_bridge::key(items(args)[1]),engine));
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_advance(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_advance);
     try{
         require_sequence(args,4,true);
         auto ctx=simulation_context(identity(items(args)[0]));
         sim_motion_bridge::Engine engine(ctx,items(args)[3]);
         const auto key=sim_motion_bridge::key(items(args)[1]);
         const auto command=sim_motion_bridge::command(items(args)[2]);
-        const auto&state=ctx->motion.advance_actor(key,command,engine);
+        const auto&state=profile.run(&offline_simulation::motion::Store::advance_actor, &ctx->motion, key,command,engine);
         if(!command.diagnostics)return sim_motion_bridge::state_result(state);
         OwnedTuple out(2);
         out.set(0,sim_motion_bridge::state_result(state));
         out.set(1,sim_motion_bridge::drive_trace_result(ctx->motion.observation(key)));
         return out.release();
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_settle(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_settle);
     try{
         require_sequence(args,2,true);
         auto ctx=simulation_context(identity(items(args)[0]));
         sim_motion_bridge::Engine engine(ctx,items(args)[1]);
-        ctx->motion.settle_roster(engine);
+        profile.run(&offline_simulation::motion::Store::settle_roster, &ctx->motion, engine);
         OwnedTuple out(ctx->motion.actors().size());
         size_t i=0;
         for(const auto&item:ctx->motion.actors()){
@@ -632,64 +668,69 @@ PyObject*WOT_CDECL sim_motion_settle(PyObject*,PyObject*args){
         }
         return out.release();
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_snapshot(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_snapshot);
     try{
         require_sequence(args,2,true);
         auto ctx=simulation_context(identity(items(args)[0]));
-        return sim_motion_bridge::state_result(ctx->motion.snapshot(sim_motion_bridge::key(items(args)[1])));
+        return sim_motion_bridge::state_result(profile.run(&offline_simulation::motion::Store::snapshot, &ctx->motion, sim_motion_bridge::key(items(args)[1])));
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_patch_fields(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_patch_fields);
     try{
         require_sequence(args,4,true);
         auto ctx=simulation_context(identity(items(args)[0]));
-        ctx->motion.patch_fields(sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[3]),static_cast<unsigned>(index_value(items(args)[2])));
+        profile.run(&offline_simulation::motion::Store::patch_fields, &ctx->motion, sim_motion_bridge::key(items(args)[1]),sim_motion_bridge::state(items(args)[3]),static_cast<unsigned>(index_value(items(args)[2])));
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_after_weapon(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_after_weapon);
     try{
         require_sequence(args,3,true);
         auto ctx=simulation_context(identity(items(args)[0]));
         PyObject*row=items(args)[2];
         require_sequence(row,5,true);
-        offline_simulation::motion::State input=ctx->motion.snapshot(sim_motion_bridge::key(items(args)[1]));
+        offline_simulation::motion::State input=profile.run(&offline_simulation::motion::Store::snapshot, &ctx->motion, sim_motion_bridge::key(items(args)[1]));
+        profile.input();
         input.pose.pitch=finite_number(items(row)[0]);
         input.terrain_pitch=finite_number(items(row)[1]);
         input.alive=index_value(items(row)[2])!=0;
         input.death_reason=index_value(items(row)[3]);
         input.presence &= ~(std::uint64_t(1)<<23);
         if(index_value(items(row)[4]))input.presence |= std::uint64_t(1)<<23;
-        ctx->motion.patch_fields(sim_motion_bridge::key(items(args)[1]),input,8|4);
+        profile.run(&offline_simulation::motion::Store::patch_fields, &ctx->motion, sim_motion_bridge::key(items(args)[1]),input,8|4);
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }
 PyObject*WOT_CDECL sim_motion_descriptor(PyObject*,PyObject*args){
+    NATIVE_PROFILE_ENTRY(sim_motion_descriptor);
     try{
         require_sequence(args,5,true);
         auto ctx=simulation_context(identity(items(args)[0]));
@@ -699,13 +740,13 @@ PyObject*WOT_CDECL sim_motion_descriptor(PyObject*,PyObject*args){
         if(has)alternate=sim_motion_bridge::descriptor(items(args)[3]);
         PyObject*row=items(args)[4];
         require_sequence(row,3,true);
-        ctx->motion.descriptor_patch(sim_motion_bridge::key(items(args)[1]),normal,has?&alternate:nullptr,index_value(items(row)[0]),finite_number(items(row)[1]),finite_number(items(row)[2]));
+        profile.run(&offline_simulation::motion::Store::descriptor_patch, &ctx->motion, sim_motion_bridge::key(items(args)[1]),normal,has?&alternate:nullptr,index_value(items(row)[0]),finite_number(items(row)[1]),finite_number(items(row)[2]));
         return int_new(1);
     }
-    catch(const PythonAllocationFailed&){
+    catch(const PythonAllocationFailed&){ profile.fail();
         return 0;
     }
-    catch(...){
+    catch(...){ profile.fail();
         return fallback();
     }
 }

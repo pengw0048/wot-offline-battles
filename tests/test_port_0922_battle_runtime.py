@@ -7632,7 +7632,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'stages': dict(('stage.%d' % index, {'calls': index})
                            for index in range(300)),
             'escaped': '\\"\n\u4e2d' * 4000}}
-        for kind in ('combat_trace', 'combat_summary'):
+        for kind in ('combat_trace', 'combat_summary', 'combat_checkpoint'):
             with self.subTest(kind=kind):
                 lines = _combat_log_lines(prefix, kind, record).splitlines()
                 self.assertGreater(len(lines), 1)
@@ -7645,6 +7645,28 @@ class BattleRuntimeContractTests(unittest.TestCase):
                                     for part in parts))
                 self.assertEqual(record, json.loads(''.join(
                     part['data'] for part in parts)))
+
+    def test_frame_diagnostics_emit_incomplete_capture_checkpoint_separately(self):
+        wall = [0.0]
+        payloads = []
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=payloads.append, window_seconds=30.0)
+        frame = diagnostics.begin(0.0, 0.02)
+        wall[0] = 0.005
+        diagnostics.finish(frame, 0.0, 0.02, 0.02, {}, {},
+                           {'role': 'worker', 'round': 7, 'map': '07_lakeville'})
+        diagnostics.begin(0.02, 0.02)
+        checkpoint = {'capture': 3, 'cumulative': True, 'frames': 17,
+                      'detail': {'native_frontier': {'frames': 4}}}
+        diagnostics.note_worker_runtime({'combat_checkpoint': checkpoint})
+        diagnostics.flush()
+        lines = ''.join(payloads).splitlines()
+        rows = [json.loads(line.split('combat_checkpoint ', 1)[1])
+                for line in lines if 'combat_checkpoint ' in line]
+        self.assertEqual(1, len(rows))
+        self.assertEqual(checkpoint, rows[0]['capture'])
+        self.assertEqual(7, rows[0]['round'])
+        self.assertFalse(any('combat_summary ' in line for line in lines))
 
     def test_frame_diagnostic_percentile_storage_is_bounded(self):
         diagnostics = _FrameDiagnostics(

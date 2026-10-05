@@ -23,6 +23,7 @@ class NativeSimulation(object):
         self.control = None
         self.motion = None
         self.weapons = None
+        self._diagnostic_owner = None
         handle = backend.sim_open(self.round_id, self.generation)
         if handle is None or int(handle) <= 0:
             raise RuntimeError('Native simulation could not create a lifetime')
@@ -67,6 +68,7 @@ class NativeSimulation(object):
         handle = self.handle
         if handle is None:
             return
+        self.finish_diagnostic()
         self.handle = None
         failure = None
         try:
@@ -84,6 +86,28 @@ class NativeSimulation(object):
             self.backend.sim_close(handle)
         if failure is not None:
             raise failure
+
+    def begin_diagnostic(self, diagnostic):
+        if (diagnostic is None or not diagnostic.active or
+                not diagnostic.detail_active or self.handle is None):
+            return
+        try:
+            if self.backend.sim_diag_begin(self.handle, diagnostic._frame) == 1:
+                self._diagnostic_owner = diagnostic
+            else:
+                diagnostic.count('native_frontier_unavailable')
+        except Exception:
+            diagnostic.count('native_frontier_unavailable')
+
+    def finish_diagnostic(self):
+        diagnostic = self._diagnostic_owner
+        self._diagnostic_owner = None
+        if diagnostic is None:
+            return
+        try:
+            diagnostic.native_frontier(self.backend.sim_diag_end(self.handle))
+        except Exception:
+            diagnostic.count('native_frontier_unavailable')
 
     def matches(self, runtime):
         return (self.handle is not None and

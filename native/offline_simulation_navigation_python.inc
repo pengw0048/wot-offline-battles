@@ -692,14 +692,17 @@ class Engine : public n::Frontier {
   std::shared_ptr<SimulationContext> context_;
   PyObject *dispatcher_;
   n::Grid &grid_;
-  WorldObject call(int op, OwnedTuple &payload) {
+  WorldObject call(int op, OwnedTuple &payload, std::uint64_t rows = 1) {
+    NativeProfilePhase bridge(NativePhase::Pack);
     if (context_->closed.load())
       throw Unsupported();
     OwnedTuple args(2);
     args.set(0, int_new(op));
     args.set(1, payload.release());
     WorldObject arguments(args.release());
-    PyObject *result = object_call(dispatcher_, arguments.get(), 0);
+    PyObject *result = profiled_object_call(
+        NativeCallback::Navigation, "navigation", op, rows, dispatcher_,
+        arguments.get());
     if (context_->closed.load()) {
       if (result)
         decref(result);
@@ -715,10 +718,12 @@ public:
     (void)unused;
   }
   std::pair<bool, bool> proof_receipt(const n::Point &a, const n::Point &b) {
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(2);
     row.set(0, value(a));
     row.set(1, value(b));
     auto r = call(30, row);
+    bridge.input();
     require_sequence(r.get(), 2, true);
     return {integer(items(r.get())[0]) != 0, integer(items(r.get())[1]) != 0};
   }
@@ -790,16 +795,19 @@ public:
     return grid_.needs_review(a, b);
   }
   void clear_negative() override {
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(0);
     call(15, row);
   }
   void frame(bool open) override {
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(1);
     row.set(0, int_new(open));
     call(16, row);
   }
   void housekeeping(double time) override {
     grid_.prune(time);
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(1);
     row.set(0, float_new(time));
     call(17, row);
@@ -810,6 +818,7 @@ public:
       return context_->navigation.async.submit(
           grid_, a, b, time, limit, prefer, hard,
           [this](const char *name, int amount) { count(name, amount); });
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(6);
     row.set(0, value(a));
     row.set(1, value(b));
@@ -818,6 +827,7 @@ public:
     row.set(4, int_new(prefer));
     row.set(5, value(hard));
     auto r = call(18, row);
+    bridge.input();
     return search(r.get());
   }
   std::vector<n::Search> advance(double time, int budget) override {
@@ -828,10 +838,12 @@ public:
             return proof_receipt(a, b);
           },
           [this](const char *name, int amount) { count(name, amount); });
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(2);
     row.set(0, float_new(time));
     row.set(1, int_new(budget));
     auto r = call(19, row);
+    bridge.input();
     require_sequence(r.get(), 0);
     std::vector<n::Search> out;
     for (Py_ssize_t i = 0; i < size(r.get()); ++i)
@@ -844,21 +856,24 @@ public:
           ids, [this](const char *name, int amount) { count(name, amount); });
       return;
     }
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(ids.size());
     for (size_t i = 0; i < ids.size(); ++i)
       row.set(i, integer_result(ids[i]));
-    call(20, row);
+    call(20, row, ids.size());
   }
   void close() override {
     if (context_->navigation.async.active) {
       context_->navigation.async.close();
       return;
     }
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(0);
     call(21, row);
   }
   std::vector<n::Key>
   container_order(int kind, const std::vector<n::OrderEvent> &events) override {
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(2), changes(events.size());
     row.set(0, int_new(kind));
     for (size_t i = 0; i < events.size(); ++i) {
@@ -868,7 +883,8 @@ public:
       changes.set(i, item.release());
     }
     row.set(1, changes.release());
-    auto result = call(40, row);
+    auto result = call(40, row, events.size());
+    bridge.input();
     require_sequence(result.get(), 0);
     std::vector<n::Key> out;
     for (Py_ssize_t i = 0; i < size(result.get()); ++i)
@@ -876,6 +892,7 @@ public:
     return out;
   }
   void count(const char *name, int amount) override {
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple row(2);
     row.set(0, string_new(name));
     row.set(1, int_new(amount));
@@ -884,6 +901,7 @@ public:
 };
 } // namespace sim_navigation_bridge
 PyObject *WOT_CDECL sim_navigation_install(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_install);
   try {
     require_sequence(args, 5, true);
     auto ctx = simulation_context(identity(items(args)[0]));
@@ -894,46 +912,61 @@ PyObject *WOT_CDECL sim_navigation_install(PyObject *, PyObject *args) {
     sim_navigation_bridge::grid_load(state.grid, items(args)[2],
                                      items(args)[3]);
     sim_navigation_bridge::async_load(state.async, items(args)[4]);
+    profile.compute();
     state.installed = true;
     state.async.owns = state.async.active;
     ctx->navigation = std::move(state);
+    profile.output();
     return int_new(1);
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 PyObject *WOT_CDECL sim_navigation_snapshot(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_snapshot);
   try {
     require_sequence(args, 1, true);
     auto ctx = simulation_context(identity(items(args)[0]));
     if (!ctx->navigation.installed)
       throw Unsupported();
+    profile.compute();
     for (const auto &v : ctx->navigation.searches)
       if (!v.second.done)
         ctx->navigation.async.watched.insert(v.second.id);
+    profile.output();
     return sim_navigation_bridge::snapshot(ctx->navigation);
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 PyObject *WOT_CDECL sim_navigation_remove(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_remove);
   try {
     require_sequence(args, 1, true);
     auto ctx = simulation_context(identity(items(args)[0]));
+    profile.compute();
     ctx->navigation.async.owns = false;
     ctx->navigation = offline_simulation::navigation::Store();
+    profile.output();
     return int_new(1);
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 PyObject *WOT_CDECL sim_navigation_command(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_command);
   try {
     require_sequence(args, 5, true);
     auto a = items(args);
@@ -943,6 +976,7 @@ PyObject *WOT_CDECL sim_navigation_command(PyObject *, PyObject *args) {
       throw Unsupported();
     sim_navigation_bridge::Engine f(ctx, a[3], a[4]);
     const int op = sim_navigation_bridge::integer(a[1]);
+    profile.opcode(op);
     require_sequence(a[2], 0);
     auto p = items(a[2]);
     const auto arity = [&](int n) {
@@ -960,15 +994,15 @@ PyObject *WOT_CDECL sim_navigation_command(PyObject *, PyObject *args) {
     switch (op) {
     case 0:
       arity(1);
-      s.begin_frame(f, number(0));
+      profile.run(&sim_navigation_bridge::n::Store::begin_frame, &s, f, number(0));
       break;
     case 1:
       arity(0);
-      s.end_frame(f);
+      profile.run(&sim_navigation_bridge::n::Store::end_frame, &s, f);
       break;
     case 2:
       arity(1);
-      s.tick(f, number(0));
+      profile.run(&sim_navigation_bridge::n::Store::tick, &s, f, number(0));
       break;
     case 3: {
       arity(9);
@@ -976,52 +1010,62 @@ PyObject *WOT_CDECL sim_navigation_command(PyObject *, PyObject *args) {
       sim_navigation_bridge::n::Field<double> look;
       sim_navigation_bridge::read_field(p[5], anchor);
       sim_navigation_bridge::read_field(p[7], look);
-      answer = sim_navigation_bridge::value(s.next_target(
-          f, integer(0), point(1), point(2), sim_navigation_bridge::token(p[3]),
-          number(4), anchor, sim_navigation_bridge::path(p[6]), look,
-          integer(8) != 0));
+      answer = sim_navigation_bridge::value(profile.run(
+          &sim_navigation_bridge::n::Store::next_target, &s, f, integer(0),
+          point(1), point(2), sim_navigation_bridge::token(p[3]), number(4),
+          anchor, sim_navigation_bridge::path(p[6]), look, integer(8) != 0));
       break;
     }
     case 4: {
       arity(6);
       sim_navigation_bridge::n::Point out;
-      answer = s.observe_direct(f, integer(0), point(1), point(2),
-                                sim_navigation_bridge::token(p[3]), number(4),
-                                integer(5) != 0, out)
+      answer = profile.run(
+                   &sim_navigation_bridge::n::Store::observe_direct, &s, f,
+                   integer(0), point(1), point(2),
+                   sim_navigation_bridge::token(p[3]), number(4),
+                   integer(5) != 0, out)
                    ? sim_navigation_bridge::value(out)
                    : fallback();
       break;
     }
     case 5:
       arity(4);
-      answer =
-          int_new(s.blocked_step(f, integer(0), point(1), point(2), number(3)));
+      answer = int_new(profile.run(
+          &sim_navigation_bridge::n::Store::blocked_step, &s, f, integer(0),
+          point(1), point(2), number(3)));
       break;
     case 6:
       arity(2);
-      answer = int_new(s.blocked_plan(f, point(0), point(1)));
+      answer = int_new(profile.run(
+          &sim_navigation_bridge::n::Store::blocked_plan, &s, f, point(0),
+          point(1)));
       break;
     case 7:
       arity(4);
-      answer = int_new(
-          s.bot_penalized(f, integer(0), point(1), point(2), number(3)));
+      answer = int_new(profile.run(
+          &sim_navigation_bridge::n::Store::bot_penalized, &s, f, integer(0),
+          point(1), point(2), number(3)));
       break;
     case 8:
       arity(5);
-      answer = int_new(s.controlled(f, integer(0), point(1), number(2),
-                                    number(3), integer(4) != 0));
+      answer = int_new(profile.run(
+          &sim_navigation_bridge::n::Store::controlled, &s, f, integer(0),
+          point(1), number(2), number(3), integer(4) != 0));
       break;
     case 9:
       arity(1);
-      answer = int_new(s.terminal(integer(0)));
+      answer = int_new(profile.run(
+          &sim_navigation_bridge::n::Store::terminal, &s, integer(0)));
       break;
     case 10:
       arity(0);
-      s.close(f);
+      profile.run(&sim_navigation_bridge::n::Store::close, &s, f);
       break;
     case 12: {
       arity(2);
-      const auto ready = f.advance(number(0), integer(1));
+      const auto ready = profile.run(
+          &sim_navigation_bridge::Engine::advance, &f, number(0), integer(1));
+      profile.compute();
       for (const auto &job : ready)
         for (auto &entry : s.searches)
           if (entry.second.id == job.id) {
@@ -1036,54 +1080,66 @@ PyObject *WOT_CDECL sim_navigation_command(PyObject *, PyObject *args) {
       std::vector<int> ids;
       for (Py_ssize_t i = 0; i < size(p[0]); ++i)
         ids.push_back(sim_navigation_bridge::integer(items(p[0])[i]));
-      s.prune_modes(ids);
+      profile.run(&sim_navigation_bridge::n::Store::prune_modes, &s, ids);
       break;
     }
     default:
       throw Unsupported();
     }
+    profile.output();
     OwnedTuple out(1);
     out.set(0, answer ? answer : int_new(1));
     return out.release();
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 
 PyObject *WOT_CDECL sim_navigation_grid_snapshot(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_grid_snapshot);
   try {
     require_sequence(args, 1, true);
     auto ctx = simulation_context(identity(items(args)[0]));
     if (!ctx->navigation.installed)
       throw Unsupported();
+    profile.output();
     return sim_navigation_bridge::grid_snapshot(ctx->navigation.grid);
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 PyObject *WOT_CDECL sim_navigation_bot_snapshot(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_bot_snapshot);
   try {
     require_sequence(args, 2, true);
     auto ctx = simulation_context(identity(items(args)[0]));
     if (!ctx->navigation.installed)
       throw Unsupported();
-    const auto it = ctx->navigation.bots.find(
-        sim_navigation_bridge::integer(items(args)[1]));
+    const int id = sim_navigation_bridge::integer(items(args)[1]);
+    profile.output();
+    const auto it = ctx->navigation.bots.find(id);
     OwnedTuple out(it == ctx->navigation.bots.end() ? 0 : 1);
     if (it != ctx->navigation.bots.end())
       out.set(0, sim_navigation_bridge::value(it->second));
     return out.release();
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_grid_command);
   try {
     namespace b = sim_navigation_bridge;
     namespace n = offline_simulation::navigation;
@@ -1095,6 +1151,7 @@ PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
       throw Unsupported();
     b::Engine f(ctx, a[3], none_object);
     const int op = b::integer(a[1]);
+    profile.opcode(op);
     require_sequence(a[2], 0);
     auto p = items(a[2]);
     const auto arity = [&](int n) {
@@ -1108,16 +1165,16 @@ PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
     switch (op) {
     case 0:
       arity(1);
-      answer = b::value(g.cell(point(0)));
+      answer = b::value(profile.run(&n::Grid::cell, &g, point(0)));
       break;
     case 1:
       arity(3);
-      answer = int_new(g.hazard(point(0), point(1), integer(2)));
+      answer = int_new(profile.run(&n::Grid::hazard, &g, point(0), point(1), integer(2)));
       break;
     case 2: {
       arity(3);
       std::vector<n::Cell> rows;
-      if (g.hazard_cells(point(0), point(1), integer(2), rows)) {
+      if (profile.run(&n::Grid::hazard_cells, &g, point(0), point(1), integer(2), rows)) {
         OwnedTuple out(rows.size());
         for (size_t i = 0; i < rows.size(); ++i)
           out.set(i, b::value(rows[i]));
@@ -1128,19 +1185,19 @@ PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
     }
     case 3:
       arity(2);
-      answer = int_new(g.segment(point(0), point(1), f.proof()));
+      answer = int_new(profile.run(&n::Grid::segment, &g, point(0), point(1), f.proof()));
       break;
     case 4:
       arity(3);
-      answer = int_new(g.dry(point(0), point(1), number(2), f.proof()));
+      answer = int_new(profile.run(&n::Grid::dry, &g, point(0), point(1), number(2), f.proof()));
       break;
     case 5:
       arity(3);
-      answer = float_new(g.penalty(point(0), point(1), number(2)));
+      answer = float_new(profile.run(&n::Grid::penalty, &g, point(0), point(1), number(2)));
       break;
     case 6: {
       arity(2);
-      const auto rows = g.edges(point(0), point(1));
+      const auto rows = profile.run(&n::Grid::edges, &g, point(0), point(1));
       OwnedTuple out(rows.size());
       for (size_t i = 0; i < rows.size(); ++i)
         out.set(i, b::value(rows[i]));
@@ -1149,7 +1206,7 @@ PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
     }
     case 7: {
       arity(2);
-      const auto rows = g.edges(point(0), point(1));
+      const auto rows = profile.run(&n::Grid::edges, &g, point(0), point(1));
       answer = rows.empty() ? fallback() : b::value(rows[0]);
       break;
     }
@@ -1163,70 +1220,76 @@ PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
         hard[b::edge(items(row)[0])] = finite_number(items(row)[1]);
       }
       n::Point out;
-      answer = g.safe_local(point(0), point(1), number(2), b::path(p[3]),
-                            number(4), hard, number(6), out, f.proof())
+      answer = profile.run(&n::Grid::safe_local, &g, point(0), point(1),
+                           number(2), b::path(p[3]), number(4), hard,
+                           number(6), out, f.proof())
                    ? b::value(out)
                    : fallback();
       break;
     }
     case 9:
       arity(2);
-      answer = int_new(g.path_penalty(b::path(p[0]), number(1)));
+      answer = int_new(profile.run(&n::Grid::path_penalty, &g, b::path(p[0]), number(1)));
       break;
     case 10:
       arity(1);
-      answer = int_new(g.path_hull(b::path(p[0])));
+      answer = int_new(profile.run(&n::Grid::path_hull, &g, b::path(p[0])));
       break;
     case 11:
       arity(4);
       answer = int_new(
-          g.clearance(b::path(p[0]), integer(1), integer(2), number(3)));
+          profile.run(
+          &n::Grid::clearance, &g, b::path(p[0]), integer(1), integer(2), number(3)));
       break;
     case 12:
       arity(4);
       answer = int_new(
-          n::Grid::live_climb(point(0), b::path(p[1]), integer(2), integer(3)));
+          profile.run(
+          &n::Grid::live_climb, point(0), b::path(p[1]), integer(2), integer(3)));
       break;
     case 13:
       arity(2);
-      answer = int_new(g.review(point(0), point(1)));
+      answer = int_new(profile.run(&n::Grid::review, &g, point(0), point(1)));
       break;
     case 14:
       arity(2);
-      answer = int_new(g.needs_review(point(0), point(1)));
+      answer = int_new(profile.run(&n::Grid::needs_review, &g, point(0), point(1)));
       break;
     case 17:
       arity(1);
-      g.prune(number(0));
+      profile.run(&n::Grid::prune, &g, number(0));
       break;
     case 23: {
       arity(2);
       n::Cell out;
-      answer = int_new(g.nearest(g.cell(point(0)), integer(1), out));
+      answer = int_new(profile.run([&](const n::Point &p, int limit) {
+        return g.nearest(g.cell(p), limit, out);
+      }, point(0), integer(1)));
       break;
     }
     case 24:
       arity(3);
-      answer = int_new(g.motion_hazard(point(0), point(1), integer(2)));
+      answer = int_new(profile.run(&n::Grid::motion_hazard, &g, point(0), point(1), integer(2)));
       break;
     case 25:
       arity(2);
-      answer = int_new(g.point_hazard(point(0), integer(1)));
+      answer = int_new(profile.run(&n::Grid::point_hazard, &g, point(0), integer(1)));
       break;
     case 26:
       arity(2);
-      answer = int_new(g.hazard_near(point(0), integer(1)));
+      answer = int_new(profile.run(&n::Grid::hazard_near, &g, point(0), integer(1)));
       break;
     case 27: {
       arity(1);
       std::array<double, 2> out;
-      answer = g.local_corridor(point(0), out) ? world_numbers(out.data(), 2)
-                                               : fallback();
+      answer = profile.run(&n::Grid::local_corridor, &g, point(0), out)
+                   ? world_numbers(out.data(), 2)
+                   : fallback();
       break;
     }
     case 28:
       arity(4);
-      answer = int_new(g.hull_pose(point(0), number(1), number(2), number(3)));
+      answer = int_new(profile.run(&n::Grid::hull_pose, &g, point(0), number(1), number(2), number(3)));
       break;
     case 29: {
       arity(1);
@@ -1237,54 +1300,66 @@ PyObject *WOT_CDECL sim_navigation_grid_command(PyObject *, PyObject *args) {
         world_array(items(p[0])[i], row.data(), 6);
         rows.push_back(row);
       }
-      answer = int_new(g.set_hulls(rows));
+      answer = int_new(profile.run(&n::Grid::set_hulls, &g, rows));
       break;
     }
     case 31: {
       arity(3);
       double y = 0.;
-      answer = g.ground(number(0), number(1), y) ? float_new(y) : fallback();
+      answer = profile.run(&n::Grid::ground, &g, number(0), number(1), y)
+                   ? float_new(y)
+                   : fallback();
       break;
     }
     case 32:
       arity(2);
-      answer = b::value(g.point(b::cell(p[0]), number(1)));
+      answer = b::value(profile.run(&n::Grid::point, &g, b::cell(p[0]), number(1)));
       break;
     case 33:
       arity(0);
+      profile.output();
       answer = int_new(g.hull_revision);
       break;
     default:
       throw Unsupported();
     }
+    profile.output();
     OwnedTuple out(1);
     out.set(0, answer ? answer : int_new(1));
     return out.release();
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 
 PyObject *WOT_CDECL sim_navigation_async_snapshot(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_async_snapshot);
   try {
     require_sequence(args, 1, true);
     auto ctx = simulation_context(identity(items(args)[0]));
     if (!ctx->navigation.installed)
       throw Unsupported();
+    profile.output();
     return sim_navigation_bridge::async_snapshot(ctx->navigation.async);
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 PyObject *WOT_CDECL sim_navigation_receipts(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_receipts);
   try {
     require_sequence(args, 1, true);
     auto ctx = simulation_context(identity(items(args)[0]));
     auto &s = ctx->navigation.async;
+    profile.output();
     OwnedTuple out(s.settled.size());
     size_t i = 0;
     for (const auto &entry : s.settled) {
@@ -1303,19 +1378,25 @@ PyObject *WOT_CDECL sim_navigation_receipts(PyObject *, PyObject *args) {
       out.set(i++, row.release());
       s.watched.erase(entry.first);
     }
+    profile.compute();
     s.settled.clear();
+    profile.output();
     return out.release();
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }
 
 PyObject *WOT_CDECL sim_navigation_order_events(PyObject *, PyObject *args) {
+  NATIVE_PROFILE_ENTRY(sim_navigation_order_events);
   try {
     require_sequence(args, 1, true);
     auto ctx = simulation_context(identity(items(args)[0]));
+    profile.output();
     OwnedTuple out(2);
     for (int kind = 0; kind < 2; ++kind) {
       auto &events = kind == 0 ? ctx->navigation.cache_order_events
@@ -1328,12 +1409,16 @@ PyObject *WOT_CDECL sim_navigation_order_events(PyObject *, PyObject *args) {
         rows.set(i, row.release());
       }
       out.set(kind, rows.release());
+      profile.compute();
       events.clear();
+      profile.output();
     }
     return out.release();
   } catch (const PythonAllocationFailed &) {
+    profile.fail();
     return 0;
   } catch (...) {
+    profile.fail();
     return fallback();
   }
 }

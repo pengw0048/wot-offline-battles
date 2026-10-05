@@ -6107,6 +6107,8 @@ class BotRuntime(object):
         if (not ignore_deadline and
                 now >= cached.get('deadline', 0.0)):
             combat_count('motion_cache_deadline')
+            combat_count('motion_cache_deadline_late_us', int(
+                max(0.0, now - cached.get('deadline', 0.0)) * 1000000.0))
             return False
         lookahead = 20.0 if abs(_number(speed)) > 5.0 else 15.0
         forward_budget = MOTION_PROBE_FORWARD_BUDGET
@@ -12027,6 +12029,7 @@ class BotRuntime(object):
         if callable(navigator_begin):
             navigator_begin(elapsed_input)
         outgoing = []
+        native_diagnostic_owner = None
         receipt_frame_open = False
         visibility_frame_open = False
         native_control = (self._native_simulation.control
@@ -12044,6 +12047,10 @@ class BotRuntime(object):
                 return []
             if self._combat_diagnostics is not None:
                 self._combat_diagnostics.begin_control()
+                native_diagnostic_owner = self._native_simulation
+                if native_diagnostic_owner is not None:
+                    native_diagnostic_owner.begin_diagnostic(
+                        self._combat_diagnostics)
             # Exact world-receipt work is capped per render callback, not per
             # control step. Do not open an empty receipt frame on intervening
             # high-FPS callbacks: finishing one without a control step would
@@ -12118,8 +12125,12 @@ class BotRuntime(object):
                 if receipt_frame_open:
                     self._finish_world_receipt_frame()
         finally:
-            if callable(navigator_end):
-                navigator_end()
+            try:
+                if callable(navigator_end):
+                    navigator_end()
+            finally:
+                if native_diagnostic_owner is not None:
+                    native_diagnostic_owner.finish_diagnostic()
         source_batch_horizon_us = self._sample_time_us
         for message in outgoing:
             if message.get('type') != 'bot_state':
@@ -12411,6 +12422,11 @@ class BotRuntime(object):
                         'decision_deadline' if decision_cache_valid else
                         'decision_cache_missing' if decision_cache is None else
                         'decision_order_changed')
+                    if decision_cache_valid:
+                        evaluation_time = (self._control_evaluation_time
+                            if self._control_evaluation_time is not None else now)
+                        diagnostic.count('decision_deadline_late_us', int(
+                            max(0.0, evaluation_time - decision_cache[1]) * 1000000.0))
             decision_deadline = None
             raw_command = None
             planner_probe_samples = {}
@@ -12572,11 +12588,15 @@ class BotRuntime(object):
                     self._friendly_reposition_order(state, targets, now)
                 if (reposition_order is not None and
                         callable(decide_with_order)):
+                    if diagnostic is not None:
+                        diagnostic.count('decision_reposition_order')
                     command = timed_call(
                         self._combat_diagnostics, 'bot.planner_driver',
                         decide_with_order,
                         decision_state, reposition_order, sample_clear)
                 elif server_order is not None and callable(decide_with_order):
+                    if diagnostic is not None:
+                        diagnostic.count('decision_server_order')
                     server_order = dict(server_order)
                     if (server_order.get('target_kind') == 'human' and
                             server_order.get('target_id') is not None):
@@ -12594,6 +12614,8 @@ class BotRuntime(object):
                         decision_state, server_order,
                         sample_clear)
                 else:
+                    if diagnostic is not None:
+                        diagnostic.count('decision_local_planner')
                     command = timed_call(
                         self._combat_diagnostics, 'bot.planner_driver',
                         self.adapter.decide,
@@ -12770,7 +12792,7 @@ class BotRuntime(object):
                     command['turn'] = 0.0
                     command['movement_intent'] = False
             if diagnostic is not None:
-                diagnostic.phase('bot.motion_prepare')
+                diagnostic.phase('bot.motion_plan')
             throttle = max(-1.0, min(1.0, command['throttle']))
             turn = max(-1.0, min(1.0, command.get('turn', 0.0)))
             aim_fallback = (target.get('position') if target is not None

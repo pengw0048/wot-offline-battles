@@ -8032,3 +8032,31 @@ or sub-50-ms result is claimed. The near-target driver also stops powering a
 turn whose measured speed and descriptor turn limit cannot intersect the
 existing arrival circle, then resumes when the forward path can reach it;
 closed-loop tests retain the original arrival radius and vehicle parameters.
+
+### Native boundary diagnostics
+
+Selected combat-control callbacks now carry a separate native timing ledger.
+It starts after the existing rotating detail sampler selects a control callback
+and ends after navigation-frame cleanup. Native entry rows separate input
+parsing, core body work and output packing; callback rows separate Python/engine
+work from nested native reentry. Only entry parse/body-self/pack and callback
+self are disjoint within this ledger. Inclusive columns explain nesting and
+must not be added to those costs or to the surrounding Python stage tree.
+Native body time still includes C++ allocation and is not automatically
+parallelizable computation. Internal `stage.` rows distinguish pure substeps
+from actual Python-to-native entries.
+
+Python stages separately measure motion/weapon mirrors, control configuration,
+target projection and navigation-receipt copying. Fixed counters record cache
+expiry lateness, output rows and configuration reuse. Frozen-roster sweeps and
+contact pair construction/solving have independent native stages. Contact
+component counts derive from the already-built pair set only during capture;
+they describe that solver stage, not independence of an entire vehicle tick.
+Inactive native scopes do not read a clock or construct a component graph.
+
+The bounded native observer owns no gameplay state or Python/engine references.
+Ending a sample during callback reentry cancels the incomplete ledger rather
+than retaining stack pointers. Periodic `combat_checkpoint` records preserve
+completed samples when the worker exits before the capture deadline. These are
+cumulative: use the latest checkpoint or final summary for a capture, never
+sum both. A diagnostic failure does not replay or reject simulation work.

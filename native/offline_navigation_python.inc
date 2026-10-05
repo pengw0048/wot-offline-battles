@@ -50,6 +50,7 @@ std::vector<offline_navigation::EdgePenalty> edge_values(PyObject *object) {
     return out;
 }
 PyObject *WOT_CDECL nav_open(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_open);
     try {
         require_sequence(args,1,true);PyObject *value=items(args)[0];require_sequence(value,11,true);
         PyObject **row=items(value);offline_navigation::MapInput map;
@@ -70,10 +71,11 @@ PyObject *WOT_CDECL nav_open(PyObject *,PyObject *args) {
             for (size_t index=0;index<4;++index) map.bounds[index]=finite_number(items(row[8])[index]);
         }
         map.max_grade=finite_number(row[9]);map.heuristic_weight=finite_number(row[10]);
-        return integer_result(offline_navigation::open(std::move(map)));
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+        return integer_result(profile.run(offline_navigation::open,std::move(map)));
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL nav_submit(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_submit);
     try {
         require_sequence(args,12,true);PyObject **row=items(args);offline_navigation::SearchInput input;
         const int64_t context=identity(row[0]);input.job_id=identity(row[1]);
@@ -94,12 +96,13 @@ PyObject *WOT_CDECL nav_submit(PyObject *,PyObject *args) {
             input.native_review_cells.push_back({{index_value(items(item)[0]),index_value(items(item)[1])}});
         }
         input.hull_revision=identity(row[11]);
-        return int_new(offline_navigation::submit(context,std::move(input))?1:0);
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+        return int_new(profile.run(offline_navigation::submit,context,std::move(input))?1:0);
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL nav_poll(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_poll);
     try {
-        require_sequence(args,1,true);const auto data=offline_navigation::poll(identity(items(args)[0]));
+        require_sequence(args,1,true);const auto data=profile.run(offline_navigation::poll,identity(items(args)[0]));
         OwnedTuple completed(data.completed.size()),queries(data.queries.size()),stats(data.stats.size());
         for (size_t index=0;index<data.completed.size();++index) {
             const auto &value=data.completed[index];OwnedTuple row(6),path(value.path.size());
@@ -115,9 +118,10 @@ PyObject *WOT_CDECL nav_poll(PyObject *,PyObject *args) {
         }
         for (size_t index=0;index<data.stats.size();++index) stats.set(index,integer_result(static_cast<int64_t>(data.stats[index])));
         OwnedTuple result(3);result.set(0,completed.release());result.set(1,queries.release());result.set(2,stats.release());return result.release();
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL nav_answer(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_answer);
     try {
         require_sequence(args,2,true);PyObject **row=items(args);require_sequence(row[1],0);
         std::vector<std::pair<int64_t,bool>> values;values.reserve(static_cast<size_t>(size(row[1])));
@@ -125,17 +129,19 @@ PyObject *WOT_CDECL nav_answer(PyObject *,PyObject *args) {
             PyObject *item=items(row[1])[index];require_sequence(item,2,true);
             values.emplace_back(identity(items(item)[0]),number(items(item)[1])!=0.);
         }
-        offline_navigation::answer(identity(row[0]),values);return int_new(1);
-    } catch (...) {return fallback();}
+        profile.run(offline_navigation::answer,identity(row[0]),values);return int_new(1);
+    } catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL nav_cancel(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_cancel);
     try {
         require_sequence(args,2,true);PyObject **row=items(args);require_sequence(row[1],0);std::vector<int64_t> values;
         for (Py_ssize_t index=0;index<size(row[1]);++index) values.push_back(identity(items(row[1])[index]));
-        offline_navigation::cancel(identity(row[0]),values);return int_new(1);
-    } catch (...) {return fallback();}
+        profile.run(offline_navigation::cancel,identity(row[0]),values);return int_new(1);
+    } catch (...) { profile.fail();return fallback();}
 }
 PyObject *WOT_CDECL nav_close(PyObject *,PyObject *args) {
-    try {require_sequence(args,1,true);offline_navigation::close(identity(items(args)[0]));return int_new(1);}
-    catch (...) {return fallback();}
+    NATIVE_PROFILE_ENTRY(nav_close);
+    try {require_sequence(args,1,true);profile.run(offline_navigation::close,identity(items(args)[0]));return int_new(1);}
+    catch (...) { profile.fail();return fallback();}
 }

@@ -12,6 +12,7 @@ struct NavigationFilterBinding {
     ~NavigationFilterBinding() { navigation_filter_context = previous; }
 };
 PyObject *WOT_CDECL nav_query_filter(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_query_filter);
     // Normal #1513 callbacks carry four exact ints. Exact long material uses
     // the original pure filter; no conversion API or guessed type RVA is added.
     if (!sequence(args) || size(args) != 4) return int_new(1);
@@ -21,21 +22,27 @@ PyObject *WOT_CDECL nav_query_filter(PyObject *, PyObject *args) {
         if (values[index]->ob_type != int_type &&
             (!context || static_cast<const void *>(values[index]->ob_type) != context->capabilities[9])) return int_new(1);
     }
-    if (values[0]->ob_type != int_type)
-        return object_call(context->capabilities[8], args, 0);
+    if (values[0]->ob_type != int_type) {
+        PyObject *result = profiled_object_call(NativeCallback::NavigationQuery, "navigation.query", 7, 1, context->capabilities[8], args);
+        if (!result) profile.fail();
+        return result;
+    }
     const long material = read<long>(reinterpret_cast<const char *>(values[0]) + sizeof(PyObject));
-    return int_new(material >= 71 && material < 86 ? 0 : 1);
+    profile.compute();
+    const int result = material >= 71 && material < 86 ? 0 : 1;
+    profile.output();
+    return int_new(result);
 }
 
-WorldObject navigation_call(PyObject *callable, OwnedTuple &arguments) {
+WorldObject navigation_call(PyObject *callable, OwnedTuple &arguments, int opcode) {
     WorldObject args(arguments.release());
-    return WorldObject(object_call(callable, args.get(), 0));
+    return WorldObject(profiled_object_call(NativeCallback::NavigationQuery, "navigation.query", opcode, 1, callable, args.get()));
 }
 PyObject *navigation_vector(PyObject *constructor, const double *point) {
     OwnedTuple args(3);
     for (unsigned i = 0; i < 3; ++i) args.set(i, float_new(point[i]));
     WorldObject tuple(args.release());
-    PyObject *result = object_call(constructor, tuple.get(), 0);
+    PyObject *result = profiled_object_call(NativeCallback::NavigationQuery, "navigation.query", 2, 1, constructor, tuple.get());
     if (!result) throw PythonAllocationFailed();
     return result;
 }
@@ -53,24 +60,25 @@ void navigation_geometry(NavigationPythonContext &context, PyObject *start, PyOb
     if (!context.diagnostic) return;
     OwnedTuple a(1), b(1);
     navigation_borrow(a, 0, start); navigation_borrow(b, 0, end);
-    WorldObject ax = navigation_call(context.diagnostic[3], a);
-    WorldObject bx = navigation_call(context.diagnostic[3], b);
+    WorldObject ax = navigation_call(context.diagnostic[3], a, 3);
+    WorldObject bx = navigation_call(context.diagnostic[3], b, 3);
     OwnedTuple key(3), args(2);
     navigation_borrow(key, 0, context.capabilities[5]);
     navigation_borrow(key, 1, ax.get()); navigation_borrow(key, 2, bx.get());
     args.set(0, string_new("native.navigation.ray")); args.set(1, key.release());
-    WorldObject ignored = navigation_call(context.diagnostic[2], args);
+    WorldObject ignored = navigation_call(context.diagnostic[2], args, 4);
 }
 
 bool navigation_ray(void *opaque, const double *a, const double *b, bool ground,
                     double &height, double &normal) {
+    NativeProfilePhase bridge(NativePhase::Pack);
     NavigationPythonContext &context = *static_cast<NavigationPythonContext *>(opaque);
     WorldObject start(navigation_vector(context.capabilities[2], a));
     WorldObject end(navigation_vector(context.capabilities[2], b));
     navigation_geometry(context, start.get(), end.get());
     if (context.diagnostic) {
         OwnedTuple empty(0);
-        WorldObject token = navigation_call(context.diagnostic[0], empty);
+        WorldObject token = navigation_call(context.diagnostic[0], empty, 5);
         navigation_diagnostic_token(context.diagnostic[4], token.get());
     }
     OwnedTuple args(5);
@@ -79,27 +87,29 @@ bool navigation_ray(void *opaque, const double *a, const double *b, bool ground,
     navigation_borrow(args, 3, context.capabilities[6]);
     navigation_borrow(args, 4, context.capabilities[4]);
     ++context.rays;
-    WorldObject hit = navigation_call(context.capabilities[0], args);
+    WorldObject hit = navigation_call(context.capabilities[0], args, 0);
     if (context.diagnostic) {
         OwnedTuple stop_args(2);
         stop_args.set(0, string_new("native.navigation.ray"));
         navigation_borrow(stop_args, 1, items(context.diagnostic[4])[0]);
-        WorldObject ignored = navigation_call(context.diagnostic[1], stop_args);
+        WorldObject ignored = navigation_call(context.diagnostic[1], stop_args, 6);
         navigation_diagnostic_token(context.diagnostic[4], none_object);
     }
+    bridge.input();
     if (hit.get() == none_object) return false;
     if (!ground) return true;
     require_sequence(hit.get(), 2);
     OwnedTuple point(1), direction(1);
     navigation_borrow(point, 0, items(hit.get())[0]);
     navigation_borrow(direction, 0, items(hit.get())[1]);
-    WorldObject y = navigation_call(context.capabilities[3], point);
-    WorldObject ny = navigation_call(context.capabilities[3], direction);
+    WorldObject y = navigation_call(context.capabilities[3], point, 3);
+    WorldObject ny = navigation_call(context.capabilities[3], direction, 3);
     height = number(y.get()); normal = number(ny.get());
     return true;
 }
 
 double navigation_water(void *opaque, double x, double y, double z) {
+    NativeProfilePhase bridge(NativePhase::Pack);
     NavigationPythonContext &context = *static_cast<NavigationPythonContext *>(opaque);
     if (context.capabilities[1] == none_object) return -1.0;
     const double a[] = {x, y + 20.0, z}, b[] = {x, y - 5.0, z};
@@ -108,7 +118,8 @@ double navigation_water(void *opaque, double x, double y, double z) {
     args.set(1, world_numbers(b, 3));
     navigation_borrow(args, 2, context.capabilities[7]);
     ++context.waters;
-    WorldObject result = navigation_call(context.capabilities[1], args);
+    WorldObject result = navigation_call(context.capabilities[1], args, 1);
+    bridge.input();
     if (result.get() == none_object) return -1.0;
     const double value = number(result.get());
     return value < 0.0 ? -1.0 : 20.0 - value;
@@ -119,6 +130,7 @@ PyObject *navigation_result(int status, unsigned rays, unsigned waters) {
     return output.release();
 }
 PyObject *WOT_CDECL nav_query_run(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(nav_query_run);
     bool entered = false;
     NavigationPythonContext context = {};
     try {
@@ -142,10 +154,10 @@ PyObject *WOT_CDECL nav_query_run(PyObject *, PyObject *args) {
         NavigationFilterBinding filter(&context);
         const NavigationQueryEngine engine = {&context, navigation_ray, navigation_water};
         entered = true;
-        const int status = navigation_query_run(snapshot, engine);
+        const int status = profile.run(navigation_query_run, snapshot, engine);
         return navigation_result(status, context.rays, context.waters);
-    } catch (const PythonAllocationFailed &) { return 0; }
-      catch (...) { return entered ? navigation_result(-1, context.rays, context.waters) : fallback(); }
+    } catch (const PythonAllocationFailed &) { profile.fail(); return 0; }
+      catch (...) { profile.fail(); return entered ? navigation_result(-1, context.rays, context.waters) : fallback(); }
 }
 PyObject *WOT_CDECL thread_cpu_seconds(PyObject *, PyObject *args) {
     if (!sequence(args) || size(args)) return fallback();

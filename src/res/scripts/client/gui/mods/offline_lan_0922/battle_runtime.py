@@ -59,7 +59,8 @@ from gui.mods.offline_lan_0922.siege_hud import PersistentSiegeHints
 from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
 from gui.mods.offline_lan_0922.collision_flags import VEHICLE_SKIP_FLAGS
 from gui.mods.offline_lan_0922.worker_diagnostics import (
-    WorkerCombatDiagnostics, timed, call as timed_call, observed_ray)
+    WorkerCombatDiagnostics, timed, call as timed_call, observed_ray,
+    observed_call)
 from gui.mods.offline_lan_0922 import (
     ballistics, burst_mechanics, combat_rules, critical_damage, descriptor_donation,
     destructibles_compat, device_damage, effective_params,
@@ -1097,6 +1098,12 @@ class _FrameDiagnostics(object):
             lines.append(_combat_log_lines(prefix, 'combat_summary', {
                 'schema': 2, 'round': self._last_context.get('round'),
                 'map': self._last_context.get('map'), 'capture': capture,
+            }))
+        checkpoint = self._worker_runtime.get('combat_checkpoint')
+        if checkpoint is not None:
+            lines.append(_combat_log_lines(prefix, 'combat_checkpoint', {
+                'schema': 2, 'round': self._last_context.get('round'),
+                'map': self._last_context.get('map'), 'capture': checkpoint,
             }))
         return ''.join(lines)
 
@@ -6036,7 +6043,7 @@ class BattleRuntime(object):
         if not callable(collide):
             return -1.0
         try:
-            value = collide(
+            value = observed_call('native.motion.water', collide,
                 self._vector((point[0], point[1] + 20.0, point[2])),
                 self._vector((point[0], point[1] - 5.0, point[2])), False)
         except Exception:
@@ -6114,7 +6121,7 @@ class BattleRuntime(object):
             end = self._vector((
                 float(point[0]), float(point[1]) + 0.1,
                 float(point[2])))
-            value = collide(start, end, False)
+            value = observed_call('native.weapon.water', collide, start, end, False)
             return value is not None and float(value) > 0.0
         except Exception:
             return True
@@ -17920,6 +17927,8 @@ class BattleRuntime(object):
                     try:
                         note_worker_runtime({
                             'control': self._worker_control_snapshot(),
+                            'combat_checkpoint': (combat_diagnostic.checkpoint()
+                                if combat_diagnostic is not None else None),
                             'bot_diagnostics': (
                                 self._worker_diagnostic_totals()),
                             'presentation': {

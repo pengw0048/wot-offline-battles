@@ -13,6 +13,7 @@ from . import vehicle_physics as physics
 from . import world_collision as world
 from . import tank_collision
 from . import prebaked_navigation
+from .worker_diagnostics import observed
 
 STATE_NAMES = (
     'terrain_pitch', 'speed', '_turn_speed', 'vertical_speed', 'push_x', 'push_z',
@@ -98,6 +99,7 @@ class NativeMotion(object):
         self._by_id.clear()
         self.players = ()
 
+    @observed('frontier.motion_pack')
     def _state(self, state):
         row = []
         for name in STATE_NAMES:
@@ -119,6 +121,7 @@ class NativeMotion(object):
                        if name in state and name not in ('_turn_speed', 'grind_ticks'))
         return (_pose(state), tuple(row), flags, float(presence))
 
+    @observed('frontier.motion_mirror')
     def _mirror(self, bot_id, receipt):
         state = self.runtime.states[int(bot_id)]
         pose, values, flags, presence = receipt
@@ -156,6 +159,7 @@ class NativeMotion(object):
         return self._mirror(bot_id, self._require(
             'sim_motion_snapshot', (1, int(bot_id))))
 
+    @observed('frontier.motion_descriptor')
     def _descriptor(self, bot_id, descriptor=None, revision=0):
         state = self.runtime.states[int(bot_id)]
         descriptor = descriptor or self.runtime._descriptors[int(bot_id)]

@@ -1,3 +1,4 @@
+#include "offline_simulation_diagnostics.h"
 #include "offline_contact_roster.h"
 #include <algorithm>
 #include <array>
@@ -200,11 +201,14 @@ Angular angular_response(const Body &a,const Body &b,const Hit &hit,double ia,do
 // Four sequential passes update private poses and velocities. Position-fixed
 // hulls still move in this private solver; only their published correction is held.
 std::vector<Result> solve(std::vector<Body> bodies,double dt) {
+    NATIVE_PROFILE_STAGE(contact_solve);
     std::stable_sort(bodies.begin(),bodies.end(),[](const Body &a,const Body &b){return a.id<b.id;});
     std::vector<Result> results; results.reserve(bodies.size());
     std::vector<double> radii; radii.reserve(bodies.size());
     for(const Body &b:bodies) {results.push_back(Result{b.id,{0.,0.,0.,0.,0.}});radii.push_back(std::hypot(b.shape[0],b.shape[1]));}
     std::vector<Pair> pairs; pairs.reserve(bodies.size()*(bodies.size()?bodies.size()-1:0)/2);
+    {
+    NATIVE_PROFILE_STAGE(contact_pair_build);
     for(uint32_t i=0;i<bodies.size();++i) {
         const Body &a=bodies[i];
         for(uint32_t j=i+1;j<bodies.size();++j) {
@@ -216,6 +220,46 @@ std::vector<Result> solve(std::vector<Body> bodies,double dt) {
                 pairs.push_back(Pair{i,j,projection(a,b)});
         }
     }
+    }
+    // Build diagnostics only from the solver's existing candidate edges. No
+    // extra pair scan or state mutation is introduced in either capture mode.
+    if (offline_simulation::diagnostics::ledger().active) try {
+        namespace d = offline_simulation::diagnostics;
+        std::vector<std::size_t> roots(bodies.size()), actors(bodies.size(), 1), edges(bodies.size(), 0);
+        for (std::size_t i = 0; i < roots.size(); ++i) roots[i] = i;
+        const auto root = [&](std::size_t value) {
+            while (roots[value] != value) {
+                roots[value] = roots[roots[value]];
+                value = roots[value];
+            }
+            return value;
+        };
+        for (const auto &pair : pairs) {
+            const auto a = root(pair.a), b = root(pair.b);
+            if (a == b) { ++edges[a]; continue; }
+            roots[b] = a;
+            actors[a] += actors[b];
+            edges[a] += edges[b] + 1;
+        }
+        std::uint64_t isolated = 0, islands = 0, largest_actors = 0, largest_pairs = 0;
+        for (std::size_t i = 0; i < roots.size(); ++i) {
+            if (roots[i] != i) continue;
+            if (!edges[i]) { ++isolated; continue; }
+            ++islands;
+            largest_actors = std::max(largest_actors, static_cast<std::uint64_t>(actors[i]));
+            largest_pairs = std::max(largest_pairs, static_cast<std::uint64_t>(edges[i]));
+        }
+        d::count(d::CounterCode::ContactActors, "contact.actors", bodies.size());
+        d::count(d::CounterCode::ContactPairs, "contact.candidate_pairs", pairs.size());
+        d::count(d::CounterCode::ContactIsolated, "contact.isolated_actors", isolated);
+        d::count(d::CounterCode::ContactIslands, "contact.nontrivial_islands", islands);
+        d::count(d::CounterCode::ContactLargestActors, "contact.largest_island_actors", largest_actors);
+        d::count(d::CounterCode::ContactLargestPairs, "contact.largest_island_pairs", largest_pairs);
+    } catch (...) {
+        // Exhausted diagnostic allocation cannot alter a physical result.
+    }
+    {
+    NATIVE_PROFILE_STAGE(contact_solve_passes);
     for(unsigned pass=0;pass<4;++pass) {
         for(const Pair &p:pairs) {
             Body &a=bodies[p.a], &b=bodies[p.b];
@@ -243,6 +287,7 @@ std::vector<Result> solve(std::vector<Body> bodies,double dt) {
                 }
             }
         }
+    }
     }
     return results;
 }

@@ -4,6 +4,8 @@ from __future__ import print_function
 import copy
 
 from gui.mods.offline_lan_0922.ai.driver import LocalDriver
+from gui.mods.offline_lan_0922.worker_diagnostics import (
+    observed, count as combat_count)
 
 _POSE_NAMES = ('x', 'y', 'z', 'yaw', 'pitch', 'roll', 'aim_yaw',
                'turret_yaw', 'gun_pitch', 'speed', 'velocity')
@@ -368,7 +370,9 @@ class NativeControl(object):
         key = tuple(key)
         values = tuple(values)
         if self._config.get(key) == values:
+            combat_count('frontier_control_config_unchanged')
             return
+        combat_count('frontier_control_config_changed')
         self._call('sim_control_configure', ((key, hash(_wire_key(key)), values),))
         self._config[key] = values
 
@@ -400,6 +404,7 @@ class NativeControl(object):
             self._call('sim_control_finish')
             self._open = False
 
+    @observed('frontier.control_config')
     def _actor_config(self, source, tick):
         from gui.mods.offline_lan_0922 import bot_runtime as laws
         runtime = self.runtime
@@ -459,6 +464,7 @@ class NativeControl(object):
             runtime._source_radio_range(source, tick), float(relay), 0.0)
         return values, bool(last_effort), bool(designated)
 
+    @observed('frontier.control_sample')
     def _sample(self, source, key, last_effort=False, designated=False,
                 refresh_schedule=True):
         runtime = self.runtime
@@ -478,6 +484,7 @@ class NativeControl(object):
                  (designated << 2) | (bool(due) << 3))
         return key, _pose(source), -1 if fire is None else int(fire), flags, selected
 
+    @observed('frontier.control_template')
     def _install_template(self, source, key, processed=False):
         runtime = self.runtime
         if key[0] == 0:
@@ -601,6 +608,7 @@ class NativeControl(object):
         finally:
             runtime._probe_finished(0, started)
 
+    @observed('frontier.control_events')
     def _sync_events(self, aggregate=None, team_visibility=None):
         runtime = self.runtime
         for source, target, sampled, duration, pose_row in self.observations():
@@ -645,12 +653,14 @@ class NativeControl(object):
                 visibility_tick.setdefault('player_vision_ranges', []).extend(vision_rows)
         return True
 
+    @observed('frontier.control_contacts')
     def contacts_for(self, source, players, now, team_spotted=None,
                      visibility_tick=None, processed_bot_ids=None):
         # Current actor input may have changed during its preparation phase.
         # Earlier actors are updated separately after their committed motion.
         self.update_actor(source, source.get('kind', 'bot'), processed=False)
         rows = self.contacts(_key(source), self._sight)
+        combat_count('frontier_contact_rows', len(rows))
         contacts, lookup = [], {}
         for key, flags, unused_remaining, unused_sampled, pose in rows:
             target = dict(self._pose_free[tuple(key)])
@@ -664,6 +674,7 @@ class NativeControl(object):
         self._sync_events(team_visibility=team_spotted)
         return contacts, lookup
 
+    @observed('frontier.control_export')
     def _export_perception(self, snapshot):
         runtime = self.runtime
         actor_rows, observations, unused_slots, visibility, teams, waiting, radio_rows, now = snapshot

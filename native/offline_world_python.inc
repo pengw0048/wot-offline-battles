@@ -68,6 +68,7 @@ int world_dispatch(void *opaque, uint32_t opcode, const WorldRequest *requests,
                    uint32_t count, WorldResponse *responses) {
   WorldContext &context = *static_cast<WorldContext *>(opaque);
   try {
+    NativeProfilePhase bridge(NativePhase::Pack);
     OwnedTuple rows(count), arguments(2);
     for (size_t index = 0; index < count; ++index)
       rows.set(index, world_request(opcode, requests[index]));
@@ -76,7 +77,9 @@ int world_dispatch(void *opaque, uint32_t opcode, const WorldRequest *requests,
     // PyObject_Call borrows callable/args and returns a new reference. Both
     // input tuples remain owned across synchronous Python/BigWorld reentry.
     WorldObject args(arguments.release());
-    WorldObject output(object_call(context.dispatcher, args.get(), 0));
+    WorldObject output(profiled_object_call(NativeCallback::World, "world",
+        static_cast<int>(opcode), count, context.dispatcher, args.get()));
+    bridge.input();
     if (opcode == WORLD_FILTER || opcode == WORLD_DEPARTING ||
         opcode == WORLD_TRACE)
       return 1;
@@ -114,6 +117,7 @@ int world_dispatch(void *opaque, uint32_t opcode, const WorldRequest *requests,
 }
 
 PyObject *WOT_CDECL world_run(PyObject *, PyObject *args) {
+    NATIVE_PROFILE_ENTRY(world_run);
   bool entered = false;
   try {
     require_sequence(args, 2, true);
@@ -135,14 +139,14 @@ PyObject *WOT_CDECL world_run(PyObject *, PyObject *args) {
     snapshot.supplied_departing = values[18] != 0.;
     WorldContext context = {items(args)[1], std::exception_ptr()};
     entered = true;
-    const int result = wot_world_run(&snapshot, world_dispatch, &context);
+    const int result = profile.run(wot_world_run, &snapshot, world_dispatch, &context);
     if (context.exception)
       std::rethrow_exception(context.exception);
     return int_new(result);
-  } catch (const PythonAllocationFailed &) {
+  } catch (const PythonAllocationFailed &) { profile.fail();
     // Includes a NULL PyObject_Call result: keep the original PyErr.
     return 0;
-  } catch (...) {
+  } catch (...) { profile.fail();
     // Returning None authorizes Python replay, which is safe only before
     // the reducer can have invoked a callback with engine side effects.
     return entered ? int_new(-2) : fallback();

@@ -16,6 +16,7 @@ PyObject *contact_pair_result(const std::array<double,2> &value) {
     return pair.release();
 }
 PyObject *WOT_CDECL contact_roster(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(contact_roster);
     try {
         require_sequence(args,4,true);PyObject **input=items(args);
         require_sequence(input[0],0);require_sequence(input[1],0);require_sequence(input[3],0);
@@ -63,7 +64,7 @@ PyObject *WOT_CDECL contact_roster(PyObject *,PyObject *args) {
             }
             bodies.push_back(body);
         }
-        const auto rows=offline_contact::resolve(bodies,owners,dt,previous);
+        const auto rows=profile.run(offline_contact::resolve,bodies,owners,dt,previous);
         OwnedTuple result(rows.size());
         for (size_t index=0;index<rows.size();++index) {
             const auto &value=rows[index];OwnedTuple row(8),retained(value.retained_contacts.size()),ram(value.ram_candidates.size());
@@ -85,5 +86,5 @@ PyObject *WOT_CDECL contact_roster(PyObject *,PyObject *args) {
             row.set(6,retained.release());row.set(7,ram.release());result.set(index,row.release());
         }
         return result.release();
-    } catch (const PythonAllocationFailed &) {return 0;} catch (...) {return fallback();}
+    } catch (const PythonAllocationFailed &) { profile.fail();return 0;} catch (...) { profile.fail();return fallback();}
 }

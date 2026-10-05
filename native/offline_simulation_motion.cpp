@@ -1,3 +1,4 @@
+#include "offline_simulation_diagnostics.h"
 #include "offline_simulation_motion.h"
 #include <algorithm>
 #include <cmath>
@@ -912,6 +913,8 @@ namespace offline_simulation {
                 predrive.push_back(body);
             }
             for(auto h:humans_)predrive.push_back({h.id,h.has(offline_contact::HasY),h.x,h.y,h.z,h.yaw,h.pitch,h.roll,h.shape});
+            {
+            NATIVE_PROFILE_STAGE(motion_predrive_sweep);
             for(auto k:sorted){
                 auto&e=entry(k);
                 if(!e.state.alive)continue;
@@ -925,6 +928,7 @@ namespace offline_simulation {
                 const auto allowed=offline_math::slide(before,move,predrive,true,fraction);
                 e.state.pose.position[0]=before.x+allowed.x;
                 e.state.pose.position[2]=before.z+allowed.z;
+            }
             }
             for(auto k:sorted)guarded(k,[&](){
                 auto&e=entry(k);
