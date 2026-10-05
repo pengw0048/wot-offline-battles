@@ -31,6 +31,11 @@ jobs:
               native/offline_contact_roster.cpp \
               native/world_stage.cpp \
               native/navigation_query_stage.cpp \
+              native/offline_simulation.cpp \
+              native/offline_simulation_control.cpp \
+              native/offline_simulation_motion.cpp \
+              native/offline_simulation_weapons.cpp \
+              native/offline_simulation_navigation.cpp \
               native/offline_math_batch_native.cpp \
               -o /tmp/offline_math_batch_native.so
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_math.py \
@@ -42,6 +47,17 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_world.py \
               /tmp/offline_math_batch_native.so /src/src/res/scripts/client
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_navigation_query.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_control.py \
+              --extension /tmp/offline_math_batch_native.so \
+              --client-scripts /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_weapons.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_navigation.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_motion.py \
               /tmp/offline_math_batch_native.so
           '
   test:

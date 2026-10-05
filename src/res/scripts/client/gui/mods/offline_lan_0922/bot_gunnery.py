@@ -347,6 +347,13 @@ def _anchor_value(points, rating):
     return lower + (float(points[index + 1]) - lower) * fraction
 
 
+def _crew_level_at_rating(rating):
+    level = _anchor_value(
+        [_PARAMETERS[skill]['crew_level'] for skill in SKILL_TIERS], rating)
+    return min(PROVEN_CREW_LEVELS,
+               key=lambda proven: (abs(proven - level), proven))
+
+
 def rating_parameters(rating, overrides=None):
     """Return one Bot's gunner bundle, interpolated between the anchors.
 
@@ -360,9 +367,7 @@ def rating_parameters(rating, overrides=None):
     for name in ('reaction_seconds', 'patience_seconds', 'converged_factor',
                  'aim_bias_factor', 'lead_error'):
         result[name] = _anchor_value([row[name] for row in rows], rating)
-    level = _anchor_value([row['crew_level'] for row in rows], rating)
-    result['crew_level'] = min(
-        PROVEN_CREW_LEVELS, key=lambda proven: (abs(proven - level), proven))
+    result['crew_level'] = _crew_level_at_rating(rating)
     if overrides:
         from gui.mods.offline_lan_0922.bot_tactics import normalize_values
         result.update(dict((k, v) for k, v in normalize_values(overrides).items() if k != 'skill'))
@@ -376,7 +381,7 @@ def skill_parameters(skill):
 
 def rating_crew_level(rating):
     """Return the #1513 crew level one rating trains its Bot to."""
-    return int(rating_parameters(rating)['crew_level'])
+    return int(_crew_level_at_rating(normalize_rating(rating)))
 
 
 def crew_level(skill):

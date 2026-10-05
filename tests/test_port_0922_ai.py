@@ -2246,7 +2246,7 @@ class BotAiPortTests(unittest.TestCase):
             self.assertEqual(1.0, order['throttle'])
             self.assertEqual(0.0, order['turn'])
 
-    def test_target_behind_hull_brakes_before_route_heading_lease_expires(self):
+    def test_target_behind_hull_coasts_before_route_heading_lease_expires(self):
         driver = LocalDriver()
         target = (50.0, 0.0, 0.0)
         first = driver.drive(
@@ -2257,11 +2257,11 @@ class BotAiPortTests(unittest.TestCase):
             target, (), lambda unused_yaw: True)
 
         self.assertEqual(1.0, first['throttle'])
-        self.assertFalse(first['brake'])
+        self.assertNotIn('brake', first)
         self.assertAlmostEqual(first['target_yaw'], second['target_yaw'])
         self.assertEqual('drive', second['recovery_mode'])
         self.assertEqual(0.0, second['throttle'])
-        self.assertTrue(second['brake'])
+        self.assertNotIn('brake', second)
 
     def test_failed_yaw_cache_uses_circular_buckets(self):
         driver = LocalDriver()
@@ -2399,7 +2399,7 @@ class BotAiPortTests(unittest.TestCase):
             self.assertNotIn(order['recovery_mode'],
                              ('reverse_turn', 'pivot_recovery'))
 
-    def test_terminal_target_brakes_inside_copied_stopping_distance(self):
+    def test_terminal_target_coasts_inside_copied_stopping_distance(self):
         driver = LocalDriver()
         terminal = driver.drive(
             71, 0, (0.0, 0.0, 0.0), 0.0, 14.0, 0.15,
@@ -2413,9 +2413,9 @@ class BotAiPortTests(unittest.TestCase):
             decision_horizon=0.15)
 
         self.assertEqual(0.0, terminal['throttle'])
-        self.assertTrue(terminal['brake'])
+        self.assertNotIn('brake', terminal)
         self.assertEqual(1.0, corridor['throttle'])
-        self.assertFalse(corridor['brake'])
+        self.assertNotIn('brake', corridor)
 
     def test_prohorovka_west_ridge_corner_keeps_forward_progress(self):
         driver = LocalDriver()
@@ -2894,10 +2894,10 @@ class BotAiPortTests(unittest.TestCase):
             (20.0, 0.0, 20.0), (), lambda unused_yaw: True)
 
         self.assertEqual(0.0, uphill['throttle'])
-        self.assertTrue(uphill['brake'])
+        self.assertNotIn('brake', uphill)
         self.assertGreater(abs(uphill['turn']), 0.9)
         self.assertEqual(1.0, flat['throttle'])
-        self.assertFalse(flat['brake'])
+        self.assertNotIn('brake', flat)
 
 
 if __name__ == '__main__':

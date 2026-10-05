@@ -21,6 +21,11 @@ build_bridge() {
         "$PORT_ROOT/native/offline_contact_roster.cpp" \
         "$PORT_ROOT/native/world_stage.cpp" \
         "$PORT_ROOT/native/navigation_query_stage.cpp" \
+        "$PORT_ROOT/native/offline_simulation.cpp" \
+        "$PORT_ROOT/native/offline_simulation_control.cpp" \
+        "$PORT_ROOT/native/offline_simulation_motion.cpp" \
+        "$PORT_ROOT/native/offline_simulation_weapons.cpp" \
+        "$PORT_ROOT/native/offline_simulation_navigation.cpp" \
         "$PORT_ROOT/native/offline_math_batch_native.cpp"
     PE_INFO=$(i686-w64-mingw32-objdump -p "$OUTPUT")
     echo "$PE_INFO" | grep -q 'file format pei-i386'

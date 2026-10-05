@@ -149,7 +149,6 @@ class LocalDriver(object):
 
 	def __init__(self, stuck_seconds=1.8, recovery_seconds=0.85,
 			failure_ttl=2.0):
-		self._probe_takes_distance = True
 		self.stuck_seconds = max(0.4, float(stuck_seconds))
 		self.recovery_seconds = max(0.25, float(recovery_seconds))
 		self.failure_ttl = max(0.25, float(failure_ttl))
@@ -223,6 +222,7 @@ class LocalDriver(object):
 				'traffic_wait_time': 0.0,
 				'last_step': 0.0,
 				'braking_target': None,
+				'coast_target': None,
 			}
 			self.states[bot_id] = state
 		elif state['team_slot'] != team_slot:
@@ -294,22 +294,25 @@ class LocalDriver(object):
 		return neighbour
 
 	def _clear(self, direction_clear, yaw, maximum_distance=None):
-		"""Ask one probe about a heading, optionally over a bounded distance.
-
-		A recovery manoeuvre travels a hull length, not the fifteen to twenty
-		metre travel horizon the ordinary drive candidates are ranked over.
-		Probes that predate the bounded form keep the unbounded answer.
-		"""
-		if maximum_distance is not None and self._probe_takes_distance:
-			try:
-				return bool(direction_clear(yaw, maximum_distance))
-			except TypeError:
-				self._probe_takes_distance = False
-			except Exception:
-				return False
+		"""Choose a legacy probe's arity before its one observable invocation."""
+		takes_distance = maximum_distance is not None
+		if takes_distance:
+			target = getattr(direction_clear, 'im_func',
+				getattr(direction_clear, '__func__', direction_clear))
+			code = getattr(target, 'func_code', getattr(target, '__code__', None))
+			if code is not None:
+				count = int(code.co_argcount)
+				bound = getattr(direction_clear, 'im_self',
+					getattr(direction_clear, '__self__', None))
+				if bound is not None:
+					count -= 1
+				takes_distance = bool(code.co_flags & 0x04) or count >= 2
 		try:
+			if takes_distance:
+				return bool(direction_clear(yaw, maximum_distance))
 			return bool(direction_clear(yaw))
 		except Exception:
+			# An exception may follow native work. Contain it without replaying.
 			return False
 
 	@staticmethod
@@ -550,7 +553,8 @@ class LocalDriver(object):
 			neighbours, direction_clear, velocity=None,
 			half_length=3.5, half_width=1.7,
 			movement_intent=True, stopping_distance=None,
-			stop_at_target=True, decision_horizon=0.0, pose_clear=None):
+			stop_at_target=True, decision_horizon=0.0, pose_clear=None,
+			turn_speed_limit=None):
 		"""Return ``throttle``, ``turn``, ``target_yaw`` and ``recovery_mode``.
 
 		``team_slot`` is the explicit stable 0..14 formation slot. It must not be
@@ -582,6 +586,7 @@ class LocalDriver(object):
 			state['steering_yaw'] = None
 			state['heading_progress_yaw'] = None
 			state['braking_target'] = None
+			state['coast_target'] = None
 			return {
 				'throttle': 0.0,
 				'turn': 0.0,
@@ -604,6 +609,7 @@ class LocalDriver(object):
 			state['last_position'] = (
 				float(position[0]), float(position[2]))
 			state['braking_target'] = None
+			state['coast_target'] = None
 			return {
 				'throttle': 0.0,
 				'turn': 0.0,
@@ -662,6 +668,7 @@ class LocalDriver(object):
 					own_half_length, own_half_width)
 
 		if state['recovery_time'] > 0.0:
+			state['coast_target'] = None
 			# Keep one side for the whole episode. Geometry separates an asymmetric
 			# local jam; team-local slot parity breaks an exact tie without coupling
 			# steering to the timing phase. Never reverse blindly: at a cliff or
@@ -760,6 +767,7 @@ class LocalDriver(object):
 				own_half_length, own_half_width)
 			state['plan_age'] = 0.0
 		if chosen_yaw is None:
+			state['coast_target'] = None
 			# No forward ray is usable.  Start a timed recovery on the next tick
 			# rather than issuing an unsafe blind turn.
 			state['stuck_time'] = max(state['stuck_time'], threshold)
@@ -825,6 +833,30 @@ class LocalDriver(object):
 					throttle = 0.0
 		elif not stop_at_target:
 			state['braking_target'] = None
+		# A nearby target can lie wholly inside the tightest current turn circle.
+		# Driving then maintains an orbit even on clear ground. Coast while turning
+		# until the forward ray intersects the unchanged arrival disk. The latch
+		# survives zero speed, so one acceleration pulse cannot restart that orbit.
+		turn_rate = float(turn_speed_limit or 0.0)
+		coast_key = (float(target[0]), float(target[2]))
+		if (avoiding or speed < 0.0 or turn_rate <= 0.0 or
+				state.get('coast_target') not in (None, coast_key)):
+			state['coast_target'] = None
+		if not avoiding and speed >= 0.0 and turn_rate > 0.0:
+			dx = float(target[0]) - float(position[0])
+			dz = float(target[2]) - float(position[2])
+			side = abs(dx * math.cos(yaw) - dz * math.sin(yaw))
+			ahead = dx * math.sin(yaw) + dz * math.cos(yaw)
+			if ahead > 0.0 and side <= WAYPOINT_ARRIVAL_RADIUS:
+				state['coast_target'] = None
+			elif side > WAYPOINT_ARRIVAL_RADIUS and speed > 0.0:
+				radius = float(speed) / turn_rate
+				if (radius > WAYPOINT_ARRIVAL_RADIUS and
+						math.hypot(side - radius, ahead) <
+						radius - WAYPOINT_ARRIVAL_RADIUS):
+					state['coast_target'] = coast_key
+			if state.get('coast_target') is not None:
+				throttle = 0.0
 		return {
 			'throttle': throttle,
 			'turn': turn,

@@ -1,7 +1,7 @@
-"""Real collision feedback must also retire a failed recovery direction.
+"""Real hull collision remains authoritative over clear planning rays.
 
-The fixed analytic alley isolates the Airfield report's clear-planning-ray /
-failed-final-sweep contract. It is not a reconstruction of native Airfield BSP.
+These analytic scenes check containment, query and receipt lifecycle contracts.
+They do not prove narrow-alley escape behavior or reconstruct native Airfield BSP.
 """
 import contextlib
 import io
@@ -145,9 +145,6 @@ class DriverRecoveryFeedbackTests(unittest.TestCase):
             return True
 
         runtime.navigator.grid.hull_pose_clear = pose_clear
-        runtime.rotation_resolver = (
-            lambda bot, position, old, new, desc, dt, now, rate, *unused:
-            pose_clear(position, new, 3.5, 1.7))
         decide = runtime.adapter.decide_with_order
         commands = []
 
@@ -163,10 +160,10 @@ class DriverRecoveryFeedbackTests(unittest.TestCase):
             'recovery_time'] = 0.85
         return runtime, scene, commands, target
 
-    def test_final_world_failure_changes_next_recovery_and_leaves_fixed_alley(self):
+    def test_final_world_failure_invalidates_planning_receipts_without_penetration(self):
         for fps in (5, 10):
             with self.subTest(fps=fps), contextlib.redirect_stdout(io.StringIO()):
-                runtime, scene, commands, target = self._runtime()
+                runtime, scene, commands, unused = self._runtime()
                 dt = 1.0 / fps
                 self.assertTrue(scene.probe(
                     (0.0, 0.0, 0.0), math.pi, maximum_distance=5.6)['clear'])
@@ -176,73 +173,99 @@ class DriverRecoveryFeedbackTests(unittest.TestCase):
                 self.assertEqual('solid_lane', scene.hard[0][4]['reason'])
                 self.assertLess(scene.hard[0][3], 0.0)
                 self.assertEqual(0.0, runtime.states[11]['z'])
+                self.assertEqual(0.0, runtime.states[11]['speed'])
                 self.assertNotIn(11, runtime._decision_cache)
                 self.assertNotIn(11, runtime._motion_probe_cache)
-                runtime.update(dt, 1.0+dt)
-                self.assertEqual('forward_escape', commands[-1]['recovery_mode'])
-                self.assertGreater(runtime.states[11]['z'], 0.0)
-                departed = False
-                for frame in range(2, 45*fps):
-                    runtime.update(dt, 1.0+frame*dt)
-                    state = runtime.states[11]
-                    departed |= state['z'] > 2.0+3.5
-                    if math.hypot(state['x']-target[0], state['z']-target[2]) <= 1.5:
-                        break
-                self.assertTrue(departed)
-                self.assertLessEqual(math.hypot(
-                    state['x']-target[0], state['z']-target[2]), 1.5)
-                # The lip never changes or vanishes; only the initial reverse
-                # sweep touches it, then the hull takes the existing exit.
-                self.assertEqual(1, len(scene.hard))
+                driver = runtime.adapter.driver
+                state = driver.states[11]
+                failed = driver._yaw_key(math.pi)
+                self.assertGreater(state['failed_yaws'][failed], state['clock'])
 
-    def test_both_real_failed_exits_hold_instead_of_repeating_forward_escape(self):
+    def test_repeated_clear_planner_cannot_push_through_real_rear_lip(self):
         runtime, scene, commands, unused = self._runtime(closed_front=True)
         with contextlib.redirect_stdout(io.StringIO()):
-            runtime.update(0.1, 1.0)
-            runtime.update(0.1, 1.1)
-            self.assertEqual('forward_escape', commands[-1]['recovery_mode'])
-            self.assertEqual(2, len(scene.hard))
-            self.assertLess(scene.hard[0][3], 0.0)
-            self.assertGreater(scene.hard[1][3], 0.0)
-            runtime.update(0.1, 1.2)
-        self.assertEqual('blocked', commands[-1]['recovery_mode'])
-        self.assertTrue(commands[-1]['brake'])
-        self.assertEqual(0.0, commands[-1]['throttle'])
-        self.assertEqual(2, len(scene.hard))
-        self.assertEqual(0.0, runtime.states[11]['z'])
-
-    def test_expired_real_failure_allows_a_new_recovery_probe(self):
-        runtime, scene, commands, target = self._runtime()
-        with contextlib.redirect_stdout(io.StringIO()):
-            runtime.update(0.1, 1.0)
-            # A stationary commanded hold advances the same driver clock;
-            # no new motion renews the old five-second collision receipt.
-            runtime.adapter.navigation_target = lambda *unused: (0.0, 0.0, 0.0)
-            for frame in range(1, 62):
+            for frame in range(5):
+                prior_queries = len(scene.hard)
                 runtime.update(0.1, 1.0+frame*0.1)
-            runtime.adapter.navigation_target = lambda *unused: target
-            runtime.adapter.driver.states[11]['recovery_time'] = 0.85
-            runtime._decision_cache.clear()
-            runtime.update(0.1, 7.2)
-        self.assertEqual('reverse_turn', commands[-1]['recovery_mode'])
-        self.assertEqual(2, len(scene.hard))
+                self.assertEqual('reverse_turn', commands[-1]['recovery_mode'])
+                self.assertGreater(len(scene.hard), prior_queries)
+                state = runtime.states[11]
+                self.assertEqual((0.0, 0.0, 0.0),
+                                 (state['x'], state['z'], state['speed']))
+                self.assertNotIn(11, runtime._decision_cache)
+                self.assertNotIn(11, runtime._motion_probe_cache)
 
-    def test_curved_recovery_keeps_only_the_unfailed_straight_exit(self):
+    def test_dynamic_rear_and_both_pivot_blockers_hold_then_release(self):
+        from gui.mods.offline_lan_0922.ai.driver import LocalDriver
+        driver = LocalDriver()
+        state = driver._state(11, 0, (0.0, 0.0, 0.0))
+        state.update(recovery_time=0.85, recovery_side=1.0)
+        blocked = [True]
+        probes = []
+        def clear(yaw, distance=None):
+            probes.append((yaw, distance))
+            return not blocked[0]
+        args = dict(bot_id=11, team_slot=0, position=(0.0, 0.0, 0.0),
+                    yaw=0.0, speed=0.0, dt=0.1, target=(0.0, 0.0, 20.0),
+                    neighbours=(), direction_clear=clear,
+                    pose_clear=lambda unused: not blocked[0])
+        command = driver.drive(**args)
+        self.assertEqual('blocked', command['recovery_mode'])
+        self.assertEqual((0.0, 0.0), (command['throttle'], command['turn']))
+        self.assertEqual([(math.pi, 3.5*1.6)], probes)
+        blocked[0] = False
+        command = driver.drive(**args)
+        self.assertEqual('reverse_turn', command['recovery_mode'])
+        self.assertLess(command['throttle'], 0.0)
+
+    def test_expired_real_failure_allows_route_candidate_again(self):
+        runtime, unused_scene, unused_commands, unused_target = self._runtime()
+        driver = runtime.adapter.driver
+        state = driver.states[11]
+        state['recovery_time'] = 0.0
+        runtime._decision_cache[11] = ('stale',)
+        runtime._motion_probe_cache[11] = {'stale': True}
+        runtime._invalidate_realised_motion(11, 0.0)
+        self.assertNotIn(11, runtime._decision_cache)
+        self.assertNotIn(11, runtime._motion_probe_cache)
+        args = dict(bot_id=11, team_slot=0, position=(0.0, 0.0, 0.0),
+                    yaw=0.0, speed=0.0, dt=0.1, target=(0.0, 0.0, 20.0),
+                    neighbours=(), direction_clear=lambda *unused: True)
+        failed_key = driver._yaw_key(0.0)
+        before = driver.drive(**args)
+        self.assertIn(failed_key, state['failed_yaws'])
+        self.assertNotEqual(0.0, before['target_yaw'])
+        driver.drive(movement_intent=False, **dict(args, dt=5.1))
+        after = driver.drive(**args)
+        self.assertNotIn(failed_key, state['failed_yaws'])
+        self.assertEqual('drive', after['recovery_mode'])
+        self.assertEqual((1.0, 0.0, 0.0),
+                         (after['throttle'], after['turn'], after['target_yaw']))
+
+    def test_curved_recovery_keeps_the_checked_straight_exit(self):
         from gui.mods.offline_lan_0922.ai.driver import (
             LocalDriver, RECOVERY_YAW_OFFSET)
         driver = LocalDriver()
         state = driver._state(11, 0, (0.0, 0.0, 0.0))
         state.update(recovery_time=0.85, recovery_side=1.0)
-        driver.remember_failure(11, math.pi+RECOVERY_YAW_OFFSET*0.5, 0.25)
+        blocked = [True]
+        probes = []
+        def clear(yaw, distance=None):
+            probes.append((yaw, distance))
+            return not (blocked[0] and
+                        abs(yaw-math.pi-RECOVERY_YAW_OFFSET*0.5) < 1e-8)
         args = dict(bot_id=11, team_slot=0, position=(0.0, 0.0, 0.0),
                     yaw=0.0, speed=0.0, dt=0.1, target=(0.0, 0.0, 20.0),
-                    neighbours=(), direction_clear=lambda *unused: True,
+                    neighbours=(), direction_clear=clear,
                     pose_clear=lambda unused: True)
         command = driver.drive(**args)
         self.assertEqual('reverse_turn', command['recovery_mode'])
         self.assertLess(command['throttle'], 0.0)
         self.assertEqual(0.0, command['turn'])
-        args['dt'] = 0.3
+        self.assertEqual([(math.pi, 3.5*1.6),
+                          (math.pi+RECOVERY_YAW_OFFSET*0.25, 3.5*1.6),
+                          (math.pi+RECOVERY_YAW_OFFSET*0.5, 3.5*1.6)], probes)
+        blocked[0] = False
         command = driver.drive(**args)
         self.assertLess(command['throttle'], 0.0)
         self.assertEqual(-1.0, command['turn'])

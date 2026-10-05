@@ -11604,6 +11604,105 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         self.assertEqual(1, counts['receipt_proximity_stores'])
         self.assertEqual(1, counts['receipt_proximity_entries'])
 
+    def _non_fellable_catalog_scan_fixture(self, kind, native_type):
+        (manager, mapper, area, bigworld, math_module,
+         descriptor) = self._empty_catalog_scan_fixture()
+        material = 73 if kind == 'structure' else None
+        destructibles_sensor.set_catalog(_catalog({
+            'known.model': {'kind': kind,
+                            'boxes': [[-1, -1, -1, 1, 1, 1, material]]},
+        }))
+        manager.set_chunk_count(22, 1)
+        area.g_cache.getDescByFilename = lambda unused: {
+            'type': native_type, 'health': 20, 'mass': 100,
+            'modules': {73: {'health': 20}}}
+        bigworld.wg_getChunkDestrFilenames.return_value = ('known.model',)
+        bigworld.wg_getDestructibleEffectCategory = mock.Mock(
+            return_value=native_type)
+        bigworld.wg_getDestructibleMatrix = mock.Mock(
+            return_value=_ItemMatrix(_Vector(0., 0., 2.)))
+        return manager, mapper, area, bigworld, math_module, descriptor
+
+    def test_non_fellable_catalog_boxes_allow_empty_proximity_reuse(self):
+        for kind, native_type in (('fragile', 3), ('structure', 4), ('falling', 2)):
+            with self.subTest(kind=kind):
+                (unused_manager, mapper, area, bigworld, math_module,
+                 descriptor) = self._non_fellable_catalog_scan_fixture(kind, native_type)
+                authority = types.SimpleNamespace(is_destroyed=lambda *unused: False)
+                with mock.patch.dict(sys.modules, {
+                        'AreaDestructibles': area, 'BigWorld': bigworld,
+                        'Math': math_module}), mock.patch.object(
+                            destructibles_sensor, '_get_destr_authority',
+                            return_value=authority):
+                    destructibles_sensor._fell_trees_near(
+                        1, _Vector(), 0., 6., descriptor)
+                    destructibles_sensor._fell_trees_near(
+                        1, _Vector(.01, 0., 0.), .1, 8., descriptor)
+                    # A scan receipt never grants passage through these boxes.
+                    self.assertTrue(destructibles_sensor._catalog_hull_contact(
+                        _Vector(), 0., 6., descriptor, .1))
+                self.assertIn((22, 0), destructibles_sensor.g_offh_destr_instances)
+                self.assertEqual(1, destructibles_sensor.g_offh_tree_state['chunks'][22]['count'])
+                self.assertEqual(12, mapper.call_count)
+                counts = destructibles_sensor.registry_counts()
+                self.assertEqual(1, counts['receipt_proximity_stores'])
+                self.assertEqual(1, counts['receipt_proximity_hits'])
+
+    def test_non_fellable_receipt_retires_when_streaming_adds_a_nearby_tree(self):
+        (manager, unused_mapper, area, bigworld, math_module,
+         descriptor) = self._non_fellable_catalog_scan_fixture('fragile', 3)
+        tree = 'speedtree/test/arriving-tree.spt'
+        with mock.patch.dict(sys.modules, {
+                'AreaDestructibles': area, 'BigWorld': bigworld,
+                'Math': math_module}):
+            destructibles_sensor._fell_trees_near(1, _Vector(), 0., 6., descriptor)
+            destructibles_sensor._fell_trees_near(1, _Vector(), 0., 6., descriptor)
+            manager.set_chunk_count(22, 2)
+            bigworld.wg_getChunkDestrFilenames.return_value = ('known.model', tree)
+            area.g_cache.getDescByFilename = lambda filename: {
+                'type': 1 if filename == tree else 3, 'health': 20, 'mass': 100}
+            bigworld.wg_getDestructibleEffectCategory.side_effect = (
+                lambda space, chunk, item, module: 1 if item == 1 else 3)
+            bigworld.wg_getDestructibleMatrix.side_effect = (
+                lambda space, chunk, item: _ItemMatrix(
+                    _Vector(6. if item == 1 else 0., 0., 2.)))
+            # This tree is outside the occupied hull and speed is zero. It is
+            # still a potential later contact and must prevent an empty receipt.
+            destructibles_sensor._fell_trees_near(1, _Vector(), 0., 0., descriptor)
+        self.assertEqual(2, destructibles_sensor.g_offh_tree_state['chunks'][22]['count'])
+        counts = destructibles_sensor.registry_counts()
+        self.assertEqual(1, counts['receipt_proximity_hits'])
+        self.assertEqual(1, counts['receipt_proximity_invalidated'])
+        self.assertEqual(1, counts['receipt_proximity_stores'])
+        self.assertEqual(0, counts['receipt_proximity_entries'])
+
+    def test_non_fellable_receipt_keeps_local_generation_and_active_column_guards(self):
+        for mutation in ('local_cell', 'chunk', 'unload', 'active_column', 'catalog'):
+            with self.subTest(mutation=mutation):
+                (manager, mapper, area, bigworld, math_module,
+                 descriptor) = self._non_fellable_catalog_scan_fixture('fragile', 3)
+                with mock.patch.dict(sys.modules, {
+                        'AreaDestructibles': area, 'BigWorld': bigworld,
+                        'Math': math_module}):
+                    destructibles_sensor._fell_trees_near(1, _Vector(), 0., 6., descriptor)
+                    destructibles_sensor._fell_trees_near(1, _Vector(), 0., 6., descriptor)
+                    if mutation == 'local_cell':
+                        destructibles_sensor._bump_spatial_revision_1513(bin_keys=((0, 0),))
+                    elif mutation == 'chunk':
+                        destructibles_sensor._bump_spatial_revision_1513(chunk_ids=(22,))
+                    elif mutation == 'unload':
+                        manager._DestructiblesManager__loadedChunkIDs.pop(22)
+                    elif mutation == 'active_column':
+                        destructibles_sensor.g_offh_destr_falling_active = {
+                            (22, 99): {'last_refresh': None}}
+                    else:
+                        destructibles_sensor.set_catalog(_catalog({
+                            'known.model': {'kind': 'fragile',
+                                'boxes': [[-2, -1, -1, 2, 1, 1, None]]}}))
+                    before = mapper.call_count
+                    destructibles_sensor._fell_trees_near(1, _Vector(), 0., 6., descriptor)
+                    self.assertEqual(11, mapper.call_count-before)
+
     def test_empty_swept_cell_receipt_waits_for_streaming_completion(self):
         (manager, mapper, area, bigworld, math_module,
          descriptor) = self._empty_catalog_scan_fixture(streamed=False)

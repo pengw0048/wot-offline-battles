@@ -7993,3 +7993,42 @@ exercises normal install, forced reinstall and startup repair against default
 and named external slots, including legacy state and rotated backups. The
 746 launcher tests pass (14 platform/environment skips). Product reset stays
 behind its separate confirmation and is not invoked by installation or repair.
+
+## Persistent hidden-worker simulation state
+
+The existing x86 extension now owns one simulation context per round and
+native-authority generation. Control, perception, radio, driving, physical
+motion, navigation state, gun/reload/ammunition and burst clocks retain typed
+values in that context. BigWorld queries, native effects, damage publication
+and projectile admission remain synchronous engine-thread frontiers. The
+hidden worker remains the only authority; this adds no process or wire format.
+Actor order, accepted-shot records and one-shot effects cross explicit commit
+boundaries. Partial construction, authority transfer and repeated close retire
+the old context and detach its Python views before reuse. A motion query failure
+is local to its actor and does not replay an already committed destruction.
+
+The bridge uses exact numeric double payloads for the 34-bit state-presence
+mask and microsecond timestamps, with integer/range validation before typed
+storage. Win32 CPython 2.7 PyInt is signed 32-bit; using it here would reject
+spawn-state masks and clocks past 2147 seconds. Python restores integer values
+at the receiving boundary. Actor identities and handles retain their strict
+integer guards. Regression checks require float payloads explicitly so an
+LP64 development interpreter cannot hide this Win32 failure.
+
+The five native simulation checkers exercise the real CPython 2.7 bridge,
+ordered analytic engine frontiers, persistent state, effect receipts and
+lifecycle rejection. An integrated 29-Bot caller comparison also preserves
+state, outgoing messages, ordered engine queries and projectile terminal
+results, including authority loss/recovery and duplicate manifests. This
+fixture uses synthetic descriptors and engine responses; it does not prove
+human-fire parity, retail physics, native memory safety or Windows frame pacing.
+The current physical migration covers the enabled rigid-support path; the
+existing disabled detailed-suspension path remains outside this acceptance.
+
+Initial paired host trials regressed after moving the state; removing redundant
+full-state reads and batching radio summaries recovered that overhead. Later
+alternating trials show only a modest total improvement. No Windows frame-time
+or sub-50-ms result is claimed. The near-target driver also stops powering a
+turn whose measured speed and descriptor turn limit cannot intersect the
+existing arrival circle, then resumes when the forward path can reach it;
+closed-loop tests retain the original arrival radius and vehicle parameters.

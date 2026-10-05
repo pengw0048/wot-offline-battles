@@ -1,6 +1,6 @@
-/* Exact-build CPython 2.7 bridge. Inputs are the caller's existing objects;
- * no packet, serialization, protocol header, or persistent body cache exists.
- * Reading holds the GIL and cannot invoke user conversion/equality methods.
+/* Exact-build CPython 2.7 bridge. Geometry borrows caller inputs; simulation
+ * contexts own typed state and never retain Python objects. Reading holds
+ * the GIL and cannot invoke user conversion/equality methods.
  */
 #ifdef WOT_HOST_PYTHON
 #include <Python.h>
@@ -31,6 +31,7 @@ struct PyMethodDef {
 #include "offline_contact_roster.h"
 #include "world_stage.h"
 #include "navigation_query_stage.h"
+#include "offline_simulation.h"
 #ifdef WOT_HOST_PYTHON
 #include <time.h>
 #endif
@@ -298,8 +299,18 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
 #include "offline_contact_roster_python.inc"
 #include "offline_world_python.inc"
 #include "offline_navigation_query_python.inc"
+#include "offline_simulation_python.inc"
+#include "offline_simulation_control_python.inc"
+#include "offline_simulation_motion_python.inc"
+#include "offline_simulation_weapons_python.inc"
+#include "offline_simulation_navigation_python.inc"
 
 PyMethodDef methods[] = {
+    WOT_SIMULATION_METHODS
+    WOT_SIM_CONTROL_METHODS
+    WOT_SIM_MOTION_METHODS
+    WOT_SIM_WEAPON_METHODS
+    WOT_SIM_NAVIGATION_METHODS
     {"nav_query_run", nav_query_run, 0x0001, "Run a complete same-thread navigation corridor oracle."},
     {"nav_query_filter", nav_query_filter, 0x0001, "Filter original planning materials during a native oracle call."},
     {"thread_cpu_seconds", thread_cpu_seconds, 0x0001, "Read current-thread user and kernel CPU seconds."},

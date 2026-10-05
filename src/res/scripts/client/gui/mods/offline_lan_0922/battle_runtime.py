@@ -27994,6 +27994,10 @@ class BattleRuntime(object):
                         else:
                             vehicle['state'].pop(name, None)
                     vehicle['boxes'], vehicle['velocity'] = saved_boxes, saved_velocity
+                    motion = self._bots._native_motion_for(vehicle['state']['id'])
+                    if motion is not None:
+                        motion.patch_external(vehicle['state']['id'],
+                                              ('pose', 'velocity', 'terminal'))
                 self._warn_optional_failure('detached turret rigid body', error)
                 continue
             self._turret_sim_times[key] = motion_ms
@@ -28013,6 +28017,9 @@ class BattleRuntime(object):
             'delta_velocity': (hit['delta'][0], hit['delta'][2]),
             'correction': (hit['vehicle_correction'][0], hit['vehicle_correction'][2]),
         }, step, advance_push=False)
+        motion = self._bots._native_motion_for(state['id'])
+        if motion is not None:
+            motion.patch_external(state['id'], ('pose', 'velocity', 'terminal'))
         moved = (state['x']-before[0], 0.0, state['z']-before[2])
         vehicle['boxes'] = tuple((rigid_turret.add(center, moved), axes)
                                  for center, axes in vehicle['boxes'])

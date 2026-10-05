@@ -17,23 +17,25 @@ def _float32(value):
     return result
 
 
+# Every caller supplies float32 operands: yaw, curve nodes, a previous rounded
+# result, or the exactly representable 1.0. Round each arithmetic result once;
+# re-rounding the operands would be idempotent and repeat Python struct work.
 def _add(left, right):
-    return _float32(_float32(left) + _float32(right))
+    return _float32(left + right)
 
 
 def _subtract(left, right):
-    return _float32(_float32(left) - _float32(right))
+    return _float32(left - right)
 
 
 def _multiply(left, right):
-    return _float32(_float32(left) * _float32(right))
+    return _float32(left * right)
 
 
 def _divide(left, right):
-    denominator = _float32(right)
-    if denominator == 0.0:
+    if right == 0.0:
         raise ValueError('gun pitch limit curve has duplicate yaw nodes')
-    return _float32(_float32(left) / denominator)
+    return _float32(left / right)
 
 
 _TWO_PI = _float32(2.0 * math.pi)

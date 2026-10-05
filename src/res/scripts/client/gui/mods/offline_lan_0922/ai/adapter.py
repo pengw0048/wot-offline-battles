@@ -147,7 +147,8 @@ class BotAdapter(object):
                 stopping_distance=state.get('stopping_distance'),
                 stop_at_target=stop_at_target,
                 decision_horizon=float(state.get('decision_horizon', 0.0)),
-                pose_clear=state.get('pose_clear'))
+                pose_clear=state.get('pose_clear'),
+                turn_speed_limit=state.get('turn_speed_limit'))
         # Preserve the mature face-position intent which is separate from the
         # gun target.  At a route/cover stop it gives armoured turreted tanks
         # their stable 12-30 degree hull angle while the turret keeps tracking

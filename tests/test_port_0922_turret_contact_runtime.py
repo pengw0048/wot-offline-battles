@@ -31,7 +31,9 @@ class TurretRuntimeContactTests(unittest.TestCase):
             runtime.bigworld.entities[engine_id] = _Vehicle(engine_id, td, _Vector(), (0,0,0), {'health': 500})
             battle._records[key] = dict(engine_id=engine_id, ready=True, kind=key.split(':')[0], network_id=int(key.split(':')[1]))
         battle.client = types.SimpleNamespace(player_id=1)
-        battle._bots = types.SimpleNamespace(states={17: dict(id=17, x=100., y=0., z=0., yaw=0., speed=0., alive=False)})
+        battle._bots = types.SimpleNamespace(
+            states={17: dict(id=17, x=100., y=0., z=0., yaw=0., speed=0., alive=False)},
+            _native_motion_for=lambda unused: None)
         battle._collide_rigid_turret = lambda a,b: None
         battle._apply_turret_bot_response = lambda *args: None
         return runtime, battle

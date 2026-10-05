@@ -7164,7 +7164,15 @@ def _fell_trees_near(
 			for (_ti, _tx, _ty, _tz, _ttyp, _tfn, _thp, _tmass,
 					_world_boxes, _contact_radius) in _nearby_destructibles(
 						registry, pos, vehicle_box):
-				_found_nearby = True
+				# Catalog boxes below never fell by proximity. They remain solid
+				# in the motion/contact seam, but cannot invalidate this scan's
+				# empty tree/pole receipt. Keep all potentially fallable items,
+				# including ones outside this pose or below the speed threshold.
+				if not (_world_boxes and _ttyp in (
+						AreaDestructibles.DESTR_TYPE_FRAGILE,
+						structure_type,
+						AreaDestructibles.DESTR_TYPE_FALLING_ATOM)):
+					_found_nearby = True
 				if _destructible_isolated_1513(cid, _ti):
 					continue
 				dx = _tx - pos.x; dz = _tz - pos.z

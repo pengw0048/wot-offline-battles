@@ -20263,6 +20263,66 @@ class BotRuntimeTests(unittest.TestCase):
         profile = runtime._spotting_profile(target)
         self.assertEqual(3, len(profile))
 
+    def test_shared_radio_pose_stays_separate_from_post_motion_direct_pose(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        bot = {
+            'id': 25, 'team': 2, 'alive': True,
+            'x': 10.0, 'y': 1.0, 'z': 20.0, 'yaw': 0.2,
+            'pitch': 0.1, 'roll': -0.1, 'aim_yaw': 0.4,
+            'turret_yaw': 0.3, 'gun_pitch': 0.5,
+            'speed': 3.0, 'velocity': (1.0, 0.0, 2.0),
+        }
+        runtime.states = {25: bot}
+        sources = dict((key, {'id': key, 'team': 1})
+                       for key in (11, 12, 13, 14))
+        runtime._radio_network.configure({
+            ('bot', key): (1, (0.0 if key != 14 else 5000.0, 0.0, 0.0), 100.0)
+            for key in sources}, 1.0)
+        runtime._visible = lambda source, *unused: source['id'] in (11, 13)
+        tick = {}
+        before, unused = runtime._contacts_for(
+            sources[11], [], 1.0, visibility_tick=tick,
+            processed_bot_ids=set())
+        before_pose = dict(runtime._visible_target_poses[(1, 'bot', 25)])
+        # A same-timestamp radio donor retains its old pose after integration.
+        bot.update(x=40.0, yaw=0.7, gun_pitch=0.9,
+                   velocity=(4.0, 0.0, 5.0))
+        shared, unused = runtime._contacts_for(
+            sources[12], [], 1.0, visibility_tick=tick,
+            processed_bot_ids={25})
+        self.assertTrue(shared[0]['visible'])
+        self.assertTrue(shared[0]['fresh_visible'])
+        self.assertFalse(shared[0]['direct_visible'])
+        for name, value in before_pose.items():
+            self.assertEqual(value, shared[0][name], name)
+        shared[0].update(x=999.0, gun_pitch=9.0)
+
+        direct, unused = runtime._contacts_for(
+            sources[13], [], 1.0, visibility_tick=tick,
+            processed_bot_ids={25})
+        self.assertTrue(direct[0]['direct_visible'])
+        self.assertEqual((40.0, 1.0, 20.0), direct[0]['position'])
+        self.assertEqual(0.9, direct[0]['gun_pitch'])
+        self.assertEqual((4.0, 0.0, 5.0), direct[0]['velocity'])
+        self.assertEqual(10.0, before[0]['x'])
+        self.assertEqual(before_pose,
+                         runtime._radio_network.observations[
+                             ('bot', 11)][('bot', 25)][2])
+
+        # The disconnected observer gets no optional live or donated pose,
+        # even though another hidden observer used this exact template first.
+        unknown, lookup = runtime._contacts_for(
+            sources[14], [], 1.0, visibility_tick=tick,
+            processed_bot_ids={25})
+        self.assertEqual({}, lookup)
+        self.assertFalse(unknown[0]['visible'])
+        self.assertFalse(unknown[0]['fresh_visible'])
+        self.assertEqual((0.0, 0.0, 0.0), unknown[0]['position'])
+        for name in ('pitch', 'roll', 'aim_yaw', 'turret_yaw',
+                     'gun_pitch', 'velocity'):
+            self.assertNotIn(name, unknown[0])
+
     def test_human_observation_visits_each_enemy_target_once(self):
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor())
