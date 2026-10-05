@@ -970,19 +970,22 @@ def translation_fraction(body, movement, others):
     return fraction
 
 
-def slide_translation(body, movement, others):
+def slide_translation(body, movement, others, first_fraction=None):
     """Retain tangential travel when another owned hull blocks the normal.
 
     Replica positions stay solid until their owner moves them. Truncating
     the entire vector at first contact also cancels the unconstrained tangent
     and wedges oblique pushes. Project only the entering remainder, re-sweep
     every projected segment, and leave momentum to the reciprocal solver.
+    The caller may reuse a first fraction computed for the same initial body,
+    movement and roster in this operation; later segments always sweep again.
     """
     current = dict(body)
     remaining = tuple(movement)
     total = [0.0, 0.0]
-    for unused in range(4):
-        fraction = translation_fraction(current, remaining, others)
+    for segment in range(4):
+        fraction = (first_fraction if segment == 0 and first_fraction is not None
+                    else translation_fraction(current, remaining, others))
         accepted = (remaining[0]*fraction, remaining[1]*fraction)
         for i, key in enumerate(('x', 'z')):
             current[key] += accepted[i]

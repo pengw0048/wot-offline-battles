@@ -8438,7 +8438,8 @@ class BotRuntime(object):
                 state['_contact_drive_sweep'] = (start, move)
             else:
                 state.pop('_contact_drive_sweep', None)
-            accepted = tank_collision.slide_translation(by_id[state['id']], move, bodies)
+            accepted = tank_collision.slide_translation(
+                by_id[state['id']], move, bodies, first_fraction=fraction)
             state['x'], state['z'] = start[0]+accepted[0], start[2]+accepted[1]
 
     @staticmethod
@@ -8500,7 +8501,8 @@ class BotRuntime(object):
         fraction = tank_collision.translation_fraction(
             self._contact_motion_body(state), (move_x, move_z), bodies)
         move_x, move_z = tank_collision.slide_translation(
-            self._contact_motion_body(state), (move_x, move_z), bodies)
+            self._contact_motion_body(state), (move_x, move_z), bodies,
+            first_fraction=fraction)
         move_distance = math.sqrt(move_x * move_x + move_z * move_z)
         if move_distance > 0.0001:
             contact_yaw = math.atan2(move_x, move_z)

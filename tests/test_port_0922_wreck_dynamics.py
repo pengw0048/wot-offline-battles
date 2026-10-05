@@ -161,6 +161,14 @@ class WreckOwnerTests(unittest.TestCase):
     _runtime = bt.ShovedWreckTests._runtime
     _wreck = bt.ShovedWreckTests._wreck
 
+    def _full_suspension_case(self, terrain):
+        # These cases exercise the retained detailed solver. Production uses
+        # basic support; restore the switch even when a test raises or fails.
+        patcher = mock.patch.object(self.module, 'BOT_FULL_SUPPORT_ENABLED', True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return bt.BotRuntimeTests._suspension_case(self, terrain)
+
     def test_report_bank_releases_live_and_dead_hulls_without_drive_input(self):
         # 203327 M41: the native bank normal is an upward 30.5-degree face.
         # Player suspension has side-slip; the worker previously only changed
@@ -168,8 +176,8 @@ class WreckOwnerTests(unittest.TestCase):
         nx, ny, nz = -.30123034, .861268997, -.40923822
         gx, gz = -nx/ny, -nz/ny
         for alive in (True, False):
-            worker,state,unused=bt.BotRuntimeTests._suspension_case(
-                self, lambda x,z: gx*x+gz*z if x > -3. else -30.)
+            worker,state,unused=self._full_suspension_case(
+                lambda x,z: gx*x+gz*z if x > -3. else -30.)
             state.update(alive=alive,speed=0.,movement_dir=0,yaw=-1.244333,
                          collision_shape=c.DEFAULT_SHAPE,mass=23496.,
                          _contact_dynamics=True)
@@ -242,8 +250,8 @@ class WreckOwnerTests(unittest.TestCase):
     def test_authority_update_advances_bank_slide_for_live_and_dead_states(self):
         gx,gz=.30123034/.861268997,.40923822/.861268997
         for alive in (True,False):
-            support,initial,unused=bt.BotRuntimeTests._suspension_case(
-                self,lambda x,z: gx*x+gz*z if x>-3. else -30.)
+            support,initial,unused=self._full_suspension_case(
+                lambda x,z: gx*x+gz*z if x>-3. else -30.)
             worker=self.module.BotRuntime(1,
                 descriptor_resolver=lambda unused:support._descriptors[11],
                 adapter_factory=lambda *args,**kwargs:bt._FixedAdapter(
@@ -469,8 +477,8 @@ class WreckOwnerTests(unittest.TestCase):
         worker._apply_wreck_contact_response(state,dict(delta_velocity=(0.,4.),correction=(0.,0.)),.1)
         self.assertEqual(before,state['z'])
 
-    def test_production_wreck_only_ground_probe_activates_after_death(self):
-        worker,state,unused=bt.BotRuntimeTests._suspension_case(self,lambda x,z:0.)
+    def test_detailed_wreck_only_ground_probe_activates_after_death(self):
+        worker,state,unused=self._full_suspension_case(lambda x,z:0.)
         worker.states={state['id']:state}
         worker._wreck_ground_probe=worker._suspension_ground_probe
         worker._suspension_ground_probe=None
@@ -482,8 +490,8 @@ class WreckOwnerTests(unittest.TestCase):
         self.assertFalse(worker._suspension_param_failures)
 
     def test_contact_promotes_live_bot_to_track_support_before_cliff_departure(self):
-        worker,state,unused=bt.BotRuntimeTests._suspension_case(
-            self,lambda x,z:0. if x<=0. else -30.)
+        worker,state,unused=self._full_suspension_case(
+            lambda x,z:0. if x<=0. else -30.)
         worker.states={state['id']:state}
         worker._wreck_ground_probe=worker._suspension_ground_probe
         worker._suspension_ground_probe=None
@@ -663,7 +671,7 @@ class WreckOwnerTests(unittest.TestCase):
 
     def test_ten_spring_wreck_tips_off_supported_edge(self):
         # Use the same descriptor/spring adapter as the live cliff regression.
-        worker,state,unused=bt.BotRuntimeTests._suspension_case(self,lambda x,z: 0. if z<=0. else -8.)
+        worker,state,unused=self._full_suspension_case(lambda x,z: 0. if z<=0. else -8.)
         worker.states={state['id']:state}
         state.update(x=0.,y=0.,z=-4.,alive=False,health=0,grounded_once=True,
                      mass=25000.,collision_shape=c.DEFAULT_SHAPE)
