@@ -2426,6 +2426,9 @@ class BotRuntime(object):
         self._navigation_error = None
         self.baked_graph = graph
         previous_navigator = self.navigator
+        navigator.grid.native_query_oracle = getattr(
+            getattr(previous_navigator, 'grid', None),
+            'native_query_oracle', None)
         self.navigator = navigator
         close = getattr(previous_navigator, 'close', None)
         if callable(close):

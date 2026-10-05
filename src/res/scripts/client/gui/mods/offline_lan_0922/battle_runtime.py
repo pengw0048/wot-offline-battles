@@ -68,7 +68,7 @@ from gui.mods.offline_lan_0922 import (
     gc_sweep, graphics_probe, loadout as loadout_law,
     world_census, prebaked_destructibles,
     prebaked_foliage,
-    prebaked_navigation, native_mapping_mask, server_aim, shot_geometry, spotting,
+    prebaked_navigation, native_mapping_mask, native_math, server_aim, shot_geometry, spotting,
     tank_collision, track_damage,
     vehicle_blacklist, vehicle_configuration, vehicle_physics,
     water_geometry, world_collision)
@@ -475,8 +475,9 @@ class _FrameDiagnostics(object):
 
     def __init__(self, clock=None, writer=None,
                  window_seconds=DIAGNOSTIC_WINDOW_SECONDS,
-                 initial_window_seconds=None):
+                 initial_window_seconds=None, cpu_clock=None):
         self._clock = clock or _PROFILE_CLOCK
+        self._cpu_clock = cpu_clock
         self._writer = writer or sys.stdout.write
         self._steady_window_seconds = max(0.25, float(window_seconds))
         self._initial_window_seconds = max(0.25, float(
@@ -487,6 +488,7 @@ class _FrameDiagnostics(object):
 
     def reset(self):
         self._pending = None
+        self._cpu_entry = None
         self._recent_frames = collections.deque(maxlen=3)
         self._frame_id = 0
         self._window_id = 0
@@ -503,6 +505,10 @@ class _FrameDiagnostics(object):
         self._raw_max = 0.0
         self._exec_sum = 0.0
         self._exec_max = 0.0
+        self._cpu_sum = 0.0
+        self._cpu_max = 0.0
+        self._cpu_samples = 0
+        self._cpu_wall_sum = 0.0
         self._outside_sum = 0.0
         self._outside_max = 0.0
         self._gap_samples = collections.deque(
@@ -547,6 +553,19 @@ class _FrameDiagnostics(object):
         self._pending = None
         self._slow = []
 
+    def _read_cpu(self):
+        if self._cpu_clock is None:
+            return None
+        try:
+            value = self._cpu_clock()
+            if value is not None:
+                value = float(value)
+                if value >= 0.0 and not math.isnan(value) and not math.isinf(value):
+                    return value
+        except Exception:
+            pass
+        return None
+
     def begin(self, entry_wall, raw_dt, offframe=0.0):
         """Seal the previous callback using this callback's entry interval.
 
@@ -557,6 +576,7 @@ class _FrameDiagnostics(object):
         frame_id = self._frame_id
         if not self.enabled:
             return frame_id
+        self._cpu_entry = self._read_cpu()
         try:
             pending = self._pending
             if pending is not None:
@@ -605,6 +625,12 @@ class _FrameDiagnostics(object):
         self._raw_max = max(self._raw_max, raw_dt)
         self._exec_sum += execution
         self._exec_max = max(self._exec_max, execution)
+        cpu = row.get('thread_cpu')
+        if cpu is not None:
+            self._cpu_sum += cpu
+            self._cpu_max = max(self._cpu_max, cpu)
+            self._cpu_samples += 1
+            self._cpu_wall_sum += execution
         self._outside_sum += outside
         self._outside_max = max(self._outside_max, outside)
         self._gap_samples.append(gap)
@@ -698,6 +724,8 @@ class _FrameDiagnostics(object):
             'authority_time': row.get('context', {}).get('authority_time'),
             'gap_ms': round(row['wall_gap'] * 1000.0, 3),
             'exec_ms': round(row['exec'] * 1000.0, 3),
+            'thread_cpu_ms': (round(row['thread_cpu'] * 1000.0, 3)
+                              if row.get('thread_cpu') is not None else None),
             'outside_ms': round(row['outside'] * 1000.0, 3),
             'offframe_ms': round(row.get('offframe', 0.0) * 1000.0, 3),
             'stages_ms': dict((name, round(value * 1000.0, 3))
@@ -796,6 +824,20 @@ class _FrameDiagnostics(object):
                 0, self._distribution_samples - len(self._gap_samples)),
             'frame_interval_ms': gap_distribution,
             'python_callback_ms': exec_distribution,
+            # This is the current callback thread, including native work on
+            # it. Background worker CPU is excluded. OS clock granularity can
+            # make an individual CPU sample exceed its wall sample, so retain
+            # both instead of fabricating a per-frame "wait" duration.
+            'main_thread_cpu': {
+                'samples': self._cpu_samples,
+                'avg_ms': (self._milliseconds(self._cpu_sum / self._cpu_samples)
+                           if self._cpu_samples else None),
+                'max_ms': (self._milliseconds(self._cpu_max)
+                           if self._cpu_samples else None),
+                'matched_wall_avg_ms': (self._milliseconds(
+                    self._cpu_wall_sum / self._cpu_samples)
+                    if self._cpu_samples else None),
+            },
             'outside_callback_ms': outside_distribution,
             'python_stages_ms': stage_snapshot,
             'python_details_ms': detail_snapshot,
@@ -904,6 +946,14 @@ class _FrameDiagnostics(object):
                  presentation.get('aim_writes'),
                  presentation.get('aim_skips')))
         stage_values = []
+        if self._cpu_samples:
+            lines.append(prefix + (
+                'thread_cpu samples=%d/%d cpu_ms_avg_max=%.3f/%.3f '
+                'matched_callback_wall_ms_avg=%.3f\n') % (
+                    self._cpu_samples, self._samples,
+                    self._milliseconds(self._cpu_sum / self._cpu_samples),
+                    self._milliseconds(self._cpu_max),
+                    self._milliseconds(self._cpu_wall_sum / self._cpu_samples)))
         for name in _FRAME_STAGE_NAMES:
             stage_values.append('%s=%.3f/%.3f' % (
                 name,
@@ -1069,10 +1119,15 @@ class _FrameDiagnostics(object):
                 self._window_seconds = self._steady_window_seconds
                 self._reset_window()
             stages['diag_emit'] = emit_seconds
+            end_cpu = self._read_cpu()
             end_wall = self._clock()
             self._pending = {
                 'cause': int(frame_id), 'entry_wall': float(entry_wall),
                 'exec': max(0.0, end_wall - float(entry_wall)),
+                'thread_cpu': (end_cpu - self._cpu_entry
+                               if (end_cpu is not None and
+                                   self._cpu_entry is not None and
+                                   end_cpu >= self._cpu_entry) else None),
                 'tick_dt': max(0.0, float(tick_dt)),
                 'motion_dt': max(0.0, float(motion_dt)),
                 'stages': stages, 'probes': probes,
@@ -1874,7 +1929,8 @@ class BattleRuntime(object):
         self._authority_aim_skips = 0
         self._frame_diagnostics = (
             _FrameDiagnostics(
-                initial_window_seconds=DIAGNOSTIC_INITIAL_WINDOW_SECONDS)
+                initial_window_seconds=DIAGNOSTIC_INITIAL_WINDOW_SECONDS,
+                cpu_clock=native_math.thread_cpu_seconds)
             if PERFORMANCE_DIAGNOSTICS else None)
         self._combat_diagnostics = None
         self._sixth_sense = None
@@ -3796,6 +3852,9 @@ class BattleRuntime(object):
                 control_seconds=(
                     WORKER_CONTROL_SECONDS if self._worker_mode else None),
                 combat_diagnostics=self._combat_diagnostics)
+            if self._worker_mode:
+                from .native_navigation_query import Oracle
+                self._bots.navigator.grid.native_query_oracle = Oracle.create(self)
             self._bots.debug_logging = bool(
                 self._config.get('debug_logging', False))
             # Sampled here, not before BotRuntime exists: the bot, navigator

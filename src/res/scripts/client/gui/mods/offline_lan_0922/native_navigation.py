@@ -154,6 +154,7 @@ class NativeNavigation(object):
         try:
             self._poll(now)
             answers = []
+            deferred = []
             budget = max(0, int(query_budget))
             while budget and self.query_order:
                 job_id = self.query_order.popleft()
@@ -171,12 +172,30 @@ class NativeNavigation(object):
                     # settles its receipt, so the worker cannot wait forever.
                     clear = False
                     combat_count('nav_async_query_failed')
-                answers.append((query_id, bool(clear)))
+                pending = self.grid._native_review_pending
+                if (not clear and self.grid.native_query_oracle is not None and
+                        pending is not None and
+                        (tuple(start), tuple(end)) in pending):
+                    # A missing column is not a proved wall. Keep the receipt
+                    # owned by this job and retry next callback, never again
+                    # in this callback's round-robin service loop.
+                    deferred.append((job_id, query_id, start, end))
+                    combat_count('nav_async_query_unknown')
+                elif job_id in self.jobs:
+                    answers.append((query_id, bool(clear)))
                 budget -= 1
                 if queue:
                     self.query_order.append(job_id)
                 else:
                     self.queries.pop(job_id, None)
+            for job_id, query_id, start, end in deferred:
+                if job_id not in self.jobs:
+                    continue
+                queue = self.queries.get(job_id)
+                if queue is None:
+                    queue = self.queries[job_id] = deque()
+                    self.query_order.append(job_id)
+                queue.append((query_id, start, end))
             if answers:
                 self.backend.nav_answer(self.context, tuple(answers))
                 self.total_queries += len(answers)

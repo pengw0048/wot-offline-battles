@@ -12620,13 +12620,25 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'round_id': 1, 'map': '01_karelia',
             'bot_authority_id': -1, 'players': [], 'bots': []}
 
-        self.assertTrue(battle.start({
-            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
-            'name': 'Worker', 'worker_mode': True}, start, client))
-        runtime.bigworld.callbacks.pop(0)()
-        runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
-        runtime.bigworld.callbacks.pop(0)()
+        from gui.mods.offline_lan_0922.native_navigation_query import Oracle
+        oracle = object()
 
+        def bind_oracle(owner):
+            self.assertIs(owner, battle)
+            self.assertIsNotNone(owner._bots)
+            self.assertIsNotNone(owner._avatar)
+            return oracle
+
+        with mock.patch.object(Oracle, 'create', side_effect=bind_oracle) as create:
+            self.assertTrue(battle.start({
+                'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                'name': 'Worker', 'worker_mode': True}, start, client))
+            runtime.bigworld.callbacks.pop(0)()
+            runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
+            runtime.bigworld.callbacks.pop(0)()
+
+        create.assert_called_once_with(battle)
+        self.assertIs(battle._bots.navigator.grid.native_query_oracle, oracle)
         self.assertEqual('running', battle.state)
         self.assertTrue(battle._bots._fixed_control)
         self.assertEqual(

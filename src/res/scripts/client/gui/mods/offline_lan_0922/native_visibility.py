@@ -1,6 +1,7 @@
 """Main-thread ownership of asynchronous native spotting computation."""
 from __future__ import print_function
 
+import math
 import sys
 
 from gui.mods.offline_lan_0922 import native_math, shot_geometry, spotting
@@ -43,6 +44,7 @@ class NativeVisibility(object):
         self.submitted = 0
         self.completed = 0
         self.cancelled = 0
+        self.cancellation_reasons = {}
         self.worker_seconds = 0.0
         self.max_completion_age = 0.0
         self._clear_foliage_changes()
@@ -86,6 +88,13 @@ class NativeVisibility(object):
         if not self.backend.vis_update(self.context, rows, cells,
                                        tuple(self.foliage.inactive_instances)):
             raise RuntimeError('native foliage update was not accepted')
+        changed_cells = self.foliage.native_dirty_cells
+        for job in self.jobs.values():
+            job['foliage_dirty_cells'].update(changed_cells)
+            if not changed_cells:
+                # A revision without its spatial footprint cannot prove that
+                # an older prepared observation remains geometrically valid.
+                job['foliage_unknown'] = True
         self.revision = revision
         self._clear_foliage_changes()
 
@@ -113,14 +122,36 @@ class NativeVisibility(object):
         self.descriptors[id(descriptor)] = (descriptor, ready, result)
         return result
 
-    def _cancel(self, key):
+    def _cancel(self, key, reason):
         job = self.jobs.pop(key, None)
         if job is None:
             return
         self.by_id.pop(job['id'], None)
         self.backend.vis_cancel(self.context, (job['id'],))
         self.cancelled += 1
+        self.cancellation_reasons[reason] = (
+            self.cancellation_reasons.get(reason, 0) + 1)
         combat_count('visibility_async_cancelled')
+        combat_count('visibility_async_cancelled_' + reason)
+
+    def _foliage_changed(self, job):
+        if job['foliage_unknown']:
+            return True
+        cells = job['foliage_dirty_cells']
+        if not cells or not job['rays']:
+            return False
+        # Every candidate used by the native supercover lies inside this
+        # conservative rectangle. Its one-cell border includes closed-grid
+        # endpoint and corner neighbours without retracing all sight rays.
+        points = [point for start, end, unused_cover in job['rays']
+                  for point in (start, end)]
+        size = float(self.foliage.cell_size)
+        low_x = int(math.floor(min(point[0] for point in points) / size)) - 1
+        high_x = int(math.floor(max(point[0] for point in points) / size)) + 1
+        low_z = int(math.floor(min(point[2] for point in points) / size)) - 1
+        high_z = int(math.floor(max(point[2] for point in points) / size)) + 1
+        return any(low_x <= x <= high_x and low_z <= z <= high_z
+                   for x, z in cells)
 
     def _poll(self, now):
         # All pair requests in a control slice share one nonblocking drain.
@@ -139,7 +170,7 @@ class NativeVisibility(object):
         # unconsumed prepared result for the rest of the round.
         for key, job in tuple(self.jobs.items()):
             if float(now) - job['last_requested'] > spotting.SPOT_MEMORY_SECONDS:
-                self._cancel(key)
+                self._cancel(key, 'unrequested')
 
     def request(self, key, identity, observer, target, descriptors, phase,
                 detection, now, fire_sequence, query_ray):
@@ -151,14 +182,25 @@ class NativeVisibility(object):
         # Preserve a delayed pose sample, but never carry an old crew/module,
         # moving or firing camouflage state into a different detection state.
         token = (tuple(id(owner) for owner in identity), fire_sequence,
-                 self.revision, tuple(detection[1:]))
+                 tuple(detection[1:]))
         job = self.jobs.get(key)
-        if job is not None and (job['token'] != token or
-                float(now) - job['sampled_at'] >= spotting.SHOT_CAMOUFLAGE_SECONDS):
+        reason = None
+        if job is not None:
+            if job['token'][0] != token[0]:
+                reason = 'identity'
+            elif job['token'][1] != token[1]:
+                reason = 'fire'
+            elif job['token'][2] != token[2]:
+                reason = 'detection'
+            elif (job['status'] == 'done' and self._foliage_changed(job)):
+                reason = 'foliage'
+            elif float(now) - job['sampled_at'] >= spotting.SHOT_CAMOUFLAGE_SECONDS:
+                reason = 'age'
+        if reason is not None:
             # A CPU observation older than the shortest camouflage-effect
             # window cannot be published as a new spot. Unlike the 6 Hz cache
             # TTL, this permits one delayed callback on the loaded worker.
-            self._cancel(key)
+            self._cancel(key, reason)
             job = None
         if job is None:
             self.next_job_id += 1
@@ -169,7 +211,8 @@ class NativeVisibility(object):
                 raise RuntimeError('native visibility job was not accepted')
             job = {'id': job_id, 'token': token, 'owners': identity,
                    'sampled_at': float(now),
-                   'last_requested': float(now), 'status': 'pending', 'rays': ()}
+                   'last_requested': float(now), 'status': 'pending', 'rays': (),
+                   'foliage_dirty_cells': set(), 'foliage_unknown': False}
             self.jobs[key] = job
             self.by_id[job_id] = key
             self.submitted += 1
@@ -180,7 +223,7 @@ class NativeVisibility(object):
             combat_count('visibility_async_pending')
             return None
         if job['status'] != 'done':
-            self._cancel(key)
+            self._cancel(key, 'backend')
             return None
         clear_prefix = []
         for start, end, cover in job['rays']:
@@ -212,5 +255,6 @@ class NativeVisibility(object):
     def snapshot(self):
         return {'submitted': self.submitted, 'completed': self.completed,
                 'cancelled': self.cancelled, 'pending': len(self.jobs),
+                'cancellation_reasons': dict(self.cancellation_reasons),
                 'worker_seconds': self.worker_seconds,
                 'max_completion_age': self.max_completion_age}

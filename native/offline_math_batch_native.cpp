@@ -30,6 +30,10 @@ struct PyMethodDef {
 #include "offline_visibility.h"
 #include "offline_contact_roster.h"
 #include "world_stage.h"
+#include "navigation_query_stage.h"
+#ifdef WOT_HOST_PYTHON
+#include <time.h>
+#endif
 
 namespace {
 using offline_math::Body;
@@ -293,8 +297,12 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
 #include "offline_visibility_python.inc"
 #include "offline_contact_roster_python.inc"
 #include "offline_world_python.inc"
+#include "offline_navigation_query_python.inc"
 
 PyMethodDef methods[] = {
+    {"nav_query_run", nav_query_run, 0x0001, "Run a complete same-thread navigation corridor oracle."},
+    {"nav_query_filter", nav_query_filter, 0x0001, "Filter original planning materials during a native oracle call."},
+    {"thread_cpu_seconds", thread_cpu_seconds, 0x0001, "Read current-thread user and kernel CPU seconds."},
     {"world_run", world_run, 0x0001, "Run the complete world law with same-thread engine frontiers."},
     {"contact_roster", contact_roster, 0x0001, "Solve one complete roster contact stage over frozen bodies."},
     {"vis_open", vis_open, 0x0001, "Load immutable foliage for asynchronous visibility."},

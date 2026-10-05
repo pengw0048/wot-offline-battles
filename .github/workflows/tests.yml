@@ -30,6 +30,7 @@ jobs:
               native/offline_visibility.cpp \
               native/offline_contact_roster.cpp \
               native/world_stage.cpp \
+              native/navigation_query_stage.cpp \
               native/offline_math_batch_native.cpp \
               -o /tmp/offline_math_batch_native.so
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_math.py \
@@ -40,6 +41,8 @@ jobs:
               /tmp/offline_math_batch_native.so /src/src/res/scripts/client
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_world.py \
               /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_navigation_query.py \
+              /tmp/offline_math_batch_native.so
           '
   test:
     needs: windows-server

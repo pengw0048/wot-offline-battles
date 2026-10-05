@@ -163,6 +163,9 @@ class TerrainGrid(object):
 		self._native_review_cells = set()
 		self._native_review_seeds = set()
 		self._native_review_cache = {}
+		# The runtime explicitly binds its synchronous main-thread corridor oracle.
+		# Pure-data grids retain the same Python proof without an engine owner.
+		self.native_query_oracle = None
 		self._native_review_pending = None
 
 	def _install_baked_graph(self, graph):
@@ -773,6 +776,22 @@ class TerrainGrid(object):
 		exact_key = (tuple(start), tuple(end))
 		if pending is not None and exact_key in pending:
 			return False
+		oracle = self.native_query_oracle
+		if oracle is not None:
+			try:
+				receipt = oracle.run(start, end, self.cell_size,
+				                     self.max_grade_up, self.max_grade_down)
+			except Exception:
+				# Dispatch may have started: never replay engine work in Python.
+				if pending is not None:
+					pending.add(exact_key)
+				return False
+			if receipt is not None:
+				if receipt[0] < 0:
+					if pending is not None:
+						pending.add(exact_key)
+					return False
+				return self._store_native_review(key, bool(receipt[0]))
 		steps = max(1, int(math.ceil(distance / (self.cell_size * 0.42))))
 		previous = None
 		first = None
@@ -785,7 +804,7 @@ class TerrainGrid(object):
 				hint = previous[1] if previous is not None else start[1]
 				y = self.ground_probe(x, z, hint)
 				if y is None or math.isnan(float(y)) or math.isinf(float(y)):
-					if pending is not None:
+					if pending is not None and oracle is None:
 						pending.add(exact_key)
 					return False
 				point = (x, float(y), z)
@@ -800,9 +819,13 @@ class TerrainGrid(object):
 			if clear:
 				clear = not self.obstacle_probe(first, previous, 2.15)
 		except Exception:
-			if pending is not None:
+			if pending is not None and oracle is None:
 				pending.add(exact_key)
 			return False
+		return self._store_native_review(key, clear)
+
+	def _store_native_review(self, key, clear):
+		"""Share a proved corridor result; unknown columns never reach this cache."""
 		if len(self._native_review_cache) >= 4096:
 			self._native_review_cache.pop(next(iter(self._native_review_cache)))
 		self._native_review_cache[key] = bool(clear)

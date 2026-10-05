@@ -202,6 +202,7 @@ struct Job {
     uint64_t sequence=0;
     unsigned expanded=0,attempt_expanded=0,status=0,unanswered=0;
     bool has_reached=false,queued=false;
+    bool raw_proof_after_failure=false;
     std::atomic<bool> cancelled{false};
     Stage stage=Stage::Start;
     RunState state=RunState::Queued;
@@ -254,7 +255,10 @@ struct Job {
         if (dry && (world_segment(a,b) || !map->shallow_free(a,b))) return 0;
         if (distance(a,b)<.25) return 1;
         if (!map->corridor(a,b,false)) return 0;
-        return needs_review(a,b)?review(a,b):1;
+        // Choose candidates from baked geometry and already-owned receipts.
+        // Candidate selection does not dispatch engine requests.
+        if (needs_review(a,b) && (distance(a,b)>map->cell_size*12. || reviewed_blocked(a,b))) return 0;
+        return 1;
     }
     double terrain_penalty(Cell cell) const {
         double value=input.prefer_clearance?(8-map->link_count(cell))*map->cell_size*.20:0.;
@@ -278,11 +282,15 @@ struct Job {
         for (size_t at=1;at<path.size();++at) {
             if (reviewed_blocked(path[at-1],path[at])) {restart_search();return;}
         }
-        // Search candidates may traverse unknown review edges, but every
-        // selected edge is proved before publication. Emit the entire path's
-        // proof frontier together, never one A* expansion per render frame.
-        for (size_t at=1;at<path.size();++at)
-            if (needs_review(path[at-1],path[at])) review(path[at-1],path[at]);
+        // Baked/hazard/clearance/climb rules choose the whole candidate first.
+        // Only its final directed segments need native proof. No unverified
+        // prefix is published while any selected receipt remains outstanding.
+
+        // After the first rejected engine receipt, retain the original
+        // batch proof of the raw route for this job. Clear jobs stay lazy.
+        if (raw_proof_after_failure)
+            for (size_t at=1;at<path.size();++at)
+                if (needs_review(path[at-1],path[at])) review(path[at-1],path[at]);
         auto candidate=path;
         Point raw=input.goal;
         const Cell cell=map->cell_for(raw);
@@ -313,6 +321,9 @@ struct Job {
                 smoothed.push_back(candidate[last]);at=last;
             }
         }
+        for (size_t at=1;at<smoothed.size();++at)
+            if (distance(smoothed[at-1],smoothed[at])>=.25 && needs_review(smoothed[at-1],smoothed[at]))
+                review(smoothed[at-1],smoothed[at]);
         if (!requests.empty()) return;
         path=std::move(smoothed);terminate(0);
     }
@@ -502,6 +513,7 @@ public:
             const auto job=found->second.job;
             if (!job->cancelled.load(std::memory_order_relaxed)) {
                 job->reviews[found->second.key]=answer.second;
+                if (!answer.second) job->raw_proof_after_failure=true;
                 if (job->unanswered) --job->unanswered;
                 if (!job->unanswered && job->state==RunState::Waiting) queue(context,job);
             }

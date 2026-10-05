@@ -71,6 +71,18 @@ def snapshot():
     return result
 
 
+def thread_cpu_seconds():
+    """Read this thread's CPU clock without affecting native availability."""
+    backend = _load()
+    operation = getattr(backend, 'thread_cpu_seconds', None)
+    if not callable(operation):
+        return None
+    try:
+        return operation()
+    except Exception:
+        return None
+
+
 def report_world_failure(error):
     """Count rejected motion operations without disabling or replaying them."""
     global _world_failures, _reported_world_failure

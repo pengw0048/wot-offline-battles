@@ -346,15 +346,22 @@ class FoliageMap(object):
 		self.map_name = str(data.get('map') or '')
 		self.cell_size = max(1.0, float(data.get('cell_size', 32.0)))
 		self.instances = list(data.get('instances') or ())
+		self.fallen_tree_profiles = {}
+		self.standing_fallen_tree_cells = {}
+		for row in data.get('fallen_trees') or ():
+			self.fallen_tree_profiles[(int(row[0]), int(row[1]))] = (
+				tuple(float(value) for value in row[2:8]), row[8])
+			if row[8] is not None:
+				self.standing_fallen_tree_cells[int(row[8])] = []
 		self.cells = {}
 		for key, values in (data.get('cells') or {}).items():
 			parts = str(key).split(',', 1)
 			if len(parts) == 2:
-				self.cells[(int(parts[0]), int(parts[1]))] = list(values)
-		self.fallen_tree_profiles = {}
-		for row in data.get('fallen_trees') or ():
-			self.fallen_tree_profiles[(int(row[0]), int(row[1]))] = (
-				tuple(float(value) for value in row[2:8]), row[8])
+				cell = (int(parts[0]), int(parts[1]))
+				self.cells[cell] = list(values)
+				for instance_id in values:
+					if instance_id in self.standing_fallen_tree_cells:
+						self.standing_fallen_tree_cells[instance_id].append(cell)
 		self.activated_fallen_trees = set()
 		self.refreshing_fallen_trees = set()
 		self.fallen_tree_instances = {}
@@ -408,11 +415,19 @@ class FoliageMap(object):
 		if identity not in self.refreshing_fallen_trees:
 			return False
 		row, bounds = _dynamic_instance(center, half_axes)
+		instance_id = self.fallen_tree_instances.get(identity)
+		if instance_id is not None and self.instances[instance_id] == row:
+			return False
 		unused_bounds, standing_instance_id = self.fallen_tree_profiles[
 			identity]
-		if standing_instance_id is not None:
-			self.inactive_instances.add(int(standing_instance_id))
-		instance_id = self.fallen_tree_instances.get(identity)
+		if (standing_instance_id is not None and
+				int(standing_instance_id) not in self.inactive_instances):
+			standing_instance_id = int(standing_instance_id)
+			# Deactivating the standing crown also changes its old cells, even
+			# when the first fallen pose has already moved somewhere else.
+			self.native_dirty_cells.update(
+				self.standing_fallen_tree_cells.get(standing_instance_id, ()))
+			self.inactive_instances.add(standing_instance_id)
 		if instance_id is None:
 			instance_id = len(self.instances)
 			self.instances.append(row)

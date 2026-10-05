@@ -25,7 +25,7 @@ for name in ('gui', 'gui.mods'):
     package.__path__ = [os.path.join(client_scripts, *name.split('.'))]
     sys.modules[name] = package
 from gui.mods.offline_lan_0922.ai import navigation
-from gui.mods.offline_lan_0922 import foliage, spotting
+from gui.mods.offline_lan_0922 import foliage, spotting, native_navigation_query
 backend = imp.load_dynamic('offline_math_batch_native', sys.argv[1])
 owner = threading.current_thread().ident
 checks = [0]
@@ -183,6 +183,95 @@ def navigation_checks():
     assert backend.nav_submit(fresh, *search_values(grid, 13, start, goal))
     equal(nav_wait(fresh, [13], grid)[13][2], expected)
     backend.nav_close(fresh)
+
+    context = backend.nav_open(graph_values(graph, grid))
+    assert backend.nav_submit(context, *search_values(grid, 15, start, goal))
+    deadline = time.time()+10.
+    selected_queries = ()
+    while not selected_queries:
+        completed, selected_queries, unused = backend.nav_poll(context)
+        assert not completed
+        assert time.time() < deadline
+        if not selected_queries: time.sleep(.001)
+    expected_edges = set((tuple(a), tuple(b)) for a, b in zip(expected, expected[1:])
+                         if math.hypot(a[0]-b[0], a[2]-b[2]) >= .25 and grid._needs_native_review(a, b))
+    assert set((tuple(row[2]), tuple(row[3])) for row in selected_queries) == expected_edges, (
+        'Only the final selected route needs engine proof', selected_queries, expected)
+    assert backend.nav_answer(context, [(row[0], True) for row in selected_queries[:-1]])
+    completed, extra_queries, stats = backend.nav_poll(context)
+    assert not completed and not extra_queries and stats[2] == 1, 'Unverified path prefix escaped'
+    assert backend.nav_answer(context, [(selected_queries[-1][0], True)])
+    equal(nav_wait(context, [15], grid)[15][2], expected)
+    backend.nav_close(context)
+
+    # Unknown streaming columns must remain pending in the same owned jobs,
+    # rather than rejecting A* edges or publishing failed paths with cooldown.
+    missing = [True]
+    deep_water = [False]
+    def streaming_ground(*unused):
+        return None if missing[0] else 0.
+    waiting_grid = navigation.TerrainGrid(streaming_ground, lambda *unused: False,
+                                        baked_graph=graph)
+    waiting_grid._native_review_cells = set(grid._native_review_cells)
+    class Vector(object):
+        def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+    class StreamingEngine(object):
+        def wg_collideSegment(self, space, first, last, flags, keep):
+            assert threading.current_thread().ident == owner
+            if missing[0] or first.x != last.x or first.z != last.z: return None
+            return Vector(first.x, 0., first.z), Vector(0., 1., 0.)
+        def wg_collideWater(self, first, last, flags): return 19.09 if deep_water[0] else 20.
+    oracle_owner = types.ModuleType('navigation_oracle_owner')
+    oracle_owner._avatar = types.ModuleType('avatar')
+    oracle_owner._avatar.spaceID = 7
+    oracle_owner._runtime = types.ModuleType('runtime')
+    oracle_owner._runtime.bigworld = StreamingEngine()
+    oracle_owner._runtime.math = types.ModuleType('math_capability')
+    oracle_owner._runtime.math.Vector3 = Vector
+    waiting_grid.native_query_oracle = native_navigation_query.Oracle(oracle_owner, backend)
+    adapter = navigation.NativeNavigation(waiting_grid, backend)
+    try:
+        jobs = [adapter.submit(start, goal, 0., 4096, True) for unused in range(5)]
+        deadline = time.time()+10.
+        while not adapter.stats or adapter.stats[2] != len(jobs):
+            adapter._poll(0.)
+            assert time.time() < deadline
+            if not adapter.stats or adapter.stats[2] != len(jobs): time.sleep(.001)
+        for callback in range(40):
+            waiting_grid._native_review_pending = set()
+            adapter.advance((callback+1)*.25, 384)
+            assert not any(job.done for job in jobs), 'Unknown published empty done'
+            assert adapter.total_queries == 0, 'Unknown answered False to a worker'
+            assert not waiting_grid._native_review_cache
+        missing[0] = False
+        deadline = time.time()+10.
+        now = 10.
+        while not all(job.done for job in jobs):
+            now += .25
+            waiting_grid._native_review_pending = set()
+            adapter.advance(now, 384)
+            assert time.time() < deadline
+            if not all(job.done for job in jobs): time.sleep(.001)
+        for job in jobs:
+            equal(job.result, expected)
+        deep_water[0] = True
+        waiting_grid._native_review_cache.clear()
+        waiting_grid._native_review_pending = set()
+        assert waiting_grid.native_query_oracle.run(start, goal, 4., .48, .38)[0] == 0
+        assert not waiting_grid._native_segment_clear(start, goal)
+        assert not waiting_grid._native_review_pending, 'Deep water is proved hard, not streaming'
+        blocked = adapter.submit(start, goal, now, 4096, True)
+        deadline = time.time()+10.
+        while not blocked.done:
+            now += .25
+            waiting_grid._native_review_pending = set()
+            adapter.advance(now, 384)
+            assert not waiting_grid._native_review_pending, 'Deep water incorrectly deferred'
+            assert time.time() < deadline
+            if not blocked.done: time.sleep(.001)
+        assert not adapter.queries, 'Proved water kept a permanent waiting receipt'
+    finally:
+        adapter.close()
 
     # A rejected candidate edge must trigger a new owned search. A thin
     # blocker intersects the initial diagonal, and every final shortcut is
