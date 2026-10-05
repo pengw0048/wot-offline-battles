@@ -1171,14 +1171,15 @@ def resolve_pairs(tanks, dt, anchor=None):
             shape_a, shape_b = shapes[a['id']], shapes[b['id']]
             reach = radii[a['id']]+radii[b['id']]+CONTACT_BROADPHASE_PADDING
             if (a['x']-b['x'])**2 + (a['z']-b['z'])**2 <= reach*reach:
+                # These vertical fields stay fixed in this call's four passes.
+                if not vertical_overlap(
+                        a.get('y'), shape_a, b.get('y'), shape_b,
+                        pitch_a=a.get('pitch', 0.0), roll_a=a.get('roll', 0.0),
+                        pitch_b=b.get('pitch', 0.0), roll_b=b.get('roll', 0.0)):
+                    continue
                 pairs.append((a, b, shape_a, shape_b))
     for unused_pass in range(4):
         for a, b, shape_a, shape_b in pairs:
-            if not vertical_overlap(
-                    a.get('y'), shape_a, b.get('y'), shape_b,
-                    pitch_a=a.get('pitch', 0.0), roll_a=a.get('roll', 0.0),
-                    pitch_b=b.get('pitch', 0.0), roll_b=b.get('roll', 0.0)):
-                continue
             hit = obb_contact(a['x'], a['z'], a['yaw'], shape_a,
                               b['x'], b['z'], b['yaw'], shape_b)
             hit = _owner_oriented_contact(hit, a['x']-b['x'], a['z']-b['z'], a['id'], b['id'])
