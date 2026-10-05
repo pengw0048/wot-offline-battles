@@ -1903,17 +1903,39 @@ nonzero damage, and applies motion through the existing world gates. Human ram
 receipts keep their separate authoritative settlement path. A contact batch
 does not introduce a delayed physics step or invoke an engine callback.
 
+The synchronous `world_run` method moves the complete horizontal world law
+into C++: posed/perimeter lanes, support profiles, terrain recognition and
+ordered contact resolution. Its Python dispatcher retains live descriptors,
+Math vectors, collision filters, original engine hits, recasts and destruction
+effects on the invoking main thread. Independent ray frontiers contain at most
+seven queries; destructive resolution remains ordered and cannot be replayed.
+Unsupported input may use the Python law only before the first dispatcher call.
+The bridge preserves callback exceptions and rejects invalid responses without
+repeating engine effects. The public motion check contains such failures as a
+hard result for that operation, records a failure counter/diagnostic and leaves
+the backend available for subsequent actors. Already committed destruction is
+retained; the failure does not replay the law or terminate the battle.
+
 The embedded interpreter does not export its C API. The bridge binds the
 reviewed #1513 `Py_InitModule4`, `PyDict_GetItem`, `PyString_FromString`,
-`PyFloat_FromDouble`, `PyTuple_New` and `PyInt_FromLong` entry points after one load-time check
+`PyFloat_FromDouble`, `PyTuple_New`, `PyInt_FromLong` and `PyObject_Call` entry points after one load-time check
 of the executable and required object layouts. Exact built-in containers and
 numeric objects can be read without invoking conversion or equality callbacks.
 Borrowed object storage is consumed before allocating results; a new private
 tuple takes ownership of its two new float references. Unsupported existing
 representations use the Python operation locally.
 
+The exact executable's `PyObject_Call` at RVA `0x00bca730` accepts three cdecl
+arguments (callable, tuple, nullable kwargs). Reviewed Python and engine callers
+retain/decrement the argument tuple themselves and consume the returned owned
+reference. The implementation forwards to `tp_call` under the existing thread's
+recursion guard and preserves a NULL result's Python exception. The bridge
+checks its entry signature, holds arguments across reentry and uses this API
+only from the synchronous world dispatcher, never from a background job.
+
 Host conformance covers physical outcomes, unchanged inputs, live-pose reuse,
-ordered armor/damage settlement and reference ownership. Ordinary floating-point rounding differences
+ordered armor/damage settlement, world query/effect order, exception non-replay
+and reference ownership. Ordinary floating-point rounding differences
 are permitted; bit identity across CRT implementations is not required. These
 checks and complete-caller timing do not establish Windows frame pacing or
 embedded-process lifetime safety; those require the installed #1513 test build.

@@ -24,10 +24,12 @@ struct PyMethodDef {
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <exception>
 #include "offline_math_batch.h"
 #include "offline_navigation.h"
 #include "offline_visibility.h"
 #include "offline_contact_roster.h"
+#include "world_stage.h"
 
 namespace {
 using offline_math::Body;
@@ -37,6 +39,7 @@ typedef PyObject *(WOT_CDECL *StringNewFn)(const char *);
 typedef PyObject *(WOT_CDECL *FloatNewFn)(double);
 typedef PyObject *(WOT_CDECL *TupleNewFn)(Py_ssize_t);
 typedef PyObject *(WOT_CDECL *IntNewFn)(long);
+typedef PyObject *(WOT_CDECL *ObjectCallFn)(PyObject *, PyObject *, PyObject *);
 typedef PyObject *(WOT_CDECL *ModuleNewFn)(
     const char *, PyMethodDef *, const char *, PyObject *, int);
 typedef void (WOT_CDECL *DeallocFn)(PyObject *);
@@ -46,6 +49,7 @@ StringNewFn string_new = 0;
 FloatNewFn float_new = 0;
 TupleNewFn tuple_new = 0;
 IntNewFn int_new = 0;
+ObjectCallFn object_call = 0;
 ModuleNewFn module_new = 0;
 const void *dict_type = 0, *tuple_type = 0, *list_type = 0;
 const void *float_type = 0, *int_type = 0, *bool_type = 0;
@@ -288,8 +292,10 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
 #include "offline_navigation_python.inc"
 #include "offline_visibility_python.inc"
 #include "offline_contact_roster_python.inc"
+#include "offline_world_python.inc"
 
 PyMethodDef methods[] = {
+    {"world_run", world_run, 0x0001, "Run the complete world law with same-thread engine frontiers."},
     {"contact_roster", contact_roster, 0x0001, "Solve one complete roster contact stage over frozen bodies."},
     {"vis_open", vis_open, 0x0001, "Load immutable foliage for asynchronous visibility."},
     {"vis_update", vis_update, 0x0001, "Publish changed foliage rows to future jobs."},
@@ -332,6 +338,7 @@ bool initialize_api() {
     float_new = PyFloat_FromDouble;
     tuple_new = PyTuple_New;
     int_new = PyInt_FromLong;
+    object_call = PyObject_Call;
     module_new = Py_InitModule4;
     dict_type = &PyDict_Type; tuple_type = &PyTuple_Type; list_type = &PyList_Type;
     float_type = &PyFloat_Type; int_type = &PyInt_Type; bool_type = &PyBool_Type;
@@ -396,9 +403,11 @@ bool initialize_api() {
     static const unsigned char float_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x35,0xc0,0xc3,0x14,0x02,0x85,0xf6,0x75,0x5a,0x68,0xe8};
     static const unsigned char tuple_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x85,0xf6,0x79,0x14,0x6a,0x36,0x68,0x60,0xf4};
     static const unsigned char int_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x8d,0x46,0x05,0x3d,0x05,0x01,0x00,0x00,0x77};
+    static const unsigned char call_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x57,0x8b,0x46,0x04,0x8b,0x78,0x40,0x85,0xff};
     if (!signature(base + 0x00be1940U, init_bytes) || !signature(base + 0x00be4190U, dict_bytes) ||
         !signature(base + 0x00bd85f0U, string_bytes) || !signature(base + 0x00bdc460U, float_bytes) ||
-        !signature(base + 0x00bb3420U, tuple_bytes) || !signature(base + 0x00be1180U, int_bytes)) return false;
+        !signature(base + 0x00bb3420U, tuple_bytes) || !signature(base + 0x00be1180U, int_bytes) ||
+        !signature(base + 0x00bca730U, call_bytes)) return false;
     if (!type_layout(base, 0x01664d30U, 124, 0) || !type_layout(base, 0x0165c398U, 12, 4) ||
         !type_layout(base, 0x01660a88U, 20, 0) || !type_layout(base, 0x01664370U, 16, 0) ||
         !type_layout(base, 0x01664bf0U, 12, 0) || !type_layout(base, 0x016608b0U, 12, 0) ||
@@ -409,6 +418,7 @@ bool initialize_api() {
     float_new = reinterpret_cast<FloatNewFn>(base + 0x00bdc460U);
     tuple_new = reinterpret_cast<TupleNewFn>(base + 0x00bb3420U);
     int_new = reinterpret_cast<IntNewFn>(base + 0x00be1180U);
+    object_call = reinterpret_cast<ObjectCallFn>(base + 0x00bca730U);
     module_new = reinterpret_cast<ModuleNewFn>(base + 0x00be1940U);
     dict_type = base + 0x01664d30U; tuple_type = base + 0x0165c398U; list_type = base + 0x01660a88U;
     float_type = base + 0x01664370U; int_type = base + 0x01664bf0U; bool_type = base + 0x016608b0U;
