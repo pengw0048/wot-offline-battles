@@ -595,9 +595,9 @@ class StaticHullNavigationTests(unittest.TestCase):
         while not search.done:
             search.step(1)
         self.assertTrue(navigator.grid.path_crosses_static_hull(search.result))
-        navigator._finish_search(key, search, 0.1)
-        self.assertNotEqual(navigator.grid.static_hull_revision,
-                            navigator.path_hull_revisions[key])
+        self.assertFalse(navigator._finish_search(key, search, 0.1))
+        self.assertNotIn(key, navigator.paths)
+        self.assertNotIn(key, navigator.path_hull_revisions)
         navigator._path(path_key, start, goal, 0.2, None)
         if key in navigator.paths:
             self.assertFalse(navigator.grid.path_crosses_static_hull(

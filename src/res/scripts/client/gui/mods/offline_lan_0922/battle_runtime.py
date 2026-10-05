@@ -3739,6 +3739,8 @@ class BattleRuntime(object):
                 direction_probe=self._direction_probe,
                 vehicle_selector=self._select_bot_vehicle,
                 visibility_probe=self._bot_visibility,
+                visibility_async_probe=(self._bot_visibility_async
+                                        if self._worker_mode else None),
                 firing_lane_probe=self._bot_firing_lane,
                 incoming_lane_probe=self._bot_incoming_lane,
                 friendly_lane_probe=self._bot_friendly_firing_lane,
@@ -24505,6 +24507,62 @@ class BattleRuntime(object):
         return self._spot_geometry(source, target, descriptors[0], descriptors[1],
                                    fired_recently)
 
+    def _bot_visibility_async(self, source, target, fired_recently, now,
+                              fire_sequence, detection):
+        from gui.mods.offline_lan_0922.native_visibility import NativeVisibility
+        enabled = bool(self._foliage is not None and
+                       self._optional_feature_enabled('foliage camouflage'))
+        owner = (self._generation, self._bots.round_id, self._avatar.spaceID)
+        service = getattr(self, '_native_visibility', None)
+        if service is not None and (service.foliage is not self._foliage or
+                service.enabled != enabled or
+                getattr(self, '_native_visibility_owner', None) != owner):
+            service.close()
+            self._native_visibility = None
+            service = None
+        if service is None:
+            service = NativeVisibility.create(self._foliage, enabled)
+            self._native_visibility = service
+            self._native_visibility_owner = owner
+        if service is None:
+            return self._bot_visibility(source, target, fired_recently)
+        descriptors = []
+        identity = [self._avatar]
+        actors = []
+        for state in (source, target):
+            kind = 'player' if state.get('kind') == 'human' else 'bot'
+            actor = state.get('network_id', state.get('id', 0))
+            record = self._records.get('%s:%s' % (kind, actor))
+            entity = self._server_entity(record['engine_id']) if record else None
+            descriptor = getattr(entity, 'typeDescriptor', None)
+            descriptors.append(descriptor)
+            identity.extend((record, entity, descriptor))
+            actors.extend((kind, int(actor)))
+        broken_filter = self._sight_collision_filter()
+        collide_sight = getattr(self._destructibles, 'collide_sight_segment', None)
+        report = getattr(self._destructibles, 'report_sight_contact', None)
+
+        def query_ray(start_point, end_point):
+            start, end = self._vector(start_point), self._vector(end_point)
+            if callable(collide_sight):
+                hit = collide_sight(self._avatar.spaceID, start, end,
+                    broken_filter, self._runtime.bigworld.wg_collideSegment)
+            else:
+                args = (self._avatar.spaceID, start, end, 128)
+                if broken_filter is not None:
+                    args += (broken_filter,)
+                hit = self._runtime.bigworld.wg_collideSegment(*args)
+            clear = bool(hit is None or
+                (hit[0] - start).length + spotting.SIGHT_END_TOLERANCE >=
+                (end - start).length)
+            if not clear and callable(report):
+                report(self._avatar.spaceID, start, end, hit)
+            return clear
+
+        return service.request(tuple(actors), tuple(identity), source, target,
+            descriptors, int(max(0, self._turret_server_time_ms()) / 2000),
+            detection, now, fire_sequence, query_ray)
+
     def _bot_aim_context(self, source, target):
         """Keep candidate ownership on the current source/target records."""
         if not isinstance(target, dict) or not target.get('alive', True):
@@ -29109,6 +29167,14 @@ class BattleRuntime(object):
             raise cleanup_error
 
     def _cleanup(self):
+        # Cancel native CPU work while its Python round owner still exists.
+        native_visibility = getattr(self, '_native_visibility', None)
+        if native_visibility is not None:
+            native_visibility.close()
+            self._native_visibility = None
+        close_bots = getattr(self._bots, 'close', None)
+        if callable(close_bots):
+            close_bots()
         audio = getattr(self, '_live_reload_sound', None)
         if audio is not None:
             try:

@@ -14,19 +14,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Exercise the production geometry through the Python 2 C API
+      - name: Exercise native geometry and background jobs through the Python 2 C API
         run: |
           docker run --rm -v "$PWD:/src" -w /src python:2.7.18 /bin/sh -c '
             set -eu
-            g++ -std=c++17 -O3 -fPIC -shared -DWOT_HOST_PYTHON \
+            g++ -std=c++17 -O3 -fPIC -shared -pthread -DWOT_HOST_PYTHON \
               -fno-fast-math -ffp-contract=off \
               -fno-builtin-sin -fno-builtin-cos -fno-builtin-pow \
               -fno-builtin-hypot -fno-builtin-fmod \
               -I/usr/local/include/python2.7 \
               native/offline_math_batch_geometry.cpp \
+              native/offline_async_worker.cpp \
+              native/offline_navigation.cpp \
+              native/native_visibility_core.cpp \
+              native/offline_visibility.cpp \
               native/offline_math_batch_native.cpp \
               -o /tmp/offline_math_batch_native.so
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_math.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_workers.py \
               /tmp/offline_math_batch_native.so /src/src/res/scripts/client
           '
   test:

@@ -360,6 +360,9 @@ class FoliageMap(object):
 		self.fallen_tree_instances = {}
 		self.fallen_tree_cells = {}
 		self.inactive_instances = set()
+		self.native_revision = 0
+		self.native_dirty_instances = set()
+		self.native_dirty_cells = set()
 
 	def activate_fallen_tree(self, chunk_id, item_index):
 		"""Begin following one canonical tree's exact native matrix."""
@@ -415,6 +418,7 @@ class FoliageMap(object):
 			self.instances.append(row)
 			self.fallen_tree_instances[identity] = instance_id
 		else:
+			self.native_dirty_cells.update(self.fallen_tree_cells.get(identity, ()))
 			for cell in self.fallen_tree_cells.get(identity, ()):
 				members = self.cells.get(cell)
 				if members is None:
@@ -430,6 +434,9 @@ class FoliageMap(object):
 		for cell in cell_keys:
 			self.cells.setdefault(cell, []).append(instance_id)
 		self.fallen_tree_cells[identity] = cell_keys
+		self.native_dirty_instances.add(instance_id)
+		self.native_dirty_cells.update(cell_keys)
+		self.native_revision += 1
 		return True
 
 	def camouflage_bonus(self, observer, target, fired_recently=False,

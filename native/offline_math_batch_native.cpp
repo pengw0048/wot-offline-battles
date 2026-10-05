@@ -23,7 +23,10 @@ struct PyMethodDef {
 #include <stdint.h>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include "offline_math_batch.h"
+#include "offline_navigation.h"
+#include "offline_visibility.h"
 
 namespace {
 using offline_math::Body;
@@ -32,6 +35,7 @@ typedef PyObject *(WOT_CDECL *DictGetFn)(PyObject *, PyObject *);
 typedef PyObject *(WOT_CDECL *StringNewFn)(const char *);
 typedef PyObject *(WOT_CDECL *FloatNewFn)(double);
 typedef PyObject *(WOT_CDECL *TupleNewFn)(Py_ssize_t);
+typedef PyObject *(WOT_CDECL *IntNewFn)(long);
 typedef PyObject *(WOT_CDECL *ModuleNewFn)(
     const char *, PyMethodDef *, const char *, PyObject *, int);
 typedef void (WOT_CDECL *DeallocFn)(PyObject *);
@@ -40,6 +44,7 @@ DictGetFn dict_get = 0;
 StringNewFn string_new = 0;
 FloatNewFn float_new = 0;
 TupleNewFn tuple_new = 0;
+IntNewFn int_new = 0;
 ModuleNewFn module_new = 0;
 const void *dict_type = 0, *tuple_type = 0, *list_type = 0;
 const void *float_type = 0, *int_type = 0, *bool_type = 0;
@@ -275,7 +280,23 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
     } catch (...) { return fallback(); }
 }
 
+#include "offline_navigation_python.inc"
+#include "offline_visibility_python.inc"
+
 PyMethodDef methods[] = {
+    {"vis_open", vis_open, 0x0001, "Load immutable foliage for asynchronous visibility."},
+    {"vis_update", vis_update, 0x0001, "Publish changed foliage rows to future jobs."},
+    {"vis_submit", vis_submit, 0x0001, "Prepare complete pair geometry and foliage on a worker."},
+    {"vis_poll", vis_poll, 0x0001, "Drain completed visibility rays without blocking."},
+    {"vis_reduce", vis_reduce, 0x0001, "Reduce the main-thread sight prefix and retire the job."},
+    {"vis_cancel", vis_cancel, 0x0001, "Cancel visibility jobs without blocking."},
+    {"vis_close", vis_close, 0x0001, "Retire a visibility context without joining workers."},
+    {"nav_open", nav_open, 0x0001, "Load an owned map for asynchronous navigation."},
+    {"nav_submit", nav_submit, 0x0001, "Submit a complete baked navigation search."},
+    {"nav_poll", nav_poll, 0x0001, "Drain ready navigation paths and native corridor queries."},
+    {"nav_answer", nav_answer, 0x0001, "Supply completed main-thread corridor proofs."},
+    {"nav_cancel", nav_cancel, 0x0001, "Cancel navigation jobs without blocking."},
+    {"nav_close", nav_close, 0x0001, "Retire a navigation context without joining workers."},
     {"translation_fraction", translate, 0x0001, "Sweep the caller's current body and peer objects."},
     {"slide_translation", slide, 0x0001, "Resolve all swept slide segments in one synchronous call."},
     {"rotation_fraction", rotate, 0x0001, "Resolve the complete caller-owned rotation sweep."},
@@ -303,6 +324,7 @@ bool initialize_api() {
     string_new = PyString_FromString;
     float_new = PyFloat_FromDouble;
     tuple_new = PyTuple_New;
+    int_new = PyInt_FromLong;
     module_new = Py_InitModule4;
     dict_type = &PyDict_Type; tuple_type = &PyTuple_Type; list_type = &PyList_Type;
     float_type = &PyFloat_Type; int_type = &PyInt_Type; bool_type = &PyBool_Type;
@@ -366,9 +388,10 @@ bool initialize_api() {
     static const unsigned char string_bytes[] = {0x55,0x8b,0xec,0x51,0x53,0x8b,0x5d,0x08,0x56,0x8b,0xf3,0x8d,0x4e,0x01,0x66,0x90};
     static const unsigned char float_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x35,0xc0,0xc3,0x14,0x02,0x85,0xf6,0x75,0x5a,0x68,0xe8};
     static const unsigned char tuple_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x85,0xf6,0x79,0x14,0x6a,0x36,0x68,0x60,0xf4};
+    static const unsigned char int_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x8d,0x46,0x05,0x3d,0x05,0x01,0x00,0x00,0x77};
     if (!signature(base + 0x00be1940U, init_bytes) || !signature(base + 0x00be4190U, dict_bytes) ||
         !signature(base + 0x00bd85f0U, string_bytes) || !signature(base + 0x00bdc460U, float_bytes) ||
-        !signature(base + 0x00bb3420U, tuple_bytes)) return false;
+        !signature(base + 0x00bb3420U, tuple_bytes) || !signature(base + 0x00be1180U, int_bytes)) return false;
     if (!type_layout(base, 0x01664d30U, 124, 0) || !type_layout(base, 0x0165c398U, 12, 4) ||
         !type_layout(base, 0x01660a88U, 20, 0) || !type_layout(base, 0x01664370U, 16, 0) ||
         !type_layout(base, 0x01664bf0U, 12, 0) || !type_layout(base, 0x016608b0U, 12, 0) ||
@@ -378,6 +401,7 @@ bool initialize_api() {
     string_new = reinterpret_cast<StringNewFn>(base + 0x00bd85f0U);
     float_new = reinterpret_cast<FloatNewFn>(base + 0x00bdc460U);
     tuple_new = reinterpret_cast<TupleNewFn>(base + 0x00bb3420U);
+    int_new = reinterpret_cast<IntNewFn>(base + 0x00be1180U);
     module_new = reinterpret_cast<ModuleNewFn>(base + 0x00be1940U);
     dict_type = base + 0x01664d30U; tuple_type = base + 0x0165c398U; list_type = base + 0x01660a88U;
     float_type = base + 0x01664370U; int_type = base + 0x01664bf0U; bool_type = base + 0x016608b0U;
@@ -395,5 +419,5 @@ extern "C" __declspec(dllexport) void __cdecl initoffline_math_batch_native(void
 #endif
     if (!initialize_api() || !initialize_keys()) return;
     module_new("offline_math_batch_native", methods,
-               "Synchronous geometry over existing #1513 Python objects.", 0, 1013);
+               "Exact #1513 geometry and asynchronous navigation/visibility.", 0, 1013);
 }

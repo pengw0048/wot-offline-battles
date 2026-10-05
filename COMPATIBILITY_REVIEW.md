@@ -1896,7 +1896,7 @@ callback. Clear and zero-motion operations retain the Python fast return.
 
 The embedded interpreter does not export its C API. The bridge binds the
 reviewed #1513 `Py_InitModule4`, `PyDict_GetItem`, `PyString_FromString`,
-`PyFloat_FromDouble` and `PyTuple_New` entry points after one load-time check
+`PyFloat_FromDouble`, `PyTuple_New` and `PyInt_FromLong` entry points after one load-time check
 of the executable and required object layouts. Exact built-in containers and
 numeric objects can be read without invoking conversion or equality callbacks.
 Borrowed object storage is consumed before allocating results; a new private
@@ -1908,6 +1908,53 @@ boundaries and reference ownership. Ordinary floating-point rounding differences
 are permitted; bit identity across CRT implementations is not required. These
 checks and complete-caller timing do not establish Windows frame pacing or
 embedded-process lifetime safety; those require the installed #1513 test build.
+
+### Background navigation and spotting
+
+The same x86 extension runs complete baked A* searches, path smoothing and
+spotting geometry/foliage computation on two shared C++ threads. Each map is
+copied into owned native storage once. Job submission copies plain numeric
+inputs; background tasks never retain a Python object, acquire the GIL or call
+BigWorld. Navigation and spotting contexts belong to the current map/round;
+replacement, cancellation and teardown invalidate pending results and queries.
+Closing a context never waits for worker completion. The process-wide executor
+and service owners deliberately have no DLL-unload destructors, avoiding a
+thread join under the Windows loader lock. The existing launcher architecture
+and the game's 32-bit process boundary are unchanged.
+
+Baked navigation first searches a candidate route, then requests a batch of
+live native corridor proofs for its reviewed edges and prospective shortcuts.
+A denied edge is retained as a local proof and the candidate is searched
+again. No unproved route reaches the driver. This uses extra inexpensive
+background searches when obstacles reject a candidate, while avoiding one
+render-frame round trip per A* expansion. The main thread services queries
+fairly within its existing search budget and rejects newly obstructed wreck
+paths before publication. Non-baked engine-free callers keep their existing
+resumable Python search seam.
+
+Spotting projects the exact descriptor-local checkpoints and evaluates all
+foliage volumes for an admitted observer/target pair in the background. Static
+foliage is shared; fallen-tree changes produce coherent revision snapshots.
+The main thread retains the existing ordered sight queries, broken-surface
+filter and contact reports, including the first clear zero-cover early exit.
+A small native reduction completes camouflage and detection after those rays.
+Preparation and sight-query consumption have separate bounded cohorts, so
+submitting a CPU job does not also consume a later engine-query slot. Pending
+jobs retain their fair queue position; a worker that has not finished never
+makes the frame wait or spends an unused native-query credit.
+Results retain their sample time for cache and spotting-memory leases. Actor,
+descriptor, firing/camouflage state or foliage changes reject obsolete jobs.
+The maximum observation age is the existing 0.75-second shot-camouflage window;
+using the shorter 6 Hz cache interval here would starve observations whenever
+one loaded worker callback exceeds that interval. This is explicitly delayed
+spotting, not an assertion of synchronous observation timing.
+
+`tools/check_native_workers.py` exercises the actual Python 2 bridge, background
+progress while Python holds the GIL, immutable inputs, batched query proofs,
+late cancellation/answers, map replacement and ordered spotting reduction.
+Pure-data regressions also cover the Python owners' pending/result lifecycle.
+These prove the computation and ownership contracts; exact Windows callback
+latency, frame pacing and gameplay acceptance remain separate evidence.
 
 ## First-chance exception trail
 

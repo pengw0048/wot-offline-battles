@@ -2009,7 +2009,7 @@ class BotRuntime(object):
                  incoming_lane_probe=None, combat_diagnostics=None,
                  turret_motion_probe=None, turret_hulls_provider=None,
                  artillery_status_probe=None, wreck_rotation_probe=None,
-                 wreck_ground_probe=None):
+                 wreck_ground_probe=None, visibility_async_probe=None):
         self.local_player_id = local_player_id
         self.artillery_status_probe = artillery_status_probe
         self._wreck_rotation_probe = wreck_rotation_probe
@@ -2025,6 +2025,7 @@ class BotRuntime(object):
         self.adapter_factory = adapter_factory or BotAdapter
         self.vehicle_selector = vehicle_selector or (
             lambda raw: raw.get('vehicle') or 'ussr:R11_MS-1')
+        self.visibility_async_probe = visibility_async_probe
         self.visibility_probe = visibility_probe or (
             lambda unused_source, unused_target: True)
         # The production #1513 adapter uses the same static collision ray for
@@ -2207,6 +2208,7 @@ class BotRuntime(object):
         self._human_ram_report_cache = {}
         self.finished = False
         self._visibility_cache = {}
+        self._visibility_inflight = set()
         self._visibility_waiting = []
         self._visibility_frame = None
         self._reset_visibility_diagnostics()
@@ -2423,7 +2425,11 @@ class BotRuntime(object):
         self._navigation_map_name = map_name
         self._navigation_error = None
         self.baked_graph = graph
+        previous_navigator = self.navigator
         self.navigator = navigator
+        close = getattr(previous_navigator, 'close', None)
+        if callable(close):
+            close()
 
     @staticmethod
     def _validated_baked_routes(graph):
@@ -3253,6 +3259,12 @@ class BotRuntime(object):
             self.bot_rating(bot_id), bot_gunnery.CAPABILITY_WEAK_SPOT,
             self.round_id, bot_id, key, epoch)
 
+    def close(self):
+        """Retire background computation before battle state is released."""
+        close = getattr(self.navigator, 'close', None)
+        if callable(close):
+            close()
+
     def battle_start(self, message):
         """Build a local authority manifest from the server roster once per round."""
         message = message if isinstance(message, dict) else {}
@@ -3269,6 +3281,8 @@ class BotRuntime(object):
         self._bot_skill_pins = self._lineup_skill_pins(message)
         round_id = message.get('round_id')
         if round_id != self.round_id:
+            self.close()
+            self._navigation_map_name = None
             self.round_id = round_id
             self.states = {}
             self._accumulator = 0.0
@@ -3330,6 +3344,7 @@ class BotRuntime(object):
             self.adapter = None
             self.finished = False
             self._visibility_cache = {}
+            self._visibility_inflight = set()
             self._visibility_waiting = []
             self._visibility_frame = None
             self._reset_visibility_diagnostics()
@@ -3390,6 +3405,7 @@ class BotRuntime(object):
             self._ballistic_solution_cache = {}
             self._friendly_repositions = {}
             self._visibility_cache = {}
+            self._visibility_inflight = set()
             self._visibility_waiting = []
             self._visibility_frame = None
             self._reset_visibility_diagnostics()
@@ -5224,12 +5240,42 @@ class BotRuntime(object):
                    ('fire' if candidates[key][2] else
                     ('new' if candidates[key][3] else 'ordinary'))))
             for key in order)
-        frame['next'] = min(len(order), frame['budget'])
-        frame['allowed'] = set(order[:frame['next']])
+        query_order = order
+        if callable(self.visibility_async_probe):
+            self._visibility_inflight.intersection_update(valid)
+            query_order = [key for key in order
+                           if key in self._visibility_inflight]
+            prepare_order = [key for key in order
+                             if key not in self._visibility_inflight]
+            frame['prepare_order'] = prepare_order
+            frame['prepare_budget'] = MAX_VISIBILITY_PROBES_PER_FRAME
+            frame['prepare_next'] = min(len(prepare_order), frame['prepare_budget'])
+            frame['prepare_allowed'] = set(prepare_order[:frame['prepare_next']])
+            frame['preparing'] = set()
+        frame['query_order'] = query_order
+        frame['next'] = min(len(query_order), frame['budget'])
+        frame['allowed'] = set(query_order[:frame['next']])
         return True
+
+    def _backfill_visibility_slots(self, frame):
+        order = frame.get('query_order', frame['order'])
+        while (len(frame['allowed']) < frame['budget'] and
+               frame['next'] < len(order)):
+            candidate = order[frame['next']]
+            frame['next'] += 1
+            if candidate not in frame['completed']:
+                frame['allowed'].add(candidate)
+        order = frame.get('prepare_order', ())
+        while (len(frame.get('prepare_allowed', ())) < frame.get('prepare_budget', 0) and
+               frame.get('prepare_next', 0) < len(order)):
+            candidate = order[frame['prepare_next']]
+            frame['prepare_next'] += 1
+            if candidate not in frame['completed']:
+                frame['prepare_allowed'].add(candidate)
 
     def _visibility_probe_completed(self, key):
         """Retire one pair and backfill slots unused by pure-data rejects."""
+        self._visibility_inflight.discard(key)
         frame = self._visibility_frame
         if not isinstance(frame, dict):
             return False
@@ -5239,21 +5285,33 @@ class BotRuntime(object):
         if first_completion:
             self._visibility_scheduler_totals['completed'] += 1
         frame['allowed'].discard(key)
-        order = frame['order']
-        while (len(frame['allowed']) < frame['budget'] and
-               frame['next'] < len(order)):
-            candidate = order[frame['next']]
-            frame['next'] += 1
-            if candidate not in frame['completed']:
-                frame['allowed'].add(candidate)
+        frame.get('prepare_allowed', set()).discard(key)
+        self._backfill_visibility_slots(frame)
         return True
+
+    def _visibility_probe_pending(self, key):
+        """A CPU submission consumes no main-thread engine-query credit."""
+        self._visibility_inflight.add(key)
+        self._visibility_probe_deferred(key)
+        frame = self._visibility_frame
+        if not isinstance(frame, dict):
+            return
+        if key not in frame.get('preparing', ()):
+            # A previously submitted job may still be running. Give its unused
+            # query slot to another ready pair without waiting for that worker.
+            frame['budget'] += 1
+        frame['allowed'].discard(key)
+        frame.get('prepare_allowed', set()).discard(key)
+        self._backfill_visibility_slots(frame)
 
     def _visibility_probe_allowed(self, key):
         """Peek at the fair cohort without spending its native-query slot."""
         frame = self._visibility_frame
         if not isinstance(frame, dict):
             return True
-        return bool(key in frame['allowed'] and frame['budget'] > 0)
+        return bool((key in frame['allowed'] and frame['budget'] > 0) or
+                    (key in frame.get('prepare_allowed', ()) and
+                     frame.get('prepare_budget', 0) > 0))
 
     def _visibility_probe_deferred(self, key):
         """Record one per-callback denial without influencing fair order."""
@@ -5274,10 +5332,16 @@ class BotRuntime(object):
         if not isinstance(frame, dict):
             return True
         frame['requested'].add(key)
-        if key not in frame['allowed'] or frame['budget'] <= 0:
+        preparing = (key in frame.get('prepare_allowed', ()) and
+                     frame.get('prepare_budget', 0) > 0)
+        if preparing:
+            frame['prepare_budget'] -= 1
+            frame['preparing'].add(key)
+        elif key in frame['allowed'] and frame['budget'] > 0:
+            frame['budget'] -= 1
+        else:
             self._visibility_probe_deferred(key)
             return False
-        frame['budget'] -= 1
         if key not in frame['admitted']:
             frame['admitted'].add(key)
             self._visibility_scheduler_totals['admitted'] += 1
@@ -5315,6 +5379,7 @@ class BotRuntime(object):
 
     def _visible(self, source, target, now, tick_cache=None,
                  source_position=None, view_range_resolver=None):
+        sample_time = float(now)
         target_id = target.get('network_id', target.get('id', 0))
         source_kind = source.get('kind', 'bot')
         key = (source_kind, int(source.get('id', 0)),
@@ -5361,12 +5426,23 @@ class BotRuntime(object):
                     self._probe_totals[0] += 1
                     probe_started = self._probe_started()
                     try:
-                        try:
-                            visibility = self.visibility_probe(
-                                source, target, fired_recently)
-                        except TypeError:
-                            # Preserve the engine-free two-argument probe contract.
-                            visibility = self.visibility_probe(source, target)
+                        if callable(self.visibility_async_probe):
+                            detection = (distance, view_range, tuple(base_pair),
+                                         moving, fired_recently, additive,
+                                         multiplier, shot_factor)
+                            visibility = self.visibility_async_probe(
+                                source, target, fired_recently, now,
+                                fire_seq, detection)
+                            if visibility is None:
+                                self._visibility_probe_pending(key)
+                                return False
+                        else:
+                            try:
+                                visibility = self.visibility_probe(
+                                    source, target, fired_recently)
+                            except TypeError:
+                                # Preserve the engine-free two-argument probe contract.
+                                visibility = self.visibility_probe(source, target)
                     finally:
                         self._probe_finished(0, probe_started)
                 except Exception:
@@ -5379,14 +5455,18 @@ class BotRuntime(object):
                 else:
                     has_line_of_sight = bool(visibility)
                     foliage_bonus = 0.0
-                camouflage = spotting.effective_camouflage(
-                    base_pair, moving=moving, additive=additive,
-                    multiplier=multiplier, shot_factor=shot_factor,
-                    fired_recently=fired_recently,
-                    foliage_bonus=foliage_bonus)
-                value = spotting.is_detected(
-                    distance, view_range, camouflage, has_line_of_sight)
-        self._visibility_cache[key] = (now, value, fire_seq)
+                if isinstance(visibility, dict) and 'detected' in visibility:
+                    value = bool(visibility['detected'])
+                    sample_time = float(visibility['sampled_at'])
+                else:
+                    camouflage = spotting.effective_camouflage(
+                        base_pair, moving=moving, additive=additive,
+                        multiplier=multiplier, shot_factor=shot_factor,
+                        fired_recently=fired_recently,
+                        foliage_bonus=foliage_bonus)
+                    value = spotting.is_detected(
+                        distance, view_range, camouflage, has_line_of_sight)
+        self._visibility_cache[key] = (sample_time, value, fire_seq)
         self._visibility_probe_completed(key)
         if len(self._visibility_cache) > 1024:
             oldest = sorted(self._visibility_cache.items(),
@@ -5394,6 +5474,15 @@ class BotRuntime(object):
             for old_key, unused_value in oldest:
                 self._visibility_cache.pop(old_key, None)
         return value
+
+    def _visibility_sample_time(self, source, target, now):
+        if not callable(self.visibility_async_probe):
+            return float(now)
+        key = (source.get('kind', 'bot'), int(source.get('id', 0)),
+               target.get('kind'),
+               int(target.get('network_id', target.get('id', 0))))
+        cached = self._visibility_cache.get(key)
+        return min(float(now), float(cached[0])) if cached else float(now)
 
     @staticmethod
     def _human_planner_id(player_id):
@@ -5643,8 +5732,10 @@ class BotRuntime(object):
                 if alive:
                     duration = self._designated_spot_duration(
                         source, target, snapshot)
-                self._renew_team_spot(key, now, duration)
-                self._renew_observer_spot(source, target, now, duration, target_key)
+                sampled_at = (self._visibility_sample_time(source, target, now)
+                              if alive else now)
+                self._renew_team_spot(key, sampled_at, duration)
+                self._renew_observer_spot(source, target, sampled_at, duration, target_key)
             if alive:
                 self._human_direct_targets[source['id']] = direct_targets
         return True
@@ -5690,8 +5781,9 @@ class BotRuntime(object):
                 source, target, now, visibility_tick, source_position,
                 resolve_source_view_range)
             if direct_visible:
-                self._renew_team_spot(key, now)
-                self._renew_observer_spot(source, target, now)
+                sampled_at = self._visibility_sample_time(source, target, now)
+                self._renew_team_spot(key, sampled_at)
+                self._renew_observer_spot(source, target, sampled_at)
                 if team_spotted is not None:
                     team_spotted[key] = True
             else:

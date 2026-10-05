@@ -184,11 +184,13 @@ class LocalDriver(object):
 		state = self.states.get(bot_id)
 		if state is None:
 			return False
-		state['traffic_waiting'] = True
 		if elapsed is None:
 			elapsed = state.get('last_step', 0.0)
 		state['traffic_wait_time'] += max(0.0, float(elapsed))
-		if state['traffic_wait_time'] <= TRAFFIC_WAIT_LEASE_SECONDS:
+		# One protection window belongs to the current no-progress episode.
+		state['traffic_waiting'] = (
+			state['traffic_wait_time'] <= TRAFFIC_WAIT_LEASE_SECONDS)
+		if state['traffic_waiting']:
 			state['stuck_time'] = 0.0
 			state['recovery_time'] = 0.0
 			state['recovery_side'] = 0.0
@@ -560,8 +562,7 @@ class LocalDriver(object):
 		"""
 		state = self._state(bot_id, team_slot, position)
 		step = max(0.0, float(dt))
-		if not state.pop('traffic_waiting', False):
-			state['traffic_wait_time'] = 0.0
+		state.pop('traffic_waiting', False)
 		state['last_step'] = step
 		state['clock'] += step
 		self._prune_failures(state)
@@ -572,6 +573,7 @@ class LocalDriver(object):
 		state['last_desired_yaw'] = desired_yaw
 		target_distance = _distance(position, target)
 		if not movement_intent:
+			state['traffic_wait_time'] = 0.0
 			# Cover/engagement orders intentionally stop within a tolerance. Do not
 			# reinterpret that commanded hold as a stuck tank 1.8 seconds later.
 			state['stuck_time'] = 0.0
@@ -629,10 +631,12 @@ class LocalDriver(object):
 		# travel. A continuous turn may earn heading credit until it aligns;
 		# revisiting an angle already reached cannot renew that credit.
 		if displacement >= 0.08:
+			state['traffic_wait_time'] = 0.0
 			state['last_position'] = (
 				float(position[0]), float(position[2]))
 			state['stuck_time'] = 0.0
 		elif heading_progress:
+			state['traffic_wait_time'] = 0.0
 			state['stuck_time'] = max(0.0, state['stuck_time'] - step)
 		else:
 			state['stuck_time'] += step

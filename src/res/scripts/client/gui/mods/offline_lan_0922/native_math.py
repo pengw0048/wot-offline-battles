@@ -1,4 +1,4 @@
-"""Synchronous native geometry over the caller's existing Python objects."""
+"""Load native geometry and the background navigation/spotting workers."""
 from __future__ import print_function
 
 import os
@@ -34,7 +34,7 @@ def _report_failure(error):
     global _reported_failure
     if not _reported_failure:
         _reported_failure = True
-        sys.stdout.write('[Offline LAN 0.9.22] native geometry unavailable '
+        sys.stdout.write('[Offline LAN 0.9.22] native computation unavailable '
                          'for an operation; using Python: %s\n' % error)
 
 
