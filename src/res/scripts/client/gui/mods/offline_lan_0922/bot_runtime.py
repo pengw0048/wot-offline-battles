@@ -6058,6 +6058,20 @@ class BotRuntime(object):
             })
         return result
 
+    def _rotation_neighbours_for(self, source, supplied):
+        """Project only rotation geometry from the current sequential poses."""
+        result = list(supplied or ())
+        source_id = source.get('id')
+        for bot_id, raw in self.states.items():
+            if bot_id == source_id:
+                continue
+            result.append({
+                'position': _position(raw),
+                'shape': raw.get('collision_shape'),
+                'yaw': raw.get('yaw', 0.0),
+            })
+        return result
+
     @observed('bot.traffic_snapshot')
     def _traffic_snapshot(self, supplied):
         """Build one immutable local-traffic snapshot for this authority tick."""
@@ -12658,7 +12672,7 @@ class BotRuntime(object):
                     allowed = tank_collision.rotation_fraction(
                         position, old_hull_yaw, candidate_hull_yaw,
                         state.get('collision_shape') or tank_collision.DEFAULT_SHAPE,
-                        self._neighbours_for(state, neighbours))
+                        self._rotation_neighbours_for(state, neighbours))
                     if allowed < 1.0:
                         candidate_hull_yaw = old_hull_yaw + _angle_delta(
                             candidate_hull_yaw, old_hull_yaw)*allowed

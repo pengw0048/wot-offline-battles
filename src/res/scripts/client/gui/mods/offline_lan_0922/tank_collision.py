@@ -527,6 +527,47 @@ def _obb_overlap(x_a, z_a, yaw_a, shape_a,
     return best_x, best_z, best_overlap
 
 
+def _obb_pair_projection(yaw_a, shape_a, yaw_b, shape_b):
+    """Prepare only the fixed axes/radii for one private solver pair."""
+    axes_a = _axes(yaw_a)
+    axes_b = _axes(yaw_b)
+    projection = []
+    for axis_x, axis_z in axes_a + axes_b:
+        radius_a = (
+            shape_a[0] * abs(
+                axis_x * axes_a[0][0] + axis_z * axes_a[0][1]) +
+            shape_a[1] * abs(
+                axis_x * axes_a[1][0] + axis_z * axes_a[1][1]))
+        radius_b = (
+            shape_b[0] * abs(
+                axis_x * axes_b[0][0] + axis_z * axes_b[0][1]) +
+            shape_b[1] * abs(
+                axis_x * axes_b[1][0] + axis_z * axes_b[1][1]))
+        projection.append((axis_x, axis_z, radius_a, radius_b))
+    return tuple(projection)
+
+
+def _obb_contact_projected(x_a, z_a, x_b, z_b, projection):
+    """Evaluate every current center projection in the original SAT order."""
+    delta_x = x_a - x_b
+    delta_z = z_a - z_b
+    best_overlap = None
+    best_x = 0.0
+    best_z = 0.0
+    for axis_x, axis_z, radius_a, radius_b in projection:
+        signed_distance = delta_x * axis_x + delta_z * axis_z
+        overlap = radius_a + radius_b - abs(signed_distance)
+        if best_overlap is None or overlap < best_overlap:
+            if signed_distance < 0.0:
+                axis_x = -axis_x
+                axis_z = -axis_z
+            best_overlap = overlap
+            best_x = axis_x
+            best_z = axis_z
+    return ((best_x, best_z, best_overlap)
+            if best_overlap > 0.0 else None)
+
+
 def rotation_fraction(position, yaw, candidate_yaw, shape, others,
                       pivot_offset=0.0, translation=(0.0, 0.0)):
     """Project kinematic traverse onto the first legal chassis contact.
@@ -1177,11 +1218,14 @@ def resolve_pairs(tanks, dt, anchor=None):
                         pitch_a=a.get('pitch', 0.0), roll_a=a.get('roll', 0.0),
                         pitch_b=b.get('pitch', 0.0), roll_b=b.get('roll', 0.0)):
                     continue
-                pairs.append((a, b, shape_a, shape_b))
+                # Yaw/shape also stay fixed; only center distances change.
+                projection = _obb_pair_projection(
+                    a['yaw'], shape_a, b['yaw'], shape_b)
+                pairs.append((a, b, projection))
     for unused_pass in range(4):
-        for a, b, shape_a, shape_b in pairs:
-            hit = obb_contact(a['x'], a['z'], a['yaw'], shape_a,
-                              b['x'], b['z'], b['yaw'], shape_b)
+        for a, b, projection in pairs:
+            hit = _obb_contact_projected(
+                a['x'], a['z'], b['x'], b['z'], projection)
             hit = _owner_oriented_contact(hit, a['x']-b['x'], a['z']-b['z'], a['id'], b['id'])
             if hit is None:
                 continue
@@ -1198,16 +1242,14 @@ def resolve_pairs(tanks, dt, anchor=None):
             # private constraint roster, then publish only the owned share.
             # The caller still sweeps against the actual remote pose; no
             # speculative remote travel can open a passage through it.
-            position_response = pair_response(
-                hit, mobility_a, mobility_b,
-                (0.0, 0.0), (0.0, 0.0))
+            # The first response's correction has the same contact/mobilities
+            # and does not depend on velocity or friction_inverse.
             apply_impulse = a.get('impulse', True) and b.get('impulse', True)
             for body, offset in ((a, 0), (b, 4)):
                 dx, dz, dvx, dvz = response[offset:offset+4]
                 dv_yaw = 0.0
                 if angular is not None:
                     dvx, dvz, dv_yaw = angular[0 if offset == 0 else 1]
-                dx, dz = position_response[offset:offset+2]
                 result = results[body['id']]
                 if not body.get('position_fixed'):
                     result['correction'] = (result['correction'][0]+dx, result['correction'][1]+dz)

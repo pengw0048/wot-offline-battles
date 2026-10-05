@@ -99,6 +99,37 @@ class _ItemMatrix(object):
 
 class WorldCollisionTests(unittest.TestCase):
 
+    def test_posed_filter_envelope_covers_every_swept_body_corner(self):
+        # Independent vertex enumeration keeps the collision-filter envelope
+        # exact for asymmetric tracks, tipped bodies and signed travel.
+        import itertools
+        import random
+        import struct
+        rng = random.Random(1513)
+        angles = list(itertools.product(
+            (-math.pi, -math.pi / 2.0, 0.0, math.pi / 2.0, math.pi),
+            repeat=3))
+        angles.extend(tuple(rng.uniform(-math.pi, math.pi) for _ in range(3))
+                      for _ in range(500))
+        for yaw, pitch, roll in angles:
+            pos = _Vector(rng.uniform(-1000.0, 1000.0), 0.0,
+                          rng.uniform(-1000.0, 1000.0))
+            axes = tank_collision.pose_axes(yaw, pitch, roll)
+            left, right = -rng.uniform(0.1, 3.0), rng.uniform(0.1, 3.0)
+            back, front = rng.uniform(0.1, 8.0), rng.uniform(0.1, 8.0)
+            dx, dz = rng.uniform(-2.0, 2.0), rng.uniform(-2.0, 2.0)
+            corners = [
+                (pos.x + axes[0][0]*x + axes[1][0]*h + axes[2][0]*z + t*dx,
+                 pos.z + axes[0][2]*x + axes[1][2]*h + axes[2][2]*z + t*dz)
+                for x in (left, right) for z in (-back, front)
+                for h in (0.6, 1.6) for t in (0.0, 1.0)]
+            expected = (min(c[0] for c in corners), max(c[0] for c in corners),
+                        min(c[1] for c in corners), max(c[1] for c in corners))
+            actual = world_collision._posed_sweep_bounds(
+                pos, axes, left, right, back, front, dx, dz)
+            self.assertEqual([struct.pack('>d', value) for value in expected],
+                             [struct.pack('>d', value) for value in actual])
+
     def test_asymmetric_body_and_real_lateral_travel_have_no_extra_width(self):
         descriptor = _Strict1513Component(hull=_Strict1513Component(
             hitTester=types.SimpleNamespace(bbox=(
@@ -2191,8 +2222,9 @@ class WorldCollisionTests(unittest.TestCase):
                         wg_getMatInfoNearPoint=_miss_mat_info_1513)
                     trace = {}
                     with self.subTest(mirror=mirror, wall=wall, velocity=velocity), \
-                            mock.patch.object(world_collision, '_vehicle_motion_extents',
-                                              return_value=extents), \
+                            mock.patch.object(world_collision, '_vehicle_motion_bounds',
+                                              return_value=(-extents[0], extents[0],
+                                                            extents[1], extents[2])), \
                             mock.patch.object(world_collision, '_destroy_and_recast',
                                               return_value=False):
                         status = world_collision.check_horizontal_collision(
@@ -2250,8 +2282,9 @@ class WorldCollisionTests(unittest.TestCase):
                     wg_getMatInfoNearPoint=_miss_mat_info_1513)
                 trace = {}
                 with self.subTest(mirror=mirror, wall=wall), \
-                        mock.patch.object(world_collision, '_vehicle_motion_extents',
-                                          return_value=extents), \
+                        mock.patch.object(world_collision, '_vehicle_motion_bounds',
+                                          return_value=(-extents[0], extents[0],
+                                                        extents[1], extents[2])), \
                         mock.patch.object(world_collision, '_destroy_and_recast',
                                           return_value=False):
                     self.assertEqual('hard' if wall else 'clear',

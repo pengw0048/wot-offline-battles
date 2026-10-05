@@ -769,6 +769,25 @@ def check_horizontal_collision(bigworld, math_module, *args, **kwargs):
 			sys.modules['Math'] = old_math
 
 
+def _posed_sweep_bounds(pos, axes, left, right, back, front, travel_x, travel_z):
+	"""Evaluate the four extremal coordinates of the posed swept body.
+
+	Each coordinate is monotone in each local component. Select its extremal
+	vertex, retaining the original corner expression's arithmetic order.
+	"""
+	result = []
+	for component, origin, travel in ((0, pos.x, travel_x), (2, pos.z, travel_z)):
+		r, u, f = axes[0][component], axes[1][component], axes[2][component]
+		minimum = (origin + r*(right if r < 0.0 else left) +
+			u*(1.6 if u < 0.0 else 0.6) + f*(front if f < 0.0 else -back) +
+			(1.0 if travel < 0.0 else 0.0)*travel)
+		maximum = (origin + r*(right if r > 0.0 else left) +
+			u*(1.6 if u > 0.0 else 0.6) + f*(front if f > 0.0 else -back) +
+			(1.0 if travel > 0.0 else 0.0)*travel)
+		result.extend((minimum, maximum))
+	return result
+
+
 @observed('motion.world')
 def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		airborne=False, dt=0.04, return_status=False,
@@ -781,11 +800,12 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		hl_front = 3.5
 		hl_back = 3.5
 
-		extents = _vehicle_motion_extents(td)
-		if extents is not None:
-			hw, hl_back, hl_front = extents
 		bounds = _vehicle_motion_bounds(td)
-		left, right = bounds[:2] if bounds is not None else (-hw, hw)
+		if bounds is None:
+			left, right = -hw, hw
+		else:
+			left, right, hl_back, hl_front = bounds
+			hw = max(abs(left), abs(right))
 
 		if trace is not None:
 			trace.clear()
@@ -940,14 +960,12 @@ def _check_horizontal_collision(spaceID, pos, yaw, vel, td=None,
 		maximum_x = max(max(lane[0], lane[2]) for lane in lane_segments)
 		minimum_z = min(min(lane[1], lane[3]) for lane in lane_segments)
 		maximum_z = max(max(lane[1], lane[3]) for lane in lane_segments)
-		posed_corners = [(pos.x + axes[0][0]*x + axes[1][0]*h + axes[2][0]*z + t*travel_x,
-			pos.z + axes[0][2]*x + axes[1][2]*h + axes[2][2]*z + t*travel_z)
-			for x in (left, right) for z in (-hl_back, hl_front)
-			for h in (0.6, 1.6) for t in (0.0, 1.0)]
-		minimum_x = min(minimum_x, min(p[0] for p in posed_corners))
-		maximum_x = max(maximum_x, max(p[0] for p in posed_corners))
-		minimum_z = min(minimum_z, min(p[1] for p in posed_corners))
-		maximum_z = max(maximum_z, max(p[1] for p in posed_corners))
+		posed_bounds = _posed_sweep_bounds(
+			pos, axes, left, right, hl_back, hl_front, travel_x, travel_z)
+		minimum_x = min(minimum_x, posed_bounds[0])
+		maximum_x = max(maximum_x, posed_bounds[1])
+		minimum_z = min(minimum_z, posed_bounds[2])
+		maximum_z = max(maximum_z, posed_bounds[3])
 		_sweep_filter = prepare_horizontal_collision_filter(
 			Math.Vector3(minimum_x, pos.y + 0.6, minimum_z),
 			Math.Vector3(maximum_x, pos.y + 1.6, maximum_z))
