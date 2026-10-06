@@ -2125,28 +2125,52 @@ def wait_for_worker_ready(process, game_root,
                           interval=0.05, clock=None, sleep=None,
                           cancelled=None, previous_marker_token=None, marker_token=None):
     """Wait for a live hidden client to publish its ready marker."""
+    ready, unused_failed = wait_for_hidden_clients_ready(
+        ((process, marker_token or worker_ready_marker_token,
+          previous_marker_token),), game_root, timeout=timeout,
+        interval=interval, clock=clock, sleep=sleep, cancelled=cancelled)
+    return ready
+
+
+def wait_for_hidden_clients_ready(clients, game_root,
+                                 timeout=WORKER_READY_TIMEOUT_SECONDS_0922,
+                                 interval=0.05, clock=None, sleep=None,
+                                 cancelled=None):
+    """Wait for every (process, marker reader, old token) without serial gates.
+
+    Return (ready, failed index). Cancellation has no failed index. Both the
+    ordinary single-worker path and the worker/driver pair use the same fresh
+    marker and live-process boundary; no token from one role satisfies another.
+    """
     import time as time_module
 
     clock = clock or time_module.monotonic
     sleep = sleep or time_module.sleep
     deadline = clock() + float(timeout)
-    marker_token = marker_token or worker_ready_marker_token
-    previous_marker_disappeared = False
+    previous_marker_disappeared = [False] * len(clients)
     while True:
         if callable(cancelled) and cancelled():
-            return False
-        if process.poll() is not None:
-            return False
-        current_marker_token = marker_token(game_root)
-        if current_marker_token is None:
-            if previous_marker_token is not None:
-                previous_marker_disappeared = True
-        elif (previous_marker_token is None or
-              previous_marker_disappeared or
-              current_marker_token != previous_marker_token):
-            return process.poll() is None
+            return False, None
+        pending = []
+        for index, (process, marker_token, previous) in enumerate(clients):
+            if process.poll() is not None:
+                return False, index
+            current = marker_token(game_root)
+            if current is None:
+                if previous is not None:
+                    previous_marker_disappeared[index] = True
+            elif (previous is None or previous_marker_disappeared[index] or
+                  current != previous):
+                continue
+            pending.append(index)
+        if not pending:
+            # A sibling can die while the other role publishes readiness.
+            for index, (process, unused_marker, unused_previous) in enumerate(clients):
+                if process.poll() is not None:
+                    return False, index
+            return True, None
         if clock() >= deadline:
-            return False
+            return False, pending[0]
         sleep(interval)
 
 

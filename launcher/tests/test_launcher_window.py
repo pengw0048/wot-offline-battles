@@ -2037,7 +2037,7 @@ class WindowTest(unittest.TestCase):
                     self.window, "_enable_crash_capture",
                     side_effect=enable), \
                 mock.patch.object(
-                    self.window, "_start_worker",
+                    self.window, "_start_local_hidden_clients",
                     side_effect=start_worker), \
                 mock.patch.object(
                     self.window, "_run_game", return_value=False), \
@@ -2084,7 +2084,7 @@ class WindowTest(unittest.TestCase):
         create_report.assert_not_called()
         offer.assert_not_called()
 
-    def test_single_player_orders_server_worker_player_and_profile_cleanup(self):
+    def test_single_player_orders_server_hidden_clients_player_and_profile_cleanup(self):
         session = {
             "client": core.PORT_0_9_22,
             "host": core.LOCAL_HOST,
@@ -2100,9 +2100,7 @@ class WindowTest(unittest.TestCase):
             "removedMembers": 0,
             "botExcludedVehicles": ["ussr:R11_MS-1"],
         }
-        with mock.patch.object(self.window, "_start_driver",
-                               side_effect=lambda unused: order.append("driver") or True), \
-                mock.patch.object(self.window, "_stop_driver",
+        with mock.patch.object(self.window, "_stop_driver",
                                   side_effect=lambda: order.append("driver_stop")), \
                 mock.patch("core.install_client_mod", return_value=[]), \
                 mock.patch(
@@ -2122,9 +2120,9 @@ class WindowTest(unittest.TestCase):
                     side_effect=lambda *args, **kwargs: (
                         order.append("server") or True)) as start_server, \
                 mock.patch.object(
-                    self.window, "_start_worker",
+                    self.window, "_start_local_hidden_clients",
                     side_effect=lambda *unused: (
-                        order.append("worker") or True)) as start_worker, \
+                        order.append("hidden_clients") or True)) as start_hidden, \
                 mock.patch.object(
                     self.window, "_run_game",
                     side_effect=lambda *args, **kwargs: order.append("player")) \
@@ -2144,13 +2142,13 @@ class WindowTest(unittest.TestCase):
         start_server.assert_called_once_with(
             self.settings_dir, core.PORT_0_9_22, loopback_only=True,
             bot_excluded_vehicles=["ussr:R11_MS-1"])
-        start_worker.assert_called_once_with(
+        start_hidden.assert_called_once_with(
             self.settings_dir, core.LOCAL_HOST, core.DEFAULT_SERVER_PORT)
         run_game.assert_called_once_with(
             self.settings_dir, core.PORT_0_9_22, core.LOCAL_HOST,
             core.DEFAULT_SERVER_PORT, paired_worker=True)
         self.assertEqual(
-            ["profile", "server", "worker", "driver", "player", "driver_stop", "worker_stop",
+            ["profile", "server", "hidden_clients", "player", "driver_stop", "worker_stop",
              "server_stop", "shutdown_wait", "profile_cleanup"], order)
 
     def test_startup_repair_runs_in_the_background_and_reports_actions(self):

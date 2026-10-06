@@ -3008,12 +3008,9 @@ class LauncherWindow(object):
             if self._stop_requested:
                 return
             if needs_worker:
-                worker_started = self._start_worker(game_root, host, port)
-                if not worker_started:
+                if not self._start_local_hidden_clients(game_root, host, port):
                     return
-            if self._stop_requested:
-                return
-            if needs_driver and not self._start_driver(game_root):
+            elif needs_driver and not self._start_driver(game_root):
                 return
             if self._stop_requested:
                 return
@@ -3340,6 +3337,13 @@ class LauncherWindow(object):
 
     def _start_driver(self, game_root):
         """Start the private player driver before its visible owner connects."""
+        driver, previous = self._spawn_driver(game_root)
+        ready = core.wait_for_driver_ready(
+            driver, game_root, cancelled=lambda: self._stop_requested,
+            previous_marker_token=previous)
+        return self._finish_driver_start(game_root, driver, ready)
+
+    def _spawn_driver(self, game_root):
         starter = core.worker_starter_executable(game_root)
         if not os.path.isfile(starter):
             raise core.LauncherError("The hidden player driver starter is missing: %s" % starter)
@@ -3361,9 +3365,10 @@ class LauncherWindow(object):
                                   creationflags=_no_console_flags())
         self._driver = driver
         self._driver_starter_root = game_root
-        if core.wait_for_driver_ready(driver, game_root,
-                cancelled=lambda: self._stop_requested,
-                previous_marker_token=previous):
+        return driver, previous
+
+    def _finish_driver_start(self, game_root, driver, ready):
+        if ready:
             self._log("The hidden player driver is ready.")
             return True
         exit_code = self._observe_process_exit(driver, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
@@ -3379,6 +3384,15 @@ class LauncherWindow(object):
 
     def _start_worker(self, game_root, host, port, room_owned=False):
         """Start once against the client's normal resource and mod paths."""
+        worker, previous = self._spawn_worker(
+            game_root, host, port, room_owned=room_owned)
+        ready = core.wait_for_worker_ready(
+            worker, game_root, cancelled=lambda: self._stop_requested,
+            previous_marker_token=previous)
+        return self._finish_worker_start(
+            game_root, worker, ready, room_owned=room_owned)
+
+    def _spawn_worker(self, game_root, host, port, room_owned=False):
         self._worker_exited_unexpectedly = False
         starter = core.worker_starter_executable(game_root)
         if not os.path.isfile(starter):
@@ -3411,10 +3425,10 @@ class LauncherWindow(object):
         else:
             self._worker = worker
             self._worker_starter_root = game_root
-        if core.wait_for_worker_ready(
-                worker, game_root,
-                cancelled=lambda: self._stop_requested,
-                previous_marker_token=previous_marker_token):
+        return worker, previous_marker_token
+
+    def _finish_worker_start(self, game_root, worker, ready, room_owned=False):
+        if ready:
             self._log("The hidden simulation worker is ready.")
             if room_owned:
                 watcher = threading.Thread(
@@ -3437,6 +3451,28 @@ class LauncherWindow(object):
                     self._log(hint)
             self._log_worker_failure(game_root)
         self._stop_worker(room_owned=room_owned)
+        return False
+
+    def _start_local_hidden_clients(self, game_root, host, port):
+        """Overlap the two native loaders, keeping both existing ready gates."""
+        worker, worker_previous = self._spawn_worker(game_root, host, port)
+        if self._stop_requested:
+            return False
+        driver, driver_previous = self._spawn_driver(game_root)
+        ready, failed = core.wait_for_hidden_clients_ready((
+            (worker, core.worker_ready_marker_token, worker_previous),
+            (driver, core.driver_ready_marker_token, driver_previous)),
+            game_root, cancelled=lambda: self._stop_requested)
+        if ready:
+            self._finish_worker_start(game_root, worker, True)
+            self._finish_driver_start(game_root, driver, True)
+            return True
+        if failed == 0:
+            self._finish_worker_start(game_root, worker, False)
+        elif failed == 1:
+            self._finish_driver_start(game_root, driver, False)
+        # The session's finally block retires every started companion, including
+        # one that was still loading when its sibling failed or was cancelled.
         return False
 
     def _watch_room_worker(self, worker):
