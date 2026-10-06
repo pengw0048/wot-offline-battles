@@ -151,6 +151,7 @@ class Checker(object):
         self.human_frames = 0
         self.arrival_runs = self.arrival_ticks = self.arrival_handoffs = 0
         self.radio_summaries = 0
+        self.stopping_distance_ticks = self.driver_input_rejections = 0
 
     def equal(self, actual, expected, path):
         if isinstance(expected, dict):
@@ -362,6 +363,133 @@ class Checker(object):
         owner.detach()
         self.backend.sim_close(owner.handle)
         self.lifecycle_checks += 1
+
+    def stopping_distance_cases(self):
+        from gui.mods.offline_lan_0922.bot_runtime import BotRuntime
+        params = _effective_params_snapshot()['physics']
+        finite = BotRuntime._traffic_stopping_distance(8., params, 0.)
+        unbounded = BotRuntime._traffic_stopping_distance(8., params, .2)
+        assert 0. < finite < 100.
+        assert math.isinf(unbounded) and unbounded > 0.
+        owner, unused_runtime = self.owner()
+        original = self.driver.LocalDriver()
+        # An unbounded coast distance is a legal producer result on a slope.
+        # The latch persists when the grade clears, until the hull slows down.
+        scenes = (
+            (finite, 8., 100., True, True, False, 1., 'drive', None),
+            (unbounded, 8., 100., True, True, False, 0., 'drive', (0., 100.)),
+            (finite, 8., 100., True, True, False, 0., 'drive', (0., 100.)),
+            (finite, .2, 100., True, True, False, 1., 'drive', None),
+            (unbounded, 8., 120., True, True, False, 0., 'drive', (0., 120.)),
+            (unbounded, 8., 120., False, True, False, 1., 'drive', None),
+            (unbounded, 8., 120., True, False, False, 0., 'arrived', None),
+            (unbounded, 8., 0., True, True, False, 0., 'arrived', None),
+            (unbounded, 8., 120., True, True, True, 1., 'avoid', None),
+        )
+        for index, scene in enumerate(scenes):
+            distance, speed, target_z, stop, moving, avoid, throttle, mode, brake = scene
+            traces = [[], []]
+            def probe(side):
+                def clear(yaw, maximum_distance=None):
+                    traces[side].append((yaw, maximum_distance))
+                    return not avoid or abs(yaw) > .2
+                return clear
+            args = (1, 0, (0., 0., 0.), 0., speed, .1,
+                    (0., 0., target_z), [])
+            kwargs = dict(stopping_distance=distance, stop_at_target=stop,
+                          movement_intent=moving, decision_horizon=.2)
+            expected = original.drive(*(args + (probe(0),)), **kwargs)
+            actual = owner.driver.drive(*(args + (probe(1),)), **kwargs)
+            path = 'driver.stopping_distance.%d' % index
+            self.equal(actual, expected, path + '.command')
+            self.equal(owner.driver.states, original.states, path + '.state')
+            self.equal(traces[1], traces[0], path + '.queries')
+            assert actual['throttle'] == throttle, (path, actual)
+            assert actual['recovery_mode'] == mode, (path, actual)
+            assert owner.driver.states[1]['braking_target'] == brake, path
+            self.stopping_distance_ticks += 1
+        owner.detach()
+        self.backend.sim_close(owner.handle)
+
+    def driver_input_rejection_cases(self):
+        # Only the stopping-distance slot admits positive infinity. Exercise
+        # every other numeric ingress slot, including unused flags and peers.
+        base = [1, [0., 0., 0.], [0., 0., 100.],
+                [0, 0., 8., .1, 3.5, 1.7, 1, 1, 1, 15., .2, 0., 100., 0.]]
+        peer = [2, [30., 0., 30.], [0., 0., 0.],
+                [1, 1, 0., 3.5, 1.7, 1, -.8, 2.]]
+        malformed = []
+        nonfinite = (('nan', float('nan')), ('positive_inf', float('inf')),
+                     ('negative_inf', -float('inf')))
+        for label, value in nonfinite:
+            for field in range(14):
+                if field == 9 and value > 0.:
+                    continue
+                row = copy.deepcopy(base)
+                row[3][field] = value
+                malformed.append(('value.%d.%s' % (field, label), row, []))
+            for vector in (1, 2):
+                for axis in range(3):
+                    row = copy.deepcopy(base)
+                    row[vector][axis] = value
+                    malformed.append(('point.%d.%d.%s' % (vector, axis, label), row, []))
+            for field, width in ((1, 3), (2, 3), (3, 8)):
+                for index in range(width):
+                    body = copy.deepcopy(peer)
+                    body[field][index] = value
+                    malformed.append(('peer.%d.%d.%s' % (field, index, label),
+                                      copy.deepcopy(base), [body]))
+        for label, row, peers in malformed:
+            owner, unused_runtime = self.owner()
+            original = self.driver.LocalDriver()
+            traces = [[], []]
+            def probe(side):
+                def clear(yaw, maximum_distance=None):
+                    traces[side].append((yaw, maximum_distance))
+                    return True
+                return clear
+            args = (1, 0, (0., 0., 0.), 0., 8., .1, (0., 0., 100.), [])
+            kwargs = dict(stopping_distance=15., decision_horizon=.2)
+            original.drive(*(args + (probe(0),)), **kwargs)
+            owner.driver.drive(*(args + (probe(1),)), **kwargs)
+            before = copy.deepcopy(owner.driver.states)
+            callbacks = []
+            def dispatch(*values):
+                callbacks.append(values)
+                return 1
+            assert self.backend.sim_control_drive(
+                owner.handle, row, peers, dispatch) is None, label
+            assert callbacks == [], label
+            if label == 'value.9.negative_inf':
+                rejected = dict(kwargs, stopping_distance=-float('inf'))
+                try:
+                    owner.driver.drive(*(args + (dispatch,)), **rejected)
+                except RuntimeError as error:
+                    message = str(error)
+                    values = list(row[3])
+                    for flag in (6, 7, 8):
+                        values[flag] = bool(values[flag])
+                    inputs = (1, tuple(row[1]), tuple(row[2]), tuple(values))
+                    assert 'Native control operation failed: sim_control_drive' in message
+                    assert 'inputs=%r' % (inputs,) in message, message
+                    assert 'neighbours=0' in message, message
+                else:
+                    raise AssertionError('invalid facade input was accepted')
+                assert callbacks == [], label
+                self.lifecycle_checks += 1
+            self.equal(owner.driver.states, before, label + '.mirror_unchanged')
+            # The next accepted command exposes the native state as well as
+            # the Python mirror, so a rejected parse cannot advance its clock.
+            traces[0][:] = []
+            traces[1][:] = []
+            expected = original.drive(*(args + (probe(0),)), **kwargs)
+            actual = owner.driver.drive(*(args + (probe(1),)), **kwargs)
+            self.equal(actual, expected, label + '.continued_command')
+            self.equal(owner.driver.states, original.states, label + '.continued_state')
+            self.equal(traces[1], traces[0], label + '.continued_queries')
+            owner.detach()
+            self.backend.sim_close(owner.handle)
+            self.driver_input_rejections += 1
 
     def traffic_cases(self):
         owner, runtime = self.owner()
@@ -923,6 +1051,8 @@ def main():
     checker.driver_cases()
     checker.arrival_cases()
     checker.driver_failure_cases()
+    checker.driver_input_rejection_cases()
+    checker.stopping_distance_cases()
     checker.traffic_cases()
     checker.perception_cases()
     checker.projection_cases()
@@ -936,6 +1066,8 @@ def main():
         arrival_runs=checker.arrival_runs, arrival_ticks=checker.arrival_ticks,
         arrival_handoffs=checker.arrival_handoffs,
         radio_summaries=checker.radio_summaries,
+        stopping_distance_ticks=checker.stopping_distance_ticks,
+        driver_input_rejections=checker.driver_input_rejections,
         lifecycle_checks=checker.lifecycle_checks,
         maximum_difference=checker.maximum_difference), sort_keys=True))
 

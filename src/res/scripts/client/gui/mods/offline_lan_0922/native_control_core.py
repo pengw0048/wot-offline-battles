@@ -185,10 +185,15 @@ class _NativeDriver(LocalDriver):
             float(stopping_distance or 0.0), float(decision_horizon),
             round(float(target[0]), 2), round(float(target[2]), 2),
             float(turn_speed_limit or 0.0))
-        result, state = self.owner._call('sim_control_drive',
-            (int(bot_id), tuple(position), tuple(target), values),
-            _bodies(neighbours, half_length, half_width),
+        inputs = (int(bot_id), tuple(position), tuple(target), values)
+        bodies = _bodies(neighbours, half_length, half_width)
+        output = self.owner._optional('sim_control_drive', inputs, bodies,
             self._dispatcher(direction_clear, pose_clear))
+        if output is None:
+            raise RuntimeError(
+                'Native control operation failed: sim_control_drive; '
+                'inputs=%r; neighbours=%d' % (inputs, len(bodies)))
+        result, state = output
         self.states[bot_id] = _state_dict(state, self.states.get(bot_id))
         return _command(result)
 

@@ -7544,6 +7544,45 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertAlmostEqual(
             0.003, diagnostics._pending['stages']['diag_emit'])
 
+    def test_frame_totals_keep_cpu_and_bot_timing_without_combat_scopes(self):
+        wall, cpu, payloads = [0.0], [10.0], []
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], cpu_clock=lambda: cpu[0],
+            writer=payloads.append, window_seconds=0.25)
+        context = {'role': 'worker', 'bot_count': 29}
+
+        first = diagnostics.begin(0.0, 0.02)
+        wall[0], cpu[0] = 0.012, 10.009
+        diagnostics.finish(first, 0.0, 0.02, 0.02,
+                           {'bots_update': 0.008}, {}, context)
+        wall[0], cpu[0] = 0.020, 10.010
+        second = diagnostics.begin(0.020, 0.020)
+        wall[0], cpu[0] = 0.026, 10.014
+        diagnostics.finish(second, 0.020, 0.03, 0.03,
+                           {'bots_update': 0.003}, {}, context)
+        wall[0], cpu[0] = 0.050, 10.020
+        diagnostics.begin(0.050, 0.030)
+
+        diagnostics.flush()
+        snapshot = diagnostics.snapshot()
+        self.assertEqual(2, snapshot['samples'])
+        self.assertAlmostEqual(25.0, snapshot['frame_interval_ms']['p50'])
+        self.assertAlmostEqual(9.0, snapshot['python_callback_ms']['p50'])
+        self.assertEqual({'avg_ms': 5.5, 'max_ms': 8.0},
+                         snapshot['python_stages_ms']['bots_update'])
+        self.assertEqual(2, snapshot['main_thread_cpu']['samples'])
+        for key, expected in (('avg_ms', 6.5), ('max_ms', 9.0),
+                              ('matched_wall_avg_ms', 9.0)):
+            self.assertAlmostEqual(expected, snapshot['main_thread_cpu'][key])
+        self.assertEqual(1, len(payloads))
+        self.assertIn('gap_ms_p50_p95_p99_max=', payloads[0])
+        self.assertIn('python_ms_p50_p95_p99_max=', payloads[0])
+        self.assertIn('bots_update=5.500/8.000', payloads[0])
+        self.assertIn('thread_cpu samples=2/2 cpu_ms_avg_max=6.500/9.000 '
+                      'matched_callback_wall_ms_avg=9.000', payloads[0])
+        self.assertNotIn('combat_summary ', payloads[0])
+        self.assertNotIn('combat_checkpoint ', payloads[0])
+
     def test_frame_diagnostics_disable_themselves_when_logging_fails(self):
         wall = [0.0]
 
@@ -12632,6 +12671,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime = _runtime()
         runtime.bigworld.defer_vehicle_entry = True
         battle = BattleRuntime(runtime)
+        self.addCleanup(battle.stop, restore_account=False)
         client = _Client()
         client.player_id = -1
         client.name = 'Worker'
@@ -12668,6 +12708,47 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle._bots._control_seconds)
         self.assertIsNone(battle._bots._suspension_ground_probe)
         self.assertEqual(battle._suspension_ground_y, battle._bots._wreck_ground_probe)
+
+        frame_diagnostics = battle._frame_diagnostics
+        self.assertIsInstance(frame_diagnostics, _FrameDiagnostics)
+        self.assertTrue(frame_diagnostics.enabled)
+        self.assertIs(battle_runtime_module.native_math.thread_cpu_seconds,
+                      frame_diagnostics._cpu_clock)
+        self.assertIsNone(battle._combat_diagnostics)
+        self.assertIsNone(battle._bots._combat_diagnostics)
+
+        # A developer may inject a detailed observer for a bounded experiment.
+        # Normal stop/restart must retire it and keep the next round lightweight.
+        from gui.mods.offline_lan_0922.worker_diagnostics import WorkerCombatDiagnostics
+        injected = WorkerCombatDiagnostics(lambda: 0.0)
+        self.assertTrue(injected.begin_frame(1, 1.0, 'test_capture'))
+        previous_bots = battle._bots
+        battle._combat_diagnostics = previous_bots._combat_diagnostics = injected
+        battle.stop()
+        self.assertFalse(injected.active)
+        self.assertIsNone(battle._combat_diagnostics)
+
+        # The fixture retains cancelled callbacks; let their generation guards
+        # reject them before the real deferred Account restore completes.
+        while runtime.bigworld.callbacks:
+            runtime.bigworld.callbacks.pop(0)()
+        self.assertIsNone(battle._lobby_restore_token)
+        start['round_id'] = 2
+        with mock.patch.object(Oracle, 'create', side_effect=bind_oracle):
+            self.assertTrue(battle.start({
+                'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                'name': 'Worker', 'worker_mode': True}, start, client))
+            runtime.bigworld.callbacks.pop(0)()
+            runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
+            runtime.bigworld.callbacks.pop(0)()
+
+        self.assertEqual('running', battle.state)
+        self.assertIsNot(previous_bots, battle._bots)
+        self.assertIsNone(battle._combat_diagnostics)
+        self.assertIsNone(battle._bots._combat_diagnostics)
+        self.assertIs(frame_diagnostics, battle._frame_diagnostics)
+        self.assertTrue(frame_diagnostics.enabled)
+        self.assertEqual(0, frame_diagnostics._frame_id)
 
     def test_player_identity_sync_rejects_arena_dp_mismatch(self):
         runtime = _runtime()

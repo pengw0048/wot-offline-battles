@@ -59,7 +59,7 @@ from gui.mods.offline_lan_0922.siege_hud import PersistentSiegeHints
 from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
 from gui.mods.offline_lan_0922.collision_flags import VEHICLE_SKIP_FLAGS
 from gui.mods.offline_lan_0922.worker_diagnostics import (
-    WorkerCombatDiagnostics, timed, call as timed_call, observed_ray,
+    timed, call as timed_call, observed_ray,
     observed_call)
 from gui.mods.offline_lan_0922 import (
     ballistics, burst_mechanics, combat_rules, critical_damage, descriptor_donation,
@@ -2246,9 +2246,9 @@ class BattleRuntime(object):
         self._replay_muzzle_count = 0
         self._replay_gun_signature = None
         self._replay_publishing = False
-        self._combat_diagnostics = (
-            WorkerCombatDiagnostics(_PROFILE_CLOCK, detail_stride=4)
-            if self._worker_mode and PERFORMANCE_DIAGNOSTICS else None)
+        # Keep normal play on the frame-level PERF observer. Fine combat
+        # scopes materially perturb the update they are meant to measure.
+        self._combat_diagnostics = None
         if self._worker_mode:
             self._config['native_remote_vehicles'] = False
             self._config['bot_track_animation'] = False

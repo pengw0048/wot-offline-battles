@@ -8015,6 +8015,12 @@ at the receiving boundary. Actor identities and handles retain their strict
 integer guards. Regression checks require float payloads explicitly so an
 LP64 development interpreter cannot hide this Win32 failure.
 
+The driver's stopping-distance input also preserves positive infinity from the
+coast integrator when a grade prevents a finite stop. The original braking law
+consumes that value as an unbounded distance; it is not replaced with a made-up
+finite limit. NaN, negative infinity and nonfinite poses, peer geometry or other
+driver scalars remain rejected before persistent state or engine queries change.
+
 The five native simulation checkers exercise the real CPython 2.7 bridge,
 ordered analytic engine frontiers, persistent state, effect receipts and
 lifecycle rejection. An integrated 29-Bot caller comparison also preserves
@@ -8058,11 +8064,24 @@ Registry removal, isolation, falling poses and proved chunk-layout changes
 update that index before reuse. Cold Bot control projections are reused only
 while their descriptor, spotting profile, crew inputs and critical payload are
 unchanged. These changes preserve the existing cadence and collision checks;
-their Windows frame-time effect requires a new exact-client capture.
+a subsequent Lakeville capture still spent most control time in Python/engine
+callbacks and outside native scopes. Moving the loops alone did not produce a
+material whole-update improvement or meet the 50 ms target. The exact-client
+capture, rather than native code coverage, remains the performance criterion.
 
 ### Native boundary diagnostics
 
-Selected combat-control callbacks now carry a separate native timing ledger.
+Normal startup retains frame-level PERF statistics and does not attach the
+fine combat observer. Frame intervals, whole-callback and Bot-update durations,
+and main-thread CPU time remain available. Detailed Python scopes have
+measurable observer cost: selected Lakeville slices were slower than unselected
+slices, and a same-workload host profile attributed a substantial increase to
+the observer's start/stop and aggregation helpers. Neither comparison gives an
+exact Windows overhead correction. Fine captures must be explicitly attached
+for a diagnostic experiment, and their timings are not an uninstrumented
+performance baseline.
+
+When attached, selected combat-control callbacks carry a native timing ledger.
 It starts after the existing rotating detail sampler selects a control callback
 and ends after navigation-frame cleanup. Native entry rows separate input
 parsing, core body work and output packing; callback rows separate Python/engine

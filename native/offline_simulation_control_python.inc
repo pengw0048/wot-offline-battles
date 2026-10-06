@@ -454,7 +454,18 @@ PyObject *WOT_CDECL sim_control_drive(PyObject *, PyObject *args) {
     world_array(row[1], in.position.data(), 3);
     world_array(row[2], in.target.data(), 3);
     double n[14];
-    world_array(row[3], n, 14);
+    require_sequence(row[3], 14, true);
+    for (size_t i = 0; i < 14; ++i) {
+      if (i == 9) {
+        // The coast integrator returns +inf when a slope prevents stopping.
+        // Only this distance has an unbounded physical meaning.
+        n[i] = number(items(row[3])[i]);
+        if (std::isnan(n[i]) || n[i] == -std::numeric_limits<double>::infinity())
+          throw Unsupported();
+      } else {
+        n[i] = finite_number(items(row[3])[i]);
+      }
+    }
     in.slot = int(n[0]);
     in.yaw = n[1];
     in.speed = n[2];
