@@ -4,7 +4,9 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import types
@@ -51,6 +53,7 @@ class NativeMathDispatchTests(unittest.TestCase):
         loader.assert_not_called()
         self.assertEqual(self.native.snapshot(), dict(
             translation_fraction=0, slide_translation=0, rotation_fraction=0,
+            contact_roster=0, world_run=0, world_failures=0,
             loaded=False, fallbacks=0))
 
     def test_windows_loads_once_from_the_client_executable_directory(self):
@@ -104,6 +107,7 @@ class NativeMathDispatchTests(unittest.TestCase):
         self.assertEqual(self.native.call('translation_fraction'), 0.75)
         self.assertEqual(self.native.snapshot(), dict(
             translation_fraction=1, slide_translation=0, rotation_fraction=1,
+            contact_roster=0, world_run=0, world_failures=0,
             loaded=True, fallbacks=2))
         self.assertEqual(self.output.getvalue().count('unavailable'), 1)
 
@@ -169,6 +173,48 @@ class NativeMathHostConformanceTests(unittest.TestCase):
             text=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'), timeout=30)
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertIn('conformance passed:', completed.stdout)
+
+
+@unittest.skipUnless(os.environ.get('WOT_0922_CLIENT'),
+                     'Set WOT_0922_CLIENT for the exact #1513 native layout audit')
+class NativeMathExactClientLayoutTests(unittest.TestCase):
+    def test_registered_api_signatures_and_plain_value_layouts_match_exact_client(self):
+        from test_port_0922_native_instance_guard import _PeImage
+
+        image = _PeImage((Path(os.environ['WOT_0922_CLIENT']) /
+                          'WorldOfTanks.exe').read_bytes())
+        self.assertEqual(0x014c, image.machine)
+        self.assertEqual(0x010b, image.optional_magic)
+        self.assertEqual(0x5a6edca4, image.timestamp)
+        self.assertFalse(any(name.startswith(('Py', '_Py')) for name in image.exports()))
+        source = (ROOT / 'native/offline_math_batch_native.cpp').read_text()
+        signatures = {
+            name: bytes(int(value.strip(), 16) for value in values.split(','))
+            for name, values in re.findall(
+                r'static const unsigned char (\w+)\[\] = \{([^}]+)\};', source)}
+        checked = set()
+        for address, name in re.findall(
+                r'signature\(base \+ (0x[0-9a-fA-F]+)U, (\w+)\)', source):
+            expected = signatures[name]
+            offset = image.rva_offset(int(address, 16))
+            self.assertEqual(expected, image.data[offset:offset + len(expected)], name)
+            checked.add(name)
+        self.assertTrue({
+            'string_layout_bytes', 'unicode_layout_bytes', 'unicode_unit_bytes',
+            'long_layout_bytes', 'long_digit_bytes', 'dict_layout_bytes',
+            'dict_entry_bytes', 'dict_value_bytes', 'dict_used_bytes',
+        }.issubset(checked))
+        layouts = re.findall(
+            r'type_layout\(base, (0x[0-9a-fA-F]+)U, (\d+), (\d+)\)', source)
+        self.assertIn(('0x01661400', '21', '1'), layouts)
+        self.assertIn(('0x0166b290', '24', '0'), layouts)
+        self.assertIn(('0x0166c7c8', '12', '2'), layouts)
+        self.assertIn(('0x01664d30', '124', '0'), layouts)
+        for address, basicsize, itemsize in layouts:
+            offset = image.rva_offset(int(address, 16))
+            self.assertEqual(0x01a5ff18, struct.unpack_from('<I', image.data, offset + 4)[0])
+            self.assertEqual((int(basicsize), int(itemsize)),
+                             struct.unpack_from('<ii', image.data, offset + 16))
 
 
 if __name__ == '__main__':

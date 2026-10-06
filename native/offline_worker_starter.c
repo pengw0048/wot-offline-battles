@@ -15,8 +15,10 @@
 
 
 #define WORKER_MUTEX_NAME L"Local\\offline_lan_0922_worker"
+#define DRIVER_MUTEX_NAME L"Local\\offline_lan_0922_player_driver"
 #define WORKER_MODE_ENV L"OFFLINE_LAN_0922_CLIENT_MODE"
 #define WORKER_MODE_VALUE L"simulation_worker"
+#define DRIVER_MODE_VALUE L"player_driver"
 #define PLAYER_MODE_VALUE L"player"
 #define MULTI_CLIENT_ENV L"OFFLINE_LAN_0922_ALLOW_MULTIPLE_CLIENTS"
 #define MULTI_CLIENT_VALUE L"1"
@@ -25,18 +27,24 @@
 #define WORKER_READY_MARKER_ENV L"OFFLINE_LAN_0922_WORKER_READY_MARKER"
 #define WORKER_INTERNAL_READY_MARKER_ENV \
 	L"OFFLINE_LAN_0922_WORKER_INTERNAL_READY_MARKER"
+#define DRIVER_READY_MARKER_ENV L"OFFLINE_LAN_0922_DRIVER_READY_MARKER"
+#define DRIVER_INTERNAL_READY_MARKER_ENV \
+	L"OFFLINE_LAN_0922_DRIVER_INTERNAL_READY_MARKER"
 #define PLAYER_READY_MARKER_ENV L"OFFLINE_LAN_0922_PLAYER_READY_MARKER"
 #define PLAYER_FINISHED_MARKER_ENV L"OFFLINE_LAN_0922_PLAYER_FINISHED_MARKER"
 #define PLAYER_FINISH_GRACE_MS 5000
 #define PLAYER_RECORDING_FINISH_GRACE_MS 30000
 #define WORKER_READY_MARKER_FILE L"offline-worker.ready"
 #define WORKER_INTERNAL_READY_MARKER_FILE L"offline-worker.internal-ready"
+#define DRIVER_READY_MARKER_FILE L"offline-driver.ready"
+#define DRIVER_INTERNAL_READY_MARKER_FILE L"offline-driver.internal-ready"
 #define PLAYER_READY_MARKER_FORMAT L"offline-player-%lu.ready"
 #define SERVER_HOST_ENV L"OFFLINE_LAN_0922_SERVER_HOST"
 #define SERVER_PORT_ENV L"OFFLINE_LAN_0922_SERVER_PORT"
 #define PLAYER_MODE L"--player"
 #define PAIRED_PLAYER_MODE L"--paired-player"
 #define WORKER_ONLY_MODE L"--worker-only"
+#define DRIVER_ONLY_MODE L"--driver-only"
 /* Kept at 60 s deliberately.  launcher/core.py waits
  * WORKER_STARTER_READY_TIMEOUT_SECONDS_0922 plus a margin, so this side
  * always reaches its own log_failure("wait_for_worker_ready") first and the
@@ -58,6 +66,8 @@
 #define STARTER_STOP_EVENT_PREFIX L"Local\\WoTOfflineBattlesStarterStop_"
 
 
+static BOOL g_driver_only = FALSE;
+static const WCHAR *g_failure_log = L"offline-worker-starter.log";
 static WCHAR g_root[MAX_PATH];
 static WCHAR g_ready_marker[MAX_PATH];
 static WCHAR g_internal_ready_marker[MAX_PATH];
@@ -101,7 +111,7 @@ static void log_status(const char *stage, const char *field, DWORD value)
 	HANDLE file;
 	if (FAILED(StringCchCopyW(log_path, MAX_PATH, g_root)) ||
 			FAILED(StringCchCatW(log_path, MAX_PATH,
-				L"offline-worker-starter.log"))) {
+				g_failure_log))) {
 		return;
 	}
 	file = CreateFileW(log_path, FILE_APPEND_DATA,
@@ -138,7 +148,7 @@ static void clear_failure_log(void)
 	WCHAR log_path[MAX_PATH];
 	if (SUCCEEDED(StringCchCopyW(log_path, MAX_PATH, g_root)) &&
 			SUCCEEDED(StringCchCatW(
-				log_path, MAX_PATH, L"offline-worker-starter.log"))) {
+				log_path, MAX_PATH, g_failure_log))) {
 		DeleteFileW(log_path);
 	}
 }
@@ -584,12 +594,13 @@ static int configure_ready_markers(void)
 {
 	if (FAILED(StringCchCopyW(g_ready_marker, MAX_PATH, g_root)) ||
 			FAILED(StringCchCatW(g_ready_marker, MAX_PATH,
-				WORKER_READY_MARKER_FILE)) ||
+				(g_driver_only ? DRIVER_READY_MARKER_FILE : WORKER_READY_MARKER_FILE))) ||
 			FAILED(StringCchCopyW(
 				g_internal_ready_marker, MAX_PATH, g_root)) ||
 			FAILED(StringCchCatW(
 				g_internal_ready_marker, MAX_PATH,
-				WORKER_INTERNAL_READY_MARKER_FILE))) {
+				(g_driver_only ? DRIVER_INTERNAL_READY_MARKER_FILE :
+				 WORKER_INTERNAL_READY_MARKER_FILE)))) {
 		return 0;
 	}
 	return 1;
@@ -1175,6 +1186,8 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 	SetEnvironmentVariableW(HIDDEN_DESKTOP_ENV, 0);
 	SetEnvironmentVariableW(WORKER_READY_MARKER_ENV, 0);
 	SetEnvironmentVariableW(WORKER_INTERNAL_READY_MARKER_ENV, 0);
+	SetEnvironmentVariableW(DRIVER_READY_MARKER_ENV, 0);
+	SetEnvironmentVariableW(DRIVER_INTERNAL_READY_MARKER_ENV, 0);
 	/* The visible client keeps the player's own mods. */
 	SetEnvironmentVariableW(BW_RES_PATH_ENV, 0);
 	if (FAILED(StringCchPrintfW(child_command, 2 * MAX_PATH,
@@ -1407,6 +1420,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 	worker_procdump_path[0] = L'\0';
 	worker_final_dump_path[0] = L'\0';
 	worker_monitor_dump_path[0] = L'\0';
+	g_driver_only = lstrcmpiW(command_line, DRIVER_ONLY_MODE) == 0;
+	g_failure_log = g_driver_only ? L"offline-driver-starter.log" :
+		L"offline-worker-starter.log";
 	g_root[0] = L'\0';
 	g_ready_marker[0] = L'\0';
 	g_internal_ready_marker[0] = L'\0';
@@ -1445,14 +1461,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 		CloseHandle(stop_event);
 		return result;
 	}
-	worker_only = lstrcmpiW(command_line, WORKER_ONLY_MODE) == 0;
+	worker_only = lstrcmpiW(command_line, WORKER_ONLY_MODE) == 0 ||
+		g_driver_only;
 	if (!worker_only) {
 		log_failure("unsupported_mode", ERROR_INVALID_PARAMETER);
 		CloseHandle(stop_event);
 		return 30;
 	}
 
-	singleton = CreateMutexW(0, TRUE, WORKER_MUTEX_NAME);
+	if (g_driver_only) {
+		singleton = CreateMutexW(0, TRUE, DRIVER_MUTEX_NAME);
+	} else {
+		singleton = CreateMutexW(0, TRUE, WORKER_MUTEX_NAME);
+	}
 	if (singleton == 0) {
 		log_failure("CreateMutexW", GetLastError());
 		CloseHandle(stop_event);
@@ -1486,7 +1507,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 
 
 	if (FAILED(StringCchPrintfW(desktop_name, 96,
-			L"OfflineLanWorker_%lu",
+			g_driver_only ? L"OfflineLanDriver_%lu" : L"OfflineLanWorker_%lu",
 			(unsigned long)GetCurrentProcessId()))) {
 		log_failure("desktop_name", ERROR_INSUFFICIENT_BUFFER);
 		result = 5;
@@ -1506,14 +1527,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 		goto worker_cleanup;
 	}
 
-	if (!SetEnvironmentVariableW(WORKER_MODE_ENV, WORKER_MODE_VALUE) ||
+	if (!SetEnvironmentVariableW(WORKER_MODE_ENV,
+			g_driver_only ? DRIVER_MODE_VALUE : WORKER_MODE_VALUE) ||
 			!SetEnvironmentVariableW(MULTI_CLIENT_ENV,
 				MULTI_CLIENT_VALUE) ||
 			!SetEnvironmentVariableW(HIDDEN_DESKTOP_ENV,
 				HIDDEN_DESKTOP_VALUE) ||
 			!SetEnvironmentVariableW(WORKER_READY_MARKER_ENV, 0) ||
 			!SetEnvironmentVariableW(WORKER_INTERNAL_READY_MARKER_ENV,
-				g_internal_ready_marker) ||
+				g_driver_only ? 0 : g_internal_ready_marker) ||
+			!SetEnvironmentVariableW(DRIVER_READY_MARKER_ENV, 0) ||
+			!SetEnvironmentVariableW(DRIVER_INTERNAL_READY_MARKER_ENV,
+				g_driver_only ? g_internal_ready_marker : 0) ||
 			!SetEnvironmentVariableW(PLAYER_READY_MARKER_ENV, 0)) {
 		error_code = GetLastError();
 		log_failure("SetEnvironmentVariableW", error_code);
@@ -1523,7 +1548,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance,
 
 	/* Use the client's paths.xml, including its installed mods. */
 	SetEnvironmentVariableW(BW_RES_PATH_ENV, 0);
-	if (FAILED(StringCchPrintfW(child_command, 2 * MAX_PATH,
+	if (g_driver_only) {
+		if (FAILED(StringCchPrintfW(child_command, 2 * MAX_PATH,
+				L"\"%s\" --config engine_config.offline-driver.xml "
+				L"--logFilePrefix offline-driver-", game_path))) {
+			log_failure("driver_command", ERROR_INSUFFICIENT_BUFFER);
+			result = 8;
+			goto worker_cleanup;
+		}
+	} else if (FAILED(StringCchPrintfW(child_command, 2 * MAX_PATH,
 			L"\"%s\" --config engine_config.offline-worker.xml "
 			L"--logFilePrefix offline-worker-", game_path))) {
 		log_failure("worker_command", ERROR_INSUFFICIENT_BUFFER);

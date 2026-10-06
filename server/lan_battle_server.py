@@ -11648,40 +11648,22 @@ class BattleState:
                             self._reject_player_destructible_contact(
                                 player, seq)
                             continue
-                        pivot = vehicle_physics.track_pivot_from_poses(
-                            player.effective_params.get("physics"),
-                            (contact["x"], contact["y"], contact["z"]),
-                            contact["yaw"],
-                            (contact["end_x"], contact["end_y"],
-                             contact["end_z"]), contact["end_yaw"])
-                        pivot_delta = (contact["end_yaw"] - contact["yaw"] +
-                                       math.pi) % (2.0 * math.pi) - math.pi
+                        # The admitted sample proves this bounded proposal is
+                        # near the player's trajectory; it is not a replacement
+                        # endpoint. A driver publishes the completed physical
+                        # slice, so rebasing the sweep start onto that sample
+                        # would erase a translation or move a track-pivot arc
+                        # to a different obstacle. Keep the validated source
+                        # endpoints for the worker's exact-token recheck.
                         contact.update({
                             "input_seq": int(sample["input_seq"]),
                             "pose_time_us": int(sample["time_us"]),
-                            "x": round(float(sample["x"]), 4),
-                            "y": round(float(sample["y"]), 4),
-                            "z": round(float(sample["z"]), 4),
-                            "yaw": round(float(sample["yaw"]), 5),
                             "pitch": round(float(sample.get(
                                 "pitch", 0.0)), 5),
                             "roll": round(float(sample.get(
                                 "roll", 0.0)), 5),
                             "forward": round(float(sample["forward"]), 4),
                         })
-                        if pivot:
-                            # Preserve the existing admitted-pose anchor, but
-                            # move both ends of a verified arc together. The
-                            # worker must still prove the exact contact token
-                            # on this authority-bound path before committing.
-                            contact["end_yaw"] = (
-                                contact["yaw"] + pivot_delta + math.pi) % (
-                                    2.0 * math.pi) - math.pi
-                            end = vehicle_physics.track_pivot_position(
-                                (contact["x"], contact["y"], contact["z"]),
-                                contact["yaw"], contact["end_yaw"], pivot)
-                            contact.update(zip(
-                                ("end_x", "end_y", "end_z"), end))
                         player.destructible_contacts[seq] = contact
                         worker = self.simulation_worker
                         if (self.bot_authority_id ==

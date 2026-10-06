@@ -1123,7 +1123,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertIsNone(BattleState._validated_player_destructible_contact(
             dict(raw, end_x=end[0]+.01), physics))
 
-    def test_destructible_track_arc_reanchors_both_ends_to_admitted_pose(self):
+    def test_destructible_track_arc_preserves_both_source_endpoints(self):
         state = _state(players=1)
         player = state.players[1]
         physics = player.effective_params['physics']
@@ -1136,8 +1136,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             x=start[0], y=start[1], z=start[2], yaw=yaw,
             end_x=end[0], end_y=end[1], end_z=end[2], end_yaw=end_yaw,
             speed=0.0, dt=.1)
-        # The accepted input is close, but deliberately not the render-frame
-        # start. Keep the established authority anchor without losing its arc.
+        # The admitted sample bounds this nearby source sweep. Replacing its
+        # endpoints would move the arc to a different world obstacle.
         self.assertTrue(_update_player_input(
             state, 1, x=start[0]+.03, y=start[1], z=start[2]-.02,
             yaw=yaw+.00012, destructible_contacts=[raw]))
@@ -1146,9 +1146,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         sample = player.pose_history[-1]
         before = tuple(accepted[name] for name in ('x', 'y', 'z'))
         after = tuple(accepted[name] for name in ('end_x', 'end_y', 'end_z'))
-        self.assertEqual(tuple(round(sample[name], 4)
-                               for name in ('x', 'y', 'z')), before)
-        self.assertNotEqual(start, before)
+        self.assertEqual(start, before)
+        self.assertEqual(end, after)
+        self.assertEqual(sample['input_seq'], accepted['input_seq'])
+        self.assertEqual(sample['time_us'], accepted['pose_time_us'])
         self.assertAlmostEqual(end_yaw-yaw,
                                accepted['end_yaw']-accepted['yaw'])
         self.assertAlmostEqual(physics['trackCenter'],

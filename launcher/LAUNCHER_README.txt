@@ -13,8 +13,14 @@ All LAN participants must update together and restart the room/server. A room
 explicitly hosted by the launcher remains open until Stop room or launcher exit;
 leaving one player client does not terminate the other players' room.
 
-Closing the visible single-player game also closes its hidden simulation worker
-and temporary server. Cleanup normally takes a few seconds and may wait longer
+Each visible game has a separate hidden client for the player's tank movement,
+including when joining a remote LAN host. The room's hidden Bot worker remains
+separate. These clients load game resources and need additional memory. If the
+player driver fails, movement stops with a local message; exit the game and
+restart it from the launcher. Other players can continue in the room.
+
+Closing the visible game closes its paired driver. In single player it also
+closes the hidden Bot worker and temporary server. Cleanup normally takes a few seconds and may wait longer
 while a recording finishes. The launcher itself stays open.
 
 Set replay recording to Off, Last or All in the game. Recordings are saved under

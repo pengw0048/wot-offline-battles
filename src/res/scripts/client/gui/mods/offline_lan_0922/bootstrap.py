@@ -40,6 +40,7 @@ _lobby_listener_installed = False
 _client_guard_released = False
 _worker_ready_signaled = False
 _player_ready_signaled = False
+_driver_ready_signaled = False
 
 # Enough of every artefact that the garage never blocks a mount on stock.
 OFFLINE_ARTEFACT_STOCK = 200
@@ -984,7 +985,7 @@ def _cleanup_runtime():
     global _lobby_listener_installed, _lobby_view_loaded
     global _announcement_ui, _intro_skip, _login_space_seen, _session, _started
     global _worker_presentation, _worker_ready_signaled
-    global _player_ready_signaled
+    global _player_ready_signaled, _driver_ready_signaled
     global _client_guard_released
     errors = []
 
@@ -1076,6 +1077,7 @@ def _cleanup_runtime():
     _client_guard_released = False
     _worker_ready_signaled = False
     _player_ready_signaled = False
+    _driver_ready_signaled = False
     _started = False
     if errors:
         return errors[0]
@@ -1086,7 +1088,8 @@ def _fail_startup(error, prefix='startup failed', worker_process=False):
     worker_process = bool(
         worker_process or
         _worker_presentation is not None or
-        _client_mode == port_config.SIMULATION_WORKER_MODE)
+        _client_mode in (port_config.SIMULATION_WORKER_MODE,
+                         port_config.PLAYER_DRIVER_MODE))
     cleanup_error = _cleanup_runtime()
     if cleanup_error is None:
         sys.stdout.write('[Offline LAN 0.9.22] %s: %s\n' %
@@ -1185,8 +1188,22 @@ def _install_worker_session():
     return True
 
 
+def _install_driver_session():
+    """Install one local player driver without a room connection or UI."""
+    global _session
+    if _session is not None:
+        return True
+    from gui.mods.offline_lan_0922.driver_session import DriverSession
+    _session = DriverSession(
+        _config, lobby_ready=_native_lobby_is_ready,
+        callback=BigWorld.callback,
+        cancel_callback=BigWorld.cancelCallback,
+        bigworld=BigWorld)
+    return True
+
+
 def _install_worker_presentation():
-    """Hide and mute only the explicitly launched simulation worker."""
+    """Hide and mute an explicitly launched native companion."""
     global _worker_presentation
     if _worker_presentation is not None:
         return True
@@ -1224,6 +1241,14 @@ def _signal_player_ready():
     from gui.mods.offline_lan_0922.worker_presentation import \
         signal_player_ready
     return signal_player_ready()
+
+
+def _signal_driver_ready():
+    """Publish the driver Hangar and listener boundary to its own starter."""
+    from gui.mods.offline_lan_0922.worker_presentation import \
+        _signal_ready_marker
+    return _signal_ready_marker(
+        port_config.DRIVER_READY_MARKER_ENV, 'player driver')
 
 
 def _install_intro_skip():
@@ -1276,7 +1301,7 @@ def _wait_for_login_space():
         try:
             # #1513 keys its vehicle dossier cache file on the account name,
             # and PlayerAccount.__init__ builds that cache before any account
-            # hook of ours runs.  Scope it here, once, for both processes.
+            # hook of ours runs. Scope it here, once, for each process role.
             from gui.mods.offline_lan_0922 import compat as _compat
             _compat.pin_dossier_cache(_dossier_cache_career)
         except Exception as error:
@@ -1288,6 +1313,8 @@ def _wait_for_login_space():
             # bridge. It owns no Battle button, announcement or preference
             # profile and therefore cannot mutate the player's UI settings.
             _install_worker_session()
+        elif _client_mode == port_config.PLAYER_DRIVER_MODE:
+            _install_driver_session()
         else:
             # LobbyHeaderMeta stores a bound ``fightClick`` Function when its
             # Scaleform movie receives ``script = self``.  A class patch
@@ -1319,14 +1346,15 @@ def _dossier_cache_career():
     #1513 caches vehicle dossiers per account and asks the server only for
     rows newer than the highest ``changeTime`` it already holds.  Offline
     every save slot logs in under the same account name, and the hidden
-    worker logs in beside the visible client, so all of them would share one
+    companions log in beside the visible client, so all would share one
     file and one watermark.  The save slot names the career, the role
-    separates the two processes, and the post-battle store's account key
+    separates the processes, and the post-battle store's account key
     separates a career that was recreated in the same slot from the one whose
     rows the cache still holds.  ``PostBattleStore`` mints a fresh key until a
     battle persists one, which is correct: there is no record to cache yet.
     """
     role = ('worker' if _client_mode == port_config.SIMULATION_WORKER_MODE
+            else 'driver' if _client_mode == port_config.PLAYER_DRIVER_MODE
             else 'player')
     account_key = ''
     if _postbattle_store is not None:
@@ -1344,7 +1372,8 @@ def _autostart_selected_replay():
     try:
         from gui.mods.offline_lan_0922 import offline_replay
         if (not offline_replay.replay_request() or _session is None or
-                _client_mode == port_config.SIMULATION_WORKER_MODE):
+                _client_mode in (port_config.SIMULATION_WORKER_MODE,
+                                 port_config.PLAYER_DRIVER_MODE)):
             return
         sys.stdout.write('[Offline LAN 0.9.22] REPLAY_ENTRY auto_join\n')
         _session.join()
@@ -1355,6 +1384,7 @@ def _autostart_selected_replay():
 
 def _wait_for_lobby():
     global _callback_id, _deadline, _player_ready_signaled
+    global _driver_ready_signaled
     global _replay_autostart_requested
     _callback_id = None
     try:
@@ -1376,6 +1406,19 @@ def _wait_for_lobby():
                 _deadline = time.time() + float(
                     _config.get('startupTimeoutSeconds', 30.0))
                 _schedule(0.10, _wait_for_worker_connection)
+            elif _client_mode == port_config.PLAYER_DRIVER_MODE:
+                if not _session.start():
+                    raise RuntimeError('player driver did not start')
+                # The launcher starts the visible process only after this
+                # marker. Waiting for a paired connection here would deadlock.
+                if not bool(getattr(_session, 'listening', False)):
+                    raise RuntimeError('player driver listener is unavailable')
+                if not _driver_ready_signaled:
+                    if not _signal_driver_ready():
+                        raise RuntimeError(
+                            'player driver ready marker was not published')
+                    _driver_ready_signaled = True
+                _deadline = 0.0
             else:
                 if not _player_ready_signaled:
                     if not _signal_player_ready():
@@ -1463,11 +1506,12 @@ def _run_once():
             sys.stdout.write('[Offline LAN 0.9.22] disabled by config\n')
             return
         _client_mode = port_config.client_mode(_config)
-        if _client_mode == port_config.SIMULATION_WORKER_MODE:
+        if _client_mode in (port_config.SIMULATION_WORKER_MODE,
+                            port_config.PLAYER_DRIVER_MODE):
             if not _client_guard_released:
                 raise RuntimeError(
-                    'simulation worker requires client guard release')
-            # The worker still needs Account/Hangar to enter and leave native
+                    'hidden native client requires client guard release')
+            # Each companion needs Account/Hangar to enter and leave native
             # spaces safely. Every mutable store is in memory and the saved
             # player garage is neither read nor overlaid.
             _account_context = {
@@ -1496,6 +1540,8 @@ def _run_once():
 def _log_session_identity(requested_mode):
     role = ('hidden-worker' if
             requested_mode == port_config.SIMULATION_WORKER_MODE else
+            'hidden-player-driver' if
+            requested_mode == port_config.PLAYER_DRIVER_MODE else
             'visible-client')
     identity = {
         'semanticVersion': 'unknown',
@@ -1552,11 +1598,12 @@ def init():
         # Install this before every worker refusal path. A fresh preferences
         # leaf otherwise selects #1513's compulsory, unskippable intro movie.
         _install_intro_skip()
-        if requested_mode == port_config.SIMULATION_WORKER_MODE:
+        if requested_mode in (port_config.SIMULATION_WORKER_MODE,
+                              port_config.PLAYER_DRIVER_MODE):
             if not _client_guard_released:
                 _started = False
                 sys.stdout.write(
-                    '[Offline LAN 0.9.22] simulation worker startup refused: '
+                    '[Offline LAN 0.9.22] hidden native client startup refused: '
                     'WGC client guard teardown did not complete\n')
                 try:
                     BigWorld.quit()
@@ -1572,7 +1619,8 @@ def init():
         _fail_startup(
             error, prefix='startup callback failed',
             worker_process=(
-                requested_mode == port_config.SIMULATION_WORKER_MODE))
+                requested_mode in (port_config.SIMULATION_WORKER_MODE,
+                                   port_config.PLAYER_DRIVER_MODE)))
 
 
 def fini():

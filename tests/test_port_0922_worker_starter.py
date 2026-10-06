@@ -13,6 +13,24 @@ WORKER_BATCH = PORT_ROOT / 'START_SIMULATION_WORKER_0922.bat'
 
 
 class WorkerStarterTests(unittest.TestCase):
+    def test_player_driver_has_independent_native_startup_identity(self):
+        source = SOURCE.read_text(encoding='utf-8')
+        main = source.split('int WINAPI wWinMain', 1)[1]
+        self.assertIn('L"--driver-only"', source)
+        self.assertIn('L"player_driver"', source)
+        self.assertIn('CreateMutexW(0, TRUE, DRIVER_MUTEX_NAME)', main)
+        self.assertIn('L"OfflineLanDriver_%lu"', main)
+        self.assertIn('--config engine_config.offline-driver.xml', main)
+        self.assertIn('--logFilePrefix offline-driver-', main)
+        self.assertIn('OFFLINE_LAN_0922_DRIVER_INTERNAL_READY_MARKER', source)
+        self.assertIn('L"offline-driver.internal-ready"', source)
+        self.assertIn('L"offline-driver.ready"', source)
+        self.assertIn('L"offline-driver-starter.log"', source)
+        self.assertIn('g_driver_only ? DRIVER_MODE_VALUE : WORKER_MODE_VALUE', main)
+        self.assertIn('g_driver_only ? 0 : g_internal_ready_marker', main)
+        self.assertIn('g_driver_only ? g_internal_ready_marker : 0', main)
+        self.assertNotIn('SwitchDesktop(', source)
+
     def test_worker_uses_an_unswitched_private_desktop_and_original_client(self):
         source = SOURCE.read_text(encoding='utf-8')
 

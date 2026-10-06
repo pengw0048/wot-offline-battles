@@ -75,6 +75,14 @@ WORKER_READY_MARKER_ENV_0922 = "OFFLINE_LAN_0922_WORKER_READY_MARKER"
 WORKER_STARTER_FILENAME_0922 = "offline_worker_starter.exe"
 WORKER_READY_MARKER_FILENAME_0922 = "offline-worker.ready"
 WORKER_FAILURE_LOG_FILENAME_0922 = "offline-worker-starter.log"
+DRIVER_MODE_0922 = "player_driver"
+DRIVER_ONLY_ARGUMENT_0922 = "--driver-only"
+DRIVER_READY_MARKER_ENV_0922 = "OFFLINE_LAN_0922_DRIVER_READY_MARKER"
+DRIVER_INTERNAL_READY_MARKER_ENV_0922 = "OFFLINE_LAN_0922_DRIVER_INTERNAL_READY_MARKER"
+DRIVER_READY_MARKER_FILENAME_0922 = "offline-driver.ready"
+DRIVER_FAILURE_LOG_FILENAME_0922 = "offline-driver-starter.log"
+DRIVER_PORT_ENV_0922 = "WOT_OFFLINE_PLAYER_DRIVER_PORT"
+DRIVER_TOKEN_ENV_0922 = "WOT_OFFLINE_PLAYER_DRIVER_TOKEN"
 SERVER_LOG_FILENAME = "server.log"
 LAUNCHER_LOG_FILENAME = "launcher.log"
 BUILD_IDENTITY_FILENAME_0922 = "build_identity.json"
@@ -84,6 +92,7 @@ BUILD_SEMANTIC_VERSION_ENV = "WOT_OFFLINE_SEMANTIC_VERSION"
 BUILD_IDENTITY_ENV = "WOT_OFFLINE_BUILD_IDENTITY"
 PLAYER_ENGINE_CONFIG_0922 = "engine_config.offline-player.xml"
 WORKER_ENGINE_CONFIG_0922 = "engine_config.offline-worker.xml"
+DRIVER_ENGINE_CONFIG_0922 = "engine_config.offline-driver.xml"
 PLAYER_ARGUMENT_0922 = "--player"
 WORKER_ONLY_ARGUMENT_0922 = "--worker-only"
 PAIRED_PLAYER_ARGUMENT_0922 = "--paired-player"
@@ -106,6 +115,7 @@ _CLIENT_RUNTIME_FILES_0_9_22 = (
     "mods/0.9.22.0.1/offline_math_batch_native.pyd",
     "res_mods/0.9.22.0.1/engine_config.offline-player.xml",
     "res_mods/0.9.22.0.1/engine_config.offline-worker.xml",
+    "res_mods/0.9.22.0.1/engine_config.offline-driver.xml",
 )
 
 _BUNDLED_SERVER_ENTRY_0_9_22 = os.path.join(
@@ -158,12 +168,28 @@ def worker_ready_marker(game_root):
     return os.path.join(game_root, WORKER_READY_MARKER_FILENAME_0922)
 
 
+def driver_ready_marker(game_root):
+    return os.path.join(game_root, DRIVER_READY_MARKER_FILENAME_0922)
+
+
+def driver_failure_log(game_root):
+    return os.path.join(game_root, DRIVER_FAILURE_LOG_FILENAME_0922)
+
+
+def driver_ready_marker_token(game_root):
+    return _ready_marker_token(driver_ready_marker(game_root))
+
+
 def worker_ready_marker_token(game_root):
+    return _ready_marker_token(worker_ready_marker(game_root))
+
+
+def _ready_marker_token(path):
     """Identify one regular ready marker without following a symlink."""
     import stat
 
     try:
-        value = os.lstat(worker_ready_marker(game_root))
+        value = os.lstat(path)
     except (IOError, OSError):
         return None
     if not stat.S_ISREG(value.st_mode):
@@ -214,7 +240,8 @@ def visible_client_command(game_root, port_version, paired_worker=False):
 def visible_client_environment(port_version, host=LOCAL_HOST,
                                port=DEFAULT_SERVER_PORT,
                                paired_worker=False, environment=None,
-                               preferred_team=DEFAULT_PREFERRED_TEAM, language="en"):
+                               preferred_team=DEFAULT_PREFERRED_TEAM, language="en",
+                               driver_port=None, driver_token=None):
     """Keep worker-only state out of the visible game process."""
     environment = dict(os.environ if environment is None else environment)
     if port_version != PORT_0_9_22:
@@ -222,9 +249,15 @@ def visible_client_environment(port_version, host=LOCAL_HOST,
     _apply_payload_identity_environment(
         environment, bundled_payload_identity(port_version))
     for name in (HIDDEN_DESKTOP_ENV_0922, WORKER_READY_MARKER_ENV_0922,
+                 DRIVER_READY_MARKER_ENV_0922, DRIVER_INTERNAL_READY_MARKER_ENV_0922,
                  "BW_RES_PATH", "WOT_OFFLINE_WORKER_RES_PATH"):
         environment.pop(name, None)
     environment["WOT_OFFLINE_UI_LANGUAGE"] = ("zh" if language == "zh" else "en")
+    environment.pop(DRIVER_PORT_ENV_0922, None)
+    environment.pop(DRIVER_TOKEN_ENV_0922, None)
+    if driver_port is not None and driver_token is not None:
+        environment[DRIVER_PORT_ENV_0922] = str(int(driver_port))
+        environment[DRIVER_TOKEN_ENV_0922] = str(driver_token)
     environment[CLIENT_MODE_ENV_0922] = PLAYER_MODE_0922
     environment[CLIENT_SERVER_HOST_ENV_0922] = str(host)
     environment[CLIENT_SERVER_PORT_ENV_0922] = str(int(port))
@@ -235,6 +268,40 @@ def visible_client_environment(port_version, host=LOCAL_HOST,
     else:
         environment.pop(ALLOW_MULTIPLE_CLIENTS_ENV_0922, None)
     return environment
+
+
+def player_driver_endpoint():
+    """Reserve a loopback choice; readiness detects a subsequent bind race."""
+    import secrets
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind((LOCAL_HOST, 0))
+        port = listener.getsockname()[1]
+    return port, secrets.token_urlsafe(32)
+
+
+def player_driver_environment(game_root, port, token, environment=None):
+    """Build only the private driver endpoint, never a room worker endpoint."""
+    environment = dict(os.environ if environment is None else environment)
+    _apply_payload_identity_environment(
+        environment, bundled_payload_identity(PORT_0_9_22))
+    for name in (CLIENT_SERVER_HOST_ENV_0922, CLIENT_SERVER_PORT_ENV_0922,
+                 CLIENT_PREFERRED_TEAM_ENV_0922, WORKER_READY_MARKER_ENV_0922,
+                 "OFFLINE_LAN_0922_WORKER_INTERNAL_READY_MARKER",
+                 "OFFLINE_LAN_0922_PLAYER_READY_MARKER",
+                 "OFFLINE_LAN_0922_PLAYER_FINISHED_MARKER", "BW_RES_PATH",
+                 "WOT_OFFLINE_WORKER_RES_PATH", DRIVER_READY_MARKER_ENV_0922,
+                 DRIVER_INTERNAL_READY_MARKER_ENV_0922):
+        environment.pop(name, None)
+    environment[CLIENT_MODE_ENV_0922] = DRIVER_MODE_0922
+    environment[ALLOW_MULTIPLE_CLIENTS_ENV_0922] = "1"
+    environment[HIDDEN_DESKTOP_ENV_0922] = "1"
+    environment[DRIVER_PORT_ENV_0922] = str(int(port))
+    environment[DRIVER_TOKEN_ENV_0922] = str(token)
+    return environment
+
+
+def player_driver_command(game_root):
+    return [worker_starter_executable(game_root), DRIVER_ONLY_ARGUMENT_0922]
 
 
 def worker_child_command(game_root):
@@ -266,6 +333,9 @@ def worker_environment(game_root, host=LOCAL_HOST,
     # Discard an inherited override left by an older launcher session.
     environment.pop("BW_RES_PATH", None)
     environment.pop("WOT_OFFLINE_WORKER_RES_PATH", None)
+    for name in (DRIVER_PORT_ENV_0922, DRIVER_TOKEN_ENV_0922,
+                 DRIVER_READY_MARKER_ENV_0922, DRIVER_INTERNAL_READY_MARKER_ENV_0922):
+        environment.pop(name, None)
     return environment
 
 
@@ -2045,23 +2115,29 @@ def worker_startup_exit_hint(exit_code):
     return ""
 
 
+def wait_for_driver_ready(process, game_root, **kwargs):
+    return wait_for_worker_ready(process, game_root,
+                                 marker_token=driver_ready_marker_token, **kwargs)
+
+
 def wait_for_worker_ready(process, game_root,
                           timeout=WORKER_READY_TIMEOUT_SECONDS_0922,
                           interval=0.05, clock=None, sleep=None,
-                          cancelled=None, previous_marker_token=None):
+                          cancelled=None, previous_marker_token=None, marker_token=None):
     """Wait for a live hidden client to publish its ready marker."""
     import time as time_module
 
     clock = clock or time_module.monotonic
     sleep = sleep or time_module.sleep
     deadline = clock() + float(timeout)
+    marker_token = marker_token or worker_ready_marker_token
     previous_marker_disappeared = False
     while True:
         if callable(cancelled) and cancelled():
             return False
         if process.poll() is not None:
             return False
-        current_marker_token = worker_ready_marker_token(game_root)
+        current_marker_token = marker_token(game_root)
         if current_marker_token is None:
             if previous_marker_token is not None:
                 previous_marker_disappeared = True

@@ -30,7 +30,7 @@ class PreferencesConfigTests(unittest.TestCase):
                 packed.TYPE_INTEGER, 120)),
         ]))
 
-    def test_builds_byte_preserving_player_and_worker_variants(self):
+    def test_builds_byte_preserving_player_worker_and_driver_variants(self):
         stock_data = self._stock_data()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,6 +43,7 @@ class PreferencesConfigTests(unittest.TestCase):
             self.assertEqual([
                 output / "engine_config.offline-player.xml",
                 output / "engine_config.offline-worker.xml",
+                output / "engine_config.offline-driver.xml",
             ], [Path(path) for path in paths])
             for path, unused_filename_leaf in zip(
                     paths, self.builder.VARIANTS):
@@ -83,7 +84,7 @@ class PreferencesConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unexpected"):
                 self.builder.build_preferences_configs(stock, root / "out")
 
-    def test_packager_accepts_the_checked_in_exact_base_pair(self):
+    def test_packager_accepts_all_checked_in_exact_base_variants(self):
         packager = _load_tool("../build_wotmod")
         source = (
             PORT_ROOT / "client_overlay" / "res_mods" / "0.9.22.0.1"
@@ -91,6 +92,9 @@ class PreferencesConfigTests(unittest.TestCase):
 
         payloads = packager._preferences_config_payloads(str(source))
 
+        self.assertEqual(
+            [name for name, unused_leaf in self.builder.VARIANTS],
+            [name for name, unused_leaf in packager.PREFERENCES_CONFIGS])
         self.assertEqual(
             [name for name, unused_payload in payloads],
             [name for name, unused_leaf in packager.PREFERENCES_CONFIGS],
@@ -102,7 +106,8 @@ class PreferencesConfigTests(unittest.TestCase):
             self.assertEqual(1, payload.count(leaf.encode("ascii")))
             restored.append(payload.replace(
                 leaf.encode("ascii"), self.builder.STOCK_PREFERENCES, 1))
-        self.assertEqual(restored[0], restored[1])
+        for value in restored[1:]:
+            self.assertEqual(restored[0], value)
 
 
 if __name__ == "__main__":

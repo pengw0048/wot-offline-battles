@@ -4,6 +4,7 @@
  */
 #ifdef WOT_HOST_PYTHON
 #include <Python.h>
+#include <longintrepr.h>
 #define WOT_CDECL
 #else
 #define WIN32_LEAN_AND_MEAN
@@ -60,6 +61,7 @@ ObjectCallFn object_call = 0;
 ModuleNewFn module_new = 0;
 const void *dict_type = 0, *tuple_type = 0, *list_type = 0;
 const void *float_type = 0, *int_type = 0, *bool_type = 0;
+const void *string_type = 0, *unicode_type = 0, *long_type = 0;
 void *string_lookup = 0;
 PyObject *none_object = 0;
 
@@ -324,8 +326,11 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
 #include "offline_simulation_motion_python.inc"
 #include "offline_simulation_weapons_python.inc"
 #include "offline_simulation_navigation_python.inc"
+#include "player_driver_codec_python.inc"
 
 PyMethodDef methods[] = {
+    {"driver_encode", driver_encode, 0x0001, "Encode bounded plain player-driver values into typed binary."},
+    {"driver_decode", driver_decode, 0x0001, "Decode validated player-driver binary into one owned value."},
     WOT_SIMULATION_METHODS
     WOT_SIM_CONTROL_METHODS
     WOT_SIM_MOTION_METHODS
@@ -386,6 +391,7 @@ bool initialize_api() {
     module_new = Py_InitModule4;
     dict_type = &PyDict_Type; tuple_type = &PyTuple_Type; list_type = &PyList_Type;
     float_type = &PyFloat_Type; int_type = &PyInt_Type; bool_type = &PyBool_Type;
+    string_type = &PyString_Type; unicode_type = &PyUnicode_Type; long_type = &PyLong_Type;
     none_object = Py_None;
     PyObject *probe = PyDict_New();
     if (!probe) return false;
@@ -444,17 +450,43 @@ bool initialize_api() {
     static const unsigned char init_bytes[] = {0x55,0x8b,0xec,0x81,0xec,0x14,0x02,0x00,0x00,0xa1,0x70,0x35,0xce,0x01,0x33,0xc5};
     static const unsigned char dict_bytes[] = {0x55,0x8b,0xec,0x83,0xec,0x08,0x53,0x8b,0x5d,0x08,0x8b,0x43,0x04,0xf7,0x40,0x54};
     static const unsigned char string_bytes[] = {0x55,0x8b,0xec,0x51,0x53,0x8b,0x5d,0x08,0x56,0x8b,0xf3,0x8d,0x4e,0x01,0x66,0x90};
+    // The codec fills only fresh strings longer than one byte. Verify the
+    // exact constructor's size/type, payload offset, unset hash and non-interned
+    // state before its offset-20 Win32 access can be used.
+    static const unsigned char string_layout_bytes[] = {0x8d,0x56,0x01,0x89,0x77,0x08,0xc7,0x47,0x04,0x00,0x14,0xa6,0x01,0x8d,0x4f,0x14,0xc7,0x07,0x01,0x00,0x00,0x00,0xc7,0x47,0x0c,0xff,0xff,0xff,0xff,0xc7,0x47,0x10,0x00,0x00,0x00,0x00};
+    // Exact readers prove Unicode length/data and UCS2 stride, signed long
+    // size and 15-bit uint16 digits, and dict used/mask/table fields at 12/16/20
+    // with 12-byte entries (key/value 4/8).
+    static const unsigned char unicode_layout_bytes[] = {0x55,0x8b,0xec,0x8b,0x45,0x08,0x6a,0x01,0xff,0x70,0x08,0xff,0x70,0x0c};
+    static const unsigned char unicode_unit_bytes[] = {0x0f,0xb7,0x0b,0x4f,0x83,0xc3,0x02,0x8b,0xd7};
+    static const unsigned char long_layout_bytes[] = {0x8b,0x43,0x08,0x8b,0x7f,0x08};
+    static const unsigned char long_digit_bytes[] = {0x0f,0xb7,0x74,0x5e,0x0c,0xc1,0xe6,0x0f};
+    static const unsigned char dict_layout_bytes[] = {0x8b,0x48,0x10,0x8b,0x70,0x14};
+    static const unsigned char dict_entry_bytes[] = {0x8d,0x04,0x7f,0x8d,0x34,0x86,0x8b,0x46,0x04};
+    static const unsigned char dict_value_bytes[] = {0x8b,0x46,0x08};
+    static const unsigned char dict_used_bytes[] = {0x55,0x8b,0xec,0x8b,0x45,0x08,0x8b,0x40,0x0c,0x5d,0xc3};
     static const unsigned char float_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x35,0xc0,0xc3,0x14,0x02,0x85,0xf6,0x75,0x5a,0x68,0xe8};
     static const unsigned char tuple_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x85,0xf6,0x79,0x14,0x6a,0x36,0x68,0x60,0xf4};
     static const unsigned char int_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x8d,0x46,0x05,0x3d,0x05,0x01,0x00,0x00,0x77};
     static const unsigned char call_bytes[] = {0x55,0x8b,0xec,0x56,0x8b,0x75,0x08,0x57,0x8b,0x46,0x04,0x8b,0x78,0x40,0x85,0xff};
     if (!signature(base + 0x00be1940U, init_bytes) || !signature(base + 0x00be4190U, dict_bytes) ||
         !signature(base + 0x00bd85f0U, string_bytes) || !signature(base + 0x00bdc460U, float_bytes) ||
+        !signature(base + 0x00bd867bU, string_layout_bytes) ||
+        !signature(base + 0x00bedcb0U, unicode_layout_bytes) ||
+        !signature(base + 0x00bf9838U, unicode_unit_bytes) ||
+        !signature(base + 0x00bf9f4cU, long_layout_bytes) ||
+        !signature(base + 0x00bfea20U, long_digit_bytes) ||
+        !signature(base + 0x00be57aeU, dict_layout_bytes) ||
+        !signature(base + 0x00be57e5U, dict_entry_bytes) ||
+        !signature(base + 0x00be423aU, dict_value_bytes) ||
+        !signature(base + 0x00be3840U, dict_used_bytes) ||
         !signature(base + 0x00bb3420U, tuple_bytes) || !signature(base + 0x00be1180U, int_bytes) ||
         !signature(base + 0x00bca730U, call_bytes)) return false;
     if (!type_layout(base, 0x01664d30U, 124, 0) || !type_layout(base, 0x0165c398U, 12, 4) ||
         !type_layout(base, 0x01660a88U, 20, 0) || !type_layout(base, 0x01664370U, 16, 0) ||
         !type_layout(base, 0x01664bf0U, 12, 0) || !type_layout(base, 0x016608b0U, 12, 0) ||
+        !type_layout(base, 0x01661400U, 21, 1) ||
+        !type_layout(base, 0x0166b290U, 24, 0) || !type_layout(base, 0x0166c7c8U, 12, 2) ||
         !readable(base + 0x0165c798U, 8) || read<void *>(base + 0x0165c79cU) != base + 0x0165c7c0U)
         return false;
     dict_get = reinterpret_cast<DictGetFn>(base + 0x00be4190U);
@@ -466,6 +498,7 @@ bool initialize_api() {
     module_new = reinterpret_cast<ModuleNewFn>(base + 0x00be1940U);
     dict_type = base + 0x01664d30U; tuple_type = base + 0x0165c398U; list_type = base + 0x01660a88U;
     float_type = base + 0x01664370U; int_type = base + 0x01664bf0U; bool_type = base + 0x016608b0U;
+    string_type = base + 0x01661400U; unicode_type = base + 0x0166b290U; long_type = base + 0x0166c7c8U;
     string_lookup = base + 0x00be57a0U;
     none_object = reinterpret_cast<PyObject *>(base + 0x0165c798U);
     return true;

@@ -1717,7 +1717,8 @@ class WindowTest(unittest.TestCase):
         }
         boundary = {"id": "20260823T120000Z-111111111111"}
         order = []
-        with mock.patch.object(
+        with mock.patch.object(self.window, "_start_driver", return_value=True), \
+                mock.patch.object(
                 wot_launcher.error_reports, "begin_session",
                 side_effect=lambda *args, **kwargs: (
                     order.append("begin") or boundary)) as begin, \
@@ -1756,7 +1757,7 @@ class WindowTest(unittest.TestCase):
             self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         begin.assert_called_once_with(
-            self.settings_dir, needs_worker=False, local_server=False)
+            self.settings_dir, needs_worker=False, local_server=False, needs_driver=True)
         finalize.assert_called_once_with(boundary)
         self.assertEqual(["begin", "game", "finalize"], order)
         self.assertIsNone(self.window._active_report_session)
@@ -1792,7 +1793,8 @@ class WindowTest(unittest.TestCase):
         digest, fetch, install = self._join_session_overlay_mocks(
             {"supported": True, "present": True, "digest": "d" * 64,
              "profile": "Fast MS-1"}, local_digest="")
-        with mock.patch(
+        with mock.patch.object(self.window, "_start_driver", return_value=True), \
+                mock.patch(
                 "core.install_client_mod", return_value=[]), \
                 mock.patch(
                     "wot_launcher.vehicle_overlays.prepare_vehicle_profile",
@@ -1839,7 +1841,8 @@ class WindowTest(unittest.TestCase):
         digest, fetch, install = self._join_session_overlay_mocks(
             {"supported": True, "present": True, "digest": "d" * 64,
              "profile": "Fast MS-1"}, local_digest="d" * 64)
-        with mock.patch(
+        with mock.patch.object(self.window, "_start_driver", return_value=True), \
+                mock.patch(
                 "core.install_client_mod", return_value=[]), \
                 mock.patch(
                     "wot_launcher.vehicle_overlays.prepare_vehicle_profile",
@@ -1937,7 +1940,8 @@ class WindowTest(unittest.TestCase):
                 "C:\\tools\\procdump.exe" if requested else None)
             return bool(requested)
 
-        with mock.patch("core.install_client_mod", return_value=[]), \
+        with mock.patch.object(self.window, "_start_driver", return_value=True), \
+                mock.patch("core.install_client_mod", return_value=[]), \
                 mock.patch(
                     "wot_launcher.vehicle_overlays.prepare_vehicle_profile",
                     return_value={"profile": None, "installedMembers": 0,
@@ -2096,7 +2100,11 @@ class WindowTest(unittest.TestCase):
             "removedMembers": 0,
             "botExcludedVehicles": ["ussr:R11_MS-1"],
         }
-        with mock.patch("core.install_client_mod", return_value=[]), \
+        with mock.patch.object(self.window, "_start_driver",
+                               side_effect=lambda unused: order.append("driver") or True), \
+                mock.patch.object(self.window, "_stop_driver",
+                                  side_effect=lambda: order.append("driver_stop")), \
+                mock.patch("core.install_client_mod", return_value=[]), \
                 mock.patch(
                     "wot_launcher.vehicle_overlays.prepare_vehicle_profile",
                     side_effect=lambda *unused: (
@@ -2142,7 +2150,7 @@ class WindowTest(unittest.TestCase):
             self.settings_dir, core.PORT_0_9_22, core.LOCAL_HOST,
             core.DEFAULT_SERVER_PORT, paired_worker=True)
         self.assertEqual(
-            ["profile", "server", "worker", "player", "worker_stop",
+            ["profile", "server", "worker", "driver", "player", "driver_stop", "worker_stop",
              "server_stop", "shutdown_wait", "profile_cleanup"], order)
 
     def test_startup_repair_runs_in_the_background_and_reports_actions(self):

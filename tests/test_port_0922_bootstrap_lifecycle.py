@@ -289,6 +289,9 @@ class BootstrapLifecycleTests(unittest.TestCase):
             'gui.mods.offline_lan_0922.config')
         config_module.PLAYER_MODE = 'player'
         config_module.SIMULATION_WORKER_MODE = 'simulation_worker'
+        config_module.PLAYER_DRIVER_MODE = 'player_driver'
+        config_module.DRIVER_READY_MARKER_ENV = \
+            'OFFLINE_LAN_0922_DRIVER_INTERNAL_READY_MARKER'
         config_module.CLIENT_MODE_ENV = 'OFFLINE_LAN_0922_CLIENT_MODE'
         config_module.load = lambda: {
             'enabled': True, 'startupTimeoutSeconds': 30.0,
@@ -2008,6 +2011,148 @@ class BootstrapLifecycleTests(unittest.TestCase):
 
         with mock.patch.dict(sys.modules, modules):
             self.assertIsNone(bootstrap._cleanup_runtime())
+
+    def test_hidden_driver_builds_only_an_in_memory_lifecycle_account(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        bootstrap.port_config.client_mode = lambda unused: 'player_driver'
+        bootstrap._client_guard_released = True
+        bootstrap._selected_vehicle = mock.Mock(return_value={'id': 1})
+        account = object()
+        bootstrap._worker_account_state = mock.Mock(return_value=account)
+        bootstrap._garage_store = mock.Mock()
+        bootstrap._battle_results_store = mock.Mock()
+        bootstrap._bind_battle_progress = mock.Mock()
+        bootstrap._wait_for_login_space = mock.Mock()
+
+        with mock.patch.dict(sys.modules, modules):
+            bootstrap._run_once()
+
+        bootstrap._selected_vehicle.assert_called_once_with(
+            bootstrap._config, restore_saved=False)
+        bootstrap._worker_account_state.assert_called_once_with()
+        bootstrap._garage_store.assert_not_called()
+        bootstrap._battle_results_store.assert_not_called()
+        self.assertEqual({'selected_vehicle': {'id': 1},
+                          'account_state': account}, bootstrap._account_context)
+        bootstrap._wait_for_login_space.assert_called_once_with()
+
+    def test_hidden_driver_login_has_its_own_cache_and_no_player_ui_hooks(self):
+        (bootstrap, unused_callbacks, compatibility, app_loader,
+         spaces, events, modules) = self._load()
+        app_loader.space_id = spaces.LOGIN
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_DRIVER_MODE
+        installed = []
+        bootstrap._install_driver_session = (
+            lambda: installed.append('driver_session'))
+
+        with mock.patch.dict(sys.modules, modules):
+            bootstrap._wait_for_login_space()
+            bootstrap._wait_for_login_space()
+
+        self.assertEqual(['driver_session'], installed)
+        self.assertEqual('default.driver.', self.dossier_cache_pins[0]())
+        self.assertEqual(['pin_dossier_cache', 'connect'], events)
+        self.assertEqual(1, len(compatibility.connect_calls))
+
+    def test_driver_ready_waits_for_hangar_and_listener_but_not_visible_peer(self):
+        (bootstrap, unused_callbacks, compatibility, unused_app_loader,
+         unused_spaces, unused_events, modules) = self._load()
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_DRIVER_MODE
+        bootstrap._config = {'startupTimeoutSeconds': 30.0}
+        compatibility.is_ready = mock.Mock(return_value=True)
+        bootstrap._lobby_is_ready = mock.Mock(return_value=False)
+        bootstrap._session = types.SimpleNamespace(
+            client=None, listening=True, start=mock.Mock(return_value=True))
+        bootstrap._signal_driver_ready = mock.Mock(return_value=True)
+        bootstrap._signal_worker_ready = mock.Mock()
+        bootstrap._signal_player_ready = mock.Mock()
+        bootstrap._schedule = mock.Mock()
+
+        with mock.patch.dict(sys.modules, modules):
+            bootstrap._wait_for_lobby()
+            bootstrap._session.start.assert_not_called()
+            bootstrap._signal_driver_ready.assert_not_called()
+            bootstrap._schedule.assert_called_once_with(
+                0.10, bootstrap._wait_for_lobby)
+            bootstrap._schedule.reset_mock()
+            bootstrap._lobby_is_ready.return_value = True
+            bootstrap._wait_for_lobby()
+
+        bootstrap._session.start.assert_called_once_with()
+        bootstrap._signal_driver_ready.assert_called_once_with()
+        bootstrap._signal_worker_ready.assert_not_called()
+        bootstrap._signal_player_ready.assert_not_called()
+        bootstrap._schedule.assert_not_called()
+        self.assertTrue(bootstrap._driver_ready_signaled)
+        self.assertEqual(0.0, bootstrap._deadline)
+
+    def test_driver_cannot_publish_ready_with_no_private_listener(self):
+        (bootstrap, unused_callbacks, compatibility, unused_app_loader,
+         unused_spaces, unused_events, modules) = self._load()
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_DRIVER_MODE
+        compatibility.is_ready = mock.Mock(return_value=True)
+        bootstrap._lobby_is_ready = mock.Mock(return_value=True)
+        bootstrap._session = types.SimpleNamespace(
+            listening=False, start=mock.Mock(return_value=True))
+        bootstrap._signal_driver_ready = mock.Mock(return_value=True)
+        bootstrap._fail_startup = mock.Mock()
+
+        with mock.patch.dict(sys.modules, modules):
+            bootstrap._wait_for_lobby()
+
+        bootstrap._signal_driver_ready.assert_not_called()
+        self.assertEqual('player driver listener is unavailable',
+                         str(bootstrap._fail_startup.call_args[0][0]))
+
+    def test_driver_marker_uses_its_private_starter_variable(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        presentation = types.ModuleType(
+            'gui.mods.offline_lan_0922.worker_presentation')
+        presentation._signal_ready_marker = mock.Mock(return_value=True)
+        modules['gui.mods.offline_lan_0922.worker_presentation'] = presentation
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(bootstrap._signal_driver_ready())
+        presentation._signal_ready_marker.assert_called_once_with(
+            'OFFLINE_LAN_0922_DRIVER_INTERNAL_READY_MARKER', 'player driver')
+
+    def test_driver_startup_failure_quits_the_hidden_process(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+        bootstrap._client_mode = bootstrap.port_config.PLAYER_DRIVER_MODE
+        bootstrap._cleanup_runtime = mock.Mock(return_value=None)
+        bootstrap.BigWorld.quit = mock.Mock()
+        bootstrap._fail_startup(RuntimeError('private listener failed'))
+        bootstrap.BigWorld.quit.assert_called_once_with()
+
+    def test_driver_session_installs_the_native_lobby_guard(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         modules) = self._load()
+        driver = types.ModuleType('gui.mods.offline_lan_0922.driver_session')
+        driver.DriverSession = mock.Mock()
+        modules['gui.mods.offline_lan_0922.driver_session'] = driver
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(bootstrap._install_driver_session())
+            self.assertTrue(bootstrap._install_driver_session())
+        driver.DriverSession.assert_called_once_with(
+            bootstrap._config, lobby_ready=bootstrap._native_lobby_is_ready,
+            callback=bootstrap.BigWorld.callback,
+            cancel_callback=bootstrap.BigWorld.cancelCallback,
+            bigworld=bootstrap.BigWorld)
+
+    def test_driver_log_names_its_distinct_process_role(self):
+        (bootstrap, unused_callbacks, unused_compatibility,
+         unused_app_loader, unused_spaces, unused_events,
+         unused_modules) = self._load()
+        with mock.patch.object(bootstrap.sys.stdout, 'write') as writer:
+            bootstrap._log_session_identity('player_driver')
+        self.assertIn('role=hidden-player-driver',
+                      ''.join(call.args[0] for call in writer.call_args_list))
 
     def test_inventory_refresh_notifies_only_the_current_lan_session(self):
         (bootstrap, unused_callbacks, unused_compatibility,

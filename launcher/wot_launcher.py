@@ -588,6 +588,10 @@ class LauncherWindow(object):
         self._worker = None
         self._worker_starter_root = None
         self._worker_stop_lock = threading.Lock()
+        self._driver = None
+        self._driver_starter_root = None
+        self._driver_stop_lock = threading.Lock()
+        self._driver_endpoint = None
         # A LAN room owns its simulation worker independently of any visible
         # player client.  Do not reuse the per-session worker slot here: the
         # latter is deliberately torn down when its visible client exits.
@@ -2383,6 +2387,7 @@ class LauncherWindow(object):
                     except Exception as error:
                         self._log(
                             "Could not close the started process: %s" % error)
+        self._stop_driver()
         self._stop_worker()
         if force_cleanup:
             core.kill_game()
@@ -2870,6 +2875,7 @@ class LauncherWindow(object):
         needs_worker = (
             not replay_path and session["client"] == core.PORT_0_9_22 and
             session["mode"] == core.MODE_SINGLE)
+        needs_driver = not replay_path and session["client"] == core.PORT_0_9_22
         server_loopback_only = (
             session["client"] == core.PORT_0_9_22 and
             session["mode"] == core.MODE_SINGLE)
@@ -2884,7 +2890,8 @@ class LauncherWindow(object):
         try:
             report_session = error_reports.begin_session(
                 game_root, needs_worker=needs_worker,
-                local_server=(session["needs_server"] or reused_server))
+                local_server=(session["needs_server"] or reused_server),
+                needs_driver=needs_driver)
             self._active_report_session = report_session
         except Exception as error:
             self._active_report_session = None
@@ -3006,6 +3013,10 @@ class LauncherWindow(object):
                     return
             if self._stop_requested:
                 return
+            if needs_driver and not self._start_driver(game_root):
+                return
+            if self._stop_requested:
+                return
             preferred_team = session.get(
                 "preferred_team", core.DEFAULT_PREFERRED_TEAM)
             if replay_path:
@@ -3028,6 +3039,7 @@ class LauncherWindow(object):
         except Exception as error:  # The window must survive any failure.
             self._log("The launcher failed: %s" % error)
         finally:
+            self._stop_driver()
             if needs_worker and self._worker is not None:
                 self._observe_process_exit(
                     self._worker, error_reports.ROLE_HIDDEN_WORKER)
@@ -3326,6 +3338,45 @@ class LauncherWindow(object):
                           exit_code)
         self.root.after(0, self._update_action_controls)
 
+    def _start_driver(self, game_root):
+        """Start the private player driver before its visible owner connects."""
+        starter = core.worker_starter_executable(game_root)
+        if not os.path.isfile(starter):
+            raise core.LauncherError("The hidden player driver starter is missing: %s" % starter)
+        previous = core.driver_ready_marker_token(game_root)
+        self._driver_endpoint = core.player_driver_endpoint()
+        port, token = self._driver_endpoint
+        self._log("Starting the hidden player driver...")
+        if self._active_report_session is not None:
+            try:
+                error_reports.expect_driver_starter_reset(self._active_report_session)
+            except Exception as error:
+                self._log("The driver starter log boundary could not be recorded: %s" % error)
+        environment = core.player_driver_environment(game_root, port, token)
+        environment = self._crash_capture_environment(
+            environment, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+        self._stop_requested_roles.discard(error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+        driver = subprocess.Popen(core.player_driver_command(game_root),
+                                  cwd=game_root, env=environment,
+                                  creationflags=_no_console_flags())
+        self._driver = driver
+        self._driver_starter_root = game_root
+        if core.wait_for_driver_ready(driver, game_root,
+                cancelled=lambda: self._stop_requested,
+                previous_marker_token=previous):
+            self._log("The hidden player driver is ready.")
+            return True
+        exit_code = self._observe_process_exit(driver, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+        if not self._stop_requested:
+            self._log("The hidden player driver did not become ready (exit=%s)." % exit_code)
+            try:
+                with open(core.driver_failure_log(game_root), "r", encoding="utf-8", errors="replace") as stream:
+                    self._log("[driver] " + stream.read(8192).replace("\n", " | "))
+            except OSError:
+                pass
+        self._stop_driver()
+        return False
+
     def _start_worker(self, game_root, host, port, room_owned=False):
         """Start once against the client's normal resource and mod paths."""
         self._worker_exited_unexpectedly = False
@@ -3479,6 +3530,63 @@ class LauncherWindow(object):
             return exit_code
         return None
 
+    def _stop_driver(self):
+        with self._driver_stop_lock:
+            return self._stop_driver_locked()
+
+    def _stop_driver_locked(self):
+        worker = self._driver
+        starter_root = self._driver_starter_root
+        self._driver = None
+        self._driver_starter_root = None
+        self._driver_endpoint = None
+        if worker is None:
+            return None
+        exit_code = self._observe_process_exit(
+            worker, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+        if exit_code is not None:
+            return exit_code
+        self._log("Stopping the hidden player driver...")
+        self._stop_requested_roles.add(error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+        stopped = (starter_root is not None and
+                   self._request_starter_stop(worker, starter_root))
+        if not stopped:
+            exit_code = self._observe_process_exit(
+                worker, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+            if exit_code is not None:
+                return exit_code
+            self._forced_stop_roles.add(
+                error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+            try:
+                worker.terminate()
+            except OSError:
+                pass
+        try:
+            exit_code = worker.wait(
+                timeout=(core.STARTER_SHUTDOWN_TIMEOUT_SECONDS_0922
+                         if stopped else 10))
+        except subprocess.TimeoutExpired:
+            self._log("The hidden player driver did not stop in time.")
+            self._forced_stop_roles.add(
+                error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+            try:
+                worker.terminate()
+            except OSError:
+                pass
+            try:
+                worker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    worker.kill()
+                except OSError:
+                    pass
+            return None
+        self._remember_process_exit(
+            exit_code, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+        if stopped and exit_code not in (None, 0):
+            return exit_code
+        return None
+
     def _stop_visible_starter(self, process, game_root, forced):
         if self._request_starter_stop(process, game_root):
             return
@@ -3495,11 +3603,18 @@ class LauncherWindow(object):
                   paired_worker=False,
                   preferred_team=core.DEFAULT_PREFERRED_TEAM, replay_path=None):
         self._log("Starting %s..." % core.GAME_EXECUTABLE)
+        driver = self._driver if not replay_path else None
+        paired_driver = driver is not None
+        endpoint = self._driver_endpoint if paired_driver else None
         command = core.visible_client_command(
-            game_root, port_version, paired_worker=paired_worker)
+            game_root, port_version, paired_worker=paired_worker or paired_driver)
         environment = core.visible_client_environment(
             port_version, host, port, paired_worker=paired_worker,
-            preferred_team=preferred_team, language=self.language)
+            preferred_team=preferred_team, language=self.language,
+            driver_port=endpoint[0] if endpoint else None,
+            driver_token=endpoint[1] if endpoint else None)
+        if paired_driver:
+            environment[core.ALLOW_MULTIPLE_CLIENTS_ENV_0922] = "1"
         if port_version == core.PORT_0_9_22:
             environment = self._crash_capture_environment(
                 environment, error_reports.ROLE_VISIBLE_CLIENT)
@@ -3513,11 +3628,11 @@ class LauncherWindow(object):
             game_root if port_version == core.PORT_0_9_22 else None)
         closed_for_required_process = False
         try:
-            if paired_worker:
+            if paired_worker or paired_driver:
                 exit_code, closed_for_required_process = (
                     core.wait_for_paired_player_exit(
                         game_process, game_root,
-                        required_process=self._worker))
+                        required_process=self._worker if paired_worker else None))
             else:
                 exit_code = game_process.wait()
         finally:
@@ -3526,6 +3641,11 @@ class LauncherWindow(object):
         worker_exit = (self._worker.poll()
                        if paired_worker and self._worker is not None
                        else None)
+        driver_failed = bool(paired_driver and driver.poll() is not None and
+                             not self._stop_requested)
+        if driver_failed:
+            self._observe_process_exit(driver, error_reports.ROLE_HIDDEN_PLAYER_DRIVER)
+            self._log("The hidden player driver stopped; the room remains connected.")
         worker_authority_failed = bool(
             paired_worker and not self._stop_requested and
             (closed_for_required_process or worker_exit is not None))
@@ -3654,6 +3774,7 @@ class LauncherWindow(object):
         if self._busy or self._maintenance_busy:
             return False
         self._save_settings()
+        self._stop_driver()
         self._stop_worker()
         self._stop_lan_room()
         self.root.destroy()

@@ -252,7 +252,7 @@ class ErrorReportTest(unittest.TestCase):
             "hidden-worker-starter.log": b"new starter\n",
         }, payloads)
         self.assertEqual((), report["missing"])
-        self.assertEqual((), report["notRun"])
+        self.assertEqual(("hidden-player-driver.log",), report["notRun"])
         self.assertNotIn("preferences.xml", payloads)
         self.assertNotIn("vehicle_profiles.json", payloads)
         self.assertEqual(
@@ -703,7 +703,7 @@ class ErrorReportTest(unittest.TestCase):
              "missing-dependencies.txt"), report["included"])
         self.assertEqual(
             ("server.log", "hidden-worker.log"), report["missing"])
-        self.assertEqual((), report["notRun"])
+        self.assertEqual(("hidden-player-driver.log",), report["notRun"])
 
     def test_network_join_reports_roles_that_this_session_did_not_run(self):
         session = error_reports.begin_session(
@@ -717,7 +717,8 @@ class ErrorReportTest(unittest.TestCase):
 
         self.assertEqual((), report["missing"])
         self.assertEqual(
-            ("server.log", "hidden-worker.log"), report["notRun"])
+            ("server.log", "hidden-worker.log", "hidden-player-driver.log"),
+            report["notRun"])
 
     def test_reused_server_is_cut_at_both_session_boundaries(self):
         server = core.server_log_path()

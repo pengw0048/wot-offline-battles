@@ -764,6 +764,7 @@ class ClientInstallTest(unittest.TestCase):
             "offline_worker_starter.exe": content,
             "res_mods/0.9.22.0.1/engine_config.offline-player.xml": content,
             "res_mods/0.9.22.0.1/engine_config.offline-worker.xml": content,
+            "res_mods/0.9.22.0.1/engine_config.offline-driver.xml": content,
         }
         for name in ("navgraphs", "foliage", "destructibles"):
             records = []
@@ -1515,6 +1516,7 @@ class PayloadStagingTest(unittest.TestCase):
             "mods/0.9.22.0.1/offline_math_batch_native.pyd",
             "res_mods/0.9.22.0.1/engine_config.offline-player.xml",
             "res_mods/0.9.22.0.1/engine_config.offline-worker.xml",
+            "res_mods/0.9.22.0.1/engine_config.offline-driver.xml",
         )
         for relative in runtime_files:
             path = os.path.join(overlay, *relative.split("/"))
@@ -1643,7 +1645,8 @@ class PayloadStagingTest(unittest.TestCase):
                        "res_mods/0.9.22.0.1/"
                        "engine_config.offline-player.xml",
                        "res_mods/0.9.22.0.1/"
-                       "engine_config.offline-worker.xml"),
+                       "engine_config.offline-worker.xml",
+                       "res_mods/0.9.22.0.1/engine_config.offline-driver.xml"),
         }
         for port_version, members in expected.items():
             archive = zipfile.ZipFile(

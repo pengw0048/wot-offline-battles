@@ -8107,3 +8107,60 @@ than retaining stack pointers. Periodic `combat_checkpoint` records preserve
 completed samples when the worker exits before the capture deadline. These are
 cumulative: use the latest checkpoint or final summary for a capture, never
 sum both. A diagnostic failure does not replay or reject simulation work.
+
+### Paired native player driver
+
+The launcher starts a separate hidden #1513 client for each visible player's
+body movement. It is independent of the room's mandatory Bot worker and does
+not connect to the LAN server or consume a player slot. A private loopback
+connection mirrors the accepted mounted vehicle, effective parameters, room
+state and live controls. The visible process retains its actual native gun
+angles, ammunition, reload, accepted shots and projectile ownership. The driver
+owns drivetrain, ground support, hull attitude, hydraulic movement and world,
+tank and detached-turret contacts. There is no visible-physics takeover when
+the private connection fails.
+
+Driver startup uses its own desktop, process Job, readiness markers, log role,
+in-memory Account stores and `driverprefs.xml` leaf. The listener-ready marker
+precedes visible startup; round readiness separately waits for the hidden
+Avatar, local model and mirrored collision lineup. Drawing remains enabled
+while native models initialize. One authenticated connection survives garage
+returns, with new generation and round identities fencing every binding,
+control and receipt. Unbinding restores the hidden Account and draw lease.
+Original-client and replay starts do not create a driver.
+
+The private stream uses length-prefixed plain binary values through the shipped
+native module, with bounded frames, queues, nesting and integer ranges. Encoding
+freezes caller-owned data before enqueueing; decoding occurs in the socket
+thread. The stream preserves room-message and receipt order, including event
+barriers, without replacing snapshots. It carries no code objects or native
+engine references. The existing room protocol is unchanged. Python 3's codec
+is a contract-test reference; the production Python 2 client requires the
+matching native implementation.
+
+Physical receipts preserve elapsed substeps and source pose times. The visible
+publisher assigns the real room input sequence, retains contact and landing
+events until their existing admission boundaries, and acknowledges the driver
+only after publication. Repeated receipts at the same physical time do not
+replace server pose history. A validated destructible sweep retains both of
+its original endpoints when bound to an admitted player sample: replacing its
+start with a completed body pose would erase a translation or shift a pivot.
+An unavailable early destruction effect yields to the canonical destruction
+event instead of blocking further body movement.
+
+A private-driver failure drains already received receipts, stops that player's
+movement and displays a local message without ending the room or cancelling
+visible projectile work. Exact #1513 `MessengerEntry.gui` forwards
+`addClientMessage(message, isCurrentPlayer=False)` through `GUIDecorator` to
+`BattleEntry` and the battle view's black-message path. The signatures and
+consumer names are included in the client ABI audit; this path does not send
+a chat command or take input focus. An absent battle view can drop that local
+message, so visibility of the failure notice still requires Windows acceptance.
+
+Host tests cover real socket framing, two-round binding and cleanup, input and
+receipt ownership, elapsed physical substeps and server contact admission.
+Exact-client bytecode and PE audits establish the consumed interfaces, not
+native lifecycle safety or timing. This architecture adds process, memory and
+IPC costs. Its net frame-time benefit, input latency, visual continuity and
+failure presentation remain unproved until exercised on the exact Windows
+client.

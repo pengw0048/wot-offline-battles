@@ -188,7 +188,13 @@ temporary output and diff it before replacing tracked catalogs.
   state and destruction. A player never simulates another player's or a Bot's
   shots. Disconnect cancels that player's remaining ledger entries; do not add
   projectile takeover or restore the removed pure-Python simulation fallback.
-- The launcher installs and starts the matching server and worker together.
+- Each launched visible client has a separate hidden player driver for its
+  own body movement, ground support and physical contacts. The visible client
+  retains input, aiming, ammunition and its shot authority. The private binary
+  link is local to that pair; the driver never joins the LAN room or becomes
+  Bot authority. Driver failure stops only that body's movement without
+  restoring visible physics or terminating the room.
+- The launcher installs and starts the matching server and hidden clients together.
   Do not build speculative compatibility machinery for combinations it never
   creates. This is a trusted-LAN product, not an anti-cheat boundary.
 - Validate wire shape, actor/round identity, and safe numeric bounds, but do

@@ -41,6 +41,7 @@ SERVER_FILENAME = 'WoT-0.9.22-LAN-Server.exe'
 PREFERENCES_CONFIGS = (
     ('engine_config.offline-player.xml', 'playerprefs.xml'),
     ('engine_config.offline-worker.xml', 'workerprefs.xml'),
+    ('engine_config.offline-driver.xml', 'driverprefs.xml'),
 )
 PYTHON_MAGIC = '\x03\xf3\r\n'
 FOLIAGE_FORMAT = 'offline-lan-0922-foliage'
