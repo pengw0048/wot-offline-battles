@@ -131,6 +131,38 @@ class PlayerDriverTests(unittest.TestCase):
         self.assertEqual([message['receipt']], frontend.drain())
         self.assertEqual(0, frontend._receipt_bytes)
 
+    def test_identical_control_is_not_resent_but_edges_and_acks_are(self):
+        runtime = FakeRuntime()
+        frontend = player_driver.attach(runtime)
+        self.ready(frontend, runtime)
+        payload = {'forward': 1.0, 'turn': 0.0,
+                   'critical': {'health': 100}, 'published_sample_seq': 0}
+        self.assertTrue(frontend.send_control(payload))
+        self.assertTrue(frontend.send_control(copy.deepcopy(payload)))
+        self.assertEqual(1, frontend._control_seq)
+        payload['critical']['health'] = 90
+        self.assertTrue(frontend.send_control(payload))
+        payload['forward'] = 0.0
+        self.assertTrue(frontend.send_control(payload))
+        payload['published_sample_seq'] = 3
+        self.assertTrue(frontend.send_control(payload))
+        rows = [row for row in self.bridge.sent
+                if row['type'] == 'driver_control']
+        self.assertEqual([1, 2, 3, 4], [row['control_seq'] for row in rows])
+        self.assertEqual([1.0, 1.0, 0.0, 0.0],
+                         [row['payload']['forward'] for row in rows])
+        self.assertEqual(100, rows[0]['payload']['critical']['health'])
+        self.assertEqual(3, rows[-1]['payload']['published_sample_seq'])
+
+    def test_explicit_siege_requests_remain_ordered_even_when_identical(self):
+        runtime = FakeRuntime()
+        frontend = player_driver.attach(runtime)
+        self.ready(frontend, runtime)
+        payload = {'forward': 0.0, 'siege_request': True}
+        self.assertTrue(frontend.send_control(payload))
+        self.assertTrue(frontend.send_control(payload))
+        self.assertEqual(2, frontend._control_seq)
+
     def test_unpaired_visible_and_hidden_modes_do_not_connect_or_schedule(self):
         runtime = FakeRuntime()
         os.environ.clear()

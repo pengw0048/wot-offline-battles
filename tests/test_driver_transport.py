@@ -117,6 +117,23 @@ class DriverTransportTests(unittest.TestCase):
         self.assertTrue(driver.send({'type': 'state', 'pose': [2, 3, 4]}))
         self.assertEqual([{'type': 'state', 'pose': [2, 3, 4]}], wait_for(visible.poll))
 
+    def test_damage_sticker_uint64_keeps_bridge_connected_and_ordered(self):
+        from test_driver_codec import damage_sticker_message
+
+        driver, visible = self.pair()
+        message = damage_sticker_message()
+        self.assertTrue(visible.send(message))
+        self.assertEqual([message], wait_for(driver.poll))
+        receipt = {'type': 'driver_receipt', 'round_id': 1, 'sample_seq': 18}
+        self.assertTrue(driver.send(receipt))
+        self.assertEqual([receipt], wait_for(visible.poll))
+        self.assertTrue(visible.send({'type': 'driver_control', 'control_seq': 19}))
+        self.assertEqual([{'type': 'driver_control', 'control_seq': 19}],
+                         wait_for(driver.poll))
+        for bridge in (driver, visible):
+            self.assertTrue(bridge.connected)
+            self.assertIsNone(bridge.error)
+
     def test_io_decodes_but_does_not_invoke_main_thread_consumers(self):
         seen_threads = []
         decode = transport._decode

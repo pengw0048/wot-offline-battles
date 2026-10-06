@@ -248,6 +248,41 @@ class DriverStateTests(unittest.TestCase):
         self.assertEqual(2, visible._driver_published_seq)
         self.assertEqual(1, visible._driver_landing_ack)
 
+    def test_receipt_burst_keeps_every_pose_and_event_with_one_final_control(self):
+        visible, hidden = _Runtime(), _Runtime(True)
+        hidden._pending_landing_impacts = [11.0]
+        self.assertTrue(hidden._publish_driver_state())
+        hidden.now += 0.02
+        hidden._local_position = (13.0, 3.0, 24.0)
+        hidden._pending_landing_impacts = [12.0]
+        self.assertTrue(hidden._publish_driver_state())
+        visible._player_driver.receipts = hidden.published
+        self.assertTrue(visible._consume_driver_receipts())
+        self.assertEqual([((12.0, 3.0, 24.0), 10000000, None),
+                          ((13.0, 3.0, 24.0), 10020000, None)], visible.inputs)
+        self.assertEqual([mock.call(11.0), mock.call(12.0)],
+                         visible.client.send_landing_observation.call_args_list)
+        self.assertEqual(1, len(visible._player_driver.controls))
+        control = visible._player_driver.controls[0]
+        self.assertEqual((2, 2, 2), (control['published_sample_seq'],
+                                   control['published_input_seq'],
+                                   control['landing_ack']))
+        self.assertFalse(visible._driver_consuming_receipts)
+
+    def test_backpressure_retains_receipt_and_flushes_only_completed_ack(self):
+        visible = _Runtime()
+        receipt = self.receipt()
+        receipt['landing'] = [{'seq': 1, 'impact_speed': 14.0}]
+        visible._player_driver.receipts = [receipt]
+        visible.client.send_landing_observation.return_value = False
+        self.assertFalse(visible._consume_driver_receipts())
+        self.assertFalse(visible._driver_consuming_receipts)
+        self.assertEqual([receipt], visible._driver_receipts_pending)
+        self.assertEqual(1, len(visible._player_driver.controls))
+        control = visible._player_driver.controls[0]
+        self.assertEqual(1, control['published_sample_seq'])
+        self.assertEqual(0, control['landing_ack'])
+
     def test_landing_is_retained_across_failed_observation_and_acked_once(self):
         visible = _Runtime()
         receipt = self.receipt()

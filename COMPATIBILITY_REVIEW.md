@@ -8128,6 +8128,17 @@ while native models initialize. One authenticated connection survives garage
 returns, with new generation and round identities fencing every binding,
 control and receipt. Unbinding restores the hidden Account and draw lease.
 Original-client and replay starts do not create a driver.
+The launcher starts the room worker and player driver before waiting for
+either readiness marker, then checks both processes before starting the
+visible client. Cancellation and failed startup clean up the processes owned
+by that launch. Overlapping startup removes the previous serial wait; its
+actual loading-time benefit and resource contention require Windows timing.
+
+The driver initializes from the accepted player's physical and loadout
+parameters, including crew-dependent traverse and terrain factors. It freezes
+the travel descriptor's mounted factors before a Siege descriptor swap, so
+later mode changes cannot reconstruct them from the hidden client's empty
+garage. Damage, stun and active equipment remain separate live modifiers.
 
 The private stream uses length-prefixed plain binary values through the shipped
 native module, with bounded frames, queues, nesting and integer ranges. Encoding
@@ -8137,6 +8148,11 @@ barriers, without replacing snapshots. It carries no code objects or native
 engine references. The existing room protocol is unchanged. Python 3's codec
 is a contract-test reference; the production Python 2 client requires the
 matching native implementation.
+Legal signed 64-bit values and unsigned 64-bit identifiers both round-trip
+exactly. A recorded armor-impact message exposed the previous signed-only
+limit: its valid damage-sticker identifier terminated the private connection.
+The native decoder also bounds its validated marshal intermediate separately
+from the unchanged 1 MiB wire limit, because unsigned values can expand there.
 
 Physical receipts preserve elapsed substeps and source pose times. The visible
 publisher assigns the real room input sequence, retains contact and landing
@@ -8147,6 +8163,11 @@ its original endpoints when bound to an admitted player sample: replacing its
 start with a completed body pose would erase a translation or shift a pivot.
 An unavailable early destruction effect yields to the canonical destruction
 event instead of blocking further body movement.
+After draining a receipt burst, the visible publisher sends one cumulative
+acknowledgement for completed admissions. Every pose and one-shot event still
+crosses its existing room boundary; partial failure retains the unadmitted
+event. Identical ordinary controls are not resent, while changed input,
+acknowledgements and explicit Siege requests remain ordered.
 
 A private-driver failure drains already received receipts, stops that player's
 movement and displays a local message without ending the room or cancelling
@@ -8161,6 +8182,21 @@ Host tests cover real socket framing, two-round binding and cleanup, input and
 receipt ownership, elapsed physical substeps and server contact admission.
 Exact-client bytecode and PE audits establish the consumed interfaces, not
 native lifecycle safety or timing. This architecture adds process, memory and
-IPC costs. Its net frame-time benefit, input latency, visual continuity and
-failure presentation remain unproved until exercised on the exact Windows
-client.
+IPC costs. The first Windows playtest reported worse smoothness and exposed
+the damage-sticker failure. The captured messages reproduce that transport
+defect, and host replay verifies its repair. The repaired version's net
+frame-time benefit, input latency, visual continuity and failure presentation
+remain unproved until exercised on the exact Windows client. The visible
+body currently follows received physical receipts; no collision-aware local
+prediction has been established by this change.
+
+Offline ground and world probes already query the client's native scene via
+`BigWorld.wg_collideSegment`; the mod owns integration and contact response.
+The exact #1513 Python archive initializes ordinary client physics with mass
+placement and suspension geometry. Its Forced, Editor and Server initializers
+also configure a supplied physics object, but their Python consumers do not
+provide a complete autonomous input, simulation-step and output lifecycle.
+Native filter notifications and exposed simulator names alone therefore do
+not establish a safe replacement driving or prediction interface. This is an
+unverified integration boundary, not evidence that native terrain physics is
+absent.

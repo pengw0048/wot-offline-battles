@@ -7,10 +7,12 @@ const unsigned max_depth = 32;
 struct Invalid {};
 struct Bytes {
   std::string data;
-  void add(char c) { if (data.size() >= limit + 16) throw Invalid();
+  const size_t maximum;
+  explicit Bytes(size_t bound=limit): maximum(bound) {}
+  void add(char c) { if (data.size() >= maximum) throw Invalid();
     data.push_back(c); }
   void add(const std::string &s) {
-    if (s.size() > limit + 16 - data.size()) throw Invalid();
+    if (s.size() > maximum - data.size()) throw Invalid();
     data += s;
   }
   void u32(uint32_t n) { for (int i = 0; i < 4; ++i) add(static_cast<char>(n >> (8*i))); }
@@ -55,6 +57,18 @@ struct Reader {
       const uint64_t bits=u64();int64_t n;std::memcpy(&n,&bits,8);
       if(n>=INT32_MIN && n<=INT32_MAX) {out.add('i');out.u32(static_cast<uint32_t>(n));}
       else {out.add('I');out.u64(bits);}return;
+    }
+    if(tag=='u') {
+      // Marshal's 'I' is signed. Build a positive long from validated 15-bit
+      // digits so identifiers above INT64_MAX stay exact on the x86 client.
+      uint64_t n=u64(),remaining=n;uint32_t digits=0;
+      while(remaining) {++digits;remaining>>=15;}
+      out.add('l');out.u32(digits);
+      for(uint32_t i=0;i<digits;++i) {
+        out.add(static_cast<char>(n&0xff));
+        out.add(static_cast<char>((n>>8)&0x7f));n>>=15;
+      }
+      return;
     }
     if(tag=='d') {
       const uint64_t bits=u64();double d;std::memcpy(&d,&bits,8);
@@ -144,9 +158,11 @@ struct Encoder {
     }
     return out;
   }
-  int64_t integer(PyObject *value) {
+  struct Integer {uint64_t bits;bool wide;};
+  Integer integer(PyObject *value) {
     if(value->ob_type==int_type)
-      return read<long>(reinterpret_cast<const char *>(value)+sizeof(PyObject));
+      return {static_cast<uint64_t>(read<long>(
+        reinterpret_cast<const char *>(value)+sizeof(PyObject))),false};
     if(value->ob_type!=long_type) throw Invalid();
     const Py_ssize_t count=size(value);
     const uint64_t n=count<0?uint64_t(-int64_t(count)):uint64_t(count);
@@ -158,7 +174,8 @@ struct Encoder {
     const unsigned shift=15;
 #endif
     if(n>(64+shift-1)/shift) throw Invalid();
-    uint64_t magnitude=0;const uint64_t maximum=uint64_t(INT64_MAX)+(count<0?1:0);
+    uint64_t magnitude=0;
+    const uint64_t maximum=count<0?uint64_t(INT64_MAX)+1:UINT64_MAX;
     for(uint64_t i=0;i<n;++i) {
       const unsigned bits=static_cast<unsigned>(i*shift);
       if(uint64_t(p[i])>(maximum>>bits)) throw Invalid();
@@ -166,7 +183,13 @@ struct Encoder {
     }
     if(magnitude>maximum) throw Invalid();
     const uint64_t bits=count<0?uint64_t(0)-magnitude:magnitude;
-    int64_t out;std::memcpy(&out,&bits,8);return out;
+    return {bits,count>=0 && magnitude>uint64_t(INT64_MAX)};
+  }
+  std::string integer_key(PyObject *value) {
+    const Integer n=integer(value);
+    if(n.wide) return std::to_string(n.bits);
+    int64_t signed_value;std::memcpy(&signed_value,&n.bits,8);
+    return std::to_string(signed_value);
   }
   void string_value(Bytes &out,const std::string &s) {
     out.add('s');out.u32(static_cast<uint32_t>(s.size()));out.add(s);
@@ -178,7 +201,8 @@ struct Encoder {
       out.add(read<long>(reinterpret_cast<const char *>(v)+sizeof(PyObject))?'t':'f');return;
     }
     if(v->ob_type==int_type || v->ob_type==long_type) {
-      out.add('i');out.u64(static_cast<uint64_t>(integer(v)));return;
+      const Integer n=integer(v);
+      out.add(n.wide?'u':'i');out.u64(n.bits);return;
     }
     if(v->ob_type==float_type) {
       const double d=number(v);if(!std::isfinite(d)) throw Invalid();
@@ -211,7 +235,7 @@ struct Encoder {
 #endif
       if(!item) continue;
       std::string name=(key->ob_type==int_type || key->ob_type==long_type)
-        ?std::to_string(integer(key)):text(key);
+        ?integer_key(key):text(key);
       if(!keys.insert(name).second) throw Invalid();
       string_value(out,name);value(out,item,depth+1);
     }
@@ -235,7 +259,12 @@ PyObject *WOT_CDECL driver_decode(PyObject *, PyObject *args) {
     require_sequence(args,2,true);auto values=items(args);
     const char *raw=driver_codec::payload(values[0]);const size_t length=size(values[0]);
     if(length<5 || std::memcmp(raw,"WDP2",4)) throw driver_codec::Invalid();
-    driver_codec::Reader scan(raw,length);scan.at=4;driver_codec::Bytes out;
+    driver_codec::Reader scan(raw,length);scan.at=4;
+    // Only uint64 expands: 9 wire bytes become at most 15 marshal bytes.
+    // UTF-8 text, signed integers, floats, lists and scalars do not grow;
+    // dictionaries shrink. Bound the validated intermediate separately from
+    // the unchanged wire limit, including its five-byte outer tuple header.
+    driver_codec::Bytes out(5+2*(length-4));
     out.add('(');out.u32(1);scan.wire(out);
     if(scan.at!=scan.length) throw driver_codec::Invalid();
     PyObject *encoded=driver_codec::bytes(out.data);if(!encoded) return 0;

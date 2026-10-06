@@ -47,9 +47,12 @@ def _reference_encode(value):
         elif kind is bool:
             put(b't' if value else b'f')
         elif kind in _INTS:
-            if not -(2 ** 63) <= value < 2 ** 63:
-                raise ValueError('driver integer exceeds int64')
-            put(b'i' + struct.pack('<q', value))
+            if not -(2 ** 63) <= value < 2 ** 64:
+                raise ValueError('driver integer exceeds int64/uint64')
+            if value < 2 ** 63:
+                put(b'i' + struct.pack('<q', value))
+            else:
+                put(b'u' + struct.pack('<Q', value))
         elif kind is float:
             if math.isnan(value) or math.isinf(value):
                 raise ValueError('driver number must be finite')
@@ -66,8 +69,8 @@ def _reference_encode(value):
             keys = set()
             for key, item in value.items():
                 if type(key) in _INTS:
-                    if not -(2 ** 63) <= key < 2 ** 63:
-                        raise ValueError('driver object key exceeds int64')
+                    if not -(2 ** 63) <= key < 2 ** 64:
+                        raise ValueError('driver object key exceeds int64/uint64')
                     key = str(key)
                 text = _text(key)
                 if text in keys:
@@ -115,6 +118,8 @@ def _reference_decode(data):
             return tag == b't'
         if tag == b'i':
             return struct.unpack('<q', take(8))[0]
+        if tag == b'u':
+            return struct.unpack('<Q', take(8))[0]
         if tag == b'd':
             value = struct.unpack('<d', take(8))[0]
             if math.isnan(value) or math.isinf(value):

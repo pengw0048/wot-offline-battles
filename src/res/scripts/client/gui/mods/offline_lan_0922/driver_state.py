@@ -106,6 +106,7 @@ class DriverRuntimeMixin(object):
         self._driver_integrating_step = False
         self._driver_receipt_due = False
         self._driver_deferred_siege = None
+        self._driver_consuming_receipts = False
 
     def _attach_player_driver(self):
         self._player_driver = player_driver.attach(self)
@@ -147,6 +148,11 @@ class DriverRuntimeMixin(object):
                 if server is not None else None)
 
     def _send_driver_control(self, siege_request=None):
+        if self._driver_consuming_receipts and siege_request is None:
+            # Receipt admission publishes every physical sample to the room.
+            # Its intermediate acknowledgements have no new player input;
+            # send the final acknowledgement once after this frame's drain.
+            return True
         frontend = self._player_driver
         sender = getattr(self, '_sender', None)
         if frontend is None or sender is None or self._driver_error:
@@ -644,6 +650,7 @@ class DriverRuntimeMixin(object):
         if frontend is None or self._driver_error:
             return False
         try:
+            self._driver_consuming_receipts = True
             rows = frontend.drain()
             if len(self._driver_receipts_pending) + len(rows) > _MAX_EVENTS:
                 return self._driver_local_failure('player driver receipt queue overflow')
@@ -656,6 +663,10 @@ class DriverRuntimeMixin(object):
                 del self._driver_receipts_pending[0]
         except Exception as error:
             return self._driver_local_failure(error)
+        finally:
+            self._driver_consuming_receipts = False
+            if not self._driver_error and not frontend.error:
+                self._send_driver_control()
         if frontend.error:
             return self._driver_local_failure(frontend.error)
-        return True
+        return not self._driver_error

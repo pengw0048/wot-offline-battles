@@ -464,17 +464,39 @@ class PlayerDriverRuntimeTests(unittest.TestCase):
         visible._player_driver.receipts = receipts
         self.assertTrue(visible._consume_driver_receipts())
         controls = visible._player_driver.controls
-        first_ack = next(row for row in controls if row['published_sample_seq'] == 1)
-        self.assertEqual(2, first_ack['published_input_seq'])
+        self.assertEqual(1, len(controls))
+        final_ack = controls[0]
+        self.assertEqual(2, final_ack['published_sample_seq'])
+        self.assertEqual(3, final_ack['published_input_seq'])
         # Exercise the actual hidden ACK parser with a valid runtime entity.
         hidden._server_entity = lambda unused: visible.entity
         hidden._avatar = visible._avatar
         hidden._apply_mirrored_gun_pose = mock.Mock()
-        first_ack['control_seq'] = 1
-        self.assertTrue(hidden.apply_driver_control(first_ack))
-        self.assertEqual((True, 2), hidden._local_siege_pending)
+        final_ack['control_seq'] = 1
+        self.assertTrue(hidden.apply_driver_control(final_ack))
+        self.assertEqual((True, 3), hidden._local_siege_pending)
         self.assertEqual(0, hidden._driver_siege_sample_seq)
         self.assertEqual(3, state.players[1].input_seq)
+
+        siege = hidden._runtime.constants.VEHICLE_SIEGE_STATE
+        record = {'local': True, 'engine_id': 101,
+                  'presented_siege_state': siege.ENABLED}
+        hidden._apply_siege_state(record, {'siege_state': siege.ENABLED,
+                                           'input_seq': 2})
+        self.assertEqual((True, 3), hidden._local_siege_pending)
+        hidden._apply_siege_state(record, {'siege_state': siege.ENABLED,
+                                           'input_seq': 3})
+        self.assertIsNone(hidden._local_siege_pending)
+        hidden._local_siege_pending = (True, 3)
+        record['presented_siege_state'] = siege.SWITCHING_ON
+        hidden._apply_siege_state(record, {'siege_state': siege.SWITCHING_ON,
+                                           'siege_time_left_ms': 100,
+                                           'input_seq': 3})
+        self.assertEqual((True, 3), hidden._local_siege_pending)
+        record['presented_siege_state'] = siege.DISABLED
+        hidden._apply_siege_state(record, {'siege_state': siege.DISABLED,
+                                           'input_seq': 3})
+        self.assertIsNone(hidden._local_siege_pending)
 
     def test_translation_then_pivot_in_one_slice_preserves_two_distinct_sweeps(self):
         hidden, visible, state, receipts, wire, relayed = self.driver_pipeline()

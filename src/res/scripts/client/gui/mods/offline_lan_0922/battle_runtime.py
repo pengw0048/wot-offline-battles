@@ -7059,10 +7059,20 @@ class BattleRuntime(DriverRuntimeMixin):
         # copied-physics frame already has one earlier sample to difference.
         self._local_motion_history.append(
             (0.0, tuple(float(value) for value in self._local_position)))
-        self._local_physics = vehicle_physics.derive_params(
-            entity.typeDescriptor,
-            self._local_factors(entity.typeDescriptor))
-        if getattr(self, '_replay_mode', False):
+        if self._player_driver_mode:
+            snapshot = self._accepted_local_effective_params()
+            if snapshot is None:
+                raise RuntimeError(
+                    'player driver physics parameters are unavailable')
+            # Freeze the travel descriptor's mounted factors before a native
+            # Siege callback can replace it with the other mode descriptor.
+            self._local_factors(entity.typeDescriptor)
+            self._local_physics = dict(snapshot['physics'])
+        else:
+            self._local_physics = vehicle_physics.derive_params(
+                entity.typeDescriptor,
+                self._local_factors(entity.typeDescriptor))
+        if self._replay_mode:
             snapshot = self._accepted_local_effective_params()
             if snapshot is not None:
                 self._local_physics = dict(snapshot['physics'])
@@ -8379,6 +8389,28 @@ class BattleRuntime(DriverRuntimeMixin):
         equipment bonus the garage shows and the battle ignores shows up here
         as a difference, not as a feeling.
         """
+        if self._player_driver_mode:
+            snapshot = self._accepted_local_effective_params()
+            physics = self._local_physics
+            profile = snapshot['spotting']
+            camouflage = snapshot['camouflage']
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] PARAMS source=accepted-player-driver '
+                'view=%.1f conceal_move=%.2f%% conceal_still=%.2f%% '
+                'hull_deg=%.2f terrain=%s power_hp=%.0f speed=%.1f/%.1f '
+                'reload=%.2fs recon=%.1f camo_crew=%.1f\n' % (
+                    self._vision_radius(descriptor, local=True),
+                    (camouflage['base_moving'] + profile['invisibility_moving'][0]) *
+                    profile['invisibility_moving'][1] * 100.0,
+                    (camouflage['base_still'] + profile['invisibility_still'][0]) *
+                    profile['invisibility_still'][1] * 100.0,
+                    math.degrees(physics['rotSpd']),
+                    ','.join('%.3f' % value for value in physics['terrainResist']),
+                    physics['powerW'] / 735.49875,
+                    physics['speedFwd'] * 3.6, physics['speedBwd'] * 3.6,
+                    self._gun_state.reload, profile['recon_level'],
+                    profile['camouflage_level']))
+            return True
         if getattr(self, '_replay_mode', False):
             from gui.mods.offline_lan_0922 import replay_presentation
             accepted = self._accepted_local_effective_params()
@@ -8542,6 +8574,10 @@ class BattleRuntime(DriverRuntimeMixin):
         """
         if self._local_loadout_cache is not None:
             return self._local_loadout_cache
+        if (self._player_driver_mode and
+                self._accepted_local_effective_params() is None):
+            raise RuntimeError(
+                'player driver loadout parameters are unavailable')
         if self._local_effective_params is not None:
             self._local_loadout_cache = dict(
                 self._local_effective_params['loadout'])
@@ -26740,14 +26776,17 @@ class BattleRuntime(DriverRuntimeMixin):
     def _spotting_profile(self, descriptor, local=False):
         """Return the device and crew spotting inputs for one descriptor.
 
-        Both sides read the same ``factors`` dictionary the garage panel
-        reads; only the crew behind it differs, because a bot has the default
-        crew instead of the player's own.
+        A hidden driver uses the accepted player's complete profile; it has
+        no garage crew from which to recompute those factors. A visible local
+        vehicle reads its captured crew, while Bots use their default crew.
         """
-        if local and getattr(self, '_replay_mode', False):
+        if local and (self._replay_mode or self._player_driver_mode):
             snapshot = self._accepted_local_effective_params()
             if snapshot is not None:
                 return snapshot['spotting']
+            if self._player_driver_mode:
+                raise RuntimeError(
+                    'player driver spotting parameters are unavailable')
         if local:
             if self._local_spotting_cache is None:
                 snapshot = self._garage_loadout_snapshot()
@@ -26775,6 +26814,34 @@ class BattleRuntime(DriverRuntimeMixin):
     def _local_factors(self, descriptor):
         """Cache the player's own #1513 attribute factors for this round."""
         if self._local_factors_cache is None:
+            if self._player_driver_mode:
+                snapshot = self._accepted_local_effective_params()
+                if snapshot is None:
+                    raise RuntimeError(
+                        'player driver mounted factors are unavailable')
+                # The accepted loadout already carries the exact native
+                # traverse and terrain factors. Only engine/power is absent:
+                # derive_params multiplies this travel enginePower by it.
+                # Recover that one factor once, without damaged-engine or
+                # active-consumable state, for later Siege descriptor swaps.
+                try:
+                    base_power = float(
+                        _field(descriptor, 'physics')['enginePower'])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    raise RuntimeError(
+                        'player driver base engine power is unavailable')
+                if (math.isnan(base_power) or math.isinf(base_power) or
+                        base_power <= 0.0):
+                    raise RuntimeError(
+                        'player driver base engine power is unavailable')
+                loadout = snapshot['loadout']
+                self._local_factors_cache = {
+                    'vehicle/rotationSpeed': loadout['vehicle_rotation_factor'],
+                    'chassis/terrainResistance': tuple(
+                        loadout['terrain_resistance_factors']),
+                    'engine/power': snapshot['physics']['powerW'] / base_power,
+                }
+                return self._local_factors_cache
             snapshot = self._garage_loadout_snapshot()
             # updateAttrFactorsWithSplit treats every supplied equipment as
             # active.  That is correct for passive fuel and food, but would

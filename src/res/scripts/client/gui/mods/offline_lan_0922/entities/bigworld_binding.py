@@ -488,14 +488,14 @@ class BigWorldVehicleBinding(object):
                                  zlib.compress(_pickle.dumps(payload)))
 
     def drive_vehicle(self, entity_id, movement_dir, rotation_dir):
-        """Replay one input state through #1513's native vehicle physics.
+        """Notify #1513's vehicle filter of one input state.
 
         The pinned executable's ``PyWGVehicleFilter`` method table exposes
         ``notifyInputKeysDown`` but neither ``set`` nor ``setPosition``.  The
         stock ``PlayerAvatar.moveVehicle`` method passes exactly these two
-        signed directions to the filter.  Reusing that boundary keeps client-
-        created remote vehicles on their native suspension, collision and
-        terrain simulation instead of guessing a non-existent pose setter.
+        signed directions to the filter. This notification supplies neither
+        the retail server pose stream nor an autonomous local driving step;
+        it does not establish ownership of movement or collision response.
         """
         entity = self._entity_or_fail(entity_id)
         self._need(entity, 'filter')

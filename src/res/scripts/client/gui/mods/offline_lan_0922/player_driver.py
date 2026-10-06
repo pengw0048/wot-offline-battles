@@ -6,6 +6,7 @@ Its main-thread poll only queues receipts; BattleRuntime drains them in order
 at its frame boundary before publishing the corresponding input/gun state.
 """
 
+import copy
 import os
 import weakref
 
@@ -130,6 +131,7 @@ class Frontend(object):
         self._bind = None
         self._bound = False
         self._control_seq = 0
+        self._last_control = None
         self._pending = []
         self._pending_bytes = 0
         self._receipts = []
@@ -173,12 +175,15 @@ class Frontend(object):
         if not isinstance(payload, dict):
             self._fail('invalid player driver control')
             return False
+        if payload == self._last_control and 'siege_request' not in payload:
+            return True
         sequence = self._control_seq + 1
         message = self._envelope('driver_control')
         message.update(control_seq=sequence, payload=payload)
         if not self._send(message):
             return False
         self._control_seq = sequence
+        self._last_control = copy.deepcopy(payload)
         return True
 
     def forward_message(self, message):
