@@ -449,6 +449,7 @@ _FRAME_STAGE_NAMES = (
     'schedule', 'diag_emit')
 # These durations are contained in ``local`` and must not be added to it.
 _FRAME_DETAIL_NAMES = ('local_ground', 'local_solver')
+_LAN_POLL_STAGES = ('poll', 'materialize', 'handle', 'notify')
 _PROJECTILE_METRIC_NAMES = (
     'active', 'chords', 'debt', 'advance', 'terminals', 'scans',
     'candidates')
@@ -490,6 +491,7 @@ class _FrameDiagnostics(object):
     def reset(self):
         self._pending = None
         self._cpu_entry = None
+        self._lan_poll_getter = None
         self._recent_frames = collections.deque(maxlen=3)
         self._frame_id = 0
         self._window_id = 0
@@ -512,6 +514,12 @@ class _FrameDiagnostics(object):
         self._cpu_wall_sum = 0.0
         self._outside_sum = 0.0
         self._outside_max = 0.0
+        self._lan_poll_samples = 0
+        self._lan_poll_sums = dict((name, 0.0) for name in _LAN_POLL_STAGES)
+        self._lan_poll_maxima = dict((name, 0.0) for name in _LAN_POLL_STAGES)
+        self._lan_poll_calls = dict((name, 0) for name in _LAN_POLL_STAGES)
+        self._outside_without_lan_poll_sum = 0.0
+        self._outside_without_lan_poll_max = 0.0
         self._gap_samples = collections.deque(
             maxlen=DIAGNOSTIC_PERCENTILE_SAMPLES)
         self._exec_samples = collections.deque(
@@ -567,17 +575,78 @@ class _FrameDiagnostics(object):
             pass
         return None
 
-    def begin(self, entry_wall, raw_dt, offframe=0.0):
+    def _read_lan_poll(self):
+        """A missing transport sample must never disable frame diagnostics."""
+        try:
+            if not callable(self._lan_poll_getter):
+                return None
+            snapshot = self._lan_poll_getter()
+            if not isinstance(snapshot, dict):
+                return None
+            generation = snapshot['generation']
+            if (isinstance(generation, bool) or
+                    not isinstance(generation, _INTEGER_TYPES) or generation < 0):
+                return None
+            owner = getattr(self._lan_poll_getter, '__self__', None)
+            if owner is None:
+                owner = getattr(self._lan_poll_getter, 'im_self', None)
+            result = {'generation': generation, 'source': id(
+                owner if owner is not None else self._lan_poll_getter)}
+            for name in _LAN_POLL_STAGES:
+                count = snapshot[name + '_calls']
+                if (isinstance(count, bool) or
+                        not isinstance(count, _INTEGER_TYPES) or count < 0):
+                    return None
+                value = float(snapshot[name + '_wall_seconds'])
+                if value < 0.0 or math.isnan(value) or math.isinf(value):
+                    return None
+                result[name + '_wall_seconds'] = value
+                result[name + '_calls'] = count
+            return result
+        except Exception:
+            return None
+
+    @staticmethod
+    def _lan_poll_delta(previous, current, outside):
+        if (previous is None or current is None or
+                previous['source'] != current['source'] or
+                previous['generation'] != current['generation']):
+            return None
+        result = {}
+        for name in _LAN_POLL_STAGES:
+            for suffix in ('_wall_seconds', '_calls'):
+                key = name + suffix
+                value = current[key] - previous[key]
+                if value < 0:
+                    return None
+                result[key] = value
+        # Child timers are included in their parents. An over-budget sample
+        # crosses a callback boundary or has inconsistent timers; do not turn
+        # it into a fabricated zero residual. Allow only clock roundoff.
+        tolerance = 1e-6
+        if (result['poll_wall_seconds'] > outside + tolerance or
+                result['materialize_wall_seconds'] +
+                result['handle_wall_seconds'] >
+                result['poll_wall_seconds'] + tolerance or
+                result['notify_wall_seconds'] >
+                result['handle_wall_seconds'] + tolerance):
+            return None
+        return result
+
+    def begin(self, entry_wall, raw_dt, offframe=0.0, lan_poll_getter=None):
         """Seal the previous callback using this callback's entry interval.
 
-        ``offframe`` is the time this port's other scheduled callbacks spent
-        inside that gap, so ``outside`` isolates work this port does not run.
+        ``outside`` retains its original gap minus execution and other timed
+        callbacks. LAN poll is a separate, nested part of that same interval;
+        its residual still includes engine, render, wait and unmeasured work.
         """
         self._frame_id += 1
         frame_id = self._frame_id
         if not self.enabled:
             return frame_id
         self._cpu_entry = self._read_cpu()
+        self._lan_poll_getter = lan_poll_getter
+        lan_poll = self._read_lan_poll()
         try:
             pending = self._pending
             if pending is not None:
@@ -598,6 +667,11 @@ class _FrameDiagnostics(object):
                     'outside': max(0.0, wall_gap - pending['exec'] - off),
                     'bw_minus_wall': observed_raw - wall_gap,
                 })
+                row['lan_poll'] = self._lan_poll_delta(
+                    pending.get('lan_poll_totals'), lan_poll, row['outside'])
+                row['outside_without_lan_poll'] = (
+                    max(0.0, row['outside'] - row['lan_poll']['poll_wall_seconds'])
+                    if row['lan_poll'] is not None else None)
                 self._add(row)
             return frame_id
         except Exception:
@@ -634,6 +708,19 @@ class _FrameDiagnostics(object):
             self._cpu_wall_sum += execution
         self._outside_sum += outside
         self._outside_max = max(self._outside_max, outside)
+        lan_poll = row.get('lan_poll')
+        if lan_poll is not None:
+            self._lan_poll_samples += 1
+            for name in _LAN_POLL_STAGES:
+                value = lan_poll[name + '_wall_seconds']
+                self._lan_poll_sums[name] += value
+                self._lan_poll_maxima[name] = max(
+                    self._lan_poll_maxima[name], value)
+                self._lan_poll_calls[name] += lan_poll[name + '_calls']
+            residual = row['outside_without_lan_poll']
+            self._outside_without_lan_poll_sum += residual
+            self._outside_without_lan_poll_max = max(
+                self._outside_without_lan_poll_max, residual)
         self._gap_samples.append(gap)
         self._exec_samples.append(execution)
         self._outside_samples.append(outside)
@@ -728,6 +815,13 @@ class _FrameDiagnostics(object):
             'thread_cpu_ms': (round(row['thread_cpu'] * 1000.0, 3)
                               if row.get('thread_cpu') is not None else None),
             'outside_ms': round(row['outside'] * 1000.0, 3),
+            'lan_poll_ms': (dict((name, round(
+                row['lan_poll'][name + '_wall_seconds'] * 1000.0, 3))
+                for name in _LAN_POLL_STAGES)
+                if row.get('lan_poll') is not None else None),
+            'outside_without_lan_poll_ms': (
+                round(row['outside_without_lan_poll'] * 1000.0, 3)
+                if row.get('outside_without_lan_poll') is not None else None),
             'offframe_ms': round(row.get('offframe', 0.0) * 1000.0, 3),
             'stages_ms': dict((name, round(value * 1000.0, 3))
                               for name, value in row['stages'].items()
@@ -792,6 +886,31 @@ class _FrameDiagnostics(object):
             }
         detail_snapshot = dict(
             (name, stage_snapshot.pop(name)) for name in _FRAME_DETAIL_NAMES)
+        lan_poll_snapshot = {
+            'samples': self._lan_poll_samples,
+            'unmatched': self._samples - self._lan_poll_samples,
+            'interval': 'previous_finish_to_current_begin',
+            'stages_ms': dict((name, {
+                'avg_ms': (self._milliseconds(
+                    self._lan_poll_sums[name] / self._lan_poll_samples)
+                    if self._lan_poll_samples else None),
+                'max_ms': (self._milliseconds(self._lan_poll_maxima[name])
+                           if self._lan_poll_samples else None),
+                'calls': self._lan_poll_calls[name],
+                'parent': ('outside' if name == 'poll' else
+                           'handle' if name == 'notify' else 'poll'),
+            }) for name in _LAN_POLL_STAGES),
+        }
+        outside_without_lan_poll = {
+            'samples': self._lan_poll_samples,
+            'avg_ms': (self._milliseconds(
+                self._outside_without_lan_poll_sum / self._lan_poll_samples)
+                if self._lan_poll_samples else None),
+            'max_ms': (self._milliseconds(self._outside_without_lan_poll_max)
+                       if self._lan_poll_samples else None),
+            # Engine/render work, waits and unmeasured callbacks remain here.
+            'gpu_measured': False,
+        }
         probe_snapshot = {}
         for name in PROBE_KINDS:
             probe_snapshot[name] = {
@@ -840,6 +959,8 @@ class _FrameDiagnostics(object):
                     if self._cpu_samples else None),
             },
             'outside_callback_ms': outside_distribution,
+            'lan_poll': lan_poll_snapshot,
+            'outside_without_lan_poll_ms': outside_without_lan_poll,
             'python_stages_ms': stage_snapshot,
             'python_details_ms': detail_snapshot,
             # One logical probe can contain several native calls. The current
@@ -947,6 +1068,22 @@ class _FrameDiagnostics(object):
                  presentation.get('aim_writes'),
                  presentation.get('aim_skips')))
         stage_values = []
+        if self._lan_poll_samples:
+            lines.append(prefix + (
+                'lan_poll samples=%d/%d interval=finish_to_begin '
+                'materialize_handle_parent=poll notify_parent=handle '
+                'wall_ms_avg_max ') % (self._lan_poll_samples, self._samples) +
+                ' '.join('%s=%.3f/%.3f %s_calls=%d' % (
+                    name, lan_poll_snapshot['stages_ms'][name]['avg_ms'],
+                    lan_poll_snapshot['stages_ms'][name]['max_ms'],
+                    name, self._lan_poll_calls[name]) for name in _LAN_POLL_STAGES) +
+                (' outside_without_lan_poll_ms_avg_max=%.3f/%.3f '
+                 'gpu_measured=0\n') % (
+                     outside_without_lan_poll['avg_ms'],
+                     outside_without_lan_poll['max_ms']))
+        else:
+            lines.append(prefix + 'lan_poll samples=0/%d unavailable=1\n' %
+                         self._samples)
         if self._cpu_samples:
             lines.append(prefix + (
                 'thread_cpu samples=%d/%d cpu_ms_avg_max=%.3f/%.3f '
@@ -1033,6 +1170,7 @@ class _FrameDiagnostics(object):
                  'slow rank=%d cause=%d next=%d gap_ms=%.3f '
                  'raw_dt_ms=%.3f bw_minus_wall_ms=%.3f '
                  'prev_exec_ms=%.3f outside_ms=%.3f '
+                 'lan_poll_ms=%s outside_without_lan_poll_ms=%s '
                  'cause_tick_ms=%.3f cause_motion_ms=%.3f '
                  'pose_step_m=%.4f speed_mps=%.3f camera_mps=%.3f '
                  'airborne=%d grind=%d bots=%d outgoing=%d '
@@ -1045,6 +1183,13 @@ class _FrameDiagnostics(object):
                      row['bw_minus_wall'] * 1000.0,
                      self._milliseconds(row['exec']),
                      self._milliseconds(row['outside']),
+                     ('%.3f' % self._milliseconds(
+                         row['lan_poll']['poll_wall_seconds'])
+                      if row.get('lan_poll') is not None else 'unavailable'),
+                     ('%.3f' % self._milliseconds(
+                         row['outside_without_lan_poll'])
+                      if row.get('outside_without_lan_poll') is not None
+                      else 'unavailable'),
                      self._milliseconds(row['tick_dt']),
                      self._milliseconds(row['motion_dt']),
                      float(context.get('pose_step', 0.0)),
@@ -1126,6 +1271,10 @@ class _FrameDiagnostics(object):
                 self._window_seconds = self._steady_window_seconds
                 self._reset_window()
             stages['diag_emit'] = emit_seconds
+            # Capture after all callback work, including diagnostic logging.
+            # A poll re-entered during this callback belongs to exec, and must
+            # not also be subtracted from the following outside interval.
+            lan_poll = self._read_lan_poll()
             end_cpu = self._read_cpu()
             end_wall = self._clock()
             self._pending = {
@@ -1141,6 +1290,7 @@ class _FrameDiagnostics(object):
                 'probe_durations': dict(probe_durations or {}),
                 'projectile': dict(projectile or {}),
                 'combat': combat,
+                'lan_poll_totals': lan_poll,
                 'context': dict(context or {}), 'emitted': emitted,
             }
         except Exception:
@@ -17383,7 +17533,14 @@ class BattleRuntime(object):
         self._offframe_seconds = 0.0
         self._effect_reports = 0
         self._spotted_signature = None
-        frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe)
+        try:
+            lan_poll_getter = (getattr(
+                self.client, 'transport_performance_snapshot', None)
+                if profiling else None)
+        except Exception:
+            lan_poll_getter = None
+        frame_id = (diagnostics.begin(entry_wall, raw_dt, offframe,
+                                      lan_poll_getter=lan_poll_getter)
                     if profiling else 0)
         combat_diagnostic = self._combat_diagnostics
         if combat_diagnostic is not None and self._battle_live and profiling:
@@ -21433,6 +21590,25 @@ class BattleRuntime(object):
                 record.get('kind') == 'bot' and
                 record.get('network_id') in self._local_ram_episode_contacts)
             if not active_episode:
+                radius = math.sqrt(shape[0] * shape[0] + shape[1] * shape[1])
+                reach = (own_radius + radius + max(0.0, extra_reach) +
+                         tank_collision.CONTACT_BROADPHASE_PADDING)
+                reach_squared = reach * reach
+                dx, dz = position[0] - x, position[2] - z
+                presented_far = dx * dx + dz * dz > reach_squared
+                canonical_far = True
+                if record.get('kind') == 'bot':
+                    canonical_dx = position[0] - _number(state.get('x'))
+                    canonical_dz = position[2] - _number(state.get('z'))
+                    canonical_far = (canonical_dx * canonical_dx +
+                                     canonical_dz * canonical_dz >
+                                     reach_squared)
+                # The existing contact gate cannot retain a body outside
+                # both circles, regardless of its vertical projection. Keep
+                # the same swept/track-pivot reach and episode exemption;
+                # near bodies still pass the exact vertical checks below.
+                if presented_far and canonical_far:
+                    continue
                 presented_overlap = tank_collision.vertical_overlap(
                         position[1], own_shape, y, shape,
                         pitch_a=self._local_pitch, roll_a=self._local_roll,
@@ -21446,15 +21622,7 @@ class BattleRuntime(object):
                         roll_b=_number(state.get('roll'))))
                 if not presented_overlap and not canonical_overlap:
                     continue
-                radius = math.sqrt(shape[0] * shape[0] + shape[1] * shape[1])
-                reach = (own_radius + radius + max(0.0, extra_reach) +
-                         tank_collision.CONTACT_BROADPHASE_PADDING)
-                dx, dz = position[0] - x, position[2] - z
-                canonical_dx = position[0] - _number(state.get('x'))
-                canonical_dz = position[2] - _number(state.get('z'))
-                if (dx * dx + dz * dz > reach * reach and
-                        (not canonical_overlap or
-                         canonical_dx * canonical_dx + canonical_dz * canonical_dz > reach * reach)):
+                if presented_far and not canonical_overlap:
                     continue
             physical_state = state
             if isinstance(presented_pose, dict):

@@ -196,6 +196,10 @@ RECOVERABLE_RUNTIME_TYPES = frozenset((
     'team_command_terminal', 'team_chat', 'team_chat_ack'))
 
 
+_TRANSPORT_PROFILE_CLOCK = getattr(
+    time, 'monotonic', getattr(time, 'clock', time.time))
+
+
 def _monotonic_time():
     """Return one non-adjustable process clock on #1513 and test hosts."""
     function = getattr(time, 'monotonic', None)
@@ -204,6 +208,58 @@ def _monotonic_time():
     # Python 2.7 on Windows defines time.clock() as elapsed wall time backed
     # by QueryPerformanceCounter.  That is the clock used by the #1513 client.
     return float(time.clock())
+
+
+class _TransportPerformance(object):
+    """Constant-size, generation-owned transport timing; never authoritative."""
+
+    def __init__(self, generation):
+        self.generation = generation
+        self.values = {}
+        for name in ('poll', 'materialize', 'handle', 'notify'):
+            self.values[name + '_wall_seconds'] = 0.0
+            self.values[name + '_calls'] = 0
+        self.handle_depth = 0
+        self.poll_depth = 0
+        self.valid = True
+
+    def clock(self):
+        try:
+            if not self.valid:
+                return None
+            value = float(_TRANSPORT_PROFILE_CLOCK())
+            if 0.0 <= value < float('inf'):
+                return value
+        except Exception:
+            pass
+        self.valid = False
+        return None
+
+    def finish(self, name, started):
+        try:
+            if started is None:
+                return
+            elapsed = self.clock() - started
+            if elapsed < 0.0:
+                self.valid = False
+                return
+            self.values[name + '_wall_seconds'] += elapsed
+            self.values[name + '_calls'] += 1
+        except Exception:
+            self.valid = False
+
+    def snapshot(self):
+        try:
+            if self.poll_depth or not self.valid:
+                # A native callback can re-enter the frame loop mid-poll.
+                # Its child timers may be complete while the parent is not.
+                return None
+            result = dict(self.values)
+            result['generation'] = self.generation
+            return result
+        except Exception:
+            self.valid = False
+            return None
 
 
 try:
@@ -1677,6 +1733,7 @@ class LANClient(object):
         self._outbound_accepting = False
         self._sender_thread = None
         self._transport_generation = 0
+        self._transport_performance = _TransportPerformance(0)
         self._snapshot_wire_baseline = None
         self._snapshot_wire_sequence = None
         self._snapshot_resync_pending = False
@@ -1710,6 +1767,7 @@ class LANClient(object):
                 return False
             self._transport_generation += 1
             generation = self._transport_generation
+            self._transport_performance = _TransportPerformance(generation)
             self._snapshot_wire_baseline = None
             self._snapshot_wire_sequence = None
             self._snapshot_resync_pending = False
@@ -4067,8 +4125,13 @@ class LANClient(object):
                 (generation != self._transport_generation or
                  self._stopping)):
             return False
+        performance = self._transport_performance
+        started = performance.clock()
         try:
-            prepared = snapshot_delta.materialize(message)
+            try:
+                prepared = snapshot_delta.materialize(message)
+            finally:
+                performance.finish('materialize', started)
         except snapshot_delta.SnapshotDeltaError:
             if (generation is not None and
                     (generation != self._transport_generation or
@@ -4083,7 +4146,13 @@ class LANClient(object):
                 (generation != self._transport_generation or
                  self._stopping)):
             return False
-        self._handle_message(prepared)
+        started = performance.clock()
+        performance.handle_depth += 1
+        try:
+            self._handle_message(prepared)
+        finally:
+            performance.handle_depth -= 1
+            performance.finish('handle', started)
         return (generation is None or
                 (generation == self._transport_generation and
                  not self._stopping))
@@ -4139,6 +4208,33 @@ class LANClient(object):
                 return
 
     def _poll(self):
+        performance = self._transport_performance
+        if performance.poll_depth:
+            # Nested polls would count their shared wall interval twice.
+            # Preserve dispatch, but do not publish misleading totals.
+            performance.valid = False
+        performance.poll_depth += 1
+        started = performance.clock()
+        try:
+            self._poll_messages()
+        finally:
+            performance.finish('poll', started)
+            performance.poll_depth -= 1
+
+    def transport_performance_snapshot(self):
+        """Return cumulative coarse main-thread costs for this transport.
+
+        Materialization and handler time are included in poll time. Notify
+        time includes replay capture and the session/runtime consumer and is
+        included in handler time. These wall times do not measure receiver
+        thread CPU or engine rendering.
+        """
+        try:
+            return self._transport_performance.snapshot()
+        except Exception:
+            return None
+
+    def _poll_messages(self):
         generation = self._transport_generation
         self._poll_callback = None
         messages = []
@@ -5477,6 +5573,15 @@ class LANClient(object):
         self._notify(kind, message, replay_hint=replay_hint)
 
     def _notify(self, kind, message, replay_hint=None):
+        performance = self._transport_performance
+        started = (performance.clock()
+                   if performance.handle_depth else None)
+        try:
+            self._notify_message(kind, message, replay_hint)
+        finally:
+            performance.finish('notify', started)
+
+    def _notify_message(self, kind, message, replay_hint):
         from gui.mods.offline_lan_0922 import offline_replay
         offline_replay.observe_wire(self, message, replay_hint)
         if self.on_event is not None and kind is not None:

@@ -7577,6 +7577,231 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertNotIn('combat_summary ', payloads[0])
         self.assertNotIn('combat_checkpoint ', payloads[0])
 
+    @staticmethod
+    def _lan_poll_test_totals(generation=1, seconds=1.0, calls=20):
+        values = {'generation': generation}
+        for name in ('poll', 'materialize', 'handle', 'notify'):
+            values[name + '_wall_seconds'] = seconds
+            values[name + '_calls'] = calls
+        return values
+
+    def test_frame_lan_poll_matches_outside_and_excludes_in_frame_reentry(self):
+        wall, payloads = [0.0], []
+        totals = self._lan_poll_test_totals()
+        getter = lambda: dict(totals)
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=payloads.append,
+            window_seconds=30.0)
+        first = diagnostics.begin(0.0, 0.02, lan_poll_getter=getter)
+        self.assertEqual(0, diagnostics._samples)
+        # Existing lobby totals and this callback's reentrant poll are not
+        # part of the later finish -> begin outside interval.
+        totals['poll_wall_seconds'] += 0.004
+        totals['poll_calls'] += 1
+        wall[0] = 0.010
+        diagnostics.finish(first, 0.0, 0.02, 0.02, {}, {}, {'role': 'worker'})
+        for name, elapsed, calls in (
+                ('poll', 0.018, 2), ('materialize', 0.003, 1),
+                ('handle', 0.010, 5), ('notify', 0.007, 5)):
+            totals[name + '_wall_seconds'] += elapsed
+            totals[name + '_calls'] += calls
+        second = diagnostics.begin(0.100, 0.100, 0.020, getter)
+        self.assertAlmostEqual(0.070, diagnostics._slow[0]['outside'])
+        self.assertAlmostEqual(
+            0.052, diagnostics._slow[0]['outside_without_lan_poll'])
+        # A second in-frame poll must not leak into the zero-poll interval.
+        totals['poll_wall_seconds'] += 0.002
+        totals['poll_calls'] += 1
+        wall[0] = 0.110
+        diagnostics.finish(second, 0.100, 0.1, 0.1, {}, {}, {'role': 'worker'})
+        diagnostics.begin(0.200, 0.100, lan_poll_getter=getter)
+        diagnostics.flush()
+
+        snapshot = diagnostics.snapshot()
+        self.assertEqual(2, snapshot['samples'])
+        self.assertAlmostEqual(80.0, snapshot['outside_callback_ms']['p50'])
+        self.assertEqual(2, snapshot['lan_poll']['samples'])
+        self.assertEqual(0, snapshot['lan_poll']['unmatched'])
+        stages = snapshot['lan_poll']['stages_ms']
+        for name, average, maximum, count, parent in (
+                ('poll', 9.0, 18.0, 2, 'outside'),
+                ('materialize', 1.5, 3.0, 1, 'poll'),
+                ('handle', 5.0, 10.0, 5, 'poll'),
+                ('notify', 3.5, 7.0, 5, 'handle')):
+            self.assertAlmostEqual(average, stages[name]['avg_ms'])
+            self.assertAlmostEqual(maximum, stages[name]['max_ms'])
+            self.assertEqual(count, stages[name]['calls'])
+            self.assertEqual(parent, stages[name]['parent'])
+        residual = snapshot['outside_without_lan_poll_ms']
+        self.assertEqual(2, residual['samples'])
+        self.assertAlmostEqual(71.0, residual['avg_ms'])
+        self.assertAlmostEqual(90.0, residual['max_ms'])
+        self.assertFalse(residual['gpu_measured'])
+        self.assertNotIn('poll', snapshot['python_stages_ms'])
+        self.assertIn('lan_poll samples=2/2 interval=finish_to_begin', payloads[0])
+        self.assertIn('materialize_handle_parent=poll notify_parent=handle', payloads[0])
+        self.assertIn('poll=9.000/18.000 poll_calls=2', payloads[0])
+        self.assertIn('outside_without_lan_poll_ms_avg_max=71.000/90.000', payloads[0])
+        self.assertIn('lan_poll_ms=18.000 outside_without_lan_poll_ms=52.000', payloads[0])
+        trace = diagnostics._recent_frames[0]
+        self.assertEqual(18.0, trace['lan_poll_ms']['poll'])
+        self.assertEqual(52.0, trace['outside_without_lan_poll_ms'])
+
+    def test_frame_lan_poll_spanning_finish_is_unmatched_then_recovers(self):
+        from gui.mods.offline_lan_0922 import lan_client
+        wall = [0.0]
+        client = lan_client.LANClient(
+            '127.0.0.1', 20014, 'Player', 'ussr:R11_MS-1')
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=lambda unused: None)
+        getter = client.transport_performance_snapshot
+
+        def reentrant_poll():
+            wall[0] = 0.02
+            first = diagnostics.begin(0.02, 0.02, lan_poll_getter=getter)
+            wall[0] = 0.03
+            diagnostics.finish(first, 0.02, 0.02, 0.02, {}, {}, {})
+            wall[0] = 0.07
+
+        with mock.patch.object(lan_client, '_TRANSPORT_PROFILE_CLOCK',
+                               lambda: wall[0]):
+            client._poll_messages = reentrant_poll
+            client._poll()
+            self.assertAlmostEqual(0.07, getter()['poll_wall_seconds'])
+            wall[0] = 0.12
+            second = diagnostics.begin(0.12, 0.1, lan_poll_getter=getter)
+            # The 70 ms poll contains this frame's 10 ms execution. Although
+            # 70 < 90 ms outside, subtracting it would double-count that work.
+            self.assertAlmostEqual(0.09, diagnostics._slow[0]['outside'])
+            self.assertIsNone(diagnostics._slow[0]['lan_poll'])
+            wall[0] = 0.13
+            diagnostics.finish(second, 0.12, 0.1, 0.1, {}, {}, {})
+            wall[0] = 0.14
+            client._poll_messages = lambda: wall.__setitem__(0, 0.15)
+            client._poll()
+            diagnostics.begin(0.22, 0.1, lan_poll_getter=getter)
+            diagnostics.flush()
+
+        self.assertTrue(diagnostics.enabled)
+        self.assertEqual(2, diagnostics.snapshot()['samples'])
+        self.assertEqual(1, diagnostics.snapshot()['lan_poll']['unmatched'])
+        self.assertEqual(1, diagnostics.snapshot()['lan_poll']['samples'])
+        self.assertAlmostEqual(10.0, diagnostics.snapshot()[
+            'lan_poll']['stages_ms']['poll']['avg_ms'])
+        self.assertAlmostEqual(80.0, diagnostics.snapshot()[
+            'outside_without_lan_poll_ms']['avg_ms'])
+
+    def test_frame_lan_poll_connection_and_reset_boundaries_are_unmatched(self):
+        class Transport(object):
+            def __init__(self, values):
+                self.values = values
+
+            def snapshot(self):
+                return dict(self.values)
+
+        for boundary in ('generation', 'client'):
+            with self.subTest(boundary=boundary):
+                wall = [0.0]
+                totals = self._lan_poll_test_totals()
+                transport = Transport(totals)
+                diagnostics = _FrameDiagnostics(
+                    clock=lambda: wall[0], writer=lambda unused: None)
+                first = diagnostics.begin(0.0, 0.02, lan_poll_getter=transport.snapshot)
+                wall[0] = 0.01
+                diagnostics.finish(first, 0.0, 0.02, 0.02, {}, {}, {})
+                if boundary == 'generation':
+                    totals['generation'] += 1
+                else:
+                    transport = Transport(totals)
+                second = diagnostics.begin(0.1, 0.1, lan_poll_getter=transport.snapshot)
+                self.assertIsNone(diagnostics._slow[0]['lan_poll'])
+                wall[0] = 0.11
+                diagnostics.finish(second, 0.1, 0.1, 0.1, {}, {}, {})
+                totals['poll_wall_seconds'] += 0.02
+                totals['poll_calls'] += 1
+                diagnostics.begin(0.2, 0.1, lan_poll_getter=transport.snapshot)
+                diagnostics.flush()
+                self.assertEqual(2, diagnostics.snapshot()['samples'])
+                self.assertEqual(1, diagnostics.snapshot()['lan_poll']['samples'])
+                self.assertEqual(1, diagnostics.snapshot()['lan_poll']['unmatched'])
+                self.assertAlmostEqual(20.0, diagnostics.snapshot()[
+                    'lan_poll']['stages_ms']['poll']['avg_ms'])
+                diagnostics.reset()
+                diagnostics.begin(5.0, 4.8, lan_poll_getter=transport.snapshot)
+                self.assertEqual(0, diagnostics._samples)
+                self.assertEqual(0, diagnostics._lan_poll_samples)
+                self.assertIsNone(diagnostics._pending)
+
+    def test_frame_lan_poll_invalid_sample_drops_locally_and_recovers(self):
+        faults = {
+            'missing': None,
+            'missing_field': {'poll_calls': None},
+            'nan': {'poll_wall_seconds': float('nan')},
+            'infinite': {'poll_wall_seconds': float('inf')},
+            'negative': {'poll_wall_seconds': -1.0},
+            'regressed': {'poll_wall_seconds': 0.9},
+            'counter_regressed': {'poll_calls': 19},
+            'counter_bool': {'poll_calls': True},
+            'counter_fraction': {'poll_calls': 20.5},
+            'generation_bool': {'generation': True},
+            'generation_negative': {'generation': -1},
+            'poll_over_budget': {'poll_wall_seconds': 1.1},
+            'children_over_poll': {'materialize_wall_seconds': 1.02},
+            'notify_over_handle': {'notify_wall_seconds': 1.01},
+        }
+        for fault, changes in faults.items():
+            with self.subTest(fault=fault):
+                wall = [0.0]
+                totals = self._lan_poll_test_totals()
+                current = [totals]
+                getter = lambda: current[0]
+                diagnostics = _FrameDiagnostics(
+                    clock=lambda: wall[0], writer=lambda unused: None)
+                first = diagnostics.begin(0.0, 0.02, lan_poll_getter=getter)
+                wall[0] = 0.01
+                diagnostics.finish(first, 0.0, 0.02, 0.02, {}, {}, {})
+                current[0] = dict(totals, **changes) if changes is not None else None
+                second = diagnostics.begin(0.1, 0.1, lan_poll_getter=getter)
+                self.assertTrue(diagnostics.enabled)
+                self.assertEqual(1, diagnostics._samples)
+                self.assertIsNone(diagnostics._slow[0]['lan_poll'])
+                current[0] = totals
+                wall[0] = 0.11
+                diagnostics.finish(second, 0.1, 0.1, 0.1, {}, {}, {})
+                totals['poll_wall_seconds'] += 0.01
+                totals['poll_calls'] += 1
+                diagnostics.begin(0.2, 0.1, lan_poll_getter=getter)
+                diagnostics.flush()
+                snapshot = diagnostics.snapshot()
+                self.assertTrue(diagnostics.enabled)
+                self.assertEqual(1, snapshot['lan_poll']['samples'])
+                self.assertEqual(1, snapshot['lan_poll']['unmatched'])
+                self.assertAlmostEqual(80.0, snapshot[
+                    'outside_without_lan_poll_ms']['avg_ms'])
+
+    def test_frame_lan_poll_getter_failure_keeps_frame_work_running(self):
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        getter = mock.Mock(side_effect=RuntimeError('diagnostic unavailable'))
+        battle.client.transport_performance_snapshot = getter
+        diagnostics = _FrameDiagnostics(writer=lambda unused: None)
+        battle._frame_diagnostics = diagnostics
+
+        battle._frame()
+        runtime.bigworld.now += 0.02
+        battle._frame()
+        diagnostics.flush()
+
+        self.assertEqual(4, getter.call_count)
+        self.assertTrue(diagnostics.enabled)
+        self.assertEqual(1, diagnostics.snapshot()['samples'])
+        self.assertEqual(0, diagnostics.snapshot()['lan_poll']['samples'])
+        self.assertIsNone(diagnostics.snapshot()['outside_without_lan_poll_ms']['avg_ms'])
+        self.assertEqual(2, battle._drive_local.call_count)
+        self.assertEqual(2, battle._schedule.call_count)
+        battle._fail.assert_not_called()
+
     def test_frame_diagnostics_disable_themselves_when_logging_fails(self):
         wall = [0.0]
 
@@ -7812,13 +8037,91 @@ class BattleRuntimeContractTests(unittest.TestCase):
                     side_effect=AssertionError('far contact projected crew')), \
                 mock.patch.object(
                     vehicle_physics, 'derive_params',
-                    side_effect=AssertionError('far contact derived physics')):
+                    side_effect=AssertionError('far contact derived physics')), \
+                mock.patch.object(
+                    tank_collision, 'vertical_overlap',
+                    side_effect=AssertionError('far contact projected height')):
             for step in range(3):
                 # Both the observer and every candidate keep moving.
                 for record in battle._records.values():
                     record['state']['z'] += 0.1
                 self.assertEqual(
                     [], battle._contact_tanks((0.0, 0.0, step * 0.1), shape))
+
+    def test_contact_prefilter_keeps_dual_pose_vertical_rules(self):
+        # Presented and canonical height/distance gates are not independent:
+        # a nearby canonical hull is useful only with canonical overlap.
+        cases = (
+            ('presented_near', 'bot', (1.0, 0.0), (300.0, 0.0), True),
+            ('canonical_near', 'bot', (300.0, 0.0), (1.0, 0.0), True),
+            ('canonical_above', 'bot', (300.0, 0.0), (1.0, 100.0), False),
+            ('presented_above', 'bot', (1.0, 100.0), (300.0, 0.0), True),
+            ('both_airborne', 'bot', (1.0, 100.0), (1.0, 100.0), False),
+            ('player_canonical_only', 'player', (300.0, 0.0), (1.0, 0.0), False),
+        )
+        for label, kind, presented, canonical, expected in cases:
+            with self.subTest(case=label):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                descriptor = _Descriptor()
+                shape = tank_collision.chassis_shape(descriptor)
+                runtime.bigworld.entities[11] = _Vehicle(
+                    11, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+                state = {
+                    'id': 11, 'x': 0.0, 'z': canonical[0],
+                    'y': canonical[1], 'yaw': 0.0, 'team': 2,
+                    'speed': 80.0, 'collision_shape': shape}
+                battle._records['%s:11' % kind] = {
+                    'engine_id': 11, 'network_id': 11, 'kind': kind,
+                    'ready': True, 'state': state,
+                    'presented_pose': {'z': presented[0], 'y': presented[1]}}
+                bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape, 0.1)
+                self.assertEqual([11] if expected else [],
+                                 [body['network_id'] for body in bodies])
+
+    def test_contact_prefilter_keeps_swept_travel_and_circle_boundary(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        shape = (3.0, 4.0, -0.5, 2.0)
+        runtime.bigworld.entities[11] = _Vehicle(
+            11, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
+        state = {'id': 11, 'x': 0.0, 'y': 0.0, 'z': 10.25,
+                 'yaw': 0.0, 'speed': -80.0, 'team': 2,
+                 'collision_shape': shape}
+        battle._records['bot:11'] = {
+            'engine_id': 11, 'network_id': 11, 'kind': 'bot',
+            'ready': True, 'state': state}
+        # Two radius-five bodies plus the existing 0.25 m padding.
+        self.assertEqual(1, len(battle._contact_tanks((0., 0., 0.), shape)))
+        state['z'] += 1.0e-8
+        with mock.patch.object(
+                tank_collision, 'vertical_overlap',
+                side_effect=AssertionError('outside circle projected height')):
+            self.assertEqual([], battle._contact_tanks((0., 0., 0.), shape))
+        # A long integrated step must still test a body crossed before its
+        # final endpoint; extra_reach comes from the unchanged swept caller.
+        state['z'] = 12.0
+        endpoint = (0.0, 0.0, 30.0)
+        self.assertEqual([], battle._contact_tanks(endpoint, shape, 0.1))
+        bodies = battle._contact_tanks(endpoint, shape, 0.1, extra_reach=30.0)
+        self.assertEqual([11], [body['network_id'] for body in bodies])
+        own = {'id': -1, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+               'yaw': 0.0, 'shape': shape}
+        self.assertLess(tank_collision.translation_fraction(
+            own, (0.0, 30.0), bodies), 1.0)
+
+    def test_contact_prefilter_preserves_missing_descriptor_failure(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._records['bot:11'] = {
+            'engine_id': 11, 'network_id': 11, 'kind': 'bot', 'ready': True,
+            'state': {'id': 11, 'x': 300.0, 'y': 0.0, 'z': 300.0}}
+        # No guessed radius may turn a missing shape into a proved miss.
+        with self.assertRaisesRegex(RuntimeError, 'descriptor is unavailable'):
+            battle._contact_tanks((0., 0., 0.), tank_collision.DEFAULT_SHAPE)
 
     def test_contact_candidates_use_presented_pose_and_keep_active_episodes(self):
         runtime = _runtime()
@@ -7833,13 +8136,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle._records['bot:%s' % actor_id] = {
                 'engine_id': actor_id, 'network_id': actor_id,
                 'kind': 'bot', 'ready': True,
-                'state': {'id': actor_id, 'x': 0.0, 'y': 0.0,
+                'state': {'id': actor_id, 'x': 0.0,
+                          'y': 500.0 if actor_id == 13 else 0.0,
                           'z': canonical_z, 'yaw': 0.0, 'speed': 10.0,
-                          'team': 2},
+                          'team': 2, 'alive': actor_id != 13},
                 'presented_pose': {'z': presented_z}}
         battle._local_ram_episode_contacts = frozenset((13,))
 
-        bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape)
+        with mock.patch.object(
+                tank_collision, 'vertical_overlap',
+                wraps=tank_collision.vertical_overlap) as overlap:
+            bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape)
+        # The remote wreck's active episode bypasses both broad phases even
+        # while it is far away and on a different vertical level.
+        self.assertEqual(4, overlap.call_count)
 
         # Keep both the historical contact needed for armour evidence and
         # the current canonical contact needed for reciprocal separation.
