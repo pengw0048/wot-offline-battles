@@ -10333,7 +10333,7 @@ class DestructiblesCompatibilityTests(unittest.TestCase):
         destructibles_sensor.g_offh_destr_instances[wire] = {}
         with mock.patch.object(
                 destructibles_sensor, '_catalog_contact_candidates',
-                return_value=[]):
+                return_value=([], None)):
             self.assertEqual('clear', self._wagon_sweep(
                 environment, authority)['status'])
         self.assertNotIn(

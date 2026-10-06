@@ -19,6 +19,7 @@ build_bridge() {
         "$PORT_ROOT/native/native_visibility_core.cpp" \
         "$PORT_ROOT/native/offline_visibility.cpp" \
         "$PORT_ROOT/native/offline_contact_roster.cpp" \
+        "$PORT_ROOT/native/offline_destructible_geometry.cpp" \
         "$PORT_ROOT/native/world_stage.cpp" \
         "$PORT_ROOT/native/navigation_query_stage.cpp" \
         "$PORT_ROOT/native/offline_simulation.cpp" \

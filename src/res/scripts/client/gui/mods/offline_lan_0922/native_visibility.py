@@ -253,6 +253,23 @@ class NativeVisibility(object):
         self.backend.vis_close(self.context)
 
     def snapshot(self):
+        if getattr(self, 'frontier_active', False):
+            row = self.backend.vis_frontier_snapshot(self.context)
+            if row is None:
+                raise RuntimeError('native sight snapshot unavailable')
+            names = ('identity', 'fire', 'detection', 'foliage', 'age',
+                     'unrequested', 'backend')
+            reasons = dict(self.cancellation_reasons)
+            for name, count in zip(names, row[6]):
+                if count:
+                    reasons[name] = reasons.get(name, 0) + count
+            return {'submitted': self.submitted + row[0],
+                    'completed': self.completed + row[1],
+                    'cancelled': self.cancelled + row[2],
+                    'pending': len(self.jobs) + row[3],
+                    'worker_seconds': self.worker_seconds + row[4],
+                    'max_completion_age': max(self.max_completion_age, row[5]),
+                    'cancellation_reasons': reasons, 'frontier_requests': row[7]}
         return {'submitted': self.submitted, 'completed': self.completed,
                 'cancelled': self.cancelled, 'pending': len(self.jobs),
                 'cancellation_reasons': dict(self.cancellation_reasons),

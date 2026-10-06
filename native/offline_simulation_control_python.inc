@@ -43,6 +43,17 @@ std::vector<ActorKey> keys(PyObject *value) {
 }
 SightProbe sight(const std::shared_ptr<SimulationContext> &context,
                  PyObject *dispatcher) {
+  if (sequence(dispatcher)) {
+    require_sequence(dispatcher, 8, true);
+    return [context, dispatcher](const SightRequest &request) {
+      if (context->closed)
+        throw Unsupported();
+      auto reply = visibility_control_sight(dispatcher, request);
+      if (context->closed)
+        throw Unsupported();
+      return reply;
+    };
+  }
   return [context, dispatcher](const SightRequest &request) {
     NativeProfilePhase bridge(NativePhase::Pack);
     if (context->closed)

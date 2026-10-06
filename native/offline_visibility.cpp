@@ -6,7 +6,17 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include <map>
+#include <set>
+#include <cmath>
+#include <limits>
 namespace offline_visibility {
+namespace {
+void frontier_open(int64_t);
+void frontier_changed(int64_t,const Update &);
+void frontier_close(int64_t);
+}
+
 namespace {
 struct Job {
     int64_t id=0;
@@ -49,6 +59,10 @@ class Service {
         context->completed.push_back(job);
     }
 public:
+    double cell_size(int64_t id) {
+        std::lock_guard<std::mutex> lock(mutex_);const auto context=find(id);
+        return context?context->snapshot->cell_size:32.;
+    }
     int64_t open_map(native_visibility::FoliageSnapshot snapshot) {
         auto context=std::make_shared<Context>();
         context->snapshot=std::make_shared<const native_visibility::FoliageSnapshot>(std::move(snapshot));
@@ -88,19 +102,21 @@ public:
         job->snapshot=context->snapshot;context->jobs.emplace(job_id,job);
         offline_async::schedule([this,context,job] {run(context,job);});return true;
     }
-    std::vector<Completion> take(int64_t id) {
+    std::vector<Completion> take(int64_t id,bool frontier=false) {
         std::vector<Completion> out;
         std::lock_guard<std::mutex> lock(mutex_);const auto context=find(id);
         if (!context || context->closed) return out;
         out.reserve(context->completed.size());
+        std::vector<std::shared_ptr<Job>> retained;
         for (const auto &job:context->completed) {
+            if((job->id<0)!=frontier){retained.push_back(job);continue;}
             Completion value;value.job_id=job->id;value.worker_seconds=job->worker_seconds;
             value.status=job->cancelled.load(std::memory_order_relaxed)?1:job->status;
             if (!value.status) value.rays=job->prepared.rays;
             else context->jobs.erase(job->id);
             job->emitted=true;out.push_back(std::move(value));
         }
-        context->completed.clear();return out;
+        context->completed=std::move(retained);return out;
     }
     bool finish(int64_t id,int64_t job_id,const std::vector<std::uint8_t> &clear,
                 native_visibility::VisibilityResult &result) {
@@ -142,11 +158,196 @@ public:
 // during DLL detach. Explicit context close releases all per-round data.
 Service &service() {static Service *const value=new Service;return *value;}
 }
-int64_t open(native_visibility::FoliageSnapshot snapshot) {return service().open_map(std::move(snapshot));}
-bool update(int64_t context,Update changes) {return service().update_map(context,std::move(changes));}
+int64_t open(native_visibility::FoliageSnapshot snapshot) {const auto id=service().open_map(std::move(snapshot));frontier_open(id);return id;}
+bool update(int64_t context,Update changes) {if (!service().update_map(context,changes)) return false;frontier_changed(context,changes);return true;}
 bool submit(int64_t context,int64_t job_id,native_visibility::PairInput pair) {return service().submit_job(context,job_id,std::move(pair));}
 std::vector<Completion> poll(int64_t context) {return service().take(context);}
 bool reduce(int64_t context,int64_t job_id,const std::vector<std::uint8_t> &clear,native_visibility::VisibilityResult &result) {return service().finish(context,job_id,clear,result);}
 void cancel(int64_t context,const std::vector<int64_t> &jobs) {service().cancel_jobs(context,jobs);}
-void close(int64_t context) {service().close_map(context);}
+void close(int64_t context) {frontier_close(context);service().close_map(context);}
+namespace {
+using PairKey=std::pair<ActorKey,ActorKey>;
+struct FrontierJob {
+    int64_t id=0, fire=-1;
+    uint64_t observer_identity=0,target_identity=0;
+    native_visibility::DetectionInputs detection;
+    double sampled_at=0.,requested_at=0.;
+    bool done=false,unknown=false;
+    unsigned status=0;
+    std::vector<native_visibility::Ray> rays;
+    std::set<native_visibility::Cell> dirty;
+};
+struct Frontier {
+    bool closed=false;
+    int64_t next_job=0;
+    uint64_t phase=0,frame_version=0;
+    double poll_at=std::numeric_limits<double>::quiet_NaN();
+    FrontierSnapshot counts;
+    std::map<ActorKey,FrontierActor> actors;
+    std::map<PairKey,FrontierJob> jobs;
+    std::map<int64_t,PairKey> by_id;
+};
+std::mutex frontier_mutex;
+std::map<int64_t,std::shared_ptr<Frontier>> frontiers;
+std::shared_ptr<Frontier> frontier_get(int64_t id) {
+    std::lock_guard<std::mutex> lock(frontier_mutex);
+    const auto found=frontiers.find(id);
+    return found==frontiers.end()?nullptr:found->second;
+}
+void frontier_open(int64_t id) {
+    std::lock_guard<std::mutex> lock(frontier_mutex);
+    frontiers[id]=std::make_shared<Frontier>();
+}
+void frontier_close(int64_t id) {
+    std::lock_guard<std::mutex> lock(frontier_mutex);
+    const auto found=frontiers.find(id);
+    if(found==frontiers.end()) return;
+    found->second->closed=true;frontiers.erase(found);
+}
+void frontier_changed(int64_t id,const Update &update) {
+    const auto f=frontier_get(id);if(!f || f->closed)return;
+    for(auto &entry:f->jobs) {
+        if(update.cells.empty())entry.second.unknown=true;
+        for(const auto &cell:update.cells)entry.second.dirty.insert(cell.first);
+    }
+}
+void frontier_cancel(int64_t id,Frontier &f,const PairKey &key,unsigned reason=0) {
+    const auto found=f.jobs.find(key);if(found==f.jobs.end())return;
+    cancel(id,{found->second.id});f.by_id.erase(found->second.id);f.jobs.erase(found);
+    ++f.counts.cancelled;++f.counts.reasons[reason];
+}
+bool same_detection(const native_visibility::DetectionInputs &a,
+                    const native_visibility::DetectionInputs &b) {
+    // Distance changes every frame and is intentionally absent from the token.
+    return a.view_range==b.view_range && a.base_camouflage==b.base_camouflage &&
+        a.moving==b.moving && a.fired_recently==b.fired_recently &&
+        a.additive==b.additive && a.multiplier==b.multiplier && a.shot_factor==b.shot_factor;
+}
+bool foliage_changed(const FrontierJob &job,double cell_size) {
+    if(job.unknown)return true;
+    if(job.dirty.empty() || job.rays.empty())return false;
+    double minx=job.rays[0].start[0],maxx=minx,minz=job.rays[0].start[2],maxz=minz;
+    for(const auto &ray:job.rays)for(const auto &point:{ray.start,ray.end}) {
+        minx=std::min(minx,point[0]);maxx=std::max(maxx,point[0]);
+        minz=std::min(minz,point[2]);maxz=std::max(maxz,point[2]);
+    }
+    const double x0=std::floor(minx/cell_size)-1,x1=std::floor(maxx/cell_size)+1;
+    const double z0=std::floor(minz/cell_size)-1,z1=std::floor(maxz/cell_size)+1;
+    for(const auto &cell:job.dirty)if(x0<=cell.first && cell.first<=x1 && z0<=cell.second && cell.second<=z1)return true;
+    return false;
+}
+void frontier_poll(int64_t id,Frontier &f,double now) {
+    if(f.poll_at==now)return;
+    f.poll_at=now;
+    for(auto &completion:service().take(id,true)) {
+        const auto found=f.by_id.find(completion.job_id);if(found==f.by_id.end())continue;
+        f.counts.worker_seconds+=completion.worker_seconds;
+        auto job=f.jobs.find(found->second);if(job==f.jobs.end())continue;
+        job->second.done=true;job->second.status=completion.status;
+        job->second.rays=std::move(completion.rays);
+    }
+    std::vector<PairKey> expired;
+    for(const auto &entry:f.jobs)if(now-entry.second.requested_at>10.)expired.push_back(entry.first);
+    for(const auto &key:expired)frontier_cancel(id,f,key,5);
+}
+}
+bool frontier_frame(int64_t id,std::vector<FrontierActor> actors,uint64_t phase,double now) {
+    const auto f=frontier_get(id);if(!f || f->closed)return false;
+    std::map<ActorKey,FrontierActor> next;
+    for(auto &actor:actors)next.emplace(actor.key,std::move(actor));
+    std::vector<PairKey> stale;
+    for(const auto &entry:f->jobs) {
+        const auto a=next.find(entry.first.first),b=next.find(entry.first.second);
+        if(a==next.end() || b==next.end() || !b->second.target_available || a->second.identity!=entry.second.observer_identity ||
+           b->second.identity!=entry.second.target_identity)stale.push_back(entry.first);
+    }
+    for(const auto &key:stale)frontier_cancel(id,*f,key);
+    f->actors=std::move(next);f->phase=phase;++f->frame_version;frontier_poll(id,*f,now);return true;
+}
+bool frontier_actor(int64_t id,FrontierActor actor) {
+    const auto f=frontier_get(id);if(!f || f->closed)return false;
+    const auto old=f->actors.find(actor.key);
+    if(!actor.identity || (old!=f->actors.end() && old->second.identity!=actor.identity)) {
+        std::vector<PairKey> stale;
+        for(const auto &entry:f->jobs)if(entry.first.first==actor.key || entry.first.second==actor.key)stale.push_back(entry.first);
+        for(const auto &key:stale)frontier_cancel(id,*f,key);
+    }
+    if(!actor.target_available && actor.identity) {
+        std::vector<PairKey> stale;
+        for(const auto &entry:f->jobs)if(entry.first.second==actor.key)stale.push_back(entry.first);
+        for(const auto &key:stale)frontier_cancel(id,*f,key);
+    }
+    if(!actor.identity)f->actors.erase(actor.key);
+    else f->actors[actor.key]=std::move(actor);
+    return true;
+}
+FrontierReply frontier_sight(int64_t id,const ActorKey &observer,const ActorKey &target,
+    double now,int64_t fire,const native_visibility::DetectionInputs &detection,const RayOracle &ray,const PhaseOracle &phase) {
+    FrontierReply reply;reply.sampled_at=now;
+    const auto f=frontier_get(id);if(!f || f->closed)return reply;
+    ++f->counts.requests;frontier_poll(id,*f,now);
+    const auto a=f->actors.find(observer),b=f->actors.find(target);
+    if(a==f->actors.end() || b==f->actors.end() || !b->second.target_available)return reply;
+    const PairKey key(observer,target);auto found=f->jobs.find(key);
+    if(found!=f->jobs.end()) {
+        const auto &job=found->second;
+        // The foliage cell size is immutable over the context lifetime.
+        // Fetch it from the job snapshot via a small service accessor below.
+        int reason=-1;
+        if(job.observer_identity!=a->second.identity || job.target_identity!=b->second.identity)reason=0;
+        else if(job.fire!=fire)reason=1;
+        else if(!same_detection(job.detection,detection))reason=2;
+        else if(job.done && foliage_changed(job,service().cell_size(id)))reason=3;
+        else if(now-job.sampled_at>=0.75)reason=4;
+        if(reason>=0){frontier_cancel(id,*f,key,static_cast<unsigned>(reason));found=f->jobs.end();}
+    }
+    if(found==f->jobs.end()) {
+        // The clock capability may synchronously reenter Python and replace
+        // actors or submit this same pair. Retain no map iterator across it.
+        const auto observer_identity=a->second.identity,target_identity=b->second.identity;
+        const auto frame_version=f->frame_version;
+        const uint64_t observer_phase=phase?phase():f->phase;
+        if(f->closed || f->frame_version!=frame_version)return reply;
+        const auto current_a=f->actors.find(observer),current_b=f->actors.find(target);
+        if(current_a==f->actors.end() || current_b==f->actors.end() ||
+           current_a->second.identity!=observer_identity || current_b->second.identity!=target_identity ||
+           !current_b->second.target_available)return reply;
+        if(f->jobs.count(key)){reply.status=2;return reply;}
+        FrontierJob job;job.id=--f->next_job;job.fire=fire;job.detection=detection;
+        job.observer_identity=current_a->second.identity;job.target_identity=current_b->second.identity;
+        job.sampled_at=job.requested_at=now;
+        native_visibility::PairInput input;input.observer_checkpoints=current_a->second.checkpoints;
+        input.target_checkpoints=current_b->second.checkpoints;input.observer=current_a->second.observer_pose;
+        input.target=current_b->second.target_pose;input.observer_phase=observer_phase;input.detection=detection;
+        if(!submit(id,job.id,std::move(input)))return reply;
+        f->by_id.emplace(job.id,key);f->jobs.emplace(key,std::move(job));++f->counts.submitted;reply.status=2;return reply;
+    }
+    found->second.requested_at=now;
+    // Copy owned rays before engine callbacks, which may close this context.
+    const FrontierJob job=found->second;
+    if(!job.done){reply.status=2;return reply;}
+    if(job.status){frontier_cancel(id,*f,key,6);reply.status=2;return reply;}
+    std::vector<uint8_t> clear;clear.reserve(job.rays.size());
+    for(const auto &item:job.rays) {
+        if(f->closed)return reply;
+        const auto current=f->jobs.find(key);
+        if(current==f->jobs.end() || current->second.id!=job.id)return reply;
+        const bool value=ray(item);clear.push_back(value?1:0);
+        if(f->closed)return reply;
+        if(value && item.foliage_bonus<=0.)break;
+    }
+    native_visibility::VisibilityResult result;
+    if(!reduce(id,job.id,clear,result))return reply;
+    // Do not erase a replacement submitted by synchronous engine reentry.
+    found=f->jobs.find(key);
+    if(found!=f->jobs.end() && found->second.id==job.id){f->jobs.erase(found);f->by_id.erase(job.id);}
+    ++f->counts.completed;f->counts.max_completion_age=std::max(f->counts.max_completion_age,std::max(0.,now-job.sampled_at));
+    reply.status=result.line_of_sight?0:1;reply.has_detection=true;reply.detected=result.detected;
+    reply.foliage=result.foliage_bonus;reply.sampled_at=job.sampled_at;return reply;
+}
+FrontierSnapshot frontier_snapshot(int64_t id) {
+    const auto f=frontier_get(id);if(!f || f->closed)return {};
+    auto result=f->counts;result.pending=f->jobs.size();return result;
+}
+
 }

@@ -309,6 +309,7 @@ class NativeControl(object):
     def __init__(self, runtime, backend, context_handle):
         self.runtime, self.backend, self.handle = runtime, backend, context_handle
         self._config = {}
+        self._config_projections = {}
         self._templates = {}
         self._pose_free = {}
         self._sources = {}
@@ -319,6 +320,7 @@ class NativeControl(object):
         self._now = 0.0
         self._visibility_tick = None
         self._scheduling = {}
+        self._sight_binding = None
         self._old_driver = runtime.adapter.driver
         self._old_traffic = runtime._traffic_coordinator
         self._old_radio = runtime._radio_network
@@ -359,12 +361,18 @@ class NativeControl(object):
                 self._export_perception(snapshot)
             self.traffic.detach()
         finally:
-            if self.runtime.adapter.driver is self.driver:
-                self.runtime.adapter.driver = self._old_driver
-            if self.runtime._traffic_coordinator is self.traffic:
-                self.runtime._traffic_coordinator = self._old_traffic
-            if self.runtime._radio_network is self.radio:
-                self.runtime._radio_network = self._old_radio
+            try:
+                from .battle_visibility import close_visibility
+                close_visibility(self)
+            finally:
+                self._config_projections.clear()
+                self._sight_binding = None
+                if self.runtime.adapter.driver is self.driver:
+                    self.runtime.adapter.driver = self._old_driver
+                if self.runtime._traffic_coordinator is self.traffic:
+                    self.runtime._traffic_coordinator = self._old_traffic
+                if self.runtime._radio_network is self.radio:
+                    self.runtime._radio_network = self._old_radio
 
     def configure(self, key, values):
         key = tuple(key)
@@ -403,9 +411,47 @@ class NativeControl(object):
         if self._open:
             self._call('sim_control_finish')
             self._open = False
+            from .battle_visibility import flush_visibility
+            requests = flush_visibility(self)
+            if requests:
+                self.runtime._probe_totals[0] += requests
 
     @observed('frontier.control_config')
     def _actor_config(self, source, tick):
+        """Keep cold Bot mechanics out of repeated pose/visibility updates.
+
+        A Bot descriptor and its spotting projection are immutable until the
+        existing descriptor/crew owner replaces them. Critical payloads may
+        be edited in place by a consumer, so retain a detached value snapshot
+        instead of treating dictionary identity as an invalidation token.
+        Human mechanics keep their existing per-slice client snapshot reader.
+        """
+        key = _key(source)
+        cacheable = key[0] == 1
+        runtime = self.runtime
+        if cacheable:
+            descriptor = runtime._descriptors.get(key[1])
+            profile = runtime._spotting_profiles.get(('bot', key[1]))
+            inputs = (source.get('team', 0), source.get('slot', 0),
+                      source.get('view_range', 330.0),
+                      runtime._vision_ranges.get(key[1]),
+                      runtime.bot_crew_level(key[1]))
+            critical = source.get('critical')
+            cached = self._config_projections.get(key)
+            if (cached is not None and descriptor is cached[0] and
+                    profile is not None and profile is cached[1] and
+                    inputs == cached[2] and critical == cached[3]):
+                combat_count('frontier_control_projection_reused')
+                return cached[4]
+        result = self._project_actor_config(source, tick)
+        if cacheable:
+            self._config_projections[key] = (
+                descriptor, runtime._spotting_profiles.get(('bot', key[1])),
+                inputs, copy.deepcopy(critical), result)
+        combat_count('frontier_control_projection_built')
+        return result
+
+    def _project_actor_config(self, source, tick):
         from gui.mods.offline_lan_0922 import bot_runtime as laws
         runtime = self.runtime
         key = _key(source)
@@ -549,6 +595,7 @@ class NativeControl(object):
         for key in removed:
             self._call('sim_control_forget', key)
             self._config.pop(key, None)
+            self._config_projections.pop(key, None)
         self._present = tuple(order)
         self.update_samples(rows)
         self.begin_samples(order, now, laws.MAX_VISIBILITY_PROBES_PER_FRAME,
@@ -557,6 +604,8 @@ class NativeControl(object):
         if self.runtime._radio_network is self._old_radio:
             self.runtime._radio_network = self.radio
         self._include_humans = bool(include_humans)
+        from .battle_visibility import bind_visibility
+        self._sight_binding = bind_visibility(self)
         return True
 
     def update_actor(self, state, kind='bot', processed=True):
@@ -573,6 +622,8 @@ class NativeControl(object):
         else:
             self._templates.pop(key, None)
             self._pose_free.pop(key, None)
+        from .battle_visibility import update_visibility
+        update_visibility(self, key)
 
     def _sight(self, source_key, target_key, now, fire, detection, unused):
         runtime = self.runtime
@@ -643,7 +694,7 @@ class NativeControl(object):
                 if int(target.get('team', 0)) != team:
                     aggregate.setdefault((team,) + _wire_key(key),
                                          [False, set(), target, set(), set()])
-        self.observe_humans(self._sight)
+        self.observe_humans(self._sight_binding or self._sight)
         self._sync_events(aggregate, team_visibility)
         if isinstance(visibility_tick, dict):
             vision_rows = [{'id': row[0][1], 'radius': row[5]}
@@ -659,7 +710,7 @@ class NativeControl(object):
         # Current actor input may have changed during its preparation phase.
         # Earlier actors are updated separately after their committed motion.
         self.update_actor(source, source.get('kind', 'bot'), processed=False)
-        rows = self.contacts(_key(source), self._sight)
+        rows = self.contacts(_key(source), self._sight_binding or self._sight)
         combat_count('frontier_contact_rows', len(rows))
         contacts, lookup = [], {}
         for key, flags, unused_remaining, unused_sampled, pose in rows:

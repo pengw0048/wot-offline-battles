@@ -18,6 +18,9 @@ enum class EntryCode {
     translate, slide, rotate,
     nav_open, nav_submit, nav_poll, nav_answer, nav_cancel, nav_close,
     vis_open, vis_update, vis_submit, vis_poll, vis_reduce, vis_cancel, vis_close,
+    vis_frontier_frame, vis_frontier_actor, vis_frontier_snapshot,
+    engine_query_filter,
+    destr_open, destr_close, destr_update, destr_query,
     contact_roster, world_run, nav_query_filter, nav_query_run,
     sim_open, sim_close, sim_lifetime,
     sim_control_configure, sim_control_update, sim_control_begin,
@@ -44,7 +47,7 @@ enum class EntryCode {
 };
 
 enum class CallbackCode { Motion, ControlSight, ControlDriver, Navigation,
-                          World, NavigationQuery, Count };
+                          World, NavigationQuery, EngineQuery, Count };
 enum class Phase { Parse, Body, Pack };
 enum class CounterCode { ContactActors, ContactPairs, ContactIsolated,
     ContactIslands, ContactLargestActors, ContactLargestPairs, Count };

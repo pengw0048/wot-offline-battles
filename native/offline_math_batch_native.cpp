@@ -29,6 +29,7 @@ struct PyMethodDef {
 #include "offline_navigation.h"
 #include "offline_visibility.h"
 #include "offline_contact_roster.h"
+#include "offline_destructible_geometry.h"
 #include "world_stage.h"
 #include "navigation_query_stage.h"
 #include "offline_simulation.h"
@@ -312,9 +313,11 @@ PyObject *WOT_CDECL rotate(PyObject *, PyObject *args) {
 }
 
 #include "offline_navigation_python.inc"
-#include "offline_visibility_python.inc"
 #include "offline_contact_roster_python.inc"
 #include "offline_world_python.inc"
+#include "offline_engine_query_python.inc"
+#include "offline_visibility_python.inc"
+#include "offline_destructible_python.inc"
 #include "offline_navigation_query_python.inc"
 #include "offline_simulation_python.inc"
 #include "offline_simulation_control_python.inc"
@@ -328,6 +331,11 @@ PyMethodDef methods[] = {
     WOT_SIM_MOTION_METHODS
     WOT_SIM_WEAPON_METHODS
     WOT_SIM_NAVIGATION_METHODS
+    WOT_DESTRUCTIBLE_METHODS
+    {"engine_query_filter", engine_query_filter, 0x0001, "Filter current engine contacts within a synchronous native query."},
+    {"vis_frontier_frame", vis_frontier_frame, 0x0001, "Publish the complete current sight actor frame."},
+    {"vis_frontier_actor", vis_frontier_actor, 0x0001, "Publish an ordered actor update to the native sight frontier."},
+    {"vis_frontier_snapshot", vis_frontier_snapshot, 0x0001, "Read native sight frontier queue and lifetime counters."},
     {"nav_query_run", nav_query_run, 0x0001, "Run a complete same-thread navigation corridor oracle."},
     {"nav_query_filter", nav_query_filter, 0x0001, "Filter original planning materials during a native oracle call."},
     {"thread_cpu_seconds", thread_cpu_seconds, 0x0001, "Read current-thread user and kernel CPU seconds."},

@@ -8033,6 +8033,33 @@ turn whose measured speed and descriptor turn limit cannot intersect the
 existing arrival circle, then resumes when the forward path can reach it;
 closed-loop tests retain the original arrival radius and vehicle parameters.
 
+### Native query ownership
+
+The motion bridge retains ordered ray iteration, candidate filtering, departing
+contact checks and bounded soft-static recasts inside one synchronous C++ call.
+Its capabilities still invoke the existing #1513 Math operations and BigWorld
+query on the engine thread. Raw hit objects remain strongly owned until their
+original effect boundary; no Python object enters the background pool. Owner,
+round, space and thread guards fence engine reentry. Live destruction evidence
+is read when each query runs, so an earlier committed break affects later rays.
+
+The visibility service also owns pair jobs and prepared rays through reduction.
+Actor snapshots distinguish current observer poses from each target's ordered
+motion phase. Identity replacement, target death, fire, detection parameters,
+foliage changes and the existing age limits retain their invalidation behavior.
+A dead human with Last Effort can remain an observer without becoming a target.
+The synchronous engine stage preserves the six-point ray order, Math-based end
+tolerance and destruction reports. Queue counters belong to the native jobs;
+the former Python callback duration is no longer a measure of this stage.
+
+The destructible sensor retains streamed native identities and effect commits,
+while a persistent numeric index owns body, tree and catalog candidate geometry.
+Registry removal, isolation, falling poses and proved chunk-layout changes
+update that index before reuse. Cold Bot control projections are reused only
+while their descriptor, spotting profile, crew inputs and critical payload are
+unchanged. These changes preserve the existing cadence and collision checks;
+their Windows frame-time effect requires a new exact-client capture.
+
 ### Native boundary diagnostics
 
 Selected combat-control callbacks now carry a separate native timing ledger.

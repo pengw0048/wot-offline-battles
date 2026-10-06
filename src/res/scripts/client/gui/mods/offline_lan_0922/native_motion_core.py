@@ -14,6 +14,7 @@ from . import world_collision as world
 from . import tank_collision
 from . import prebaked_navigation
 from .worker_diagnostics import observed
+from .native_engine_query import EngineQuery
 
 STATE_NAMES = (
     'terrain_pitch', 'speed', '_turn_speed', 'vertical_speed', 'push_x', 'push_z',
@@ -61,6 +62,7 @@ class NativeMotion(object):
         self.players = ()
         self.installed = set()
         self._world = None
+        self._engine_query = None
         self._world_actor = None
         self._world_hard = False
         self.failures = []
@@ -353,7 +355,7 @@ class NativeMotion(object):
             return (-999,)
 
     def _dispatch(self, op, row):
-        if op <= 6:
+        if op <= 7:
             if self._world is None:
                 raise RuntimeError('World query outside its ordered frontier')
             return self._world(op, row)
@@ -361,6 +363,8 @@ class NativeMotion(object):
             if self._world_actor is not None and not self._world_hard:
                 self.runtime.states[self._world_actor].pop('_world_contact_trace', None)
             self._world = None
+            if self._engine_query is not None:
+                self._engine_query.raise_failure()
             return None
         if op == 23:
             self._begin_contacts(row)
@@ -496,7 +500,9 @@ class NativeMotion(object):
                         **({'motion_yaw': motion_yaw} if motion_yaw is not None else {}))):
                 return 1
             self._world = self._world_dispatch(bot_id, state, row)
-            return 0
+            return (self._engine_query.capabilities,
+                    (world._WORLD_SOFT_RECAST_BUDGET, world._GROUND_HIT_EPSILON,
+                     world._MAX_DRIVABLE_GRADIENT))
         if op == 22:
             return self._finalize_contact(state, row[1])
         raise RuntimeError('Unknown persistent motion frontier %s' % op)
@@ -598,15 +604,13 @@ class NativeMotion(object):
     def _world_dispatch(self, bot_id, state, row):
         owner = self._owner()
         V = owner._runtime.math.Vector3
-        engine = owner._runtime.bigworld
         space = owner._avatar.spaceID
         descriptor = self.runtime._descriptors[bot_id]
         pose, speed, dt, motion_yaw, flags, unused_cap, unused_revision = row[1:8]
-        pos, yaw = V(*pose[:3]), pose[3]
-        pitch, roll = pose[4:]
+        yaw, pitch, roll = pose[3:]
         commit, active = bool(flags & 1), bool(flags & 2)
-        bounds = world._vehicle_motion_bounds(descriptor)
-        heights = world._vehicle_motion_heights(descriptor)
+        # The native descriptor owns the same bounds used by the reducer.
+        bounds = row[10][:4]
         trace = {}
         state['_world_contact_trace'] = trace
         trace.update(position=tuple(pose[:3]), yaw=yaw, speed=speed, dt=dt,
@@ -617,58 +621,33 @@ class NativeMotion(object):
         self._world_kinetic = owner._destructible_drive_speed_cap(
             descriptor, physics.derive_params(descriptor), speed,
             owner._bot_destructible_travel_descriptor(bot_id)) if active else None
-        hits, collision, crush = {}, [world._UNPREPARED_COLLISION_FILTER, None], [False]
-        def xyz(value):
-            return (value.x, value.y, value.z)
+        query = self._engine_query
+        if (query is None or query.owner is not owner or
+                query._avatar is not owner._avatar or
+                query._runtime is not owner._runtime or query._space != space):
+            query = self._engine_query = EngineQuery(owner, self.backend)
+        collision, crush = [world._UNPREPARED_COLLISION_FILTER], [False]
         def dispatch(op, rows):
+            query._live()
             if op == 1:
                 a, b = rows[0]
                 collision[0] = world._trace_collision_filter(
                     world.prepare_horizontal_collision_filter(V(*a), V(*b)), trace)
-                return None
-            if op == 2:
-                v = rows[0]
-                collision[1] = world._translation_departing_contact(
-                    pos, yaw, bounds, v[3:6], v[0], v[1], heights, dy=v[2],
-                    pose_axes=(v[6:9], v[9:12], v[12:15]) if motion_yaw is not None else None)
-                return None
+                return collision[0]
+            if op == 7:
+                a, unused_b, unused_flags = rows[0]
+                return world.ground_collision_filter(a[0], a[2])
             if op == 5:
-                a, b, handle = rows[0]
-                result = world._destroy_and_recast(space, V(*a), V(*b), hits[handle],
+                a, b, hit = rows[0]
+                result = world._destroy_and_recast(space, V(*a), V(*b), hit,
                     yaw, speed, descriptor, crush, active, self._world_kinetic, commit, collision[0])
+                query._live()
                 return (2 if result == 'kinetic' else 1 if result is True else 0,)
             if op == 6:
-                a, b, handle, reason, ground_ahead, profile = rows[0]
+                a, b, hit, reason, ground_ahead, profile = rows[0]
                 self._world_hard = True
                 world._record_hard_contact(trace, ('', 'raised_wall', 'ground_profile',
-                    'solid_lane', 'upper_lane')[reason], V(*a), V(*b), hits[handle], ground_ahead, profile)
+                    'solid_lane', 'upper_lane')[reason], V(*a), V(*b), hit, ground_ahead, profile)
                 return None
-            result, stopped = [], False
-            for a, b, query_flags in rows:
-                if stopped or query_flags & 4:
-                    result.append((None, None, 0, a, b))
-                    stopped = stopped or (op == 4 and bool(query_flags & 1))
-                    continue
-                start, end = V(*a), V(*b)
-                if op == 3:
-                    hit = world._collide_horizontal(space, start, end, collision[0],
-                        collision[1] if query_flags & 1 else None)
-                else:
-                    query_filter = collision[0]
-                    if query_filter is world._UNPREPARED_COLLISION_FILTER:
-                        query_filter = world.ground_collision_filter(a[0], a[2])
-                    try:
-                        hit = world.collide_motion_segment(space, start, end, query_filter,
-                            engine.wg_collideSegment, 'native.motion.ground')
-                    except (AttributeError, IndexError, TypeError, ValueError):
-                        hit = None
-                if hit is None:
-                    result.append((None, None, 0, xyz(start), xyz(end)))
-                    stopped = stopped or (op == 4 and bool(query_flags & 1))
-                else:
-                    handle = len(hits) + 1
-                    hits[handle] = hit
-                    normal = xyz(hit[1]) if len(hit) > 1 else (0.0, 0.0, 0.0)
-                    result.append((xyz(hit[0]), normal, handle, xyz(start), xyz(end)))
-            return tuple(result)
+            raise RuntimeError('Unknown world effect frontier %s' % op)
         return dispatch

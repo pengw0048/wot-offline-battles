@@ -396,7 +396,9 @@ def check_query_rows(scene_module, backend, NativeMotion):
     scene.owner._destructibles._catalog_hull_contact = lambda *args, **kwargs: False
     scene.runtime._turn_speeds[16] = 0.
     state['rotation_dir'] = 0
-    assert owner._dispatch(20, (key, pose, 1., .2, None, 10, 0., 0, 1, 0.)) == 0
+    shape = (-1., 1., 2., 2., .6, 1.6)
+    frontier = owner._dispatch(20, (key, pose, 1., .2, None, 10, 0., 0, 1, 0., shape))
+    assert frontier[0] is owner._engine_query.capabilities
     assert not reuse, 'stale rotation_dir admitted a world receipt'
     owner._dispatch(21, ())
     scene.runtime._turn_speeds[16] = 99.
@@ -544,6 +546,8 @@ def main():
               check_failure(scene_module, backend, NativeMotion),
               check_failure(scene_module, backend, NativeMotion, True),
               check_reentrant_close(scene_module, backend, NativeMotion)]
+    from native_motion_frontier_fixture import check_frontier
+    events.append(check_frontier(scene_module, backend, NativeMotion))
     result = dict(event_checks=events, comparisons=sum(row['comparisons'] for row in results),
                   actors=29, slices_per_case=4, cases=results,
                   physical_state_parity=True, ram_report_parity=True,

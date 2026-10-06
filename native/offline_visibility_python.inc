@@ -140,3 +140,132 @@ PyObject *WOT_CDECL vis_close(PyObject *,PyObject *args) {
     try {require_sequence(args,1,true);profile.run(offline_visibility::close,identity(items(args)[0]));return int_new(1);}
     catch (...) { profile.fail();return fallback();}
 }
+
+// Actor geometry and both consumer poses are installed once per caller frame.
+// The identity serial belongs to the Python cold owner, not to a raw address.
+offline_visibility::FrontierActor visibility_frontier_actor(PyObject *object) {
+    require_sequence(object,6,true);PyObject **row=items(object);
+    require_sequence(row[0],2,true);
+    offline_visibility::FrontierActor actor;
+    actor.key={{identity(items(row[0])[0]),identity(items(row[0])[1])}};
+    if(actor.key[0]<0 || actor.key[0]>1 || actor.key[1]<=0)throw Unsupported();
+    const auto serial=identity(row[1]);if(serial<0)throw Unsupported();
+    if(serial==0) {
+        if(row[2]!=none_object || row[3]!=none_object || row[4]!=none_object)throw Unsupported();
+        return actor;
+    }
+    actor.identity=static_cast<uint64_t>(serial);
+    actor.checkpoints=visibility_checkpoints(row[2]);
+    actor.observer_pose=visibility_pose(row[3]);actor.target_pose=visibility_pose(row[4]);
+    actor.target_available=number(row[5])!=0.;
+    return actor;
+}
+PyObject *WOT_CDECL vis_frontier_frame(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_frontier_frame);
+    try {
+        require_sequence(args,4,true);PyObject **row=items(args);require_sequence(row[1],0);
+        std::vector<offline_visibility::FrontierActor> actors;actors.reserve(size(row[1]));
+        for(Py_ssize_t i=0;i<size(row[1]);++i)actors.push_back(visibility_frontier_actor(items(row[1])[i]));
+        const auto phase=identity(row[2]);if(phase<0)throw Unsupported();
+        return int_new(profile.run(offline_visibility::frontier_frame,identity(row[0]),
+            std::move(actors),static_cast<uint64_t>(phase),finite_number(row[3]))?1:0);
+    } catch(const PythonAllocationFailed &){profile.fail();return 0;}
+      catch(...){profile.fail();return fallback();}
+}
+PyObject *WOT_CDECL vis_frontier_actor(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_frontier_actor);
+    try {
+        require_sequence(args,2,true);PyObject **row=items(args);
+        return int_new(profile.run(offline_visibility::frontier_actor,identity(row[0]),
+                                   visibility_frontier_actor(row[1]))?1:0);
+    } catch(const PythonAllocationFailed &){profile.fail();return 0;}
+      catch(...){profile.fail();return fallback();}
+}
+
+// Called directly by the control bridge. Capabilities are retained only for
+// this synchronous invocation; all background records remain plain C++ data.
+offline_simulation::control::SightReply visibility_control_sight(
+        PyObject *binding,const offline_simulation::control::SightRequest &request) {
+    using namespace offline_simulation;
+    control::SightReply result;result.sampled_at=request.now;
+    try {
+        require_sequence(binding,8,true);PyObject **caps=items(binding);
+        const auto context=identity(caps[0]);const double tolerance=finite_number(caps[7]);
+        engine_query::Session engine(caps[1]);
+        native_visibility::DetectionInputs detection;
+        detection.distance=request.detection.distance;detection.view_range=request.detection.view;
+        detection.base_camouflage={{request.detection.camo_moving,request.detection.camo_still}};
+        detection.moving=request.detection.moving;detection.fired_recently=request.detection.fired;
+        detection.additive=request.detection.additive;detection.multiplier=request.detection.multiplier;
+        detection.shot_factor=request.detection.shot_factor;
+        const auto call=[&](PyObject *function,OwnedTuple &args,int opcode) {
+            WorldObject arguments(args.release());
+            auto result=engine_query::Object(profiled_object_call(NativeCallback::ControlSight,
+                "visibility.engine",opcode,1,function,arguments.get()));
+            if(result.get()==items(caps[1])[engine_query::Failure])throw engine_query::Failed();
+            return result;
+        };
+        // Engine/contact callbacks in an earlier pair may have changed the
+        // foliage ledger. Synchronize it before inspecting any ready receipt.
+        OwnedTuple sync_args(0);auto synced=call(caps[6],sync_args,4);
+        require_sequence(synced.get(),2,true);
+        auto collision_filter=engine_query::Object::borrow(items(synced.get())[0]);
+        const double phase_value=std::floor(std::max(0.,finite_number(items(synced.get())[1]))/2000.);
+        if(phase_value>=18446744073709551616.0)throw Unsupported();
+        const uint64_t observer_phase=static_cast<uint64_t>(phase_value);
+        const auto ray=[&](const native_visibility::Ray &row) {
+            NativeProfilePhase phase(NativePhase::Pack);
+            auto start=engine.vector(row.start.data()),end=engine.vector(row.end.data());
+            auto hit=engine.collide(start.get(),end.get(),collision_filter.get());
+            phase.input();
+            bool clear=hit.get()==none_object;
+            if(!clear) {
+                require_sequence(hit.get(),1);
+                // Keep actual Vector3 subtraction/length and its float32 law.
+                auto hit_delta=engine.subtract(items(hit.get())[0],start.get());
+                const double a=engine.length(hit_delta.get());
+                auto end_delta=engine.subtract(end.get(),start.get());
+                const double b=engine.length(end_delta.get());
+                clear=a+tolerance>=b;
+                if(!clear && caps[3]!=none_object) {
+                    OwnedTuple args(4);engine_query::borrow(args,0,caps[4]);
+                    engine_query::borrow(args,1,start.get());engine_query::borrow(args,2,end.get());
+                    engine_query::borrow(args,3,hit.get());auto ignored=call(caps[3],args,2);
+                }
+            }
+            return clear;
+        };
+        const offline_visibility::ActorKey observer={{static_cast<int64_t>(request.observer.kind),request.observer.id}};
+        const offline_visibility::ActorKey target={{static_cast<int64_t>(request.target.kind),request.target.id}};
+        const auto phase=[&]() {return observer_phase;};
+        const auto reply=offline_visibility::frontier_sight(context,observer,target,request.now,
+                                                           request.fire_sequence,detection,ray,phase);
+        result.status=static_cast<QueryStatus>(reply.status);result.has_detection=reply.has_detection;
+        result.detected=reply.detected;result.foliage=reply.foliage;result.sampled_at=reply.sampled_at;
+    } catch(const engine_query::Failed &) {
+        // An attempted engine query never replays through the Python frontier.
+        result.status=QueryStatus::Failed;
+    } catch(const PythonAllocationFailed &) {
+        // Preserve the active Python allocation error for the outer C API.
+        throw;
+    } catch(...) {
+        // A malformed local engine result fails only this observation.
+        result.status=QueryStatus::Failed;
+    }
+    return result;
+}
+
+PyObject *WOT_CDECL vis_frontier_snapshot(PyObject *,PyObject *args) {
+    NATIVE_PROFILE_ENTRY(vis_frontier_snapshot);
+    try {
+        require_sequence(args,1,true);
+        const auto value=profile.run(offline_visibility::frontier_snapshot,identity(items(args)[0]));
+        OwnedTuple out(8),reasons(value.reasons.size());
+        out.set(0,integer_result(value.submitted));out.set(1,integer_result(value.completed));
+        out.set(2,integer_result(value.cancelled));out.set(3,integer_result(value.pending));
+        out.set(4,float_new(value.worker_seconds));out.set(5,float_new(value.max_completion_age));
+        for(size_t i=0;i<value.reasons.size();++i)reasons.set(i,integer_result(value.reasons[i]));
+        out.set(6,reasons.release());out.set(7,integer_result(value.requests));return out.release();
+    } catch(const PythonAllocationFailed &){profile.fail();return 0;}
+      catch(...){profile.fail();return fallback();}
+}

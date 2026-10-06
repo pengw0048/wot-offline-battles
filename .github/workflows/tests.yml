@@ -29,6 +29,7 @@ jobs:
               native/native_visibility_core.cpp \
               native/offline_visibility.cpp \
               native/offline_contact_roster.cpp \
+              native/offline_destructible_geometry.cpp \
               native/world_stage.cpp \
               native/navigation_query_stage.cpp \
               native/offline_simulation.cpp \
@@ -59,6 +60,15 @@ jobs:
               /tmp/offline_math_batch_native.so
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_motion.py \
               /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_destructibles.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_visibility_frontier.py \
+              /tmp/offline_math_batch_native.so
+            g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread \
+              -I native tools/check_native_visibility_frontier.cpp \
+              native/offline_visibility.cpp native/native_visibility_core.cpp \
+              native/offline_async_worker.cpp -o /tmp/wot-visibility-frontier-check
+            /tmp/wot-visibility-frontier-check
             g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread \
               tools/check_native_simulation_diagnostics.cpp \
               -o /tmp/wot-native-diag-check
@@ -66,10 +76,12 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_diagnostics.py \
               /tmp/offline_math_batch_native.so
           '
-      - name: Check observational combat summaries
+      - name: Check combat summaries and sight frontier lifetimes
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -m unittest discover -s tests -p test_port_0922_worker_diagnostics.py
+        run: |
+          python3 -m unittest discover -s tests -p test_port_0922_worker_diagnostics.py
+          python3 -m unittest discover -s tests -p test_port_0922_battle_visibility.py
   test:
     needs: windows-server
     runs-on: ubuntu-latest

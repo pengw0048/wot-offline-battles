@@ -218,10 +218,131 @@ namespace sim_motion_bridge {
         out.set(7,ram.release());
         return out.release();
     }
+    // One synchronous world sweep owns its original engine hits and all
+    // departing planes. No row or Python object escapes to a worker thread.
+    class WorldFrontier {
+        WorldSnapshot snapshot_;
+        unsigned recasts_;
+        double epsilon_, gradient_;
+        double position_[3], departing_[15] = {};
+        bool has_departing_ = false;
+        struct Plane { double point[3], normal[3]; };
+        std::vector<Plane> planes_;
+        std::vector<engine_query::Object> hits_;
+        bool departing(PyObject *hit) {
+            require_sequence(hit, 2);
+            double point[3], normal[3];
+            session.point(items(hit)[0], point);
+            session.point(items(hit)[1], normal);
+            if (normal[1] < -.2) return false;
+            const double delta[3] = {departing_[0], departing_[2], departing_[1]};
+            double outward = 0., length2 = 0.;
+            for (unsigned i=0;i<3;++i) {
+                outward += delta[i]*normal[i];
+                length2 += normal[i]*normal[i];
+            }
+            const bool drivable = length2 > 0. && normal[1]/std::sqrt(length2) >=
+                1./std::sqrt(1.+gradient_*gradient_);
+            if (outward < -1.e-8 || (outward <= 1.e-8 && !drivable)) return false;
+            double relative[3], local[3], local_delta[3] = {};
+            for (unsigned i=0;i<3;++i) relative[i]=point[i]-position_[i];
+            if (snapshot_.passive) {
+                for (unsigned i=0;i<3;++i) {
+                    const double *axis=departing_+6+i*3;
+                    local[i]=axis[0]*relative[0]+axis[1]*relative[1]+axis[2]*relative[2];
+                    local_delta[i]=axis[0]*delta[0]+axis[1]*delta[1]+axis[2]*delta[2];
+                }
+            } else {
+                if (std::abs(departing_[4])<.1) return false;
+                const double sine=std::sin(snapshot_.yaw), cosine=std::cos(snapshot_.yaw);
+                local[0]=relative[0]*cosine-relative[2]*sine;
+                local[2]=relative[0]*sine+relative[2]*cosine;
+                local[1]=(relative[1]-local[0]*departing_[3]-local[2]*departing_[5])/departing_[4];
+            }
+            const double lower[3]={snapshot_.bounds[0],snapshot_.heights[0],-snapshot_.bounds[2]};
+            const double upper[3]={snapshot_.bounds[1],snapshot_.heights[1],snapshot_.bounds[3]};
+            bool inside=true;
+            for (unsigned i=0;i<3;++i)
+                inside=inside && lower[i]-.001<=local[i] && local[i]<=upper[i]+.001;
+            if (!inside && snapshot_.passive && outward>1.e-8) {
+                double lo=0.,hi=1.;
+                for (unsigned i=0;i<3;++i) {
+                    if (std::abs(local_delta[i])<1.e-12) {
+                        if (!(lower[i]-.001<=local[i] && local[i]<=upper[i]+.001)) { hi=-1.;break; }
+                    } else {
+                        const double a=(local[i]-upper[i]-.001)/local_delta[i];
+                        const double b=(local[i]-lower[i]+.001)/local_delta[i];
+                        lo=std::max(lo,std::min(a,b));hi=std::min(hi,std::max(a,b));
+                    }
+                }
+                inside=lo<=hi;
+            }
+            if (inside) {
+                Plane plane;
+                for (unsigned i=0;i<3;++i) {plane.point[i]=point[i];plane.normal[i]=normal[i];}
+                planes_.push_back(plane);
+                return true;
+            }
+            for (const auto &plane:planes_) {
+                double alignment=0.,distance=0.;
+                for (unsigned i=0;i<3;++i) {
+                    alignment+=normal[i]*plane.normal[i];
+                    distance+=(point[i]-plane.point[i])*normal[i];
+                }
+                if (alignment>=.9999 && std::abs(distance)<=.001) return true;
+            }
+            return false;
+        }
+    public:
+        engine_query::Session session;
+        engine_query::Object filter;
+        bool prepared=false;
+        WorldFrontier(PyObject *capabilities, PyObject *tuning, const WorldSnapshot &snapshot):
+            snapshot_(snapshot), session(capabilities) {
+            require_sequence(tuning,3,true);
+            const auto budget=identity(items(tuning)[0]);
+            epsilon_=finite_number(items(tuning)[1]);gradient_=finite_number(items(tuning)[2]);
+            if(budget<0 || budget>1024 || epsilon_<=0. || gradient_<=0.)throw Unsupported();
+            recasts_=static_cast<unsigned>(budget);
+            auto position=session.vector(snapshot.position);
+            session.point(position.get(),position_);
+        }
+        void departure(const WorldRequest &request) {
+            for(unsigned i=0;i<15;++i)departing_[i]=request.auxiliary[i];
+            planes_.clear();has_departing_=true;
+        }
+        PyObject *hit(std::uint64_t handle) {
+            if (!handle || handle>hits_.size())throw Unsupported();
+            return hits_[handle-1].get();
+        }
+        void ray(unsigned op,const WorldRequest &request,WorldResponse &response,PyObject *query_filter) {
+            auto start=session.vector(request.start),end=session.vector(request.end);
+            session.point(start.get(),response.start);session.point(end.get(),response.end);
+            auto current=start;
+            engine_query::Object result;
+            for(unsigned attempt=0;attempt<=recasts_;++attempt) {
+                result=session.collide(current.get(),end.get(),query_filter,op==WORLD_GROUND);
+                if(op!=WORLD_HORIZONTAL || result.get()==none_object || !has_departing_ ||
+                   !(request.flags&1) || !departing(result.get()))break;
+                require_sequence(result.get(),1);
+                auto remaining=session.subtract(end.get(),items(result.get())[0]);
+                const double length=session.length(remaining.get());
+                if(length<=epsilon_) {result=engine_query::Object::borrow(none_object);break;}
+                auto step=session.scale(remaining.get(),epsilon_/length);
+                current=session.add(items(result.get())[0],step.get());
+            }
+            if(result.get()==none_object)return;
+            require_sequence(result.get(),1);
+            session.point(items(result.get())[0],response.point);
+            if(size(result.get())>1)session.point(items(result.get())[1],response.normal);
+            hits_.push_back(std::move(result));
+            response.handle=hits_.size();response.status=1;
+        }
+    };
     class Engine:public motion::Engine {
         std::shared_ptr<SimulationContext> context_;
         PyObject*dispatcher_;
-        WorldContext world_;
+        std::unique_ptr<WorldFrontier> frontier_;
         std::exception_ptr world_error_;
         void live(){
             if(context_->closed.load())throw Unsupported();
@@ -268,13 +389,12 @@ namespace sim_motion_bridge {
             return index_value(result.get())!=0;
         }
         public:  Engine(std::shared_ptr<SimulationContext>context,PyObject*dispatcher):context_(std::move(context)),dispatcher_(dispatcher){
-            world_.dispatcher=dispatcher;
         }
         bool begin_world(ActorKey k,const State&s,const motion::Descriptor&d,const WorldSnapshot&q,bool commit,bool active,bool receipt_allowed)override {
             NativeProfilePhase bridge(NativePhase::Pack);
-            world_.exception=nullptr;
+            frontier_.reset();
             world_error_=nullptr;
-            OwnedTuple row(10);
+            OwnedTuple row(11), shape(6);
             row.set(0,key_result(k));
             Pose p=s.pose;
             p.pitch=q.pitch;
@@ -287,36 +407,73 @@ namespace sim_motion_bridge {
             row.set(7,integer_result(d.revision));
             row.set(8,integer_result(s.rotation_dir));
             row.set(9,float_new(s.turn_speed));
+            for(unsigned i=0;i<4;++i)shape.set(i,float_new(q.bounds[i]));
+            for(unsigned i=0;i<2;++i)shape.set(i+4,float_new(q.heights[i]));
+            row.set(10,shape.release());
             auto result=query(20,row);
             bridge.input();
-            return index_value(result.get())!=0;
+            if(result.get()->ob_type==int_type)return index_value(result.get())!=0;
+            require_sequence(result.get(),2,true);
+            try {
+                frontier_.reset(new WorldFrontier(items(result.get())[0],items(result.get())[1],q));
+            } catch(const engine_query::Failed &) {
+                OwnedTuple cleanup(0);query(21,cleanup);
+                throw motion::OperationFailed();
+            }
+            return false;
         }
         int dispatch_world_impl(std::uint32_t op,const WorldRequest*q,std::uint32_t n,WorldResponse*r) {
             NativeProfilePhase bridge(NativePhase::Pack);
+            live();
+            if(!frontier_)throw Unsupported();
+            if(op==WORLD_DEPARTING) {
+                if(n!=1)throw Unsupported();
+                frontier_->departure(q[0]);return 1;
+            }
+            if(op==WORLD_HORIZONTAL || op==WORLD_GROUND) {
+                bool stopped=false;
+                for(size_t i=0;i<n;++i) {
+                    if(stopped || (q[i].flags&4)) {
+                        for(unsigned j=0;j<3;++j) {r[i].start[j]=q[i].start[j];r[i].end[j]=q[i].end[j];}
+                        stopped=stopped || (op==WORLD_GROUND && (q[i].flags&1));
+                        continue;
+                    }
+                    engine_query::Object local_filter;
+                    PyObject *filter=frontier_->filter.get();
+                    if(!frontier_->prepared) {
+                        if(op!=WORLD_GROUND)throw Unsupported();
+                        OwnedTuple rows(1);rows.set(0,world_request(WORLD_GROUND,q[i]));
+                        auto result=query(7,rows);
+                        local_filter=engine_query::Object::borrow(result.get());filter=local_filter.get();
+                    }
+                    frontier_->ray(op,q[i],r[i],filter);
+                    stopped=stopped || (op==WORLD_GROUND && !r[i].status && (q[i].flags&1));
+                    live();
+                }
+                return 1;
+            }
             OwnedTuple rows(n);
-            for(size_t i=0;i<n;++i)rows.set(i,world_request(op,q[i]));
+            for(size_t i=0;i<n;++i) {
+                auto value=world_request(op,q[i]);
+                if(op==WORLD_RESOLVE || op==WORLD_TRACE) {
+                    auto old=items(value)[2];
+                    auto hit=frontier_->hit(q[i].handle);++hit->ob_refcnt;
+                    items(value)[2]=hit;decref(old);
+                }
+                rows.set(i,value);
+            }
             auto result=query(op,rows,n);
             bridge.input();
-            if(op==WORLD_FILTER||op==WORLD_DEPARTING||op==WORLD_TRACE)return 1;
+            if(op==WORLD_FILTER) {
+                frontier_->filter=engine_query::Object::borrow(result.get());frontier_->prepared=true;
+                return 1;
+            }
+            if(op==WORLD_TRACE)return 1;
+            if(op!=WORLD_RESOLVE)throw Unsupported();
             require_sequence(result.get(),n,true);
-            for(size_t i=0;i<n;++i){
-                PyObject*value=items(result.get())[i];
-                if(op==WORLD_RESOLVE){
-                    r[i].status=index_value(value);
-                    if(r[i].status<0||r[i].status>2)throw Unsupported();
-                    continue;
-                }
-                require_sequence(value,5,true);
-                auto row=items(value);
-                world_array(row[3],r[i].start,3);
-                world_array(row[4],r[i].end,3);
-                if(row[0]==none_object)continue;
-                world_array(row[0],r[i].point,3);
-                world_array(row[1],r[i].normal,3);
-                const auto handle=identity(row[2]);
-                if(handle<=0)throw Unsupported();
-                r[i].handle=static_cast<std::uint64_t>(handle);
-                r[i].status=1;
+            for(size_t i=0;i<n;++i) {
+                r[i].status=index_value(items(result.get())[i]);
+                if(r[i].status<0||r[i].status>2)throw Unsupported();
             }
             live();
             return 1;
@@ -325,6 +482,13 @@ namespace sim_motion_bridge {
             try{
                 return dispatch_world_impl(op,q,n,r);
             }
+            catch(const Unsupported &){
+                // A malformed engine hit is local to this actor operation.
+                // Closed contexts still reject the old caller at end_world.
+                world_error_=context_->closed.load()?std::current_exception():
+                    std::make_exception_ptr(motion::OperationFailed());
+                return 0;
+            }
             catch(...){
                 world_error_=std::current_exception();
                 return 0;
@@ -332,12 +496,13 @@ namespace sim_motion_bridge {
         }
         void end_world()override {
             NativeProfilePhase bridge(NativePhase::Pack);
+            frontier_.reset();
+            auto error=world_error_;world_error_=nullptr;
             OwnedTuple row(0);
             query(21,row);
-            if(world_error_){
-                auto error=world_error_;
-                world_error_=nullptr;
-                std::rethrow_exception(error);
+            if(error) {
+                try {std::rethrow_exception(error);}
+                catch(const engine_query::Failed &) {throw motion::OperationFailed();}
             }
         }
         motion::CatalogResult catalog(ActorKey k,const State&s,double speed,double yaw,double dt,bool passive,bool commit)override {

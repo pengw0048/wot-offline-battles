@@ -553,6 +553,75 @@ class Checker(object):
             owner.detach()
             self.backend.sim_close(owner.handle)
 
+    def projection_cache_cases(self):
+        from gui.mods.offline_lan_0922 import bot_runtime as laws
+        runtime = laws.BotRuntime(1)
+        runtime.adapter = Object()
+        runtime.adapter.driver = self.driver.LocalDriver()
+        state = dict(id=1, kind='bot', team=1, slot=0, alive=True,
+                     x=0., y=0., z=0., yaw=0., speed=0., fire_seq=0,
+                     health=600, max_health=600, view_range=350.)
+        runtime.states = {1: state}
+        runtime._descriptors[1] = dict(radio=dict(distance=180.))
+        runtime._vision_ranges[1] = (350., 450., .5)
+        profile = ((.1, .15), .4, dict(invisibility_moving=(0., 1.),
+            invisibility_still=(.05, 1.), has_camouflage_net=True,
+            camouflage_net_delay=.4))
+        runtime._spotting_profiles[('bot', 1)] = profile
+        runtime._spotting_profile = lambda source, tick=None: (
+            runtime._spotting_profiles[('bot', source['id'])])
+        runtime._source_radio_range = lambda source, tick=None: (
+            runtime._descriptors[source['id']]['radio']['distance'] *
+            laws._critical_factor(source, runtime._descriptors[source['id']],
+                                  'signal'))
+        owner = self.facade.NativeControl(
+            runtime, self.backend, self.backend.sim_open(1, 81))
+        project = owner._project_actor_config
+        calls = []
+        def counted(source, tick):
+            calls.append(1)
+            return project(source, tick)
+        owner._project_actor_config = counted
+        def check(expected_builds):
+            actual = owner._actor_config(state, {})
+            self.equal(actual, project(state, {}), 'projection.cached_mechanics')
+            assert len(calls) == expected_builds
+        check(1)
+        # Moving, firing, damage to hull HP and terminal pose do not change
+        # the immutable view/radio mechanics; pose samples still update.
+        state.update(x=50., speed=7., fire_seq=3, health=400, alive=False)
+        check(1)
+        state['critical'] = {'crew_ko': ['commander', 'radioman']}
+        check(2)
+        # A reference-only cache would incorrectly reuse the damaged factor.
+        state['critical']['crew_ko'][:] = []
+        check(3)
+        state['critical'] = copy.deepcopy(state['critical'])
+        check(3)
+        state['critical']['devices'] = [dict(
+            name='radioHealth', hp=1., state='critical')]
+        check(4)
+        state['critical']['devices'][0]['state'] = 'normal'
+        state['critical']['devices'][0]['hp'] = 100.
+        check(5)
+        runtime._vision_ranges[1] = (370., 470., .7)
+        check(6)
+        runtime._descriptors[1] = dict(radio=dict(distance=240.))
+        check(7)
+        runtime._spotting_profiles[('bot', 1)] = (
+            (.2, .3), .5, dict(profile[2]))
+        check(8)
+        runtime._bot_behavior[1] = {'crew_level': 75}
+        check(9)
+        state['team'], state['slot'] = 2, 5
+        check(10)
+        state['view_range'] = 390.
+        check(11)
+        owner.detach()
+        assert not owner._config_projections
+        self.backend.sim_close(owner.handle)
+        self.lifecycle_checks += 1
+
     def projection_cases(self):
         from gui.mods.offline_lan_0922 import bot_runtime as laws
         runtime = laws.BotRuntime(1)
@@ -857,6 +926,7 @@ def main():
     checker.traffic_cases()
     checker.perception_cases()
     checker.projection_cases()
+    checker.projection_cache_cases()
     checker.human_cases()
     checker.lifecycle()
     print(json.dumps(dict(ok=True, comparisons=checker.comparisons,
