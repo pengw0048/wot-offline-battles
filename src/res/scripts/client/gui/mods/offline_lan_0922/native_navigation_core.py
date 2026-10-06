@@ -213,13 +213,17 @@ def _decode(snapshot, jobs):
 
 
 
-def _grid_encode(grid):
+def _grid_encode(grid, source_graph=None):
+    # TerrainGrid clamps planner cell size to at least one metre. Physical
+    # pose_is_safe reads the validated source value, including smaller cells.
+    source_cell_size = (float(source_graph['cell_size'])
+                        if isinstance(source_graph, dict) else 0.0)
     config = ((grid._baked_origin[0], grid._baked_origin[1], grid.cell_size,
                grid._baked_width, grid._baked_height, grid.max_grade_up,
                grid.max_grade_down, grid._baked_max_grade, grid.heuristic_weight,
                grid.obstacle_probe is not None),
               tuple(grid._baked_heights), tuple(grid._baked_links),
-              tuple(grid._baked_hazards), grid.bounds, 0)
+              tuple(grid._baked_hazards), grid.bounds, source_cell_size)
     state = (grid._static_hull_key, grid.static_hull_revision,
              tuple((edge, value[0], value[1])
                    for edge, value in grid._failed_edges.items()),
@@ -566,7 +570,8 @@ class NativeNavigationCore(object):
         async_state = _async_encode(facade._native_navigation, facade._jobs)
         if async_state is not None and facade._native_navigation.backend is not backend:
             raise ValueError('navigation worker belongs to a different native module')
-        grid_config, grid_state = _grid_encode(facade.grid)
+        grid_config, grid_state = _grid_encode(
+            facade.grid, getattr(runtime, 'baked_graph', None))
         if backend.sim_navigation_install(handle, snapshot, grid_config, grid_state, async_state) != 1:
             raise RuntimeError('persistent navigation installation rejected')
         facade.grid = NativeGrid(facade, facade.grid)

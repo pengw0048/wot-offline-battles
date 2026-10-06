@@ -589,15 +589,18 @@ bool Store::visible(const ActorKey &skey, const ActorKey &tkey,
                 net ? t.config.camo_net_multiplier : t.config.camo_multiplier,
                 t.config.camo_shot};
     if (dist <= detect_distance(d, 0.)) {
+      bool world_query = true;
       if (prepare_allowed_.count(p) && prepare_budget_ > 0) {
         --prepare_budget_;
         preparing_.insert(p);
+        world_query = false;
       } else if (allowed_.count(p) && budget_ > 0)
         --budget_;
       else
         return false;
       SightReply reply =
-          probe(SightRequest{skey, tkey, now_, t.sample.fire_sequence, d});
+          probe(SightRequest{skey, tkey, now_, t.sample.fire_sequence, d,
+                             world_query});
       if (reply.status == QueryStatus::Pending) {
         inflight_.insert(p);
         if (!preparing_.count(p))

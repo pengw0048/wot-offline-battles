@@ -17606,11 +17606,16 @@ class BattleRuntime(object):
                 set_camera = getattr(
                     self._bots, 'set_camera_position', None)
                 if callable(set_camera):
-                    # A worker has no presentation camera. Using its off-map
-                    # dummy as one would lower update detail for distant bots
-                    # and make worker authority behave unlike player authority.
+                    # Keep worker slope/pose sampling independent of the
+                    # off-map carrier. Planning alone uses the validated
+                    # human snapshot below; it never changes this camera.
                     set_camera(
                         None if self._worker_mode else self._local_position)
+                if self._worker_mode:
+                    # Keep unknown/dead participants in the planning roster;
+                    # _authority_players intentionally omits unknown poses.
+                    self._bots.set_planning_snapshot(
+                        self._last_snapshot or {}, now, self._generation)
                 control_sample_before = getattr(
                     self._bots, '_sample_time_us', None)
                 # The worker's injected body sensor runs inside this update,

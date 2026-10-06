@@ -2243,6 +2243,7 @@ class BotRuntime(object):
         self._flip_diary = {}
         self.debug_logging = False
         self._camera_position = None
+        self._reset_planning_observers()
         self._world_receipt_budget = 0
         self._world_receipt_waiting = []
         self._world_receipt_frame = None
@@ -3301,6 +3302,7 @@ class BotRuntime(object):
 
     def close(self):
         """Retire native state and background jobs before releasing the round."""
+        self._reset_planning_observers()
         try:
             self._retire_native_simulation()
         finally:
@@ -6725,6 +6727,136 @@ class BotRuntime(object):
         })
         print('[BOT MOTION] %s' % json.dumps(
             trace, separators=(',', ':')))
+
+    def _reset_planning_observers(self):
+        # An invalidated observer must not leave a far command lease behind.
+        intervals = getattr(self, '_planning_decision_intervals', {})
+        for bot_id, cached in list(getattr(self, '_decision_cache', {}).items()):
+            if (len(cached) >= 6 and
+                    intervals.get(bot_id, DECISION_SECONDS) > DECISION_SECONDS):
+                self._decision_cache[bot_id] = (
+                    cached[0], min(cached[1], cached[2] + DECISION_SECONDS)
+                ) + cached[2:]
+        self._planning_owner = None
+        self._planning_progress = {}
+        self._planning_positions = ()
+        self._planning_observed_at = None
+        self._planning_valid_until = None
+        self._planning_decision_intervals = {}
+
+    def set_planning_snapshot(self, message, now, generation):
+        """Use observed human input progress only to reduce AI planning work.
+
+        Public poses have no source timestamp. The existing stream-stall
+        interval bounds locally observed input progress, not source pose age.
+        Unknown participants and spectator viewpoints retain full cadence.
+        """
+        self._planning_positions = ()
+        self._planning_valid_until = None
+        try:
+            now = float(now)
+            round_id = lan_client._exact_int(message.get('round_id'))
+            epoch = lan_client._exact_int(message.get('authority_epoch'))
+            generation = lan_client._exact_int(generation)
+            if ((math.isnan(now) or math.isinf(now)) or round_id != self.round_id or
+                    round_id is None or epoch is None or epoch < 0 or
+                    generation is None or generation < 1):
+                raise ValueError('unavailable planning owner')
+            owner = (round_id, epoch, generation)
+            if (owner != self._planning_owner or
+                    (self._planning_observed_at is not None and
+                     now < self._planning_observed_at)):
+                self._reset_planning_observers()
+            self._planning_owner = owner
+            self._planning_observed_at = now
+            players = message.get('players')
+            if not isinstance(players, (list, tuple)):
+                raise ValueError('unavailable planning roster')
+            progress, positions, deadlines = {}, [], []
+            usable = True
+            for raw in players:
+                if not isinstance(raw, dict):
+                    raise ValueError('invalid planning participant')
+                player_id = lan_client._exact_int(raw.get('id'))
+                if player_id == lan_client.WORKER_AUTHORITY_ID:
+                    continue
+                if raw.get('participating') is False:
+                    continue
+                if raw.get('participating') is not True:
+                    raise ValueError('invalid planning participation')
+                if player_id is None or player_id <= 0 or player_id in progress:
+                    raise ValueError('invalid planning identity')
+                if (raw.get('alive') is not True or
+                        raw.get('world_pose') is not True):
+                    usable = False
+                    continue
+                point = tuple(float(raw[name]) for name in ('x', 'y', 'z'))
+                if any(math.isnan(value) or math.isinf(value) for value in point):
+                    raise ValueError('invalid planning position')
+                sequence = lan_client._exact_int(raw.get('input_seq'))
+                if sequence is None or sequence <= 0:
+                    usable = False
+                    continue
+                previous = self._planning_progress.get(player_id)
+                if previous is None or sequence < previous[0]:
+                    current = (sequence, now, False)
+                elif sequence > previous[0]:
+                    current = (sequence, now, True)
+                else:
+                    current = previous
+                progress[player_id] = current
+                deadline = current[1] + lan_client.SNAPSHOT_STALL_SECONDS
+                if not current[2] or now >= deadline:
+                    usable = False
+                positions.append(point)
+                deadlines.append(deadline)
+            self._planning_progress = progress
+            if usable and positions:
+                self._planning_positions = tuple(positions)
+                self._planning_valid_until = min(deadlines)
+                return True
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            self._reset_planning_observers()
+        return False
+
+    def _planning_detail_tier(self, state):
+        if not self._fixed_control:
+            return self._detail_tier(state)
+        positions = self._planning_positions
+        if not positions:
+            return 0
+        distance_sq = min((state['x'] - point[0]) ** 2 +
+                          (state['z'] - point[2]) ** 2
+                          for point in positions)
+        if distance_sq <= DETAIL_NEAR_METRES * DETAIL_NEAR_METRES:
+            return 0
+        if distance_sq <= DETAIL_FAR_METRES * DETAIL_FAR_METRES:
+            return 1
+        return 2
+
+    def _prepare_planning_deadlines(self, now):
+        """Promote nearer observers before the native visibility cohort."""
+        if not self._fixed_control:
+            return
+        if (self._planning_valid_until is None or
+                now >= self._planning_valid_until or
+                (self._planning_observed_at is not None and
+                 now < self._planning_observed_at)):
+            self._planning_positions = ()
+        for bot_id, cached in list(self._decision_cache.items()):
+            state = self.states.get(bot_id)
+            if state is None or len(cached) < 6:
+                continue
+            interval = (DECISION_SECONDS *
+                        DECISION_TIER_FACTOR[self._planning_detail_tier(state)])
+            previous = self._planning_decision_intervals.get(
+                bot_id, DECISION_SECONDS)
+            if interval < previous:
+                deadline = min(cached[1], cached[2] + interval)
+                self._decision_cache[bot_id] = (
+                    cached[0], deadline) + cached[2:]
+                self._planning_decision_intervals[bot_id] = interval
+
 
     def set_camera_position(self, position):
         """Publish the viewpoint that drives the presentation detail tiers."""
@@ -12226,6 +12358,10 @@ class BotRuntime(object):
         self._advance_probe_timing(now)
         self._advance_equipment_clock(frame_step)
         players = list(players or [])
+        if refresh_control:
+            planning_now = (self._control_evaluation_time
+                            if self._control_evaluation_time is not None else now)
+            self._prepare_planning_deadlines(planning_now)
         # Canonical player mechanics are immutable within this bounded slice.
         # Keep their source objects alive so every observer shares one result.
         pose_cache = {}
@@ -12539,8 +12675,10 @@ class BotRuntime(object):
                 if decision_cache is not None:
                     decision_step = max(
                         step, now - decision_cache[2])
-                detail_tier = self._detail_tier(state)
+                detail_tier = self._planning_detail_tier(state)
                 decision_horizon = (
+                    DECISION_SECONDS if (
+                        self._fixed_control and decision_cache is None) else
                     DECISION_SECONDS * DECISION_TIER_FACTOR[detail_tier])
                 stopping_distance = None
                 expected_mode = (
@@ -12635,11 +12773,15 @@ class BotRuntime(object):
                 bot_id = int(state['id'])
                 self._decision_counts[bot_id] = self._decision_counts.get(
                     bot_id, 0) + 1
-                decision_deadline = _cache_deadline(
-                    now, state['id'],
+                decision_interval = (
+                    DECISION_SECONDS if (
+                        self._fixed_control and decision_cache is None) else
                     DECISION_SECONDS *
-                    DECISION_TIER_FACTOR[self._detail_tier(state)],
+                    DECISION_TIER_FACTOR[self._planning_detail_tier(state)])
+                decision_deadline = _cache_deadline(
+                    now, state['id'], decision_interval,
                     3, decision_cache is None)
+                self._planning_decision_intervals[bot_id] = decision_interval
                 raw_command = dict(command)
             # Keep this decision until the next scheduled refresh. Friendly
             # following uses contact physics; crossing yields have a fixed

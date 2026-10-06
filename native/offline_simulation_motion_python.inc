@@ -520,8 +520,45 @@ namespace sim_motion_bridge {
             require_sequence(out.get(),2,true);
             return {index_value(items(out.get())[0]),index_value(items(out.get())[1])!=0};
         }
+        bool baked_safe(const Pose &pose) {
+            const auto &grid=context_->navigation.grid;
+            // pose_is_safe uses CPython 2 round, not Grid::cell's floor(v+.5).
+            // The distinction at negative half-cells is a safety boundary.
+            const double column=std::round((pose.position[0]-grid.origin_x)/grid.motion_cell_size);
+            const double row=std::round((pose.position[2]-grid.origin_z)/grid.motion_cell_size);
+            if(!std::isfinite(column)||!std::isfinite(row))throw motion::OperationFailed();
+            if(column<0.||column>=grid.width||row<0.||row>=grid.height)return false;
+            const auto index=static_cast<size_t>(row)*grid.width+static_cast<size_t>(column);
+            return !(grid.hazards[index]&9u);
+        }
+        bool baked_boundary(ActorKey k,const Pose &before,const Pose &after) {
+            const auto &grid=context_->navigation.grid;
+            if(!grid.bounds.has())return true;
+            const auto &bounds=grid.bounds.value;
+            if(bounds[0]>=bounds[2]||bounds[1]>=bounds[3])return true;
+            for(const auto value:bounds)if(!std::isfinite(value))return true;
+            const auto &shape=context_->motion.descriptor(k).shape;
+            const double half_length=std::max(.5,shape[1]),half_width=std::max(.3,shape[0]);
+            auto overflow=[&](const Pose &pose) {
+                const double sine=std::abs(std::sin(pose.yaw)),cosine=std::abs(std::cos(pose.yaw));
+                const double extent_x=cosine*half_width+sine*half_length;
+                const double extent_z=sine*half_width+cosine*half_length;
+                return std::array<double,4>{{
+                    std::max(0.,bounds[0]+extent_x-pose.position[0]),
+                    std::max(0.,pose.position[0]+extent_x-bounds[2]),
+                    std::max(0.,bounds[1]+extent_z-pose.position[2]),
+                    std::max(0.,pose.position[2]+extent_z-bounds[3])}};
+            };
+            const auto a=overflow(before),b=overflow(after);
+            for(unsigned i=0;i<4;++i)if(!(b[i]<=a[i]+1.e-6))return false;
+            return true;
+        }
         bool pose_guard(ActorKey k,const Pose&a,const Pose&b,bool hazards)override{
-            return poses(11,k,a,b,hazards);
+            live();
+            if(!context_->navigation.grid.installed||context_->navigation.grid.motion_cell_size<=0.)return poses(11,k,a,b,hazards);
+            bool clear=baked_boundary(k,a,b);
+            if(clear&&hazards&&baked_safe(a))clear=baked_safe(b);
+            return clear;
         }
         bool turret_guard(ActorKey k,const Pose&a,const Pose&b)override{
             return poses(12,k,a,b,false);
@@ -577,6 +614,11 @@ namespace sim_motion_bridge {
             return finite_number(result.get());
         }
         bool safe(ActorKey k,const Pose&p)override{
+            live();
+            if(context_->navigation.grid.installed&&context_->navigation.grid.motion_cell_size>0.) {
+                const bool clear=baked_safe(p);
+                return clear;
+            }
             NativeProfilePhase bridge(NativePhase::Pack);
             OwnedTuple row(2);
             row.set(0,key_result(k));

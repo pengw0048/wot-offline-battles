@@ -40,7 +40,7 @@ struct Pose {
 
 // Pending and failure are not physical obstructions or successful proofs.
 // Each stage applies its existing rules for retaining a previous receipt.
-enum class QueryStatus : std::uint8_t { Clear, Blocked, Pending, Failed };
+enum class QueryStatus : std::uint8_t { Clear, Blocked, Pending, Failed, DetectionComplete };
 
 }  // namespace offline_simulation
 

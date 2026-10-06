@@ -138,6 +138,41 @@ def main():
         equal(left, right, label)
         checks[0] += 1
 
+    # Motion safety consumes the authored cell size, while TerrainGrid keeps
+    # its independent planner clamp. The final config slot is an optional
+    # source-data contract, not another copy of the planner's cell size.
+    for raw_cell_size in (.5, 1., 4.):
+        baked = graph()
+        baked['cell_size'] = raw_cell_size
+        navigator = source.TerrainNavigator(lambda x, z, hint: 0.,
+                                             baked_graph=baked)
+        compare(max(1., raw_cell_size), navigator.grid.cell_size,
+                'planner cell-size clamp')
+        config, state = facade._grid_encode(navigator.grid, baked)
+        compare(6, len(config), 'grid config width unchanged')
+        compare(10, len(config[0]), 'grid header width unchanged')
+        compare(8, len(state), 'grid state width unchanged')
+        compare(raw_cell_size, config[5], 'authored motion cell size')
+        compare(0., facade._grid_encode(navigator.grid)[0][5],
+                'absent source metadata preserves Python guards')
+        runtime = types.ModuleType('motion_grid_metadata_fixture')
+        runtime.navigator, runtime.baked_graph = navigator, baked
+        handle = backend.sim_open(80, 1)
+        native = facade.NativeNavigationCore.install(runtime, backend, handle)
+        compare(max(1., raw_cell_size), native.grid.cell_size,
+                'native planner cell size remains clamped')
+        native.detach()
+        for invalid in (-1., float('nan'), float('inf')):
+            bad = config[:5] + (invalid,)
+            compare(None, backend.sim_navigation_install(
+                handle, facade._encode(navigator), bad, state, None),
+                'invalid motion source metadata rejects installation')
+        compare(1, backend.sim_navigation_install(
+            handle, facade._encode(navigator), config, state, None),
+            'invalid metadata did not partially install the grid')
+        backend.sim_close(handle)
+        navigator.close()
+
     for scenario in range(5):
         queries = [[], []]
         navigators = []

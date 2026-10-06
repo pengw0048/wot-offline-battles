@@ -464,6 +464,8 @@ void grid_load(n::Grid &g, PyObject *config, PyObject *state) {
   g.baked_max_grade = numbers[7];
   g.heuristic_weight = numbers[8];
   g.obstacle_available = numbers[9] != 0.;
+  g.motion_cell_size = finite_number(c[5]);
+  if(g.motion_cell_size < 0.)throw Unsupported();
   require_sequence(c[1], 0);
   for (Py_ssize_t i = 0; i < size(c[1]); ++i)
     g.heights_mm.push_back(absent(items(c[1])[i])

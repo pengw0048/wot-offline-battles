@@ -181,13 +181,9 @@ PreparedVisibility prepare_visibility(const PairInput& input,const FoliageSnapsh
 bool should_stop(const PreparedVisibility& prepared,std::size_t index,bool clear) {
     return clear && index<prepared.rays.size() && prepared.rays[index].foliage_bonus<=0.0;
 }
-VisibilityResult reduce_visibility(const PreparedVisibility& prepared,const std::vector<std::uint8_t>& clear) {
-    VisibilityResult out;double best=std::numeric_limits<double>::infinity();
-    for(std::size_t i=0;i<std::min(clear.size(),prepared.rays.size());++i) if(clear[i]) {
-        out.line_of_sight=true;best=std::min(best,prepared.rays[i].foliage_bonus);if(best<=0.0) break;
-    }
-    out.foliage_bonus=out.line_of_sight?best:0.0;
-    const auto& d=prepared.detection;
+namespace {
+VisibilityResult detection_result(const DetectionInputs& d,bool line_of_sight,double foliage_bonus) {
+    VisibilityResult out;out.line_of_sight=line_of_sight;out.foliage_bonus=foliage_bonus;
     double camo=(d.base_camouflage[d.moving?0:1]+d.additive)*std::max(0.0,d.multiplier);
     if(d.fired_recently) camo*=clamp(d.shot_factor,0,1);
     out.camouflage=clamp(camo+clamp(out.foliage_bonus,0,kFoliageLimit),0,.95);
@@ -196,5 +192,16 @@ VisibilityResult reduce_visibility(const PreparedVisibility& prepared,const std:
     const double distance=std::max(0.0,d.distance);
     out.detected=distance<=50 || (out.line_of_sight && distance<=out.detection_distance);
     return out;
+}
+}
+bool can_detect_with_foliage(const DetectionInputs& detection,double foliage_bonus) {
+    return detection_result(detection,true,foliage_bonus).detected;
+}
+VisibilityResult reduce_visibility(const PreparedVisibility& prepared,const std::vector<std::uint8_t>& clear) {
+    bool line_of_sight=false;double best=std::numeric_limits<double>::infinity();
+    for(std::size_t i=0;i<std::min(clear.size(),prepared.rays.size());++i) if(clear[i]) {
+        line_of_sight=true;best=std::min(best,prepared.rays[i].foliage_bonus);if(best<=0.0) break;
+    }
+    return detection_result(prepared.detection,line_of_sight,line_of_sight?best:0.0);
 }
 } // namespace native_visibility

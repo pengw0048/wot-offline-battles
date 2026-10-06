@@ -153,6 +153,9 @@ public:
 struct Grid {
   double origin_x = 0., origin_z = 0., cell_size = 4., max_grade_up = .48,
          max_grade_down = .38, baked_max_grade = .30, heuristic_weight = 1.70;
+  // Physical guard resolution comes from the validated source graph. Zero
+  // means it was not supplied, retaining the original Python query boundary.
+  double motion_cell_size = 0.;
   int width = 0, height = 0, hull_revision = 0;
   std::vector<double> heights_mm;
   std::vector<unsigned> links, hazards;

@@ -67,6 +67,7 @@ jobs:
             g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread \
               -I native tools/check_native_visibility_frontier.cpp \
               native/offline_visibility.cpp native/native_visibility_core.cpp \
+              native/offline_simulation_control.cpp \
               native/offline_async_worker.cpp -o /tmp/wot-visibility-frontier-check
             /tmp/wot-visibility-frontier-check
             g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread \

@@ -7999,6 +7999,36 @@ The synchronous engine stage preserves the six-point ray order, Math-based end
 tolerance and destruction reports. Queue counters belong to the native jobs;
 the former Python callback duration is no longer a measure of this stage.
 
+Control spotting consumes a detection result, so its frontier can skip a
+checkpoint whose foliage would prevent detection even with a clear ray, and
+finish after the first eligible clear checkpoint. It retains the original
+checkpoint order and detection law. This completion never supplies partial LOS
+or minimum-foliage geometry to another consumer; generic visibility callers
+still request the full result. Cancellation, actor replacement and engine
+reentry must retire only the original job. Pair-level foliage/filter updates
+still run, and omitted rays carry no destruction or message commit.
+
+An admitted sight job can become obsolete before a later planning decision:
+the target fires again, its detection profile or relevant foliage changes, or
+the existing age limit expires. Control detection cancels that receipt and
+prepares current numeric geometry synchronously before using the original
+world-query path. The fresh receipt has its own job identity and current sample
+time; the old age, fire and ownership guards are not relaxed. Initial requests
+and actor replacements still prepare asynchronously. Only an allocated world
+query slot can consume rays: preparation slots remain pending even when an old
+ready receipt survived a range or control-state transition. This prevents both
+repeated cancellation without progress and spending the preparation budget on
+world queries. Foreground preparation is not reported as background worker time.
+
+Pure baked-boundary and fatal-hazard guards read the installed native grid and
+current hull descriptor directly. Physical guards retain the source cell size,
+including sub-metre cells, and Python 2 half-cell rounding independently of
+the planner's grid clamping. Missing physical grid metadata retains the
+existing Python frontier. World sweeps and their collision witnesses are
+unchanged. Artillery polling similarly checks an existing queued result before
+building another unused candidate path; accepted launch parameters and fresh
+target lead retain their original owners.
+
 The destructible sensor retains streamed native identities and effect commits,
 while a persistent numeric index owns body, tree and catalog candidate geometry.
 Registry removal, isolation, falling poses and proved chunk-layout changes
@@ -8009,6 +8039,36 @@ a subsequent Lakeville capture still spent most control time in Python/engine
 callbacks and outside native scopes. Moving the loops alone did not produce a
 material whole-update improvement or meet the 50 ms target. The exact-client
 capture, rather than native code coverage, remains the performance criterion.
+
+### Human-aware planning cadence
+
+The hidden worker has no presentation camera. Its Bot decision and perception
+schedule now uses the nearest participating human on either team, with the
+existing 150/350-metre thresholds and 0.15/0.30/0.60-second decision intervals.
+Physical integration, support sampling, existing motion commands and accepted
+burst clocks continue independently. The first decision retains its original
+short stagger. Approaching humans shorten an existing command lease before
+the visibility cohort is chosen; moving farther away never extends that lease.
+This intentionally reduces distant AI and spotting responsiveness, rather than
+claiming identical tactical outcomes at a lower cost.
+
+The full worker snapshot supplies the roster, including unknown and dead human
+participants. Only the exact hidden-worker carrier identity is excluded before
+human validation. Missing poses, spectator/dead participants, unavailable input
+progress and stream stalls keep all Bots at the original planning cadence.
+Each human must first advance an input sequence in the current round, authority
+epoch and runtime generation. The existing stream-stall interval bounds locally
+observed progress; public poses do not provide source timestamps. Invalidated
+observers and teardown also shorten outstanding far leases.
+
+Regression coverage exercises the actual worker projection and LAN snapshot
+handler through the battle frame, both teams, distance crossings, stale input,
+round changes and accepted bursts. Separate x86 Windows host experiments use
+analytic engine responses and synthetic descriptors, including canonical damage
+application to prevent dead Bots from returning during native-state mirroring.
+They measure the complete Bot caller, including observer preparation, and check
+continued motion and terminal shots. They do not establish BigWorld frame rate,
+retail spotting feel or native gameplay acceptance.
 
 ### Native boundary diagnostics
 

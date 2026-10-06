@@ -79,6 +79,8 @@ PreparedVisibility prepare_visibility(const PairInput&, const FoliageSnapshot&);
 // Main thread queries the existing sight path in order and can stop after a
 // clear zero-cover ray. Flags contain only its actually queried prefix.
 bool should_stop(const PreparedVisibility&, std::size_t ray_index, bool clear);
+// Exact detection law for one clear checkpoint, without a world-query claim.
+bool can_detect_with_foliage(const DetectionInputs&, double foliage_bonus);
 VisibilityResult reduce_visibility(const PreparedVisibility&,
                                    const std::vector<std::uint8_t>& clear_prefix);
 }  // namespace native_visibility

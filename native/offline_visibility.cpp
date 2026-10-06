@@ -102,6 +102,29 @@ public:
         job->snapshot=context->snapshot;context->jobs.emplace(job_id,job);
         offline_async::schedule([this,context,job] {run(context,job);});return true;
     }
+    bool prepare_ready(int64_t id,int64_t job_id,native_visibility::PairInput input,
+                       Completion &completion) {
+        auto job=std::make_shared<Job>();job->id=job_id;job->input=std::move(input);
+        std::shared_ptr<Context> context;
+        std::shared_ptr<const native_visibility::FoliageSnapshot> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);context=find(id);
+            if (!context || context->closed || context->jobs.count(job_id)) return false;
+            snapshot=context->snapshot;
+        }
+        // Preparing numeric foliage data cannot call the engine. Keep the
+        // immutable snapshot alive without holding a lock over this work.
+        try {job->prepared=native_visibility::prepare_visibility(job->input,*snapshot);}
+        catch (...) {job->status=2;}
+        job->done=true;job->emitted=true;
+        completion.job_id=job_id;completion.status=job->status;
+        if (!job->status) completion.rays=job->prepared.rays;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (context->closed || context->snapshot!=snapshot || context->jobs.count(job_id)) return false;
+        // The caller consumes this completion directly. No worker time or
+        // asynchronous completion is attributed to synchronous preparation.
+        context->jobs.emplace(job_id,std::move(job));return true;
+    }
     std::vector<Completion> take(int64_t id,bool frontier=false) {
         std::vector<Completion> out;
         std::lock_guard<std::mutex> lock(mutex_);const auto context=find(id);
@@ -136,6 +159,25 @@ public:
             context->jobs.erase(found);
         }
         result=native_visibility::reduce_visibility(job->prepared,clear);return true;
+    }
+    bool finish_detection(int64_t id,int64_t job_id,const std::vector<std::uint8_t> &observed,
+                          bool &detected) {
+        std::lock_guard<std::mutex> lock(mutex_);const auto context=find(id);
+        if (!context || context->closed) return false;
+        const auto found=context->jobs.find(job_id);
+        if (found==context->jobs.end()) return false;
+        const auto job=found->second;
+        if (!job->done || !job->emitted || job->status || job->cancelled.load(std::memory_order_relaxed)) return false;
+        if (observed.size()>job->prepared.rays.size()) return false;
+        bool positive=job->prepared.detection.distance<=50.;
+        for(std::size_t i=0;i<observed.size();++i) {
+            const bool eligible=native_visibility::can_detect_with_foliage(
+                job->prepared.detection,job->prepared.rays[i].foliage_bonus);
+            if(observed[i]>2 || (observed[i]==2 && eligible)) return false;
+            if(observed[i]==1 && eligible) positive=true;
+        }
+        if(!positive && observed.size()!=job->prepared.rays.size()) return false;
+        detected=positive;context->jobs.erase(found);return true;
     }
     void cancel_jobs(int64_t id,const std::vector<int64_t> &ids) {
         std::lock_guard<std::mutex> lock(mutex_);const auto context=find(id);
@@ -281,14 +323,22 @@ bool frontier_actor(int64_t id,FrontierActor actor) {
     else f->actors[actor.key]=std::move(actor);
     return true;
 }
-FrontierReply frontier_sight(int64_t id,const ActorKey &observer,const ActorKey &target,
-    double now,int64_t fire,const native_visibility::DetectionInputs &detection,const RayOracle &ray,const PhaseOracle &phase) {
-    FrontierReply reply;reply.sampled_at=now;
+namespace {
+struct FrontierEvaluation {
+    unsigned status=3; // completed=0, pending=2, failed=3
+    bool detected=false,line_of_sight=false;
+    double foliage=0.,sampled_at=0.;
+};
+FrontierEvaluation frontier_evaluate(int64_t id,const ActorKey &observer,const ActorKey &target,
+    double now,int64_t fire,const native_visibility::DetectionInputs &detection,const RayOracle &ray,
+    const PhaseOracle &phase,bool detection_only,bool world_query) {
+    FrontierEvaluation reply;reply.sampled_at=now;
     const auto f=frontier_get(id);if(!f || f->closed)return reply;
     ++f->counts.requests;frontier_poll(id,*f,now);
     const auto a=f->actors.find(observer),b=f->actors.find(target);
     if(a==f->actors.end() || b==f->actors.end() || !b->second.target_available)return reply;
     const PairKey key(observer,target);auto found=f->jobs.find(key);
+    bool fresh_prepare=false;
     if(found!=f->jobs.end()) {
         const auto &job=found->second;
         // The foliage cell size is immutable over the context lifetime.
@@ -299,7 +349,13 @@ FrontierReply frontier_sight(int64_t id,const ActorKey &observer,const ActorKey 
         else if(!same_detection(job.detection,detection))reason=2;
         else if(job.done && foliage_changed(job,service().cell_size(id)))reason=3;
         else if(now-job.sampled_at>=0.75)reason=4;
-        if(reason>=0){frontier_cancel(id,*f,key,static_cast<unsigned>(reason));found=f->jobs.end();}
+        if(reason>=0){
+            // A sparse planning cadence may otherwise replace every result
+            // before it can be consumed. Refresh the same actor pair from
+            // current inputs; identity changes still start a new async job.
+            fresh_prepare=detection_only && world_query && reason>=1 && reason<=4;
+            frontier_cancel(id,*f,key,static_cast<unsigned>(reason));found=f->jobs.end();
+        }
     }
     if(found==f->jobs.end()) {
         // The clock capability may synchronously reenter Python and replace
@@ -319,10 +375,19 @@ FrontierReply frontier_sight(int64_t id,const ActorKey &observer,const ActorKey 
         native_visibility::PairInput input;input.observer_checkpoints=current_a->second.checkpoints;
         input.target_checkpoints=current_b->second.checkpoints;input.observer=current_a->second.observer_pose;
         input.target=current_b->second.target_pose;input.observer_phase=observer_phase;input.detection=detection;
-        if(!submit(id,job.id,std::move(input)))return reply;
-        f->by_id.emplace(job.id,key);f->jobs.emplace(key,std::move(job));++f->counts.submitted;reply.status=2;return reply;
+        if(fresh_prepare) {
+            Completion completion;
+            if(!service().prepare_ready(id,job.id,std::move(input),completion))return reply;
+            job.done=true;job.status=completion.status;job.rays=std::move(completion.rays);
+        } else if(!submit(id,job.id,std::move(input)))return reply;
+        f->by_id.emplace(job.id,key);f->jobs.emplace(key,std::move(job));++f->counts.submitted;
+        if(!fresh_prepare){reply.status=2;return reply;}
+        found=f->jobs.find(key);
     }
     found->second.requested_at=now;
+    // A preparation slot may encounter an already-ready frontier receipt
+    // after control eligibility changes. Only a world-query slot may use it.
+    if(!world_query){reply.status=2;return reply;}
     // Copy owned rays before engine callbacks, which may close this context.
     const FrontierJob job=found->second;
     if(!job.done){reply.status=2;return reply;}
@@ -332,18 +397,40 @@ FrontierReply frontier_sight(int64_t id,const ActorKey &observer,const ActorKey 
         if(f->closed)return reply;
         const auto current=f->jobs.find(key);
         if(current==f->jobs.end() || current->second.id!=job.id)return reply;
+        const bool eligible=!detection_only || native_visibility::can_detect_with_foliage(
+            job.detection,item.foliage_bonus);
+        if(!eligible){clear.push_back(2);continue;}
         const bool value=ray(item);clear.push_back(value?1:0);
         if(f->closed)return reply;
-        if(value && item.foliage_bonus<=0.)break;
+        if(value && (detection_only || item.foliage_bonus<=0.))break;
     }
-    native_visibility::VisibilityResult result;
-    if(!reduce(id,job.id,clear,result))return reply;
+    if(detection_only) {
+        if(!service().finish_detection(id,job.id,clear,reply.detected))return reply;
+    } else {
+        native_visibility::VisibilityResult result;
+        if(!reduce(id,job.id,clear,result))return reply;
+        reply.detected=result.detected;reply.line_of_sight=result.line_of_sight;
+        reply.foliage=result.foliage_bonus;
+    }
     // Do not erase a replacement submitted by synchronous engine reentry.
     found=f->jobs.find(key);
     if(found!=f->jobs.end() && found->second.id==job.id){f->jobs.erase(found);f->by_id.erase(job.id);}
     ++f->counts.completed;f->counts.max_completion_age=std::max(f->counts.max_completion_age,std::max(0.,now-job.sampled_at));
-    reply.status=result.line_of_sight?0:1;reply.has_detection=true;reply.detected=result.detected;
-    reply.foliage=result.foliage_bonus;reply.sampled_at=job.sampled_at;return reply;
+    reply.status=0;reply.sampled_at=job.sampled_at;return reply;
+}
+}
+FrontierReply frontier_sight(int64_t id,const ActorKey &observer,const ActorKey &target,
+    double now,int64_t fire,const native_visibility::DetectionInputs &detection,const RayOracle &ray,const PhaseOracle &phase) {
+    const auto value=frontier_evaluate(id,observer,target,now,fire,detection,ray,phase,false,true);
+    FrontierReply reply;reply.status=value.status==0?(value.line_of_sight?0:1):value.status;
+    reply.has_detection=value.status==0;reply.detected=value.detected;
+    reply.foliage=value.foliage;reply.sampled_at=value.sampled_at;return reply;
+}
+FrontierDetectionReply frontier_detect(int64_t id,const ActorKey &observer,const ActorKey &target,
+    double now,int64_t fire,const native_visibility::DetectionInputs &detection,const RayOracle &ray,const PhaseOracle &phase,bool world_query) {
+    const auto value=frontier_evaluate(id,observer,target,now,fire,detection,ray,phase,true,world_query);
+    FrontierDetectionReply reply;reply.status=value.status;reply.detected=value.detected;
+    reply.sampled_at=value.sampled_at;return reply;
 }
 FrontierSnapshot frontier_snapshot(int64_t id) {
     const auto f=frontier_get(id);if(!f || f->closed)return {};

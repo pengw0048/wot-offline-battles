@@ -46,6 +46,7 @@ struct SightRequest {
   double now = 0.;
   std::int64_t fire_sequence = -1;
   Detection detection;
+  bool world_query = true;
 };
 struct SightReply {
   QueryStatus status = QueryStatus::Failed;

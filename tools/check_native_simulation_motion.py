@@ -368,6 +368,221 @@ def check_win32_widths(scene_module, backend, NativeMotion):
     return 'Win32 first-install presence bits31/32 / explicit float payloads / 2147s and 86400s clocks'
 
 
+def _install_motion_grid(scene, backend, handle, source_metadata=True):
+    from gui.mods.offline_lan_0922 import native_navigation_core as navigation
+    runtime = scene.runtime
+    source = runtime.baked_graph if source_metadata else None
+    config, state = navigation._grid_encode(runtime.navigator.grid, source)
+    assert backend.sim_navigation_install(handle, navigation._encode(
+        runtime.navigator), config, state, None) == 1
+
+
+def _motion_guard_scene(scene_module, backend, NativeMotion, case, mode):
+    from gui.mods.offline_lan_0922 import native_math
+    from gui.mods.offline_lan_0922.ai.navigation import TerrainNavigator
+    native_math._backend, native_math._attempted = None, True
+    scene = scene_module.HostScene('public-motion-guards', native_library='')
+    runtime = scene.runtime
+    graph = copy.deepcopy(runtime.baked_graph)
+    graph.update(origin=(-100., -100.), cell_size=case['cell'],
+                 bounds=case.get('bounds', (-1000., -1000., 1000., 1000.)))
+    graph['hazards'] = [0] * (graph['width'] * graph['height'])
+    column, row, mask = case.get('hazard', (9, 8, 0))
+    graph['hazards'][row * graph['width'] + column] = mask
+    if case.get('missing_height'):
+        graph['heights_mm'] = list(graph['heights_mm'])
+        graph['heights_mm'][row * graph['width'] + column] = None
+    runtime.navigator.close()
+    runtime.baked_graph = graph
+    runtime.navigator = TerrainNavigator(runtime._ground_probe,
+        runtime._obstacle_probe, baked_graph=graph)
+    assert runtime.navigator.grid.cell_size == max(1., case['cell'])
+    runtime.states = {16: runtime.states[16]}
+    state = runtime.states[16]
+    state.update(x=case['before'][0], y=0., z=case['before'][1],
+                 yaw=case.get('yaw', 0.), pitch=0., roll=0., terrain_pitch=0.,
+                 speed=0., vertical_speed=0., push_x=0., push_z=0., push_yaw=0.,
+                 airborne=False, _contact_dynamics=False)
+    native_math._backend, native_math._attempted = backend, True
+    handle = backend.sim_open(5, 30)
+    owner = NativeMotion(runtime, backend, handle)
+    owner.install_all()
+    if mode != 'callbacks':
+        _install_motion_grid(scene, backend, handle, mode == 'native')
+    return scene, owner, handle
+
+
+def _public_motion_guard(scene_module, backend, NativeMotion, case, mode):
+    from gui.mods.offline_lan_0922 import prebaked_navigation as baked
+    scene, owner, handle = _motion_guard_scene(
+        scene_module, backend, NativeMotion, case, mode)
+    counts = {11: 0, 16: 0}
+    original = owner.dispatch
+    def dispatch(opcode, rows):
+        if opcode in counts:
+            counts[opcode] += 1
+        return original(opcode, rows)
+    owner.dispatch = dispatch
+    try:
+        scene.now, scene.frame_index = .1, 0
+        scene.frontier_log[:] = []
+        state = scene.runtime.states[16]
+        before = (state['x'], state['y'], state['z'])
+        was_safe = baked.pose_is_safe(scene.runtime.baked_graph, before,
+            shoulder_cells=0, hazard_mask=baked.MOTION_FATAL_HAZARDS)
+        owner.begin_slice(.1, .1)
+        owner.prepare_actor(16)
+        if 'shape' in case:
+            # This is an ordinary descriptor boundary, after preparation. The
+            # guard must read the current descriptor rather than installed size.
+            descriptor = list(owner._descriptor(16))
+            shape = tuple(case['shape']) + tuple(descriptor[2][2:])
+            descriptor[2] = shape
+            state['half_width'], state['half_length'] = case['shape']
+            state['collision_shape'] = shape
+            assert backend.sim_motion_descriptor(handle, (1, 16),
+                tuple(descriptor), None, (0, 0., 0.)) == 1
+        owner.advance_actor(16, 0., 0., 0.)
+        # A public pose event between native calls supplies a deterministic
+        # realised position. Preparation, advance and final guard/settlement
+        # remain the normal production entrypoints; no test export is needed.
+        state['x'], state['z'] = case['after']
+        after = (state['x'], state['y'], state['z'])
+        clear = scene.runtime._baked_pose_progress_clear(
+            state, before, state['yaw'], after, state['yaw'])
+        clear = clear and (not was_safe or baked.pose_is_safe(
+            scene.runtime.baked_graph, after, shoulder_cells=0,
+            hazard_mask=baked.MOTION_FATAL_HAZARDS))
+        assert bool(clear) == case['clear'], case['name']
+        owner.patch_external(16, ('pose',))
+        owner.after_weapon(16)
+        reports = owner.settle_roster()
+        assert not owner.failures, (case['name'], owner.failures)
+        expected = after if clear else before
+        near((state['x'], state['y'], state['z']), expected,
+             case['name'] + '/guarded pose')
+        if mode == 'native':
+            assert counts == {11: 0, 16: 0}, ('native guard escaped', counts)
+        else:
+            assert counts[11] and counts[16], ('fallback not exercised', counts)
+        return (copy.deepcopy(state), copy.deepcopy(owner.settlement),
+                reports, engine_queries(scene), copy.deepcopy(scene.effect_log))
+    finally:
+        backend.sim_close(handle)
+
+
+def check_baked_guards(scene_module, backend, NativeMotion):
+    cases = []
+    for cell in (.5, 1., 4.):
+        before, after = (-100.+8*cell, -100.+8*cell), (-100.+9*cell, -100.+8*cell)
+        for mask in (1, 8):
+            cases.append(dict(name='hazard/%s/%s' % (cell, mask), cell=cell,
+                before=before, after=after, hazard=(9, 8, mask), clear=False))
+    for mask in (2, 4):
+        cases.append(dict(name='nonfatal/%s' % mask, cell=.5,
+            before=(-96., -96.), after=(-95.5, -96.), hazard=(9, 8, mask), clear=True))
+    cases.append(dict(name='missing-height-is-not-a-hazard', cell=.5,
+        before=(-96., -96.), after=(-95.5, -96.), missing_height=True, clear=True))
+    for offset in (-1.e-10, 0., 1.e-10):
+        cases.append(dict(name='negative-half/%s' % offset, cell=.5,
+            before=(-100.25+offset, -96.), after=(-99.5, -96.),
+            hazard=(1, 8, 1), clear=offset <= 0.))
+    cases.extend((
+        dict(name='outside-grid', cell=.5, before=(-65., -96.),
+             after=(-64.5, -96.), clear=False),
+        dict(name='outward-edge', cell=4., bounds=(-120., -120., -60., -60.),
+             before=(-60., -80.), after=(-59., -80.), clear=False),
+        dict(name='edge-recovery', cell=4., bounds=(-120., -120., -60., -60.),
+             before=(-59., -80.), after=(-60., -80.), clear=True),
+        dict(name='rotated-edge', cell=4., bounds=(-120., -120., -60., -60.),
+             before=(-60., -80.), after=(-59., -80.), yaw=.37, clear=False),
+        dict(name='current-descriptor-minimum-size', cell=4.,
+             bounds=(-120., -120., -60., -60.), shape=(.1, .1),
+             before=(-61.71, -80.), after=(-60.4, -80.), clear=True),
+        dict(name='degenerate-bounds', cell=4., bounds=(-60., -120., -60., -60.),
+             before=(-60., -80.), after=(-59., -80.), clear=True)))
+    for case in cases:
+        reference = _public_motion_guard(scene_module, backend, NativeMotion,
+                                         case, 'callbacks')
+        candidate = _public_motion_guard(scene_module, backend, NativeMotion,
+                                         case, 'native')
+        near(candidate, reference, case['name'] + '/native versus callbacks')
+    # A loaded planner grid without raw source metadata is still a callback
+    # owner. In particular its clamped cell_size must never qualify motion.
+    case = cases[0]
+    near(_public_motion_guard(scene_module, backend, NativeMotion, case, 'metadata-zero'),
+         _public_motion_guard(scene_module, backend, NativeMotion, case, 'callbacks'),
+         'source-metadata-zero fallback')
+    for mode in ('callbacks', 'metadata-zero'):
+        scene, owner, handle = _motion_guard_scene(
+            scene_module, backend, NativeMotion, case, mode)
+        source = scene.runtime.baked_graph
+        scene.runtime.baked_graph = None
+        try:
+            owner.begin_slice(.1, .1)
+            owner.prepare_actor(16)
+            owner.advance_actor(16, 0., 0., 0.)
+            owner.after_weapon(16)
+            owner.settle_roster()
+            assert owner.failures and owner.failures[-1][1] == 16
+            assert scene.runtime.states[16].get('_native_motion_failed')
+            assert backend.sim_lifetime(handle) == (5, 30)
+            scene.runtime.baked_graph = source
+            failures = owner.failure_count
+            owner.begin_slice(.1, .2)
+            owner.prepare_actor(16)
+            owner.advance_actor(16, 0., 0., 0.)
+            owner.after_weapon(16)
+            owner.settle_roster()
+            assert owner.failure_count == failures
+            assert not scene.runtime.states[16].get('_native_motion_failed')
+        finally:
+            backend.sim_close(handle)
+    for retire in (False, True):
+        case = dict(name='guard-reentry', cell=4., before=(-96., -96.), after=(-96., -96.))
+        scene, owner, handle = _motion_guard_scene(
+            scene_module, backend, NativeMotion, case, 'native')
+        called = [False]
+        fallback_calls = []
+        original = owner.dispatch
+        def reenter(opcode, rows):
+            if called[0] and opcode in (11, 16):
+                fallback_calls.append(opcode)
+            if opcode == 12 and not called[0]:
+                called[0] = True
+                if retire:
+                    backend.sim_close(handle)
+                else:
+                    assert backend.sim_navigation_remove(handle) == 1
+            return original(opcode, rows)
+        owner.dispatch = reenter
+        try:
+            owner.begin_slice(.1, .1)
+            owner.prepare_actor(16)
+            before = copy.deepcopy(scene.runtime.states[16])
+            if retire:
+                try:
+                    owner.advance_actor(16, 0., 1., 0.)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError('closed native guard owner committed motion')
+                assert backend.sim_lifetime(handle) is None
+                assert scene.runtime.states[16] == before
+            else:
+                owner.advance_actor(16, 0., 1., 0.)
+                owner.after_weapon(16)
+                owner.settle_roster()
+                assert not owner.failures, owner.failures
+                assert backend.sim_navigation_snapshot(handle) is None
+                assert 11 in fallback_calls and 16 in fallback_calls, (
+                    'removed grid did not restore current callbacks', fallback_calls)
+            assert called[0], 'turret callback reentry was not exercised'
+        finally:
+            backend.sim_close(handle)
+    return 'public baked guards / raw cells / source fallback / current descriptor / reentry'
+
+
 def check_query_rows(scene_module, backend, NativeMotion):
     scene = scene_module.HostScene('narrow-query-inputs', native_library='')
     handle = backend.sim_open(5, 20)
@@ -545,7 +760,8 @@ def main():
               check_events(scene_module, backend, NativeMotion),
               check_failure(scene_module, backend, NativeMotion),
               check_failure(scene_module, backend, NativeMotion, True),
-              check_reentrant_close(scene_module, backend, NativeMotion)]
+              check_reentrant_close(scene_module, backend, NativeMotion),
+              check_baked_guards(scene_module, backend, NativeMotion)]
     from native_motion_frontier_fixture import check_frontier
     events.append(check_frontier(scene_module, backend, NativeMotion))
     result = dict(event_checks=events, comparisons=sum(row['comparisons'] for row in results),

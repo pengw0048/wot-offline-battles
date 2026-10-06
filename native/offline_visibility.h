@@ -41,6 +41,12 @@ struct FrontierReply {
     bool has_detection=false, detected=false;
     double foliage=0., sampled_at=0.;
 };
+// A completed detection has no implied LOS/foliage result for another consumer.
+struct FrontierDetectionReply {
+    unsigned status=3; // completed=0, pending=2, failed=3
+    bool detected=false;
+    double sampled_at=0.;
+};
 struct FrontierSnapshot {
     uint64_t submitted=0,completed=0,cancelled=0,pending=0,requests=0;
     double worker_seconds=0.,max_completion_age=0.;
@@ -57,6 +63,10 @@ FrontierReply frontier_sight(int64_t context,const ActorKey &observer,
     const ActorKey &target,double now,int64_t fire_sequence,
     const native_visibility::DetectionInputs &detection,const RayOracle &ray,
     const PhaseOracle &phase=PhaseOracle());
+FrontierDetectionReply frontier_detect(int64_t context,const ActorKey &observer,
+    const ActorKey &target,double now,int64_t fire_sequence,
+    const native_visibility::DetectionInputs &detection,const RayOracle &ray,
+    const PhaseOracle &phase=PhaseOracle(),bool world_query=true);
 
 }
 #endif

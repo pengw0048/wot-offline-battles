@@ -18648,6 +18648,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._bots = types.SimpleNamespace(
             presentation_states=presentation_states,
             is_authority=lambda: True,
+            set_planning_snapshot=mock.Mock(),
             update=update)
         battle._publish_player_environment = mock.Mock()
         battle._advance_artillery_arcs = mock.Mock()
@@ -19048,6 +19049,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             presentation_states=mock.Mock(return_value=()),
             is_authority=lambda: True,
             probe_totals=lambda: (0, 0, 0, 0, 0),
+            set_planning_snapshot=mock.Mock(),
             set_camera_position=mock.Mock())
         battle._flush_pending_bot_create = mock.Mock()
         battle._flush_pending_entities = mock.Mock()
@@ -19070,6 +19072,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIsNone(battle._worker_probe)
         self.assertFalse(battle._worker_probe_attempted)
         battle._bots.set_camera_position.assert_called_once_with(None)
+        battle._bots.set_planning_snapshot.assert_called_once_with(
+            battle._last_snapshot, 1.0, battle._generation)
 
     def test_worker_sample_exposes_control_astar_and_timed_logical_probes(self):
         battle = BattleRuntime(_runtime())

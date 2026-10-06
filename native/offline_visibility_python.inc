@@ -238,10 +238,13 @@ offline_simulation::control::SightReply visibility_control_sight(
         const offline_visibility::ActorKey observer={{static_cast<int64_t>(request.observer.kind),request.observer.id}};
         const offline_visibility::ActorKey target={{static_cast<int64_t>(request.target.kind),request.target.id}};
         const auto phase=[&]() {return observer_phase;};
-        const auto reply=offline_visibility::frontier_sight(context,observer,target,request.now,
-                                                           request.fire_sequence,detection,ray,phase);
-        result.status=static_cast<QueryStatus>(reply.status);result.has_detection=reply.has_detection;
-        result.detected=reply.detected;result.foliage=reply.foliage;result.sampled_at=reply.sampled_at;
+        const auto reply=offline_visibility::frontier_detect(context,observer,target,request.now,
+                                                           request.fire_sequence,detection,ray,phase,request.world_query);
+        // A completed detection is consumed before the generic LOS branch.
+        // No omitted checkpoint is published as blocked or given a cover value.
+        result.status=reply.status==0?QueryStatus::DetectionComplete:static_cast<QueryStatus>(reply.status);
+        result.has_detection=reply.status==0;result.detected=reply.detected;
+        result.sampled_at=reply.sampled_at;
     } catch(const engine_query::Failed &) {
         // An attempted engine query never replays through the Python frontier.
         result.status=QueryStatus::Failed;
