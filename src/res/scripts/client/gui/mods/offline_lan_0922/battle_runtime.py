@@ -59,7 +59,7 @@ from gui.mods.offline_lan_0922.siege_hud import PersistentSiegeHints
 from gui.mods.offline_lan_0922.spawn_planner import SpawnPlanner
 from gui.mods.offline_lan_0922.collision_flags import VEHICLE_SKIP_FLAGS
 from gui.mods.offline_lan_0922.worker_diagnostics import (
-    timed, call as timed_call, observed_ray,
+    WorkerCombatDiagnostics, timed, call as timed_call, observed_ray,
     observed_call)
 from gui.mods.offline_lan_0922 import (
     ballistics, burst_mechanics, combat_rules, critical_damage, descriptor_donation,
@@ -2233,9 +2233,11 @@ class BattleRuntime(object):
         self._replay_muzzle_count = 0
         self._replay_gun_signature = None
         self._replay_publishing = False
-        # Keep normal play on the frame-level PERF observer. Fine combat
-        # scopes materially perturb the update they are meant to measure.
-        self._combat_diagnostics = None
+        # Fine scopes perturb the measured update. Enable bounded captures
+        # only for an explicitly opted-in diagnostic process.
+        self._combat_diagnostics = (
+            WorkerCombatDiagnostics(_PROFILE_CLOCK, detail_stride=8)
+            if os.environ.get('WOT_OFFLINE_COMBAT_PROFILE') == '1' else None)
         if self._worker_mode:
             self._config['native_remote_vehicles'] = False
             self._config['bot_track_animation'] = False
@@ -7405,6 +7407,7 @@ class BattleRuntime(object):
             (velocity[axis] - previous[axis]) / window for axis in range(3))
         return velocity, acceleration
 
+    @timed('local.presentation')
     def _update_local_presentation(self, entity, dt=0.0):
         if self._local_matrix is None or self._local_model is None:
             raise RuntimeError('player presentation is not attached')
@@ -16411,6 +16414,7 @@ class BattleRuntime(object):
             self._ensure_projectile_visual, args=(meta, now))
         return True
 
+    @timed('projectile.publish_ricochet')
     def _submit_projectile_ricochet(self, meta):
         pending = meta.get('pending_ricochet')
         local_owner = not self._worker_mode and self._owns_projectile(meta)
@@ -16485,6 +16489,7 @@ class BattleRuntime(object):
                 meta, pending['state'], 'ricochet_send', 'rejected')
         return bool(sent)
 
+    @timed('projectile.publish_resolution')
     def _submit_projectile_resolution(self, meta):
         pending = meta.get('pending_resolution')
         local_owner = not self._worker_mode and self._owns_projectile(meta)
@@ -17392,7 +17397,15 @@ class BattleRuntime(object):
                 # Capture repeated motion/destruction stalls even before the
                 # first projectile or shot-lane request starts combat timing.
                 trigger = 'slow_frame'
+            else:
+                # An opted-in process must capture ordinary driving/control
+                # even when no shot or preceding slow frame supplies a trigger.
+                trigger = 'profile_window'
             combat_diagnostic.begin_frame(frame_id, now, trigger)
+            if not self._worker_mode:
+                # The visible client has no Bot control tick to select its
+                # detailed helpers. Sample one complete render callback.
+                combat_diagnostic.begin_control()
             diagnostics.note_combat_captures(
                 combat_diagnostic.drain_completed())
         stages = {}
@@ -20058,6 +20071,7 @@ class BattleRuntime(object):
                     return False
         return True
 
+    @timed('local.motion')
     def _motion_is_clear(self, entity, position, yaw, speed, dt,
                          allow_crush_drive=False, hull_yaw=None):
         """Thin tuple-to-Vector adapter around the copied 0.8.2 probe."""
@@ -21385,6 +21399,7 @@ class BattleRuntime(object):
             params, checkpoint, shape, (sample_time-transit)/1000000.0,
             now/1000000.0, impulses)
 
+    @timed('local.contact_gather')
     def _contact_tanks(self, position, own_shape, dt=0.0, extra_reach=0.0):
         """Build only bodies that can contact this presented player pose.
 
@@ -21571,6 +21586,7 @@ class BattleRuntime(object):
             })
         return result
 
+    @timed('local.contact_resolve')
     def _resolve_local_tank_contacts(self, entity, position, yaw, dt,
                                      start_position=None):
         """Apply chassis OBB separation without pushing a tank into walls."""
@@ -23329,6 +23345,7 @@ class BattleRuntime(object):
             input_seq=request_seq)
         return True
 
+    @timed('local.drive')
     def _drive_local(self, elapsed):
         """Advance local copied physics through all elapsed battle time."""
         if self._sender is None or self._server is None:

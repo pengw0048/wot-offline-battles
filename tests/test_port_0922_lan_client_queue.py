@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 import unittest
+from unittest import mock
 
 import bot_state_rows
 from gui.mods.offline_lan_0922 import bot_state_codec
@@ -15,6 +16,7 @@ sys.path.insert(0, str(
     ROOT / 'src' / 'res' / 'scripts' / 'client'))
 
 from gui.mods.offline_lan_0922 import lan_client as lan_client_module
+from gui.mods.offline_lan_0922 import snapshot_delta
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.lan_client import LANClient
@@ -71,6 +73,212 @@ class LanClientQueueTests(unittest.TestCase):
         with client._outbound_lock:
             client._outbound_accepting = True
         return client
+
+    @staticmethod
+    def _snapshot_delta_chain():
+        first = LanClientQueueTests.order_snapshot(1, bots=[{
+            'id': 11, 'x': 1.0, 'y': 0.0, 'z': 2.0, 'health': 100,
+            'critical': {'devices': [], 'events': []}}])
+        second = LanClientQueueTests.order_snapshot(2, bots=[{
+            'id': 11, 'x': 2.0, 'y': 0.0, 'z': 2.0, 'health': 80,
+            'critical': {'devices': [{'name': 'engine', 'hp': 50}],
+                         'events': []}}])
+        third = dict(second, server_tick=3, bots=[dict(second['bots'][0], x=3.0)])
+        wire = []
+        baseline = None
+        for sequence, message in enumerate((first, second, third), 1):
+            encoded, baseline = snapshot_delta.encode(message, baseline, sequence)
+            wire.append(encoded)
+        return (first, second, third), wire
+
+    def test_wire_delta_rebuilds_before_queue_and_poll_coalescing(self):
+        messages, wire = self._snapshot_delta_chain()
+        self.assertTrue(wire[1]['snapshot_delta'])
+        self.assertTrue(wire[2]['snapshot_delta'])
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                client = self.activate(worker=worker)
+                generation = client._transport_generation
+                old_limit = lan_client_module.MAX_PENDING_MESSAGES
+                lan_client_module.MAX_PENDING_MESSAGES = 1
+                try:
+                    for message in wire:
+                        restored = client._decode_received_snapshot(message, generation)
+                        client._queue_message(restored, generation)
+                finally:
+                    lan_client_module.MAX_PENDING_MESSAGES = old_limit
+                self.assertEqual([messages[-1]], client._pending)
+                seen = []
+                client._handle_message = seen.append
+                client.connected = False
+                client._poll()
+                self.assertEqual([messages[-1]], seen)
+                self.assertEqual(80, seen[0]['bots'][0]['health'])
+                self.assertEqual(50, seen[0]['bots'][0]['critical']['devices'][0]['hp'])
+
+    def test_wire_baseline_ignores_runtime_mutation_and_business_rejection(self):
+        messages, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        first = client._decode_received_snapshot(wire[0], generation)
+        client.last_snapshot = first
+        first['bots'][0]['critical']['devices'].append({'name': 'local-only'})
+        second = client._decode_received_snapshot(wire[1], generation)
+        self.assertEqual(messages[1], second)
+        # A gameplay consumer can retain the prior actor or reject this whole
+        # frame without changing which ordered raw patch the socket has read.
+        third = client._decode_received_snapshot(wire[2], generation)
+        self.assertEqual(messages[2], third)
+        self.assertEqual(3, client._snapshot_wire_sequence)
+        self.assertEqual([], client._outbound_queue)
+
+    def test_bad_delta_requests_one_full_and_preserves_other_protocol_messages(self):
+        messages, wire = self._snapshot_delta_chain()
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                client = self.activate(worker=worker)
+                generation = client._transport_generation
+                client._decode_received_snapshot(wire[0], generation)
+                broken = dict(wire[1], snapshot_base_seq=999)
+                self.assertIsNone(client._decode_received_snapshot(broken, generation))
+                self.assertIsNone(client._decode_received_snapshot(wire[2], generation))
+                self.assertIsNone(client._snapshot_wire_baseline)
+                requests = [entry[1] for entry in client._outbound_queue]
+                self.assertEqual([{
+                    'type': 'snapshot_resync', 'round_id': 7,
+                    'authority_epoch': 1, 'last_sequence': 1}], requests)
+                event = {'type': 'events', 'round_id': 7, 'events': []}
+                self.assertIs(event, client._decode_received_snapshot(event, generation))
+                self.assertTrue(client.running)
+                self.assertTrue(client.connected)
+                self.assertIsNone(client.last_error)
+                full, baseline = snapshot_delta.encode(messages[2], None, 3)
+                self.assertEqual(messages[2], client._decode_received_snapshot(full, generation))
+                self.assertFalse(client._snapshot_resync_pending)
+                next_message = dict(messages[2], server_tick=4)
+                next_wire, unused = snapshot_delta.encode(next_message, baseline, 4)
+                self.assertEqual(next_message, client._decode_received_snapshot(next_wire, generation))
+
+    def test_recovery_full_can_replace_a_bad_high_wire_sequence(self):
+        messages, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        runtime_state = {'bots': [{'id': 11, 'health': 100}]}
+        client.last_snapshot = runtime_state
+        high, unused = snapshot_delta.encode(messages[0], None, 100)
+        client._decode_received_snapshot(high, generation)
+        self.assertEqual(100, client._snapshot_wire_sequence)
+        self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        self.assertIsNone(client._snapshot_wire_baseline)
+        self.assertEqual(100, client._snapshot_wire_sequence)
+        self.assertIs(runtime_state, client.last_snapshot)
+        full, unused = snapshot_delta.encode(messages[2], None, 3)
+        self.assertEqual(messages[2], client._decode_received_snapshot(full, generation))
+        self.assertEqual(3, client._snapshot_wire_sequence)
+        self.assertFalse(client._snapshot_resync_pending)
+
+    def test_recovery_queue_pressure_retries_until_request_is_accepted(self):
+        unused, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
+        lan_client_module.MAX_OUTBOUND_MESSAGES = 0
+        try:
+            self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        finally:
+            lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
+        self.assertFalse(client._snapshot_resync_pending)
+        self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        self.assertTrue(client._snapshot_resync_pending)
+        self.assertEqual(1, len(client._outbound_queue))
+
+    def test_stale_receiver_cannot_publish_or_request_on_reconnected_transport(self):
+        unused, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        original_decode = snapshot_delta.decode
+
+        def reconnect_during_decode(message, baseline):
+            result = original_decode(message, baseline)
+            client._transport_generation += 1
+            client._snapshot_wire_baseline = None
+            client._snapshot_wire_sequence = None
+            return result
+
+        snapshot_delta.decode = reconnect_during_decode
+        try:
+            self.assertIsNone(client._decode_received_snapshot(wire[0], generation))
+        finally:
+            snapshot_delta.decode = original_decode
+        self.assertIsNone(client._snapshot_wire_baseline)
+        self.assertIsNone(client._snapshot_wire_sequence)
+        self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        self.assertEqual([], client._outbound_queue)
+
+    def test_wire_full_after_round_or_epoch_change_replaces_baseline(self):
+        messages, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        client._decode_received_snapshot(wire[0], generation)
+        for sequence, changes in (
+                (2, {'authority_epoch': 2}),
+                (4, {'round_id': 8, 'authority_epoch': 3})):
+            value = dict(messages[0], **changes)
+            full, baseline = snapshot_delta.encode(value, None, sequence)
+            self.assertEqual(value, client._decode_received_snapshot(full, generation))
+            changed = dict(value, server_tick=5)
+            delta, unused = snapshot_delta.encode(changed, baseline, sequence + 1)
+            self.assertEqual(changed, client._decode_received_snapshot(delta, generation))
+
+    def test_network_worker_queues_reconstructed_snapshots_only(self):
+        messages, wire = self._snapshot_delta_chain()
+        payload = b''.join((json.dumps(value) + '\n').encode('utf-8')
+                           for value in wire)
+
+        class IncomingSocket(RecordingSocket):
+            def __init__(self):
+                RecordingSocket.__init__(self)
+                self.chunks = [payload, b'']
+
+            def settimeout(self, unused_timeout):
+                pass
+
+            def connect(self, unused_address):
+                pass
+
+            def setsockopt(self, *unused_arguments):
+                pass
+
+            def recv(self, unused_size):
+                return self.chunks.pop(0)
+
+        client = self.activate()
+        client.effective_params = effective_params()
+        seen = []
+        client._queue_message = lambda message, unused_generation: seen.append(message)
+        client._publish_connected_transport = lambda unused_socket, unused_generation: True
+        with mock.patch.object(lan_client_module.socket, 'socket',
+                               return_value=IncomingSocket()):
+            client._worker()
+        self.assertEqual(3, len(seen))
+        for expected, actual in zip(messages, seen):
+            self.assertIn('_client_received_time', actual)
+            actual.pop('_client_received_time')
+            self.assertEqual(expected, actual)
+            self.assertNotIn('snapshot_seq', actual)
+            self.assertNotIn('snapshot_delta', actual)
+
+    def test_start_resets_wire_baseline_and_pending_recovery(self):
+        client = self.activate()
+        client.running = False
+        client._snapshot_wire_baseline = object()
+        client._snapshot_wire_sequence = 99
+        client._snapshot_resync_pending = True
+        with mock.patch.object(lan_client_module.threading, 'Thread'):
+            self.assertTrue(client.start())
+        self.assertIsNone(client._snapshot_wire_baseline)
+        self.assertIsNone(client._snapshot_wire_sequence)
+        self.assertFalse(client._snapshot_resync_pending)
 
     def test_notify_reports_socket_to_main_thread_dispatch_delay(self):
         events = []

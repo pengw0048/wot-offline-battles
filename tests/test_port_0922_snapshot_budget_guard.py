@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[1] / 'server'
@@ -11,6 +12,7 @@ from lan_battle_server import (  # noqa: E402
     BOT_MANIFEST_REFRESH_TICKS, BattleState, CLIENT_BUILD_0922,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_LINE_BYTES, Player, TICK_HZ,
 )
+from gui.mods.offline_lan_0922 import bot_state_codec  # noqa: E402
 
 
 class _Connection(object):
@@ -134,6 +136,48 @@ class SnapshotBudgetGuardTests(unittest.TestCase):
         self.assertTrue(player.connected)
         self.assertEqual(-1, player.snapshot_tick_sent)
         self.assertEqual(0, player.bot_manifest_tick_sent)
+
+    def test_steady_snapshot_checks_budget_once_and_still_serializes(self):
+        state, player, connection = self._state(base_bytes=1)
+        self._mark_manifest_current(state, player)
+        with mock.patch.object(
+                state, '_projectile_message_fits',
+                wraps=state._projectile_message_fits) as fits:
+            state.tick_once(1.0 / TICK_HZ)
+        self.assertEqual(1, fits.call_count)
+        self.assertEqual(1, len(connection.messages))
+        self.assertEqual('snapshot', connection.messages[0]['type'])
+        self.assertEqual(1, player.snapshot_tick_sent)
+
+    def test_server_snapshot_freezes_shared_equipment_with_its_dynamic_rows(self):
+        state, player, connection = self._state(base_bytes=1)
+        self._mark_manifest_current(state, player)
+        equipment = {
+            'equipment': {'name': 'largeRepairkit', 'tags': ['repairkit'],
+                          'bonusValue': 0.10},
+            'usesLeft': 0, 'cooldownTimeLeft': 12.5, 'active': False,
+            'autoPendingElapsed': None, 'aiPendingElapsed': 0.5}
+        state.bot_states[2]['equipment_states'] = [equipment]
+        state.bot_states[3] = dict(state.bot_states[2], id=3, slot=1)
+        frozen = []
+        player.offer_snapshot = lambda value: frozen.append(value) or True
+
+        state.tick_once(1.0 / TICK_HZ)
+
+        snapshot = frozen[0]
+        self.assertEqual(1, len(snapshot['bot_equipment_contracts']))
+        self.assertEqual([0, 0], [row['equipment_states'][0]['equipment']
+                                  for row in snapshot['bots']])
+        equipment['equipment']['tags'].append('changed-after-freeze')
+        equipment['usesLeft'] = 1
+        self.assertEqual(['repairkit'],
+                         snapshot['bot_equipment_contracts'][0]['tags'])
+        self.assertEqual(0, snapshot['bots'][0]['equipment_states'][0]['usesLeft'])
+        rows = [bot_state_codec.decode_snapshot_equipment(
+            row, snapshot['bot_equipment_contracts']) for row in snapshot['bots']]
+        self.assertEqual(12.5, rows[0]['equipment_states'][0]['cooldownTimeLeft'])
+        self.assertIsNot(rows[0]['equipment_states'][0]['equipment'],
+                         rows[1]['equipment_states'][0]['equipment'])
 
 
 if __name__ == '__main__':

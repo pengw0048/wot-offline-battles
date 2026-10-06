@@ -991,12 +991,20 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'bot_manifest': [], 'players': [snapshot_human], 'bots': [],
             'projectiles': [],
         }
+        equipment_rows = [{
+            'id': 11, 'vehicle': 'ussr:R11_MS-1', 'team': 1, 'slot': 1,
+            'x': 1.0, 'y': 0.0, 'z': 2.0,
+            'equipment_states': _projected_bot_equipment_states()}]
+        snapshot['bots'], snapshot['bot_equipment_contracts'] = (
+            bot_state_codec.encode_snapshot_equipment(equipment_rows))
         with mock.patch.object(
                 lan_client_module.effective_params_wire, 'canonical',
                 wraps=lan_client_module.effective_params_wire.canonical
         ) as canonical:
             client._handle_message(snapshot)
             self.assertEqual(0, canonical.call_count)
+            self.assertEqual(equipment_rows, client.last_snapshot['bots'])
+            self.assertNotIn('bot_equipment_contracts', client.last_snapshot)
 
             full_snapshot = dict(snapshot)
             full_snapshot['server_tick'] = 1

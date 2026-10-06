@@ -298,6 +298,27 @@ class WorkerCombatDiagnosticsTests(unittest.TestCase):
         self.assertTrue(trace.begin_frame(1, 400.0, 'projectiles'))
         self.assertEqual(1, trace.capture)
 
+    def test_repeated_profile_trigger_obeys_default_capture_and_cooldown_caps(self):
+        trace = diagnostics.WorkerCombatDiagnostics(lambda: 1.0, detail_stride=8)
+        for frame, now in enumerate((0.0, 30.0, 60.0, 90.0,
+                                     120.0, 150.0, 180.0), 1):
+            expected = now in (0.0, 60.0, 120.0)
+            self.assertEqual(expected, trace.begin_frame(
+                frame, now, 'profile_window'))
+            trace.begin_control()
+            row = trace.finish_frame()
+            self.assertEqual(expected, row is not None)
+            self.assertFalse(trace.active)
+        captures = trace.drain_completed()
+        self.assertEqual(3, len(captures))
+        self.assertEqual([0.0, 60.0, 120.0],
+                         [row['authority_start'] for row in captures])
+        self.assertTrue(all(row['end_reason'] == 'deadline'
+                            for row in captures))
+        trace.close()
+        trace.close()
+        self.assertEqual([], trace.drain_completed())
+
     def test_wait_measures_each_identity_even_when_enqueued_before_capture(self):
         trace = diagnostics.WorkerCombatDiagnostics(lambda: 0.0)
         ordinary = (1, 'bot', 8)

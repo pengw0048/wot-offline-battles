@@ -10,11 +10,13 @@ import time
 import uuid
 
 from gui.mods.offline_lan_0922 import state_transfer
+from gui.mods.offline_lan_0922 import snapshot_delta
 
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922.battle_achievements import (
     AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
 from gui.mods.offline_lan_0922 import bot_gunnery
+from gui.mods.offline_lan_0922 import bot_state_codec
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import friendly_fire
@@ -1675,6 +1677,9 @@ class LANClient(object):
         self._outbound_accepting = False
         self._sender_thread = None
         self._transport_generation = 0
+        self._snapshot_wire_baseline = None
+        self._snapshot_wire_sequence = None
+        self._snapshot_resync_pending = False
         self._stopping = False
         self._poll_callback = None
         self._last_ping = 0.0
@@ -1705,6 +1710,9 @@ class LANClient(object):
                 return False
             self._transport_generation += 1
             generation = self._transport_generation
+            self._snapshot_wire_baseline = None
+            self._snapshot_wire_sequence = None
+            self._snapshot_resync_pending = False
             self._outbound_queue = []
             self._outbound_bytes = 0
             self._outbound_seq = 0
@@ -1795,6 +1803,9 @@ class LANClient(object):
             sock = self.sock
             was_connected = self.connected
             self._stopping = True
+            self._snapshot_wire_baseline = None
+            self._snapshot_wire_sequence = None
+            self._snapshot_resync_pending = False
             self._outbound_accepting = False
             self.running = False
             self.connected = False
@@ -3478,6 +3489,67 @@ class LANClient(object):
         print('[Offline LAN 0.9.22] STATE_TRANSFER %s %s' % (
             stage, json.dumps(fields, sort_keys=True, separators=(',', ':'))))
 
+    def _request_snapshot_resync(self, message, generation):
+        """Request one complete wire baseline without blocking either peer."""
+        with self._outbound_lock:
+            if (generation != self._transport_generation or
+                    self._snapshot_resync_pending or self._stopping or
+                    not self.running):
+                return
+            sequence = self._snapshot_wire_sequence
+        request = {
+            'type': 'snapshot_resync',
+            'round_id': _exact_int(message.get('round_id')),
+            'authority_epoch': _exact_int(message.get('authority_epoch')),
+            'last_sequence': sequence,
+        }
+        frozen, size = _freeze_outbound(request, [0])
+        # Binding the enqueue to the receiver's generation prevents an old
+        # socket from requesting recovery on a newly connected transport.
+        if self._enqueue_outbound(frozen, size + 1, generation):
+            with self._outbound_lock:
+                if generation == self._transport_generation:
+                    self._snapshot_resync_pending = True
+
+    def _decode_received_snapshot(self, message, generation):
+        """Rebuild raw actor state before any main-thread queue coalescing.
+
+        The wire baseline is independent of ``last_snapshot``: gameplay
+        admission may retain an invalid actor, and runtime consumers may
+        enrich or mutate their own rows. Neither operation may change the
+        ordered transport's next patch base.
+        """
+        if not isinstance(message, dict) or message.get('type') != 'snapshot':
+            return message
+        with self._outbound_lock:
+            if (generation != self._transport_generation or
+                    self._stopping or not self.running):
+                return None
+            baseline = self._snapshot_wire_baseline
+        try:
+            restored, next_baseline = snapshot_delta.decode(message, baseline)
+        except snapshot_delta.SnapshotDeltaError:
+            with self._outbound_lock:
+                if (generation != self._transport_generation or
+                        self._stopping or not self.running):
+                    return None
+                # Only a new full message can repair a broken wire chain.
+                # Retaining an invalid high sequence would reject the
+                # server's otherwise valid recovery snapshot indefinitely.
+                self._snapshot_wire_baseline = None
+            self._request_snapshot_resync(message, generation)
+            return None
+        with self._outbound_lock:
+            if (generation != self._transport_generation or
+                    self._stopping or not self.running):
+                return None
+            self._snapshot_wire_baseline = next_baseline
+            self._snapshot_wire_sequence = _exact_int(
+                message.get('snapshot_seq'))
+            if message.get('snapshot_delta') is not True:
+                self._snapshot_resync_pending = False
+        return restored
+
     def _worker(self, generation=None):
         if generation is None:
             generation = self._transport_generation
@@ -3530,6 +3602,12 @@ class LANClient(object):
                     break
                 received_time = _monotonic_time()
                 for message in decoder.feed(chunk, received_time):
+                    if generation != self._transport_generation:
+                        break
+                    message = self._decode_received_snapshot(
+                        message, generation)
+                    if message is None:
+                        continue
                     if isinstance(message, dict):
                         # Frame stalls must not inflate RTT or countdown
                         # projection: both end in this network thread, not
@@ -4177,7 +4255,7 @@ class LANClient(object):
                 int(uncanonical_rows)))
         return True
 
-    def _canonical_runtime_rows(self, rows, field):
+    def _canonical_runtime_rows(self, rows, field, message=None):
         """Canonicalize one runtime row list, retaining unusable rows.
 
         ``SnapshotSync`` destroys any entity a snapshot omits, so dropping an
@@ -4188,7 +4266,14 @@ class LANClient(object):
         """
         previous_rows = {}
         previous = self.last_snapshot
-        if isinstance(previous, dict):
+        same_scope = (message is None or (
+            isinstance(previous, dict) and
+            (previous.get('round_id'), previous.get('authority_epoch')) ==
+            (message.get('round_id'), message.get('authority_epoch'))))
+        same_round = (message is None or (
+            isinstance(previous, dict) and
+            previous.get('round_id') == message.get('round_id')))
+        if isinstance(previous, dict) and same_round:
             for value in previous.get(field) or ():
                 if not isinstance(value, dict):
                     continue
@@ -4198,7 +4283,17 @@ class LANClient(object):
         canonical = []
         retained = 0
         for value in rows:
-            row = _canonical_runtime_vehicle_row(value)
+            try:
+                restored = (
+                    bot_state_codec.decode_snapshot_equipment(
+                        value, (message or {}).get('bot_equipment_contracts'),
+                        (previous_rows.get(_exact_int(value.get('id')))
+                         if same_scope else None))
+                    if field == 'bots' else value)
+                row = _canonical_runtime_vehicle_row(restored)
+            except (bot_state_codec.BotStateCodecError, TypeError,
+                    ValueError, OverflowError):
+                row = None
             if row is not None:
                 canonical.append(row)
                 continue
@@ -4869,7 +4964,8 @@ class LANClient(object):
                 prepared_players is not None and prepared_players[2])
             bots = _strict_mapping_list(message.get('bots'), 30)
             if bots is not None:
-                bots, retained = self._canonical_runtime_rows(bots, 'bots')
+                bots, retained = self._canonical_runtime_rows(
+                    bots, 'bots', message)
                 uncanonical_rows += retained
             manifest = None
             if 'bot_manifest' in message:
@@ -5035,7 +5131,7 @@ class LANClient(object):
                 message = dict(message)
                 message.pop('timing', None)
             players = self._commit_player_static_inputs(prepared_players)
-            if (players or bots or
+            if (players or bots or 'bot_equipment_contracts' in message or
                     players != message.get('players') or
                     bots != message.get('bots')):
                 # Keep an empty, already-canonical snapshot untouched.  There
@@ -5044,6 +5140,7 @@ class LANClient(object):
                 message = dict(message)
                 message['players'] = players
                 message['bots'] = bots
+                message.pop('bot_equipment_contracts', None)
             if ('bot_manifest' not in message and
                     lean_manifest_valid):
                 message = dict(message)

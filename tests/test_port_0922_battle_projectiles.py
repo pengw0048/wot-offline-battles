@@ -335,7 +335,9 @@ class BattleProjectileTests(unittest.TestCase):
                 if mode == 'broken':
                     raise RuntimeError('diagnostic clock failed')
                 return reads[0] * 0.000001
-            diagnostic = WorkerCombatDiagnostics(clock) if mode else None
+            diagnostic = (WorkerCombatDiagnostics(
+                clock, detail_stride=8 if mode == 'sampled' else 1)
+                if mode else None)
             battle._combat_diagnostics = diagnostic
             bigworld.wall_x = 4.0
             native = bigworld.wg_collideSegment
@@ -366,6 +368,7 @@ class BattleProjectileTests(unittest.TestCase):
                     bigworld.now = now
                     if diagnostic is not None:
                         diagnostic.begin_frame(frame, now, 'projectiles')
+                        diagnostic.begin_control()
                     battle._advance_projectiles(now)
                     frames.append((battle._projectiles.snapshot(),
                                    dict((key, value) for key, value in
@@ -397,8 +400,10 @@ class BattleProjectileTests(unittest.TestCase):
             with self.subTest(shooter=shooter_kind):
                 baseline, unused = exercise(shooter_kind, None)
                 measured, traces = exercise(shooter_kind, 'active')
+                sampled, sampled_traces = exercise(shooter_kind, 'sampled')
                 failed, unused = exercise(shooter_kind, 'broken')
                 self.assertEqual(baseline, measured)
+                self.assertEqual(baseline, sampled)
                 self.assertEqual(baseline, failed)
                 self.assertEqual(len(measured[1]), sum(row['stages'].get(
                     'native.projectile.world', {}).get('calls', 0)
@@ -406,6 +411,11 @@ class BattleProjectileTests(unittest.TestCase):
                 self.assertEqual(8, sum(row['stages'].get(
                     'projectile.terminal', {}).get('calls', 0)
                     for row in traces))
+                self.assertGreaterEqual(sum(row['stages'].get(
+                    'projectile.publish_resolution', {}).get('calls', 0)
+                    for row in sampled_traces), 8)
+                self.assertEqual(1, len([row for row in sampled_traces
+                                        if row['detail_sampled']]))
 
     def _preinstalled_high_precision_player_projectile(self):
         battle, unused_bigworld = _battle(now=10.0)

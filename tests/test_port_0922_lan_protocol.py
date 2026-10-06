@@ -25,6 +25,7 @@ from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
 from gui.mods.offline_lan_0922 import bot_state_codec
+from gui.mods.offline_lan_0922 import snapshot_delta
 from lan_battle_server import (
     BattleState, CLIENT_BUILD_0922, Player,
     PLAYER_PROJECTILE_OWNER_CAPABILITY, PLAYER_INPUT_FAULT_CLASSES,
@@ -1002,6 +1003,154 @@ class LanProtocolTests(unittest.TestCase):
         self.assertEqual(manifest, self.client.last_snapshot['bot_manifest'])
         self.assertIsNot(
             manifest, self.client.last_snapshot['bot_manifest'])
+
+    @staticmethod
+    def _equipment_snapshot(tick=1, epoch=1):
+        bots = []
+        for bot_id in (11, 12):
+            bots.append({
+                'id': bot_id, 'vehicle': 'ussr:R11_MS-1', 'team': 1,
+                'slot': bot_id - 11, 'x': float(tick), 'y': 0.0, 'z': 2.0,
+                'health': 100, 'alive': True,
+                'equipment_states': [{
+                    'equipment': {'name': 'repairkit', 'tags': ['equipment']},
+                    'usesLeft': 1, 'cooldownTimeLeft': 0.0, 'active': False,
+                    'autoPendingElapsed': None, 'aiPendingElapsed': None}]})
+        rows, table = bot_state_codec.encode_snapshot_equipment(bots)
+        return {
+            'type': 'snapshot', 'protocol': 5, 'round_id': 7,
+            'server_tick': tick, 'bot_state_revision': 0,
+            'map': '01_karelia',
+            'players': [], 'bots': rows, 'bot_manifest': [],
+            'bot_authority_id': -1, 'authority_epoch': epoch,
+            'bot_equipment_contracts': table,
+        }
+
+    def test_snapshot_equipment_restores_before_dispatch_and_replay_capture(self):
+        self.client.running = True
+        received = []
+        self.client.on_event = lambda kind, value: received.append((kind, value))
+        message = self._equipment_snapshot()
+        wire_copy = json.loads(json.dumps(message))
+        self.client._handle_message(message)
+        self.assertIsNone(self.client.last_error)
+        snapshot = self.client.last_snapshot
+        self.assertNotIn('bot_equipment_contracts', snapshot)
+        self.assertEqual('repairkit', snapshot['bots'][0][
+            'equipment_states'][0]['equipment']['name'])
+        self.assertEqual(('snapshot', snapshot), received[-1])
+        self.assertEqual(wire_copy, message)
+        first = snapshot['bots'][0]['equipment_states'][0]['equipment']
+        second = snapshot['bots'][1]['equipment_states'][0]['equipment']
+        self.assertIsNot(first, second)
+        self.assertIsNot(first['tags'], second['tags'])
+
+    def test_bad_equipment_reference_keeps_death_and_other_bots_advancing(self):
+        self.client.running = True
+        self.client._handle_message(self._equipment_snapshot())
+        message = self._equipment_snapshot(tick=2)
+        damaged = message['bots'][0]
+        damaged.update(health=0, alive=False)
+        damaged['equipment_states'][0].update(equipment=9, usesLeft=0,
+                                              cooldownTimeLeft=90.0)
+        self.client._handle_message(message)
+        accepted = self.client.last_snapshot['bots']
+        self.assertTrue(self.client.running)
+        self.assertEqual([11, 12], [row['id'] for row in accepted])
+        self.assertEqual([2.0, 2.0], [row['x'] for row in accepted])
+        self.assertFalse(accepted[0]['alive'])
+        self.assertEqual(0, accepted[0]['equipment_states'][0]['usesLeft'])
+
+    def test_equipment_reference_cannot_inherit_across_epoch_or_round(self):
+        self.client.running = True
+        first = self._equipment_snapshot()
+        self.client._handle_message(first)
+        prior = self.client.last_snapshot['bots'][0]
+        bad = self._equipment_snapshot(tick=2, epoch=2)
+        bad['bots'][0]['equipment_states'][0]['equipment'] = 9
+        self.client._handle_message(bad)
+        accepted = self.client.last_snapshot['bots']
+        # Keep the known entity alive until a usable row arrives, without
+        # attaching the old epoch's contract to new-epoch dynamic state.
+        self.assertEqual(prior, accepted[0])
+        self.assertEqual(2.0, accepted[1]['x'])
+        self.client._handle_message(self._equipment_snapshot(tick=3, epoch=2))
+        self.assertEqual(3.0, self.client.last_snapshot['bots'][0]['x'])
+        future = self._equipment_snapshot(tick=1, epoch=3)
+        future['round_id'] = 8
+        future.pop('bot_equipment_contracts')
+        rows, retained = self.client._canonical_runtime_rows(
+            future['bots'], 'bots', future)
+        self.assertEqual([], rows)
+        self.assertEqual(2, retained)
+
+    def test_new_receiver_and_next_frame_need_only_their_own_equipment_table(self):
+        self.client.running = True
+        first = self._equipment_snapshot(tick=8, epoch=5)
+        self.client._handle_message(first)
+        self.assertEqual(8, self.client.last_snapshot['server_tick'])
+        second = self._equipment_snapshot(tick=9, epoch=6)
+        second['bot_equipment_contracts'].insert(
+            0, {'name': 'unused', 'tags': []})
+        for row in second['bots']:
+            row['equipment_states'][0]['equipment'] = 1
+        self.client._handle_message(second)
+        self.assertEqual(9, self.client.last_snapshot['server_tick'])
+        self.assertEqual('repairkit', self.client.last_snapshot['bots'][0][
+            'equipment_states'][0]['equipment']['name'])
+
+    def test_unknown_actor_bad_reference_is_local_and_next_snapshot_recovers(self):
+        self.client.running = True
+        first = self._equipment_snapshot()
+        first['bots'][0]['equipment_states'][0]['equipment'] = 99
+        self.client._handle_message(first)
+        self.assertTrue(self.client.running)
+        self.assertIsNone(self.client.last_error)
+        self.assertEqual([12], [row['id']
+                               for row in self.client.last_snapshot['bots']])
+        self.client._handle_message(self._equipment_snapshot(tick=2))
+        self.assertEqual([11, 12], [row['id']
+                                   for row in self.client.last_snapshot['bots']])
+
+    def test_runtime_retained_actor_does_not_roll_back_raw_delta_baseline(self):
+        self.client.running = True
+        first = self._equipment_snapshot()
+        damaged = self._equipment_snapshot(tick=2)
+        damaged['bots'][0]['x'] = 'unusable-pose'
+        repaired = self._equipment_snapshot(tick=3)
+        wire_base = None
+        for sequence, source in enumerate((first, damaged, repaired), 1):
+            wire, wire_base = snapshot_delta.encode(source, wire_base, sequence)
+            received = self.client._decode_received_snapshot(
+                wire, self.client._transport_generation)
+            self.assertIsNotNone(received)
+            self.client._handle_message(received)
+            expected_x = 1.0 if sequence == 2 else float(sequence)
+            self.assertEqual(expected_x, self.client.last_snapshot['bots'][0]['x'])
+            self.assertEqual(float(sequence),
+                             self.client.last_snapshot['bots'][1]['x'])
+            self.assertEqual(sequence, self.client._snapshot_wire_sequence)
+        self.assertTrue(self.client.running)
+        self.assertIsNone(self.client.last_error)
+
+    def test_equipment_table_survives_latest_snapshot_coalescing(self):
+        self.client.running = True
+        self.client.connected = False
+        self.client.bigworld = mock.Mock()
+        self.client.bigworld.callback.return_value = 1
+        self.client.server_capabilities = (LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
+        self.client._handle_message(self._equipment_snapshot())
+        pending = [self._equipment_snapshot(tick=tick) for tick in (2, 3)]
+        for message in pending:
+            message.pop('bot_manifest')
+            message['bot_equipment_contracts'][0]['name'] = (
+                'contract-%d' % message['server_tick'])
+        with self.client._pending_lock:
+            self.client._pending = pending
+        self.client._poll()
+        self.assertEqual(3, self.client.last_snapshot['server_tick'])
+        self.assertEqual('contract-3', self.client.last_snapshot['bots'][0][
+            'equipment_states'][0]['equipment']['name'])
 
     def test_poll_does_not_coalesce_away_manifest_barrier(self):
         self.client.server_capabilities = (

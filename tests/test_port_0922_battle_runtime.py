@@ -12674,6 +12674,161 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(frame_diagnostics.enabled)
         self.assertEqual(0, frame_diagnostics._frame_id)
 
+    def test_combat_profile_requires_exact_process_opt_in(self):
+        for flag in (None, '', '0', 'true', 'yes', ' 1', '1 '):
+            with self.subTest(flag=flag):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                environment = {} if flag is None else {
+                    'WOT_OFFLINE_COMBAT_PROFILE': flag}
+                with mock.patch.dict(battle_runtime_module.os.environ,
+                                     environment, clear=True):
+                    self.assertTrue(battle.start({
+                        'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                        'name': 'Player', 'combat_profile': True},
+                        _minimal_start(), _Client()))
+                    self.assertIsNone(battle._combat_diagnostics)
+                    battle.stop(restore_account=False)
+
+    def test_combat_profile_start_restart_and_teardown_are_round_local(self):
+        from gui.mods.offline_lan_0922.native_navigation_query import Oracle
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                runtime = _runtime()
+                runtime.bigworld.defer_vehicle_entry = True
+                battle = BattleRuntime(runtime)
+                client = _Client()
+                if worker:
+                    client.player_id = -1
+                    client.bot_authority_id = -1
+                    client.is_bot_authority = lambda: True
+                    client.send_bot_manifest = lambda *unused: True
+                previous = None
+                for round_id, flag in enumerate(('1', '1', '0'), 1):
+                    start = _minimal_start(round_id)
+                    if worker:
+                        start['players'] = []
+                    with mock.patch.dict(battle_runtime_module.os.environ, {
+                            'WOT_OFFLINE_COMBAT_PROFILE': flag}):
+                        self.assertTrue(battle.start({
+                            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                            'name': 'Player', 'worker_mode': worker},
+                            start, client))
+                    with mock.patch.object(Oracle, 'create', return_value=object()):
+                        runtime.bigworld.callbacks.pop(0)()
+                        runtime.bigworld.enter_pending_vehicle(
+                            battle._server.vehicle_id)
+                        runtime.bigworld.callbacks.pop(0)()
+                    self.assertEqual('running', battle.state, battle.error)
+                    trace = battle._combat_diagnostics
+                    self.assertIs(trace, battle._bots._combat_diagnostics)
+                    if flag == '1':
+                        self.assertIsNot(previous, trace)
+                        self.assertIs(battle_runtime_module._PROFILE_CLOCK,
+                                      trace.clock)
+                        self.assertEqual((30.0, 30.0, 3, 8), (
+                            trace.capture_seconds, trace.cooldown_seconds,
+                            trace.maximum_captures, trace.detail_stride))
+                        self.assertEqual(0, trace.capture)
+                        self.assertFalse(trace.active)
+                        self.assertIsNone(trace._deadline)
+                        self.assertTrue(trace.begin_frame(1, 1.0, 'test'))
+                        trace.begin_control()
+                        trace.finish_frame()
+                    else:
+                        self.assertIsNone(trace)
+                    battle.stop()
+                    self.assertIsNone(battle._combat_diagnostics)
+                    if trace is not None:
+                        self.assertFalse(trace.active)
+                        self.assertIsNone(trace._deadline)
+                        self.assertEqual([], trace._stack)
+                        previous = trace
+                    while runtime.bigworld.callbacks:
+                        runtime.bigworld.callbacks.pop(0)()
+                    self.assertIsNone(battle._lobby_restore_token)
+
+    def test_combat_profile_visible_frames_select_complete_detail_callbacks(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        trace = worker_diagnostics.WorkerCombatDiagnostics(
+            lambda: 1.0, detail_stride=8)
+        battle._combat_diagnostics = trace
+        rows, steps = [], []
+        battle._frame_diagnostics = types.SimpleNamespace(
+            enabled=True, begin=mock.Mock(side_effect=range(1, 17)),
+            note_combat_captures=mock.Mock(),
+            finish=lambda *args, **kwargs: rows.append(kwargs['combat']))
+        battle._sender = types.SimpleNamespace(send_current=mock.Mock())
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._drive_local = lambda dt: BattleRuntime._drive_local(battle, dt)
+
+        @worker_diagnostics.observed('test.local_step')
+        def step(dt):
+            steps.append((trace._frame, dt, trace.detail_active))
+            worker_diagnostics.count('local_steps')
+            return False
+
+        battle._drive_local_step = step
+        for unused in range(16):
+            battle._frame()
+            self.assertFalse(trace.active)
+            self.assertIsNone(worker_diagnostics.current())
+            runtime.bigworld.now += 0.02
+        battle._fail.assert_not_called()
+        self.assertEqual([1, 10], [row['frame'] for row in rows
+                                  if row['detail_sampled']])
+        self.assertTrue(all(row['trigger'] == 'profile_window' for row in rows))
+        self.assertTrue(all(row['stages']['local.drive']['calls'] == 1
+                            for row in rows))
+        self.assertEqual(len(steps), sum(row['stages'].get(
+            'test.local_step', {}).get('calls', 0) for row in rows) +
+            len([step for step in steps if not step[2]]))
+        self.assertEqual(16, trace._detail_ticks)
+        self.assertTrue(trace.enabled)
+
+    def test_combat_profile_worker_frame_leaves_selection_to_bot_control(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        battle._worker_mode = True
+        battle.client.is_bot_authority = lambda: True
+        trace = worker_diagnostics.WorkerCombatDiagnostics(
+            lambda: 1.0, detail_stride=8)
+        battle._combat_diagnostics = trace
+        battle._frame_diagnostics = types.SimpleNamespace(
+            enabled=True, begin=mock.Mock(return_value=1),
+            note_combat_captures=mock.Mock(), finish=mock.Mock())
+        battle._frame()
+        battle._fail.assert_not_called()
+        self.assertEqual(0, trace._detail_ticks)
+        row = battle._frame_diagnostics.finish.call_args.kwargs['combat']
+        self.assertEqual('profile_window', row['trigger'])
+        self.assertFalse(row['detail_sampled'])
+        self.assertFalse(trace.active)
+
+    def test_combat_profile_local_exception_closes_nested_scopes(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+        battle = BattleRuntime(_runtime())
+        trace = worker_diagnostics.WorkerCombatDiagnostics(lambda: 1.0)
+        battle._combat_diagnostics = trace
+        battle._sender = object()
+        battle._server = object()
+        battle._drive_local_step = lambda dt: battle._update_local_presentation(
+            None, dt)
+        trace.begin_frame(1, 1.0, 'test')
+        with self.assertRaisesRegex(RuntimeError, 'presentation is not attached'):
+            battle._drive_local(0.1)
+        self.assertEqual([], trace._stack)
+        self.assertIsNone(worker_diagnostics.current())
+        row = trace.finish_frame()
+        self.assertEqual(1, row['stages']['local.drive']['calls'])
+        self.assertEqual(1, row['stages']['local.presentation']['calls'])
+        self.assertTrue(trace.enabled)
+
     def test_player_identity_sync_rejects_arena_dp_mismatch(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)

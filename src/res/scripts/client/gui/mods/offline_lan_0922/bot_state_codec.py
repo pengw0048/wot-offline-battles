@@ -156,6 +156,96 @@ class BotStateCodecError(ValueError):
     """One row could not be encoded or decoded against this layout."""
 
 
+def encode_snapshot_equipment(states):
+    """Share equal immutable contracts inside one self-contained snapshot.
+
+    The server freezes the projected rows and this small table together before
+    releasing its state lock. No later packet or successfully applied manifest
+    is needed to restore a row, including after a reconnect or authority edge.
+    """
+    contracts = []
+    rows = []
+    for state in states:
+        equipment = state.get('equipment_states')
+        if not equipment:
+            rows.append(state)
+            continue
+        projected = []
+        for item in equipment:
+            contract = item.get('equipment')
+            if not isinstance(contract, dict):
+                # Only canonical full contracts are compacted. Keep an
+                # unavailable producer row intact for ordinary containment.
+                projected.append(item)
+                continue
+            try:
+                index = contracts.index(contract)
+            except ValueError:
+                index = len(contracts)
+                contracts.append(contract)
+            value = dict(item)
+            value['equipment'] = index
+            projected.append(value)
+        row = dict(state)
+        row['equipment_states'] = projected
+        rows.append(row)
+    return rows, contracts
+
+
+def decode_snapshot_equipment(state, contracts, previous=None):
+    """Restore one row without sharing mutable contracts between actors."""
+    equipment = state.get('equipment_states')
+    if not equipment:
+        return state
+    projected = []
+    changed = False
+    previous_equipment = ((previous or {}).get('equipment_states') or ())
+    same_actor = (previous is not None and all(
+        state.get(name) == previous.get(name)
+        for name in ('id', 'vehicle', 'team', 'slot')))
+    for slot, item in enumerate(equipment):
+        if not isinstance(item, dict):
+            raise BotStateCodecError('bot equipment state is not an object')
+        contract = item.get('equipment')
+        if isinstance(contract, dict):
+            # Start messages and replay records already carry complete rows.
+            projected.append(item)
+            continue
+        available = (
+            isinstance(contract, int) and not isinstance(contract, bool) and
+            isinstance(contracts, (list, tuple)) and
+            len(contracts) <= 30 * MAX_EQUIPMENT and
+            0 <= contract < len(contracts) and
+            isinstance(contracts[contract], dict))
+        if available:
+            contract = contracts[contract]
+        elif (same_actor and len(previous_equipment) == len(equipment) and
+                isinstance(previous_equipment[slot], dict) and
+                isinstance(previous_equipment[slot].get('equipment'), dict)):
+            # The caller fences this prior row by round and authority epoch.
+            # A damaged reference cannot change the actor's immutable loadout;
+            # retain that exact contract while still applying current HP,
+            # pose, uses and cooldown instead of reviving an old whole row.
+            contract = previous_equipment[slot]['equipment']
+        else:
+            raise BotStateCodecError('bot equipment contract is unavailable')
+        # A validated equipment contract has scalar fields and one tags list.
+        # Each runtime ledger gets its own copy, just as JSON decoding the
+        # former repeated objects did; mutating one Bot cannot change another.
+        restored = dict(contract)
+        if isinstance(restored.get('tags'), list):
+            restored['tags'] = list(restored['tags'])
+        value = dict(item)
+        value['equipment'] = restored
+        projected.append(value)
+        changed = True
+    if not changed:
+        return state
+    row = dict(state)
+    row['equipment_states'] = projected
+    return row
+
+
 def _fixed(value, scale, bounds=None):
     """Round half away from zero so 2.7 and 3.x encode the same integer."""
     number = float(value)

@@ -48,6 +48,7 @@ from vehicle_overlay_store import (
 )
 from gui.mods.offline_lan_0922 import ram_history
 from gui.mods.offline_lan_0922 import state_transfer
+from gui.mods.offline_lan_0922 import snapshot_delta
 from gui.mods.offline_lan_0922 import battle_bonds, tank_collision
 from gui.mods.offline_lan_0922 import spg_positions, bot_tactics
 from gui.mods.offline_lan_0922 import turret_obstacle_schema
@@ -235,6 +236,7 @@ MODERN_VISIBLE_MESSAGE_TYPES = frozenset((
     "select_team", "set_team_size", "set_bot_tier_mode",
     "set_bot_skill_mode",
     "ping", "worker_ping", "leave",
+    "snapshot_resync",
     "track_repair",
     "equipment_intent",
     "team_command",
@@ -1702,6 +1704,10 @@ def _monotonic_endpoint_server_time(endpoint, message):
     return outgoing
 
 
+class _FrozenSnapshot(dict):
+    """Tick wire values frozen under the state lock and shared read-only."""
+
+
 class _EndpointSendMixin:
     """Keep slow TCP writers off the simulation and handler threads."""
 
@@ -1712,6 +1718,14 @@ class _EndpointSendMixin:
         self._outbox_snapshot = None
         self._outbox_thread = None
         self._outbox_failure_reported = False
+        self._snapshot_baseline = None
+        self._snapshot_sequence = 0
+        self.snapshot_resync_requested = False
+        self._destructible_replay_required = False
+        self._snapshot_wire_profile = (
+            [time.monotonic(), 0, 0, 0, 0.0]
+            if os.environ.get("WOT_OFFLINE_COMBAT_PROFILE") == "1"
+            else None)
 
     def __post_init__(self):
         self._initialize_outbox()
@@ -1776,7 +1790,7 @@ class _EndpointSendMixin:
                     "sent_bytes": sent_bytes,
                     "reliable_messages": len(self._outbox_reliable),
                     "reliable_bytes": self._outbox_reliable_bytes,
-                    "snapshot_bytes": (len(snapshot["payload"])
+                    "snapshot_bytes": (len(snapshot["payload"] or b"")
                                        if snapshot is not None else 0),
                     "error_type": (
                         type(error).__name__[:64]
@@ -1795,7 +1809,7 @@ class _EndpointSendMixin:
             # A broken log destination must not change send/close semantics.
             pass
 
-    def _serialize_message(self, message):
+    def _serialize_message(self, message, report_failure=True):
         outgoing = _monotonic_endpoint_server_time(self, message)
         try:
             payload = (json.dumps(
@@ -1810,8 +1824,9 @@ class _EndpointSendMixin:
                     outgoing, payload,
                     state_transfer.CAPABILITY in getattr(self, "capabilities", ()))
             except state_transfer.TransferError:
-                self._record_outbound_failure(
-                    "message_too_large", message, payload, sent_bytes=0)
+                if report_failure:
+                    self._record_outbound_failure(
+                        "message_too_large", message, payload, sent_bytes=0)
                 return None
             _server_log_limited(
                 "state-transfer:%s:%s" % (id(self), outgoing.get("type")),
@@ -1842,10 +1857,113 @@ class _EndpointSendMixin:
                     message.get("destructible_revision", -1))
                 if server_tick >= 0:
                     self.destructible_tick_sent = server_tick
+                self._destructible_replay_required = False
             except (TypeError, ValueError):
                 pass
 
-    def _send_direct(self, message):
+    @staticmethod
+    def _is_actor_snapshot(message):
+        return bool(message.get("type") == "snapshot" and
+                    isinstance(message.get("players"), list) and
+                    isinstance(message.get("bots"), list))
+
+    def _write_message(self, message, payload=None, full_snapshot=False,
+                       repair_snapshot=False):
+        """Encode against the preceding completed write, never an offer."""
+        if (self._destructible_replay_required and
+                message.get("type") == "snapshot" and
+                "destructibles" in message and
+                int(message.get("destructible_base_revision", 0)) > 0):
+            # This page may have been prepared before the repair barrier
+            # reset the frontier. Sending it now would hide the missing
+            # prefix behind its newer revision. Replay starts next tick.
+            message = dict(message)
+            message.pop("destructibles", None)
+            message.pop("destructible_base_revision", None)
+            payload = None
+        baseline = None
+        actor_snapshot = self._is_actor_snapshot(message)
+        profiling = actor_snapshot and self._snapshot_wire_profile is not None
+        encode_started = time.perf_counter() if profiling else None
+        if actor_snapshot:
+            sequence = self._snapshot_sequence + 1
+            try:
+                outgoing, baseline = snapshot_delta.encode(
+                    message, self._snapshot_baseline, sequence,
+                    force_full=full_snapshot)
+            except snapshot_delta.SnapshotDeltaError:
+                # Preserve the existing actor-local admission boundary if a
+                # locally invalid row cannot be represented as a patch.
+                outgoing = message
+            delta = outgoing.get("snapshot_delta") is True
+            payload = self._serialize_message(
+                outgoing, report_failure=baseline is None)
+            if payload is None and delta:
+                outgoing, baseline = snapshot_delta.encode(
+                    message, None, sequence, force_full=True)
+                payload = self._serialize_message(outgoing, report_failure=False)
+            if payload is None and baseline is not None:
+                # Metadata can cross a line budget that the complete logical
+                # state still fits. Send that self-contained state and reset
+                # the codec; never lose a checkpoint to an optimization.
+                outgoing = message
+                baseline = None
+                payload = self._serialize_message(outgoing)
+        else:
+            outgoing = _monotonic_endpoint_server_time(self, message)
+            if outgoing is not message:
+                # A newer snapshot may have completed after this reliable
+                # item's bytes were prepared. Clamp in actual write order.
+                payload = None
+            if payload is None:
+                payload = self._serialize_message(outgoing)
+        if payload is None:
+            if message.get("type") == "snapshot":
+                self.snapshot_resync_requested = True
+            return False
+        encode_ms = ((time.perf_counter() - encode_started) * 1000.0
+                     if profiling else 0.0)
+        self._write_payload(payload, outgoing)
+        if baseline is not None:
+            self._snapshot_baseline = baseline
+            self._snapshot_sequence = sequence
+        elif message.get("type") in (
+                "snapshot", "roster", "battle_start", "battle_live"):
+            self._snapshot_baseline = None
+        if repair_snapshot:
+            # Reset only after the repair barrier reaches TCP. An older
+            # in-flight write can no longer restore stale sparse frontiers.
+            self.bot_order_revision_sent = -1
+            self.destructible_revision_sent = -1
+            self._destructible_replay_required = True
+        self._mark_message_sent(outgoing)
+        if profiling:
+            try:
+                self._record_snapshot_wire(outgoing, len(payload), encode_ms)
+            except Exception:
+                # Diagnostic I/O must not change a completed send.
+                pass
+        return True
+
+    def _record_snapshot_wire(self, message, byte_count, encode_ms):
+        """Summarize actual writes only during the opt-in profiling run."""
+        stats = self._snapshot_wire_profile
+        stats[1 if message.get("snapshot_delta") is True else 2] += 1
+        stats[3] += byte_count
+        stats[4] += encode_ms
+        now = time.monotonic()
+        if now - stats[0] < 5.0:
+            return
+        worker = isinstance(self, SimulationWorker)
+        _server_log(
+            "SNAPSHOT_WIRE role=%s endpoint=%d elapsed=%.3f "
+            "delta=%d full=%d bytes=%d encode_ms=%.3f" % (
+                "worker" if worker else "player",
+                self.worker_id if worker else self.player_id,
+                now - stats[0], stats[1], stats[2], stats[3], stats[4]))
+        self._snapshot_wire_profile = [now, 0, 0, 0, 0.0]
+
+    def _send_direct(self, message, full_snapshot=True, repair_snapshot=False):
         if not self.connected:
             return False
         # A restored endpoint may lack its outbox. Initialize before taking
@@ -1853,11 +1971,10 @@ class _EndpointSendMixin:
         self._ensure_outbox()
         try:
             with self.send_lock:
-                payload = self._serialize_message(message)
-                if payload is None:
+                if not self._write_message(
+                        message, full_snapshot=full_snapshot,
+                        repair_snapshot=repair_snapshot):
                     return False
-                self._write_payload(payload, message)
-            self._mark_message_sent(message)
             return True
         except (BrokenPipeError, ConnectionError, OSError):
             self.connected = False
@@ -1909,7 +2026,7 @@ class _EndpointSendMixin:
         self._outbox_thread = thread
         thread.start()
 
-    def _enqueue_reliable(self, message, wait):
+    def _enqueue_reliable(self, message, wait, repair_snapshot=False):
         if not self.connected:
             return False
         condition = self._ensure_outbox()
@@ -1941,7 +2058,12 @@ class _EndpointSendMixin:
                 return False
             self._outbox_reliable.append({
                 "payload": payload,
-                "message": dict(message),
+                "message": (copy.deepcopy(message)
+                            if (self._is_actor_snapshot(message) and
+                                not isinstance(message, _FrozenSnapshot))
+                            else dict(message)),
+                "full_snapshot": True,
+                "repair_snapshot": repair_snapshot,
                 "done": done,
                 "result": result,
             })
@@ -2003,22 +2125,40 @@ class _EndpointSendMixin:
             return self._send_direct(message)
         return self._enqueue_reliable(message, wait=False)
 
-    def offer_snapshot(self, message):
-        """Replace an unsent snapshot while preserving reliable messages."""
+    def offer_snapshot_repair(self, message):
+        """Queue a full actor barrier followed by sparse section replay."""
         if not self._uses_async_outbox():
-            return self._send_direct(message)
+            return self._send_direct(message, repair_snapshot=True)
+        return self._enqueue_reliable(message, wait=False, repair_snapshot=True)
+
+    def offer_snapshot(self, message):
+        """Replace an unsent snapshot while preserving reliable messages.
+
+        The tick publisher already freezes nested state under its state lock.
+        Other callers transfer their mutable candidate through a fresh copy.
+        """
+        if not self._uses_async_outbox():
+            return self._send_direct(message, full_snapshot=False)
         if not self.connected:
             return False
         condition = self._ensure_outbox()
         with condition:
             if not self.connected:
                 return False
-            payload = self._serialize_message(message)
-            if payload is None:
-                return False
+            if self._is_actor_snapshot(message):
+                # Keep a self-contained candidate while it can be replaced.
+                # Only the writer knows which earlier snapshot reached TCP.
+                if not isinstance(message, _FrozenSnapshot):
+                    message = copy.deepcopy(message)
+                payload = None
+            else:
+                payload = self._serialize_message(message)
+                if payload is None:
+                    return False
             self._outbox_snapshot = {
                 "payload": payload,
                 "message": dict(message),
+                "full_snapshot": False,
                 "done": None,
                 "result": None,
             }
@@ -2062,14 +2202,16 @@ class _EndpointSendMixin:
                     self._outbox_snapshot = None
             try:
                 with self.send_lock:
-                    self._write_payload(item["payload"], item["message"])
+                    written = self._write_message(
+                        item["message"], item["payload"],
+                        full_snapshot=item.get("full_snapshot", False),
+                        repair_snapshot=item.get("repair_snapshot", False))
             except (BrokenPipeError, ConnectionError, OSError):
                 self._fail_outbox(item)
                 self._shutdown_transport()
                 return
-            self._mark_message_sent(item["message"])
             if item["result"] is not None:
-                item["result"].append(True)
+                item["result"].append(written)
             if item["done"] is not None:
                 item["done"].set()
 
@@ -3819,6 +3961,7 @@ class BattleState:
                 "battle_result": self.battle_result,
                 "destructible_revision": self.destructible_revision,
                 "destructibles": list(self.destructibles.values()),
+                "destructible_base_revision": 0,
                 "detached_turrets": self._detached_turret_snapshot(),
             }
             start_message.update({
@@ -4125,6 +4268,18 @@ class BattleState:
             }
             message.update(self._authority_fields())
             return message
+
+    def request_snapshot_resync(self, endpoint):
+        """Repair only this connection with a reliable current checkpoint."""
+        with self.lock:
+            if not self._endpoint_is_current(endpoint):
+                return False
+            if self.phase == "loading":
+                message = self.loading_snapshot()
+                if message is not None:
+                    return endpoint.offer_snapshot_repair(message)
+            endpoint.snapshot_resync_requested = True
+            return True
 
     def request_worker_ping(self, player, message):
         """Relay one bounded probe; only the native main loop may answer it."""
@@ -14307,6 +14462,10 @@ class BattleState:
                 "detached_turrets": self._detached_turret_snapshot(),
             })
             snapshot.update(self._authority_fields())
+            snapshot["bots"], equipment_contracts = (
+                bot_state_codec.encode_snapshot_equipment(snapshot["bots"]))
+            if equipment_contracts:
+                snapshot["bot_equipment_contracts"] = equipment_contracts
             # Freeze one exact wire image while holding the state lock. Bot,
             # rule, manifest and critical dictionaries are otherwise shared
             # mutable objects; serializing later per endpoint could make one
@@ -14414,7 +14573,8 @@ class BattleState:
                 BOT_MANIFEST_REFRESH_TICKS)
             snapshot_lineage_due = bool(
                 snapshot_lineage_changed or
-                snapshot_manifest_refresh_due)
+                snapshot_manifest_refresh_due or
+                player.snapshot_resync_requested)
             supports_lean_manifest = bool(
                 LEAN_SNAPSHOT_MANIFEST_CAPABILITY in player.capabilities)
             snapshot_due = bool(
@@ -14441,6 +14601,7 @@ class BattleState:
                     BOT_ORDER_REFRESH_TICKS))
             needs_destructibles = bool(
                 not needs_manifest and (
+                    player._destructible_replay_required or
                     player.destructible_revision_sent !=
                     snapshot_destructible_revision or
                     snapshot_tick - player.destructible_tick_sent >=
@@ -14477,7 +14638,8 @@ class BattleState:
                 sent_revision = int(player.destructible_revision_sent)
                 after_revision = (
                     sent_revision
-                    if 0 <= sent_revision < snapshot_destructible_revision
+                    if (not player._destructible_replay_required and
+                        0 <= sent_revision < snapshot_destructible_revision)
                     else 0)
                 candidates = [
                     event for event in snapshot_destructibles
@@ -14489,6 +14651,7 @@ class BattleState:
                     value = dict(base)
                     rows = candidates[:count]
                     value["destructibles"] = rows
+                    value["destructible_base_revision"] = after_revision
                     value["destructible_revision"] = (
                         int(rows[-1]["revision"]) if rows else 0)
                     return value
@@ -14538,7 +14701,8 @@ class BattleState:
                 outgoing = dict(outgoing, bot_orders=snapshot_orders)
                 included_orders = True
             deferred_manifest_refresh = False
-            if (not state_fits(outgoing) and
+            outgoing_fits = state_fits(outgoing)
+            if (not outgoing_fits and
                     needs_manifest and not snapshot_lineage_changed and
                     supports_lean_manifest):
                 # A cadence replay is restorative, not a state transition.
@@ -14551,7 +14715,8 @@ class BattleState:
                 outgoing.pop("bot_manifest", None)
                 needs_manifest = False
                 deferred_manifest_refresh = True
-            if not state_fits(outgoing):
+                outgoing_fits = state_fits(outgoing)
+            if not outgoing_fits:
                 # Never turn a locally constructed oversized snapshot into a
                 # peer disconnect.  No delivery frontier advances, so a later
                 # tick can retry after transient projectiles/contacts retire.
@@ -14574,9 +14739,17 @@ class BattleState:
                         snapshot_manifest_revision or
                         not self._endpoint_is_current(player)):
                     continue
-                offered = (player.offer_reliable(outgoing)
-                           if needs_manifest else
-                           player.offer_snapshot(outgoing))
+                outgoing = _FrozenSnapshot(outgoing)
+                repair_snapshot = player.snapshot_resync_requested
+                if repair_snapshot and needs_manifest:
+                    # Clear before offering, since the writer may immediately
+                    # fail its final wire budget and request another repair.
+                    player.snapshot_resync_requested = False
+                    offered = player.offer_snapshot_repair(outgoing)
+                else:
+                    offered = (player.offer_reliable(outgoing)
+                               if needs_manifest else
+                               player.offer_snapshot(outgoing))
                 if offered:
                     player.snapshot_round_id_sent = snapshot_round_id
                     player.snapshot_tick_sent = snapshot_tick
@@ -14591,7 +14764,10 @@ class BattleState:
                         player.bot_manifest_revision_sent = (
                             snapshot_manifest_revision)
             if not offered:
-                self._remove_endpoint(player)
+                if player.connected:
+                    player.snapshot_resync_requested = True
+                else:
+                    self._remove_endpoint(player)
                 continue
             if (isinstance(player, Player) and
                     id(player) not in current_receipt_recipients and
@@ -15000,6 +15176,8 @@ class ClientHandler(socketserver.BaseRequestHandler):
         authority_id = SIMULATION_WORKER_AUTHORITY_ID
         if message_type == "worker_pong":
             return server.state.resolve_worker_ping(worker, message)
+        if message_type == "snapshot_resync":
+            return server.state.request_snapshot_resync(worker)
         if message_type == "simulation_progress":
             accepted = server.state.update_simulation_progress(worker, message)
         elif message_type == "player_environment":
@@ -15736,6 +15914,8 @@ class ClientHandler(socketserver.BaseRequestHandler):
                                 })
                         elif message_type == "worker_ping":
                             server.state.request_worker_ping(player, message)
+                        elif message_type == "snapshot_resync":
+                            server.state.request_snapshot_resync(player)
                         elif message_type == "ping":
                             player.send({
                                 "type": "pong",

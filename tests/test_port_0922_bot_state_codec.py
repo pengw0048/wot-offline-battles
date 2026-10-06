@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import os
@@ -75,6 +76,87 @@ def _bot_state(**overrides):
 
 
 class BotStateCodecTest(unittest.TestCase):
+
+    def _full_snapshot_bot(self, bot_id=17):
+        states = [dict(_equipment_snapshot(), equipment=copy.deepcopy(value))
+                  for value in CONTRACTS]
+        return _bot_state(id=bot_id, vehicle='ussr:R11_MS-1', team=1,
+                          slot=bot_id % 15, equipment_states=states)
+
+    def test_snapshot_table_round_trip_preserves_dynamic_ledger_and_identity(self):
+        first = self._full_snapshot_bot()
+        first['equipment_states'][0].update(
+            usesLeft=-1, cooldownTimeLeft=13.75, active=True,
+            autoPendingElapsed=0.75, aiPendingElapsed=None)
+        first['equipment_states'][1].update(
+            usesLeft=0, aiPendingElapsed=4.5)
+        rows = [first, self._full_snapshot_bot(18)]
+        before = copy.deepcopy(rows)
+        projected, contracts = codec.encode_snapshot_equipment(rows)
+        self.assertEqual(3, len(contracts))
+        wire = json.loads(json.dumps({'bots': projected, 'table': contracts}))
+        restored = [codec.decode_snapshot_equipment(row, wire['table'])
+                    for row in wire['bots']]
+        self.assertEqual(before, restored)
+        self.assertEqual(before, rows)
+        restored[0]['equipment_states'][0]['equipment']['tags'].append('new')
+        restored[0]['equipment_states'][0]['equipment']['bonusValue'] = 99
+        self.assertEqual(before[1], restored[1])
+        self.assertEqual(CONTRACTS[0], wire['table'][0])
+        self.assertEqual(before, rows)
+
+    def test_snapshot_table_compares_full_contract_not_equipment_name(self):
+        rows = [self._full_snapshot_bot(value) for value in (17, 18, 19)]
+        rows[1]['equipment_states'][0]['equipment']['bonusValue'] = 0.25
+        rows[2]['equipment_states'][0]['equipment']['tags'].append('special')
+        projected, contracts = codec.encode_snapshot_equipment(rows)
+        self.assertEqual(5, len(contracts))
+        self.assertEqual(rows, [codec.decode_snapshot_equipment(row, contracts)
+                               for row in projected])
+
+    def test_snapshot_full_and_empty_rows_need_no_table(self):
+        for row in (self._full_snapshot_bot(), _bot_state(equipment_states=[]),
+                    {'id': 17}):
+            self.assertIs(row, codec.decode_snapshot_equipment(row, None))
+        self.assertEqual(([], []), codec.encode_snapshot_equipment([]))
+
+    def test_snapshot_bad_reference_retains_only_matching_prior_contract(self):
+        previous = self._full_snapshot_bot()
+        rows, contracts = codec.encode_snapshot_equipment([previous])
+        current = copy.deepcopy(rows[0])
+        current.update(health=0, alive=False, x=17.0)
+        current['equipment_states'][0].update(equipment=99, usesLeft=0,
+                                              cooldownTimeLeft=90.0)
+        restored = codec.decode_snapshot_equipment(current, contracts, previous)
+        self.assertFalse(restored['alive'])
+        self.assertEqual(0, restored['health'])
+        self.assertEqual(17.0, restored['x'])
+        self.assertEqual(0, restored['equipment_states'][0]['usesLeft'])
+        self.assertEqual(90.0,
+                         restored['equipment_states'][0]['cooldownTimeLeft'])
+        self.assertEqual(CONTRACTS[0],
+                         restored['equipment_states'][0]['equipment'])
+        for field, value in (('id', 99), ('vehicle', 'another'), ('team', 2),
+                             ('slot', 9)):
+            with self.assertRaises(codec.BotStateCodecError):
+                codec.decode_snapshot_equipment(
+                    dict(current, **{field: value}), contracts, previous)
+        with self.assertRaises(codec.BotStateCodecError):
+            codec.decode_snapshot_equipment(
+                dict(current, equipment_states=current['equipment_states'][:1]),
+                contracts, previous)
+
+    def test_snapshot_rejects_unavailable_or_noninteger_references_locally(self):
+        rows, contracts = codec.encode_snapshot_equipment(
+            [self._full_snapshot_bot()])
+        for reference in (True, False, -1, 90, 0.0, '0', None):
+            row = copy.deepcopy(rows[0])
+            row['equipment_states'][0]['equipment'] = reference
+            with self.assertRaises(codec.BotStateCodecError):
+                codec.decode_snapshot_equipment(row, contracts)
+        for table in (None, {}, [], [None], contracts * 31):
+            with self.assertRaises(codec.BotStateCodecError):
+                codec.decode_snapshot_equipment(rows[0], table)
 
     def test_service_brake_intent_survives_both_wire_states(self):
         for active in (True,False):
@@ -258,13 +340,19 @@ class BotStateCodecTest(unittest.TestCase):
         # The state travels as JSON so the 2.7 child never imports this
         # module; the shared codec is the only thing both sides load.
         # ``gui`` and ``gui.mods`` are namespace directories supplied by the
-        # game package, so load the module file directly under 2.7.
+        # game package. Supply those packages so the codec's real local
+        # dependencies load under 2.7 as they do inside the game.
         program = (
-            'import imp, json, sys\n'
-            'codec = imp.load_source("bot_state_codec", %r)\n'
+            'import json, os, sys, types\n'
+            'root = %r\n'
+            'for name in ("gui", "gui.mods"):\n'
+            '    package = types.ModuleType(name)\n'
+            '    package.__path__ = [os.path.join(root, *name.split("."))]\n'
+            '    sys.modules[name] = package\n'
+            'from gui.mods.offline_lan_0922 import bot_state_codec as codec\n'
             'state = json.loads(sys.stdin.read())\n'
             'json.dump(codec.encode_row(state), sys.stdout)\n'
-        ) % (str(CODEC_PATH),)
+        ) % (str(CLIENT_ROOT),)
         states = [_bot_state(), _bot_state(x=1.00005, yaw=0.123455,
                                           speed=-0.00005, roll=-0.000005)]
         for state in states:
