@@ -8186,17 +8186,53 @@ IPC costs. The first Windows playtest reported worse smoothness and exposed
 the damage-sticker failure. The captured messages reproduce that transport
 defect, and host replay verifies its repair. The repaired version's net
 frame-time benefit, input latency, visual continuity and failure presentation
-remain unproved until exercised on the exact Windows client. The visible
-body currently follows received physical receipts; no collision-aware local
-prediction has been established by this change.
+remain unproved until exercised on the exact Windows client.
+
+The paired-client trial now permits short display continuation from the last
+two physical poses, bounded by one observed source interval and the exact
+client server-tick interval. It does not integrate vehicle forces. Input edges
+must first be acknowledged by a completed physical slice; airborne, grinding
+and Siege-braking states suppress continuation. Existing arena, vehicle,
+detached-turret and native-world queries guard the proposed display movement
+without committing destruction or contact forces. An unavailable or blocked
+query holds the last checked display pose; a new physical receipt replaces it.
+This is a presentation guard, not a full suspension or world-contact solver.
+Terrain transitions and native render behavior still require Windows testing.
+
+The visible camera history advances once on its own frame clock, independently
+of receipt batches. Aim and accepted shots snapshot the displayed hull; room
+publication and incoming projectile collision use the canonical physical pose.
+The existing PERF window records movement-send to integrated canonical-apply
+latency, receipt cadence/batches and display/guard callback cost. These metrics
+do not claim display latency or a measured Windows frame-time improvement.
 
 Offline ground and world probes already query the client's native scene via
 `BigWorld.wg_collideSegment`; the mod owns integration and contact response.
 The exact #1513 Python archive initializes ordinary client physics with mass
 placement and suspension geometry. Its Forced, Editor and Server initializers
-also configure a supplied physics object, but their Python consumers do not
-provide a complete autonomous input, simulation-step and output lifecycle.
-Native filter notifications and exposed simulator names alone therefore do
-not establish a safe replacement driving or prediction interface. This is an
-unverified integration boundary, not evidence that native terrain physics is
-absent.
+also fully configure a supplied physics object. The PE exposes the synchronous
+`WGDynamicsSimulator.update(dt, vehicles, bodies, bspModels)` step, but this is
+not a usable replacement for the port's world-contact solver. The compiled
+space's `SceneObstaclesCollider::collidePolyhedra` and
+`collideCompositeShape` paths are unimplemented. Vehicle world contacts
+actually call the former; physical-body contacts call the latter. Historical
+#1513 Windows probes already aborted at these first-step boundaries (commits
+`1f296b2c` and `8b648e6e`). Successful configuration and readable body state
+must not be used as evidence that stepping is safe. The current PE still
+contains these paths. Track suspension uses a separate implemented scene-ray
+path; that does not supply the missing hull/world contact solver.
+
+Retail `WGVehicleFilter` has a different, implemented collision guard for
+network-pose extrapolation. Its vehicle-specific extrapolation path tests four
+line segments around the transformed model bounds against the native scene.
+These segments are prepared before the next extrapolation, not swept over the
+complete proposed movement. A blocking contact retains the preceding filtered
+position and orientation;
+triangle/material exclusions and `Vehicle._isDestructibleMayBeBroken` decide
+which hits may be ignored. This is limited presentation prediction backed by
+server-supplied motion, not a second complete vehicle dynamics simulation.
+The separate base-filter extrapolator must not be mistaken for the vehicle's
+override. The port's direct model-matrix presentation bypasses this guard.
+Reusing it requires a proved native input and presentation ownership path;
+`notifyInputKeysDown` alone does not feed position samples, and
+`setScriptInputCallback` observes incoming samples rather than supplying them.

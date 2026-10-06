@@ -6,7 +6,10 @@ Its main-thread poll only queues receipts; BattleRuntime drains them in order
 at its frame boundary before publishing the corresponding input/gun state.
 """
 
+import collections
 import copy
+import json
+import math
 import os
 import weakref
 
@@ -29,6 +32,11 @@ except NameError:
 
 def _integer(value):
     return value if type(value) in _INTEGER_TYPES else None
+
+
+def _movement_values(payload):
+    return tuple((payload or {}).get(name, 0)
+                 for name in ('forward', 'turn', 'handbrake'))
 
 
 def _freeze(value):
@@ -131,11 +139,16 @@ class Frontend(object):
         self._bind = None
         self._bound = False
         self._control_seq = 0
+        self._movement_control_seq = 0
         self._last_control = None
         self._pending = []
         self._pending_bytes = 0
         self._receipts = []
         self._receipt_bytes = 0
+        self._performance = {}
+        self._movement_edges = collections.deque()
+        self._last_apply_time = None
+        self._last_applied_pose = None
 
     def _current(self):
         runtime = self._runtime_ref()
@@ -183,8 +196,168 @@ class Frontend(object):
         if not self._send(message):
             return False
         self._control_seq = sequence
+        previous = self._last_control
         self._last_control = copy.deepcopy(payload)
+        if _movement_values(payload) != _movement_values(previous):
+            self._movement_control_seq = sequence
+        self._note_control_sent(sequence, payload, previous)
         return True
+
+    def _performance_owner(self):
+        runtime = self._runtime_ref()
+        diagnostics = getattr(runtime, '_frame_diagnostics', None)
+        if (diagnostics is None or not diagnostics.enabled or
+                not callable(getattr(diagnostics, '_clock', None))):
+            return None
+        return diagnostics
+
+    def _performance_now(self):
+        diagnostics = self._performance_owner()
+        if diagnostics is None:
+            return None
+        now = float(diagnostics._clock())
+        if math.isnan(now) or math.isinf(now):
+            return None
+        return now
+
+    def _performance_count(self, name, value=1):
+        self._performance[name] = self._performance.get(name, 0) + value
+
+    def _drop_performance_edges(self):
+        if self._movement_edges:
+            self._performance_count('edges_dropped', len(self._movement_edges))
+        self._movement_edges.clear()
+
+    def _performance_sample(self, name, seconds):
+        if seconds < 0.0:
+            self._performance_count('clock_regressions')
+            return
+        value = seconds * 1000.0
+        row = self._performance.get(name)
+        if row is None:
+            row = [0, 0.0, 0.0, collections.deque(maxlen=MAX_PENDING_MESSAGES)]
+            self._performance[name] = row
+        row[0] += 1
+        row[1] += value
+        row[2] = max(row[2], value)
+        row[3].append(value)
+
+    def _note_control_sent(self, sequence, payload, previous):
+        """Time only successfully sent movement edges on the visible clock."""
+        try:
+            if _movement_values(payload) == _movement_values(previous):
+                return
+            now = self._performance_now()
+            if now is None:
+                self._drop_performance_edges()
+                return
+            if len(self._movement_edges) >= MAX_PENDING_MESSAGES:
+                self._movement_edges.popleft()
+                self._performance_count('edges_dropped')
+            self._movement_edges.append((sequence, now))
+            self._performance_count('edges_sent')
+        except Exception:
+            # Optional timing cannot invalidate a control already admitted.
+            self._drop_performance_edges()
+
+    def note_receipt_batch(self, received, pending):
+        try:
+            if self._performance_owner() is None or not pending:
+                return
+            self._performance_count('drain_batches')
+            self._performance_count('drain_receipts', received)
+            for name, value in (('drain_batch_max', received),
+                                ('pending_receipt_max', pending)):
+                self._performance[name] = max(
+                    self._performance.get(name, 0), value)
+        except Exception:
+            pass
+
+    def note_receipt_applied(self, receipt):
+        """Observe a new canonical pose after its native presentation calls."""
+        try:
+            now = self._performance_now()
+            if now is None:
+                self._drop_performance_edges()
+                self._last_apply_time = None
+                self._last_applied_pose = None
+                return
+            self._performance_count('receipt_applied')
+            if self._last_apply_time is not None:
+                self._performance_sample(
+                    'apply_interval_ms', now - self._last_apply_time)
+            self._last_apply_time = now
+            state = receipt['state']
+            pose = tuple(state['position']) + tuple(
+                state[name] for name in ('yaw', 'pitch', 'roll'))
+            if pose == self._last_applied_pose:
+                self._performance_count('receipt_repeat_pose')
+            self._last_applied_pose = pose
+            sequence = _integer(receipt.get('integrated_control_seq'))
+            if sequence is None or not 0 <= sequence <= self._control_seq:
+                self._performance_count('invalid_integrated_seq')
+                self._drop_performance_edges()
+                return
+            # Aim and acknowledgement controls extend the same movement edge.
+            # An integration that skipped to a later movement edge cannot prove
+            # that the intervening, already superseded edges ever ran.
+            while (len(self._movement_edges) > 1 and
+                   self._movement_edges[1][0] <= sequence):
+                self._movement_edges.popleft()
+                self._performance_count('edges_superseded')
+            if self._movement_edges and self._movement_edges[0][0] <= sequence:
+                unused_seq, sent = self._movement_edges.popleft()
+                self._performance_sample('edge_latency_ms', now - sent)
+        except Exception:
+            # Timing is not receipt admission and must never freeze a body.
+            self._drop_performance_edges()
+            self._last_apply_time = None
+            self._last_applied_pose = None
+
+    def performance_snapshot(self):
+        result = dict((name, self._performance.get(name, 0)) for name in (
+            'edges_sent', 'edges_superseded', 'edges_dropped',
+            'receipt_applied', 'receipt_repeat_pose', 'drain_batches',
+            'drain_receipts', 'drain_batch_max', 'pending_receipt_max',
+            'invalid_integrated_seq', 'clock_regressions'))
+        result['pending_edges'] = len(self._movement_edges)
+        for name in ('edge_latency_ms', 'apply_interval_ms'):
+            row = self._performance.get(name, (0, 0.0, 0.0, ()))
+            values = sorted(row[3])
+            quantiles = []
+            for fraction in (0.5, 0.95):
+                rank = fraction * max(0, len(values) - 1)
+                low = int(rank)
+                high = min(low + 1, len(values) - 1)
+                quantiles.append((values[low] +
+                    (values[high] - values[low]) * (rank - low))
+                    if values else None)
+            result[name] = {
+                'count': row[0], 'sum': row[1],
+                'avg': row[1] / row[0] if row[0] else None,
+                'max': row[2] if row[0] else None,
+                'p50': quantiles[0], 'p95': quantiles[1],
+                'kept': len(values), 'dropped': row[0] - len(values),
+            }
+        return result
+
+    def report_performance(self):
+        """Called only by the existing PERF window and round-close boundary."""
+        try:
+            diagnostics = self._performance_owner()
+            writer = getattr(diagnostics, '_writer', None)
+            if not self._performance or not callable(writer):
+                return
+            report = self.performance_snapshot()
+            report.update(schema=1, round=self.round_id,
+                          generation=self.generation,
+                          clock='visible_frame_diagnostics',
+                          latency='movement_send_to_integrated_canonical_apply')
+            writer('[Offline LAN 0.9.22] PERF player_driver ' +
+                   json.dumps(report, separators=(',', ':')) + '\n')
+            self._performance = {}
+        except Exception:
+            pass
 
     def forward_message(self, message):
         """Forward accepted room state reliably, including every snapshot.
@@ -260,6 +433,7 @@ class Frontend(object):
     def close(self, reason='round ended'):
         if self._closed:
             return
+        self.report_performance()
         self._closed = True
         self.ready = False
         self._pending = []

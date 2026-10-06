@@ -26286,6 +26286,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
     def test_relative_gun_tracking_uses_delta_and_stop_uses_hull_yaw(self):
         owner = types.SimpleNamespace(
             local_pose=lambda: ((100.0, 5.0, 200.0), 0.5),
+            _local_display_pose=lambda: ((100.0, 5.0, 200.0), 0.5),
             local_stabilised_position=lambda: (101.0, 6.0, 202.0),
             client=types.SimpleNamespace(send_input=mock.Mock(return_value=True)))
         owner.shoot = mock.Mock(return_value=True)

@@ -145,6 +145,62 @@ class DriverStateTests(unittest.TestCase):
         visible._send_driver_control()
         self.assertEqual([1.0, 0.0], [p['forward'] for p in visible._player_driver.controls])
 
+    def test_receipt_acknowledges_integrated_control_not_just_installed_control(self):
+        hidden = _Runtime(True)
+        hidden._driver_control_seq = 7
+        hidden._publish_driver_state()
+        self.assertEqual(0, hidden.published[-1]['integrated_control_seq'])
+        hidden._driver_integrated_control_seq = 5
+        hidden._publish_driver_state()
+        self.assertEqual(5, hidden.published[-1]['integrated_control_seq'])
+
+    def test_bad_diagnostic_metadata_never_rejects_physical_receipt(self):
+        for value in (None, True, -1, 'bad', {'extra': object()}, float('nan')):
+            with self.subTest(value=value):
+                visible = _Runtime()
+                receipt = self.receipt()
+                receipt['integrated_control_seq'] = value
+                visible._player_driver.receipts = [receipt]
+                self.assertTrue(visible._consume_driver_receipts())
+                self.assertEqual(receipt['sample_seq'], visible._driver_received_seq)
+                self.assertIsNone(visible._driver_error)
+
+    def test_display_and_timing_hooks_run_once_after_canonical_state_is_installed(self):
+        visible = _Runtime()
+        receipt = self.receipt()
+        receipt['state']['position'] = [23.0, 4.0, 45.0]
+        events = []
+
+        def accept(row, now):
+            self.assertEqual(tuple(row['state']['position']), visible._local_position)
+            self.assertEqual(row['sample_seq'], visible._driver_received_seq)
+            events.append('accept_display')
+
+        visible._accept_driver_display_receipt = accept
+        visible._update_local_presentation.side_effect = lambda entity, dt: (
+            events.append('native_pose') or visible._local_position)
+        visible._avatar.updateOwnVehiclePosition.side_effect = lambda *args: (
+            events.append('native_callback'))
+        visible._player_driver.note_receipt_applied = lambda row: (
+            events.append('canonical_apply_timing'))
+        visible._player_driver.receipts = [receipt, copy.deepcopy(receipt)]
+        self.assertTrue(visible._consume_driver_receipts())
+        self.assertEqual(['accept_display', 'native_pose', 'native_callback',
+                          'canonical_apply_timing'], events)
+
+    def test_optional_display_and_diagnostics_errors_cannot_freeze_receipt(self):
+        visible = _Runtime()
+        visible._accept_driver_display_receipt = mock.Mock(
+            side_effect=RuntimeError('display unavailable'))
+        visible._player_driver.note_receipt_batch = mock.Mock(
+            side_effect=RuntimeError('batch diagnostic unavailable'))
+        visible._player_driver.note_receipt_applied = mock.Mock(
+            side_effect=RuntimeError('apply diagnostic unavailable'))
+        visible._player_driver.receipts = [self.receipt()]
+        self.assertTrue(visible._consume_driver_receipts())
+        self.assertIsNone(visible._driver_error)
+        self.assertEqual(1, len(visible.inputs))
+
     def test_active_equipment_exact_power_and_relative_clocks_survive_control(self):
         visible, hidden = _Runtime(), _Runtime(True)
         mechanics = driver_state.equipment_mechanics

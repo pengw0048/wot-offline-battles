@@ -393,6 +393,48 @@ class PlayerDriverRuntimeTests(unittest.TestCase):
                                  relayed[0]['player']['destructible_contacts'][0],
                                  wrong_token=True)
 
+    def test_integrated_control_is_captured_at_slice_entry_before_deferred_receipt(self):
+        hidden, unused_visible, unused_state, receipts, unused_wire, unused_relay = self.driver_pipeline()
+        hidden._driver_control_seq = 7
+
+        def integrate(dt):
+            hidden._driver_control_seq = 8
+            self.assertTrue(hidden._publish_driver_state())
+            self.assertEqual([], receipts)
+            self.assertEqual(0, hidden._driver_integrated_control_seq)
+            return False
+
+        hidden._drive_local_step = integrate
+        hidden._drive_local(0.1)
+        self.assertEqual(8, hidden._driver_control_seq)
+        self.assertEqual(7, hidden._driver_integrated_control_seq)
+        self.assertEqual([7, 7], [row['integrated_control_seq'] for row in receipts])
+
+    def test_empty_stopped_failed_and_zero_duration_slices_do_not_ack_integration(self):
+        for elapsed, result in ((0.0, False), (0.1, None), (0.1, True)):
+            with self.subTest(elapsed=elapsed, result=result):
+                hidden, unused_visible, unused_state, receipts, unused_wire, unused_relay = self.driver_pipeline()
+                hidden._driver_control_seq = 9
+                hidden._drive_local_step = mock.Mock(return_value=result)
+                hidden._drive_local(elapsed)
+                self.assertEqual(0, hidden._driver_integrated_control_seq)
+                self.assertTrue(all(row['integrated_control_seq'] == 0 for row in receipts))
+        hidden, unused_visible, unused_state, unused_receipts, unused_wire, unused_relay = self.driver_pipeline()
+        hidden._driver_control_seq = 9
+        hidden._drive_local_step = lambda dt: hidden._driver_local_failure('test failure')
+        hidden._drive_local(0.1)
+        self.assertEqual(0, hidden._driver_integrated_control_seq)
+
+    def test_raising_slice_never_advances_integrated_control(self):
+        hidden, unused_visible, unused_state, receipts, unused_wire, unused_relay = self.driver_pipeline()
+        hidden._driver_control_seq = 9
+        hidden._drive_local_step = mock.Mock(side_effect=RuntimeError('slice failed'))
+        with self.assertRaisesRegex(RuntimeError, 'slice failed'):
+            hidden._drive_local(0.1)
+        self.assertFalse(hidden._driver_integrating_step)
+        self.assertEqual(0, hidden._driver_integrated_control_seq)
+        self.assertEqual([], receipts)
+
     def test_substep_track_pivot_keeps_exact_source_arc_after_server_admission(self):
         hidden, visible, state, receipts, wire, relayed = self.driver_pipeline()
         physics = state.players[1].effective_params['physics']

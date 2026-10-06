@@ -117,6 +117,195 @@ class PlayerDriverTests(unittest.TestCase):
         value.update(changes)
         return value
 
+    def timed_frontend(self):
+        runtime = FakeRuntime()
+        runtime.wall = 20.0
+        runtime.performance_lines = []
+        runtime._frame_diagnostics = types.SimpleNamespace(
+            enabled=True, _clock=lambda: runtime.wall,
+            _writer=runtime.performance_lines.append)
+        frontend = player_driver.attach(runtime)
+        self.ready(frontend, runtime)
+        return runtime, frontend
+
+    @staticmethod
+    def movement(forward=1.0, turn=0.0, handbrake=False, **changes):
+        result = dict(forward=forward, turn=turn, handbrake=handbrake)
+        result.update(changes)
+        return result
+
+    @staticmethod
+    def applied(integrated, position=(1.0, 2.0, 3.0), **changes):
+        result = {'integrated_control_seq': integrated,
+                  'pose_time_us': 987654321000,
+                  'state': {'position': position, 'yaw': 0.1,
+                            'pitch': 0.2, 'roll': 0.3}}
+        result.update(changes)
+        return result
+
+    def test_movement_latency_uses_only_visible_clock_and_ignores_ack_edges(self):
+        runtime, frontend = self.timed_frontend()
+        self.assertTrue(frontend.send_control(self.movement()))
+        runtime.wall += 0.01
+        self.assertTrue(frontend.send_control(self.movement(aim_yaw=0.4)))
+        self.assertTrue(frontend.send_control(self.movement(
+            aim_yaw=0.4, published_sample_seq=7)))
+        runtime.wall = 20.06
+        frontend.note_receipt_applied(self.applied(3, pose_time_us=1))
+        report = frontend.performance_snapshot()
+        self.assertEqual(1, report['edges_sent'])
+        self.assertEqual(1, report['edge_latency_ms']['count'])
+        self.assertAlmostEqual(60.0, report['edge_latency_ms']['avg'])
+        self.assertEqual(0, report['pending_edges'])
+
+    def test_skipped_movement_edges_are_superseded_not_reported_as_integrated(self):
+        runtime, frontend = self.timed_frontend()
+        frontend.send_control(self.movement())
+        runtime.wall = 20.02
+        frontend.send_control(self.movement(forward=0.0))
+        runtime.wall = 20.04
+        frontend.send_control(self.movement(forward=0.0, turn=-1.0))
+        runtime.wall = 20.08
+        frontend.note_receipt_applied(self.applied(3))
+        report = frontend.performance_snapshot()
+        self.assertEqual(3, report['edges_sent'])
+        self.assertEqual(2, report['edges_superseded'])
+        self.assertEqual(1, report['edge_latency_ms']['count'])
+        self.assertAlmostEqual(40.0, report['edge_latency_ms']['max'])
+
+    def test_delayed_receipt_can_still_prove_an_earlier_movement_edge(self):
+        runtime, frontend = self.timed_frontend()
+        frontend.send_control(self.movement())
+        runtime.wall = 20.01
+        frontend.send_control(self.movement(forward=0.0))
+        runtime.wall = 20.03
+        frontend.note_receipt_applied(self.applied(1))
+        runtime.wall = 20.07
+        frontend.note_receipt_applied(self.applied(2))
+        report = frontend.performance_snapshot()
+        self.assertEqual(0, report['edges_superseded'])
+        self.assertEqual(2, report['edge_latency_ms']['count'])
+        self.assertAlmostEqual(45.0, report['edge_latency_ms']['avg'])
+
+    def test_receipt_batch_intervals_and_repeated_pose_explain_hold_then_burst(self):
+        runtime, frontend = self.timed_frontend()
+        frontend.note_receipt_batch(1, 1)
+        frontend.note_receipt_applied(self.applied(0))
+        runtime.wall = 20.20
+        frontend.note_receipt_batch(3, 4)
+        frontend.note_receipt_applied(self.applied(0))
+        frontend.note_receipt_applied(self.applied(0, position=(2.0, 2.0, 3.0)))
+        frontend.note_receipt_applied(self.applied(0, position=(3.0, 2.0, 3.0)))
+        report = frontend.performance_snapshot()
+        self.assertEqual((2, 4, 3, 4), tuple(report[key] for key in (
+            'drain_batches', 'drain_receipts', 'drain_batch_max',
+            'pending_receipt_max')))
+        self.assertEqual(4, report['receipt_applied'])
+        self.assertEqual(1, report['receipt_repeat_pose'])
+        self.assertEqual(3, report['apply_interval_ms']['count'])
+        self.assertAlmostEqual(200.0, report['apply_interval_ms']['max'])
+        self.assertEqual(0.0, report['apply_interval_ms']['p50'])
+        self.assertEqual([], runtime.performance_lines)
+        frontend.report_performance()
+        self.assertEqual(1, len(runtime.performance_lines))
+        emitted = json.loads(runtime.performance_lines[0].split(
+            'PERF player_driver ', 1)[1])
+        self.assertEqual('visible_frame_diagnostics', emitted['clock'])
+        self.assertEqual(4, emitted['receipt_applied'])
+        self.assertEqual(0, frontend.performance_snapshot()['receipt_applied'])
+
+    def test_timing_failure_and_bad_ack_cannot_fail_a_control_or_receipt(self):
+        runtime, frontend = self.timed_frontend()
+        frontend.send_control(self.movement())
+        runtime._frame_diagnostics._clock = mock.Mock(
+            side_effect=RuntimeError('diagnostic clock unavailable'))
+        self.assertTrue(frontend.send_control(self.movement(forward=-1.0)))
+        self.assertIsNone(frontend.error)
+        self.assertEqual(0, frontend.performance_snapshot()['pending_edges'])
+        runtime._frame_diagnostics._clock = lambda: runtime.wall
+        self.assertTrue(frontend.send_control(self.movement(forward=0.0)))
+        frontend.note_receipt_applied(self.applied(True))
+        report = frontend.performance_snapshot()
+        self.assertEqual(1, report['invalid_integrated_seq'])
+        self.assertEqual(0, report['edge_latency_ms']['count'])
+        self.assertIsNone(frontend.error)
+        runtime._frame_diagnostics._writer = mock.Mock(
+            side_effect=RuntimeError('diagnostic writer unavailable'))
+        frontend.report_performance()
+        self.assertIsNone(frontend.error)
+
+    def test_disabled_or_missing_diagnostic_clock_does_not_collect_edges(self):
+        runtime, frontend = self.timed_frontend()
+        runtime._frame_diagnostics.enabled = False
+        self.assertTrue(frontend.send_control(self.movement()))
+        frontend.note_receipt_applied(self.applied(1))
+        self.assertEqual(0, frontend.performance_snapshot()['edges_sent'])
+        runtime._frame_diagnostics.enabled = True
+        runtime._frame_diagnostics._clock = None
+        self.assertTrue(frontend.send_control(self.movement(forward=0.0)))
+        self.assertEqual(0, frontend.performance_snapshot()['edges_sent'])
+
+    def test_latest_movement_control_sequence_is_independent_of_diagnostics(self):
+        runtime, frontend = self.timed_frontend()
+        runtime._frame_diagnostics.enabled = False
+        self.assertEqual(0, frontend._movement_control_seq)
+        self.assertTrue(frontend.send_control(self.movement()))
+        self.assertEqual(1, frontend._movement_control_seq)
+        self.assertTrue(frontend.send_control(self.movement(aim_yaw=0.3)))
+        self.assertTrue(frontend.send_control(self.movement(
+            aim_yaw=0.3, published_sample_seq=5)))
+        self.assertEqual(3, frontend._control_seq)
+        self.assertEqual(1, frontend._movement_control_seq)
+        self.assertTrue(frontend.send_control(self.movement(forward=0.0)))
+        self.assertEqual(4, frontend._movement_control_seq)
+        self.assertTrue(frontend.send_control(self.movement(
+            forward=0.0, turn=-1.0, handbrake=True)))
+        self.assertEqual(5, frontend._movement_control_seq)
+        self.bridge.fail_send = True
+        self.assertFalse(frontend.send_control(self.movement()))
+        self.assertEqual(5, frontend._movement_control_seq)
+        self.assertEqual(0, frontend.performance_snapshot()['edges_sent'])
+
+    def test_failed_send_is_never_a_timed_edge(self):
+        runtime, frontend = self.timed_frontend()
+        self.bridge.fail_send = True
+        self.assertFalse(frontend.send_control(self.movement()))
+        self.assertEqual(0, frontend._control_seq)
+        self.assertEqual(0, frontend.performance_snapshot()['edges_sent'])
+
+    def test_diagnostic_memory_is_bounded_without_discarding_controls(self):
+        runtime, frontend = self.timed_frontend()
+        for index in range(player_driver.MAX_PENDING_MESSAGES + 3):
+            frontend.send_control(self.movement(forward=(-1.0 if index % 2 else 1.0)))
+        report = frontend.performance_snapshot()
+        self.assertEqual(player_driver.MAX_PENDING_MESSAGES, report['pending_edges'])
+        self.assertEqual(3, report['edges_dropped'])
+        self.assertEqual(player_driver.MAX_PENDING_MESSAGES + 3,
+                         len([row for row in self.bridge.sent
+                              if row['type'] == 'driver_control']))
+        frontend.note_receipt_applied(self.applied(frontend._control_seq))
+        for index in range(player_driver.MAX_PENDING_MESSAGES + 3):
+            runtime.wall += 0.01
+            frontend.note_receipt_applied(self.applied(frontend._control_seq))
+        report = frontend.performance_snapshot()
+        self.assertEqual(player_driver.MAX_PENDING_MESSAGES,
+                         report['apply_interval_ms']['kept'])
+        self.assertEqual(3, report['apply_interval_ms']['dropped'])
+
+    def test_perf_window_preserves_inflight_edges_and_final_close_flushes_once(self):
+        runtime, frontend = self.timed_frontend()
+        frontend.send_control(self.movement())
+        frontend.report_performance()
+        self.assertEqual(1, frontend.performance_snapshot()['pending_edges'])
+        runtime.wall += 0.1
+        frontend.note_receipt_applied(self.applied(1))
+        frontend.close()
+        frontend.close()
+        self.assertEqual(2, len(runtime.performance_lines))
+        report = json.loads(runtime.performance_lines[1].split(
+            'PERF player_driver ', 1)[1])
+        self.assertEqual(1, report['edge_latency_ms']['count'])
+
     def test_receipt_admission_uses_wire_bytes_without_reencoding(self):
         runtime = FakeRuntime()
         frontend = player_driver.attach(runtime)

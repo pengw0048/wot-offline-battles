@@ -89,6 +89,7 @@ class DriverRuntimeMixin(object):
         self._driver_autorotation = False
         self._driver_native_gun_angles = None
         self._driver_control_seq = 0
+        self._driver_integrated_control_seq = 0
         self._driver_receipt_time_us = None
         self._driver_landing_seq = 0
         self._driver_landing_ack = 0
@@ -107,6 +108,12 @@ class DriverRuntimeMixin(object):
         self._driver_receipt_due = False
         self._driver_deferred_siege = None
         self._driver_consuming_receipts = False
+        self._driver_presentation = None
+        self._driver_display_clock = None
+        self._driver_display_input = None
+        self._driver_display_allow = False
+        self._driver_display_control_seq = 0
+        self._driver_display_guard_reported = False
 
     def _attach_player_driver(self):
         self._player_driver = player_driver.attach(self)
@@ -404,6 +411,7 @@ class DriverRuntimeMixin(object):
             }
         receipt = {
             'sample_seq': self._driver_sample_seq + 1,
+            'integrated_control_seq': self._driver_integrated_control_seq,
             'pose_time_us': int(motion_time), 'state': state,
             'ram_contacts': ram, 'destructible_contacts': destructible,
             'tank_pushes': list(self._local_contact_pushes.values()),
@@ -449,9 +457,12 @@ class DriverRuntimeMixin(object):
         self._send_driver_control()
 
     def _driver_validate_receipt(self, receipt):
-        _plain(receipt)
         if not isinstance(receipt, dict):
             raise ValueError('invalid driver receipt')
+        # This optional diagnostic acknowledgement never admits physical state.
+        # Missing/malformed metadata only suppresses its latency measurement.
+        _plain(dict((key, value) for key, value in receipt.items()
+                    if key != 'integrated_control_seq'))
         _sequence(receipt['sample_seq'], 1)
         _sequence(receipt['pose_time_us'])
         state = receipt['state']
@@ -550,6 +561,17 @@ class DriverRuntimeMixin(object):
                 now, self._vector)
         self._driver_feedback_ack = row['seq']
 
+    def _driver_note_performance(self, method, *args):
+        try:
+            callback = getattr(self._player_driver, method, None)
+            if callable(callback):
+                callback(*args)
+        except Exception:
+            pass
+
+    def _report_player_driver_performance(self):
+        self._driver_note_performance('report_performance')
+
     def _driver_apply_receipt(self, receipt):
         sequence = receipt['sample_seq']
         if sequence < self._driver_received_seq:
@@ -624,12 +646,21 @@ class DriverRuntimeMixin(object):
                        max(0.0, (receipt['pose_time_us'] -
                                  self._driver_receipt_time_us) / 1000000.0))
             self._driver_receipt_time_us = receipt['pose_time_us']
+            try:
+                accept_display = getattr(
+                    self, '_accept_driver_display_receipt', None)
+                if callable(accept_display):
+                    accept_display(receipt, now)
+            except Exception:
+                # Optional display continuation cannot reject canonical state.
+                pass
             position = self._update_local_presentation(entity, elapsed)
             callback = getattr(self._avatar, 'updateOwnVehiclePosition', None)
             if callable(callback):
                 callback(position, self._vector((0.0, 0.0, self._local_yaw)),
                          self._local_speed, self._local_turn_speed)
             self._publish_rpm(now)
+            self._driver_note_performance('note_receipt_applied', receipt)
         for row in receipt['feedback']:
             self._driver_apply_feedback(row, entity, now)
         if not self._sender.send_current(
@@ -655,6 +686,8 @@ class DriverRuntimeMixin(object):
             if len(self._driver_receipts_pending) + len(rows) > _MAX_EVENTS:
                 return self._driver_local_failure('player driver receipt queue overflow')
             self._driver_receipts_pending.extend(rows)
+            self._driver_note_performance(
+                'note_receipt_batch', len(rows), len(self._driver_receipts_pending))
             while self._driver_receipts_pending:
                 receipt = self._driver_receipts_pending[0]
                 self._driver_validate_receipt(receipt)
