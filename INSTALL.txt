@@ -24,8 +24,9 @@ not 127.0.0.1:28782. That user-owned file is never shipped in this package.
 
 For a manual diagnostic start, START_OFFLINE_0922.bat uses
 `--config engine_config.offline-player.xml`, whose isolated preferences leaf
-is `playerprefs.xml`. The hidden worker uses its separate `workerprefs.xml`.
-Neither replaces the normal `preferences.xml`. The first isolated start may
+is `playerprefs.xml`. The hidden Bot worker uses `workerprefs.xml`, and the
+launcher's hidden player driver uses `driverprefs.xml`. None replaces the
+normal `preferences.xml`. The first isolated start may
 ask for the EULA and display settings again.
 
 Play
@@ -37,6 +38,11 @@ Play
    a room never uses a visible player client as a fallback authority. Start
    without logging into an online account. On a fresh profile, accept the
    stock EULA once. Single player creates a separate local room.
+   Each player's launcher also starts a separate hidden client for that
+   player's tank movement, including when joining a remote host. It closes
+   with the visible game and does not occupy a room slot. A driver failure
+   stops that player's movement with a local message; exit the game and
+   restart it from the launcher to recover.
 2. Fit a tank in the garage and click Battle! or Create Platoon. Both join
    the configured LAN room; Create Platoon does not use retail invitations.
    The battle runs the tank the garage fitted, with its modules, health, armour
@@ -230,8 +236,9 @@ Requirements
 Manual diagnostic entry points
 ------------------------------
 
-The Launcher normally starts the LAN server, mandatory hidden worker and
-visible client together. For diagnostics only, start the server, then
+The launcher starts the paired hidden player driver before the visible client
+and starts the LAN server and Bot worker when hosting. Use it to exercise the
+complete player-driver path. For unpaired diagnostics only, start the server, then
 START_SIMULATION_WORKER_0922.bat, then START_OFFLINE_0922.bat. The hidden
 worker does not occupy a player slot; without it the room cannot start a
 battle.

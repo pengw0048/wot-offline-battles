@@ -50,7 +50,12 @@ SERVER_PORT_ENV = 'OFFLINE_LAN_0922_SERVER_PORT'
 PREFERRED_TEAM_ENV = 'OFFLINE_LAN_0922_PREFERRED_TEAM'
 PLAYER_MODE = 'player'
 SIMULATION_WORKER_MODE = 'simulation_worker'
-CLIENT_MODES = frozenset((PLAYER_MODE, SIMULATION_WORKER_MODE))
+PLAYER_DRIVER_MODE = 'player_driver'
+PLAYER_DRIVER_PORT_ENV = 'WOT_OFFLINE_PLAYER_DRIVER_PORT'
+PLAYER_DRIVER_TOKEN_ENV = 'WOT_OFFLINE_PLAYER_DRIVER_TOKEN'
+DRIVER_READY_MARKER_ENV = 'OFFLINE_LAN_0922_DRIVER_INTERNAL_READY_MARKER'
+CLIENT_MODES = frozenset((PLAYER_MODE, SIMULATION_WORKER_MODE,
+                          PLAYER_DRIVER_MODE))
 
 # One save slot owns every file that records what this player has earned.
 # ``vehicle_profiles.json`` deliberately stays outside a slot: a vehicle data
@@ -374,7 +379,7 @@ def _load_config_file(path):
     if (not isinstance(config.get('client_mode'), string_types) or
             config.get('client_mode') not in CLIENT_MODES):
         raise ValueError(
-            'client_mode must be player or simulation_worker')
+            'client_mode must be player, simulation_worker or player_driver')
     if not valid_save_slot(config.get('save_slot')):
         raise ValueError(
             'save_slot must be 1-64 characters of A-Z, a-z, 0-9, _ or -')
@@ -426,7 +431,8 @@ def client_mode(config, environ=None):
     mode = override.strip() if isinstance(override, string_types) else configured
     if mode not in CLIENT_MODES:
         raise ValueError(
-            '%s must be player or simulation_worker' % CLIENT_MODE_ENV)
+            '%s must be player, simulation_worker or player_driver' %
+            CLIENT_MODE_ENV)
     return mode
 
 

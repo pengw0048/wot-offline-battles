@@ -44,15 +44,19 @@ ROLE_LAUNCHER = "launcher"
 ROLE_VISIBLE_CLIENT = "visible-client"
 ROLE_HIDDEN_WORKER = "hidden-worker"
 ROLE_HIDDEN_WORKER_STARTER = "hidden-worker-starter"
+ROLE_HIDDEN_PLAYER_DRIVER = "hidden-player-driver"
+ROLE_HIDDEN_PLAYER_DRIVER_STARTER = "hidden-player-driver-starter"
 
 PRIMARY_ROLES = (
     ROLE_SERVER,
     ROLE_VISIBLE_CLIENT,
     ROLE_HIDDEN_WORKER,
+    ROLE_HIDDEN_PLAYER_DRIVER,
 )
 DUMP_ROLES = (
     ROLE_VISIBLE_CLIENT,
     ROLE_HIDDEN_WORKER,
+    ROLE_HIDDEN_PLAYER_DRIVER,
 )
 _SOURCE_ORDER = (
     ROLE_LAUNCHER,
@@ -60,11 +64,15 @@ _SOURCE_ORDER = (
     ROLE_VISIBLE_CLIENT,
     ROLE_HIDDEN_WORKER,
     ROLE_HIDDEN_WORKER_STARTER,
+    ROLE_HIDDEN_PLAYER_DRIVER,
+    ROLE_HIDDEN_PLAYER_DRIVER_STARTER,
 )
 _GAME_LOG_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "offline-player-python.log",
     ROLE_HIDDEN_WORKER: "offline-worker-python.log",
     ROLE_HIDDEN_WORKER_STARTER: core.WORKER_FAILURE_LOG_FILENAME_0922,
+    ROLE_HIDDEN_PLAYER_DRIVER: "offline-driver-python.log",
+    ROLE_HIDDEN_PLAYER_DRIVER_STARTER: core.DRIVER_FAILURE_LOG_FILENAME_0922,
 }
 _ARCHIVE_FILENAMES = {
     ROLE_LAUNCHER: "launcher.log",
@@ -72,10 +80,13 @@ _ARCHIVE_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "visible-client.log",
     ROLE_HIDDEN_WORKER: "hidden-worker.log",
     ROLE_HIDDEN_WORKER_STARTER: "hidden-worker-starter.log",
+    ROLE_HIDDEN_PLAYER_DRIVER: "hidden-player-driver.log",
+    ROLE_HIDDEN_PLAYER_DRIVER_STARTER: "hidden-player-driver-starter.log",
 }
 _DUMP_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "visible-client.dmp",
     ROLE_HIDDEN_WORKER: "hidden-worker.dmp",
+    ROLE_HIDDEN_PLAYER_DRIVER: "hidden-player-driver.dmp",
 }
 # The native sidecar appends one record per recorded first-chance fault. It
 # shares the session dump folder but is not a dump: it survives abort(), and
@@ -83,6 +94,7 @@ _DUMP_FILENAMES = {
 _TRAIL_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "visible-client.exceptions.txt",
     ROLE_HIDDEN_WORKER: "hidden-worker.exceptions.txt",
+    ROLE_HIDDEN_PLAYER_DRIVER: "hidden-player-driver.exceptions.txt",
 }
 # BigWorld writes its own crash banner onto the faulting thread's stack. It is
 # read out of each dump as that dump is copied, so the sentence survives even
@@ -90,6 +102,7 @@ _TRAIL_FILENAMES = {
 _CRASH_TEXT_FILENAMES = {
     ROLE_VISIBLE_CLIENT: "visible-client.crash-text.txt",
     ROLE_HIDDEN_WORKER: "hidden-worker.crash-text.txt",
+    ROLE_HIDDEN_PLAYER_DRIVER: "hidden-player-driver.crash-text.txt",
 }
 TRAIL_MAX_BYTES = 1024 * 1024
 _SESSION_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
@@ -424,7 +437,7 @@ def _new_session_id(now=None):
 
 
 def begin_session(game_root, needs_worker=False, local_server=False,
-                  session_id=None, started_at=None):
+                  session_id=None, started_at=None, needs_driver=False):
     """Replace the report boundary before any process for a game starts."""
     previous = _read_state()
     if isinstance(previous, dict):
@@ -452,6 +465,8 @@ def begin_session(game_root, needs_worker=False, local_server=False,
         expected.append(ROLE_SERVER)
     if needs_worker:
         expected.append(ROLE_HIDDEN_WORKER)
+    if needs_driver:
+        expected.append(ROLE_HIDDEN_PLAYER_DRIVER)
     with LAUNCHER_LOG_LOCK:
         _trim_old_log(core.launcher_log_path())
         sources = {
@@ -460,6 +475,8 @@ def begin_session(game_root, needs_worker=False, local_server=False,
     game_roles = [ROLE_VISIBLE_CLIENT]
     if needs_worker:
         game_roles.extend((ROLE_HIDDEN_WORKER, ROLE_HIDDEN_WORKER_STARTER))
+    if needs_driver:
+        game_roles.extend((ROLE_HIDDEN_PLAYER_DRIVER, ROLE_HIDDEN_PLAYER_DRIVER_STARTER))
     for role in game_roles:
         path = os.path.join(game_root, _GAME_LOG_FILENAMES[role])
         _trim_old_log(path)
@@ -501,11 +518,19 @@ def attach_server(session, dedicated=False):
     return path
 
 
+def expect_driver_starter_reset(session):
+    return _expect_starter_reset(session, ROLE_HIDDEN_PLAYER_DRIVER_STARTER)
+
+
 def expect_worker_starter_reset(session):
+    return _expect_starter_reset(session, ROLE_HIDDEN_WORKER_STARTER)
+
+
+def _expect_starter_reset(session, role):
     """Record that the launched native starter will delete its old log."""
     if not _is_latest(session):
         return False
-    source = session.get("sources", {}).get(ROLE_HIDDEN_WORKER_STARTER)
+    source = session.get("sources", {}).get(role)
     if source is None:
         return False
     source["resetExpected"] = True

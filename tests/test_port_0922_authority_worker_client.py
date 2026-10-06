@@ -1911,6 +1911,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         bigworld.cancelCallback = lambda unused_id: None
         config = types.ModuleType('gui.mods.offline_lan_0922.config')
         config.SIMULATION_WORKER_MODE = 'simulation_worker'
+        config.PLAYER_DRIVER_MODE = 'player_driver'
         config.load = mock.Mock(return_value={
             'enabled': True, 'vehicle': 'ussr:R11_MS-1'})
         config.client_mode = mock.Mock(return_value='simulation_worker')

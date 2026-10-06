@@ -31,6 +31,8 @@ def tr(source):
 
 
 _ZH = {
+    'Vehicle movement stopped. Exit the game and restart it from the launcher.':
+        u'本车移动已停止。请退出游戏，再从启动器重新启动。',
     'Replay playback stopped (%s).': u'录像回放已停止（%s）。',
     'Personal mission %d': u'个人任务 %d',
     'Personal mission completed: %s.': u'个人任务完成：%s。',

@@ -18,6 +18,7 @@ STOCK_PREFERENCES = b"preferences.xml"
 VARIANTS = (
     ("engine_config.offline-player.xml", b"playerprefs.xml"),
     ("engine_config.offline-worker.xml", b"workerprefs.xml"),
+    ("engine_config.offline-driver.xml", b"driverprefs.xml"),
 )
 
 
@@ -110,7 +111,7 @@ def build_preferences_configs(stock_path, output_directory):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Build player and worker Packed XML configs from the exact "
+            "Build player, worker and driver Packed XML configs from the exact "
             "#1513 stock engine_config.xml."
         )
     )

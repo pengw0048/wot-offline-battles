@@ -25,6 +25,18 @@ except ImportError:
 
 
 EXPECTED_ABI = {
+    'scripts/client/messenger/MessengerEntry.pyc': {
+        'MessengerEntry.gui': ('self',),
+    },
+    'scripts/client/messenger/gui/entry_decorator.pyc': {
+        'GUIDecorator.addClientMessage': ('self', 'message', 'isCurrentPlayer'),
+    },
+    'scripts/client/messenger/gui/Scaleform/battle_entry.pyc': {
+        'BattleEntry.addClientMessage': ('self', 'message', 'isCurrentPlayer'),
+    },
+    'scripts/client/messenger/gui/Scaleform/view/battle/messenger_view.pyc': {
+        'BattleMessengerView.addMessage': ('self', 'message', 'fillColor', 'accountDBID'),
+    },
     'scripts/client/tutorial/gui/Scaleform/effects_player.pyc': {
         'ApplicationEffect._getTutorialLayout': ('self',),
         'SetTriggerEffect.stop': ('self', 'effectID'),
@@ -1160,6 +1172,18 @@ EXPECTED_CODE_LITERALS = {
 # string payload literals cannot express.  They are the exact #1513 APIs the
 # offline Account preservation and native lobby-ready gate depend on.
 EXPECTED_CODE_NAMES = {
+    'scripts/client/messenger/MessengerEntry.pyc': {
+        'MessengerEntry.gui': ('_MessengerEntry__gui',),
+    },
+    'scripts/client/messenger/gui/entry_decorator.pyc': {
+        'GUIDecorator.addClientMessage': ('_GUIDecorator__current', 'addClientMessage'),
+    },
+    'scripts/client/messenger/gui/Scaleform/battle_entry.pyc': {
+        'BattleEntry.addClientMessage': ('FILL_COLORS', 'BLACK', 'addMessage'),
+    },
+    'scripts/client/messenger/gui/Scaleform/view/battle/messenger_view.pyc': {
+        'BattleMessengerView.addMessage': ('FILL_COLORS', 'BLACK', 'as_showBlackMessageS'),
+    },
     'scripts/client/tutorial/gui/Scaleform/effects_player.pyc': {
         'ApplicationEffect._getTutorialLayout': ('_app', 'tutorialManager'),
         'SetTriggerEffect.stop': ('_itemsIDs', '_getTutorialLayout', 'clearTriggers'),

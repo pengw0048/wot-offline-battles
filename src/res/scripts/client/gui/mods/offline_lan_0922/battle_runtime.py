@@ -37,6 +37,8 @@ from gui.mods.offline_lan_0922.entities.detached_turret import (
 from gui.mods.offline_lan_0922 import turret_obstacle_schema, tank_contact_ledger
 from gui.mods.offline_lan_0922 import rigid_turret, turret_contact_ledger
 from gui.mods.offline_lan_0922.collision_feedback import CollisionFeedback
+from gui.mods.offline_lan_0922.driver_state import DriverRuntimeMixin
+from gui.mods.offline_lan_0922.driver_presentation import DriverPresentation
 from gui.mods.offline_lan_0922.entities import turret_obstacles
 from gui.mods.offline_lan_0922.entities.native_remote_vehicle import \
     NativeRemoteVehicleFactory, present_shot_impulse, set_draw_visibility
@@ -1822,6 +1824,10 @@ class _LANInputSender(object):
         return True
 
     def send_avatar_input(self, vehicle_id, kind, payload):
+        if getattr(self.owner, '_player_driver_mode', False):
+            # The hidden camera and native key state do not own player input.
+            # Only an admitted private driver_control may update this sender.
+            return False
         payload = payload if isinstance(payload, dict) else {}
         if kind == 'move':
             flags = int(payload.get('flags', 0))
@@ -1843,13 +1849,15 @@ class _LANInputSender(object):
             self.owner._echo_local_gun_angles()
             return self.send_current()
         if kind == 'stop_tracking':
-            unused_position, vehicle_yaw = self.owner.local_pose()
+            unused_position, vehicle_yaw = self.owner._local_display_pose()
             turret_yaw = _number(payload.get('turret_yaw'))
             gun_pitch = _number(payload.get('gun_pitch'))
             self.aim_yaw = vehicle_yaw + turret_yaw
             self.gun_pitch = gun_pitch
             self.aim_pitch = (
-                float(getattr(self.owner, '_local_pitch', 0.0)) +
+                float(getattr(getattr(self.owner, '_local_matrix', None),
+                              'pitch', getattr(self.owner, '_local_pitch',
+                                               0.0))) +
                 float(getattr(
                     self.owner, '_local_siege_aim_pitch', 0.0)) +
                 gun_pitch)
@@ -1877,7 +1885,7 @@ class _LANInputSender(object):
             self.aim_point = tuple(
                 origin[index] + target[index] for index in range(3))
         else:
-            position, unused_yaw = self.owner.local_pose()
+            position, unused_yaw = self.owner._local_display_pose()
             dx = target[0] - position[0]
             dy = target[1] - position[1]
             dz = target[2] - position[2]
@@ -1892,6 +1900,10 @@ class _LANInputSender(object):
         self.aim_pitch = self.gun_pitch
 
     def send_current(self, siege_enabled=None):
+        if getattr(self.owner, '_player_driver_mode', False):
+            return self.owner._publish_driver_state(siege_enabled)
+        if getattr(self.owner, '_player_driver', None) is not None:
+            self.owner._send_driver_control()
         position, yaw = self.owner.local_pose()
         ram_contacts_getter = getattr(
             self.owner, 'local_ram_contacts', None)
@@ -1950,6 +1962,8 @@ class _LANInputSender(object):
         estimator = getattr(self.owner, '_estimated_motion_time_us', None)
         pose_time = (estimator(self.owner._clock())
                      if callable(estimator) else None)
+        if getattr(self.owner, '_player_driver', None) is not None:
+            position, pose_time = self.owner._driver_pose_publication()
         if pose_time is not None:
             keyword_args['pose_time_us'] = pose_time
         if siege_enabled is not None:
@@ -1963,6 +1977,8 @@ class _LANInputSender(object):
             forward, turn, self.aim_yaw, self.gun_pitch,
             position, yaw, **keyword_args)
         if result:
+            if getattr(self.owner, '_player_driver', None) is not None:
+                self.owner._driver_pose_published()
             enqueued = getattr(
                 self.owner, '_ram_contacts_enqueued', None)
             if callable(enqueued):
@@ -1986,7 +2002,7 @@ class _LANInputSender(object):
         return result
 
 
-class BattleRuntime(object):
+class BattleRuntime(DriverRuntimeMixin):
     """Own map, real Vehicle entities, snapshot smoothing and authority bots."""
 
     def __init__(self, runtime=None):
@@ -1998,6 +2014,8 @@ class BattleRuntime(object):
             self._read_local_vehicle_rotation_speed
         self._config = None
         self._worker_mode = False
+        self._player_driver_mode = False
+        self._reset_player_driver()
         self._replay_mode = False
         self._replay_local = None
         self._replay_local_applied = None
@@ -2375,6 +2393,9 @@ class BattleRuntime(object):
         self._runtime = self._runtime or _load_runtime()
         self._config = dict(config or {})
         self._worker_mode = bool(self._config.get('worker_mode', False))
+        self._player_driver_mode = bool(
+            self._config.get('player_driver_mode', False))
+        self._reset_player_driver()
         self._replay_mode = bool(getattr(lan_client, 'is_offline_replay', False))
         self._replay_local = None
         self._replay_local_applied = None
@@ -2388,7 +2409,7 @@ class BattleRuntime(object):
         self._combat_diagnostics = (
             WorkerCombatDiagnostics(_PROFILE_CLOCK, detail_stride=8)
             if os.environ.get('WOT_OFFLINE_COMBAT_PROFILE') == '1' else None)
-        if self._worker_mode:
+        if self._worker_mode or self._player_driver_mode:
             self._config['native_remote_vehicles'] = False
             self._config['bot_track_animation'] = False
         self._worker_probe = None
@@ -2712,6 +2733,7 @@ class BattleRuntime(object):
         self.state = 'creating_map'
         self.error = None
         try:
+            self._attach_player_driver()
             arena_type = self._standard_arena(self._config.get('map'))
             if arena_type is None:
                 raise RuntimeError('standard arena definition is unavailable')
@@ -4158,7 +4180,8 @@ class BattleRuntime(object):
         deadline = getattr(self.client, 'combat_end_deadline', None)
         if deadline is not None:
             duration = max(0.1, float(deadline) - _monotonic_time())
-        refresh_movement = (not self._worker_mode and bool(getattr(
+        refresh_movement = (not self._worker_mode and
+                            not self._player_driver_mode and bool(getattr(
             self._avatar, '_PlayerAvatar__isOnArena', False)))
         if not self._worker_mode:
             self._binding.arena_period('battle', duration)
@@ -4287,6 +4310,7 @@ class BattleRuntime(object):
 
     def on_battle_live(self, message):
         """Start the one server-owned countdown after every map is ready."""
+        self._forward_driver_message(message)
         if (self.state != 'running' or self._battle_live or
                 self._prebattle_deadline is not None):
             return False
@@ -4422,7 +4446,7 @@ class BattleRuntime(object):
         # PREBATTLE -> BATTLE callbacks must not release its aiming integrator.
         # Keep the native timer alive for marker/audio updates; do not stop and
         # restart the rotator (and its sound objects) on every saved sample.
-        locked = bool(locked or self._replay_mode)
+        locked = bool(locked or self._replay_mode or self._player_driver_mode)
         avatar.isGunLocked = locked
         lock(locked)
         return True
@@ -6770,10 +6794,45 @@ class BattleRuntime(object):
         return tuple(candidates)
 
     def local_pose(self):
-        # The copied 0.8.2 integrator owns this pose.  #1513's stock camera,
-        # gun and collision consumers see the same value through the narrow
-        # compatibility overlay installed at the native model boundary.
+        # The admitted physics pose owns network publication and history.
+        # A paired driver's display provider may briefly advance separately.
         return self._local_position, self._local_yaw
+
+    def _local_display_pose(self):
+        """Copy the displayed chassis pose for native aiming and this shot.
+
+        Input publication and physical history continue to use local_pose.
+        The native barrel already follows this persistent display provider.
+        """
+        if self._local_matrix is None:
+            return self.local_pose()
+        matrix = self._runtime.math.Matrix(self._local_matrix)
+        return _xyz(matrix.translation), float(matrix.yaw)
+
+    def _local_collision_matrices(self):
+        """Keep live hit queries at the admitted pose while display advances.
+
+        Rebase the current body-to-chassis transform, including hydraulic
+        suspension, onto the canonical chassis without touching either
+        persistent presentation provider.
+        """
+        body = self._local_body_pose()
+        chassis = self._local_matrix
+        if self._player_driver is None or chassis is None:
+            return body, chassis
+        matrix_type = self._runtime.math.Matrix
+        canonical = matrix_type()
+        canonical.setRotateYPR((
+            self._local_yaw, self._local_pitch, self._local_roll))
+        canonical.translation = self._vector(self._local_position)
+        if body is chassis:
+            return canonical, canonical
+        relative = matrix_type(body)
+        inverse = matrix_type(chassis)
+        inverse.invert()
+        relative.postMultiply(inverse)
+        relative.postMultiply(canonical)
+        return relative, canonical
 
     def local_stabilised_position(self):
         """Return the exact origin used by #1513's relative gun mailbox."""
@@ -6957,8 +7016,10 @@ class BattleRuntime(object):
                         descriptor,
                         self._runtime.math.Matrix(
                             self._local_siege_flat_body_matrix),
-                        (float(rotator.turretYaw),
-                         float(rotator.gunPitch)),
+                        (self._driver_native_gun_angles
+                         if self._player_driver_mode else
+                         (float(rotator.turretYaw),
+                          float(rotator.gunPitch))),
                         self._vector(aim_point))
                     desired, unused_reachable = (
                         hull_aiming.minimal_correction(
@@ -7036,10 +7097,20 @@ class BattleRuntime(object):
         # copied-physics frame already has one earlier sample to difference.
         self._local_motion_history.append(
             (0.0, tuple(float(value) for value in self._local_position)))
-        self._local_physics = vehicle_physics.derive_params(
-            entity.typeDescriptor,
-            self._local_factors(entity.typeDescriptor))
-        if getattr(self, '_replay_mode', False):
+        if self._player_driver_mode:
+            snapshot = self._accepted_local_effective_params()
+            if snapshot is None:
+                raise RuntimeError(
+                    'player driver physics parameters are unavailable')
+            # Freeze the travel descriptor's mounted factors before a native
+            # Siege callback can replace it with the other mode descriptor.
+            self._local_factors(entity.typeDescriptor)
+            self._local_physics = dict(snapshot['physics'])
+        else:
+            self._local_physics = vehicle_physics.derive_params(
+                entity.typeDescriptor,
+                self._local_factors(entity.typeDescriptor))
+        if self._replay_mode:
             snapshot = self._accepted_local_effective_params()
             if snapshot is not None:
                 self._local_physics = dict(snapshot['physics'])
@@ -7557,27 +7628,161 @@ class BattleRuntime(object):
             (velocity[axis] - previous[axis]) / window for axis in range(3))
         return velocity, acceleration
 
+    def _accept_driver_display_receipt(self, receipt, now):
+        """Seed optional display motion only after canonical admission."""
+        self._driver_display_allow = False
+        timeline = self._driver_presentation
+        if timeline is None:
+            timeline = self._driver_presentation = DriverPresentation()
+        state = receipt['state']
+        pose = dict((name, state[name])
+                    for name in ('position', 'yaw', 'pitch', 'roll'))
+        accepted = timeline.accept(pose, receipt['pose_time_us'], now)
+        if not accepted:
+            # Contact barriers can publish twice at one physical time. Their
+            # latest admitted pose still replaces an older display estimate.
+            timeline.reset()
+            timeline.accept(pose, receipt['pose_time_us'], now)
+        sender = self._sender
+        self._driver_display_input = (
+            sender.forward, sender.turn, bool(sender.handbrake))
+        integrated = receipt.get('integrated_control_seq')
+        edge = getattr(self._player_driver, '_movement_control_seq', None)
+        # This diagnostic field may be missing: only continuation is disabled,
+        # never receipt admission, events, control or physical publication.
+        self._driver_display_control_seq = (
+            integrated if type(integrated) in _INTEGER_TYPES else 0)
+        self._driver_display_allow = bool(
+            accepted and type(integrated) in _INTEGER_TYPES and edge is not None and
+            integrated >= edge and not self._local_airborne and
+            not self._local_grind and self._local_siege_braking is None)
+
+    @timed('local.display_guard')
+    def _driver_display_is_clear(self, entity, canonical, candidate):
+        """Read-only geometry checks; never commit crushes or contact forces."""
+        start, end = canonical['position'], candidate['position']
+        yaw, end_yaw = canonical['yaw'], candidate['yaw']
+        dx, dz = end[0] - start[0], end[2] - start[2]
+        distance = math.hypot(dx, dz)
+        descriptor = entity.typeDescriptor
+        if not self._arena_rotation_is_clear(entity, start, yaw, end_yaw, end):
+            return False
+        if not self._turret_pose_is_clear(
+                start, yaw, end, end_yaw, descriptor,
+                canonical['pitch'], canonical['roll']):
+            return False
+        shape = self._collision_shape(descriptor)
+        others = self._contact_tanks(start, shape, extra_reach=distance)
+        if others and tank_collision.rotation_fraction(
+                start, yaw, end_yaw, shape, others,
+                translation=(dx, dz)) < 1.0:
+            return False
+        reader = getattr(self._destructibles, '_vehicle_body_bbox', None)
+        bbox = reader(descriptor) if callable(reader) else None
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 2:
+            return False
+        if not self._native_world_rotation_is_clear(
+                start, yaw, end_yaw, descriptor,
+                pitch=canonical['pitch'], roll=canonical['roll'],
+                record_local=False, include_static=True, translation=(dx, dz)):
+            return False
+        if distance > 1.0e-8:
+            status = world_collision.check_horizontal_collision(
+                self._runtime.bigworld, self._runtime.math,
+                self._avatar.spaceID, self._vector(start), yaw, distance,
+                descriptor, False, 1.0, True, False, None,
+                commit_enabled=False, motion_yaw=math.atan2(dx, dz),
+                pitch=canonical['pitch'], roll=canonical['roll'])
+            if status != 'clear':
+                return False
+        return True
+
+    @timed('local.display')
+    def _present_player_driver(self, now):
+        """Advance display once on the visible clock, without moving physics."""
+        timeline = self._driver_presentation
+        if timeline is None or self._player_driver is None:
+            return False
+        entity = self._driver_entity()
+        if entity is None or self._sender is None:
+            return False
+        previous_time = self._driver_display_clock
+        self._driver_display_clock = now
+        dt = 0.0 if previous_time is None else max(0.0, now - previous_time)
+        movement = (self._sender.forward, self._sender.turn,
+                    bool(self._sender.handbrake))
+        alive = getattr(entity, 'isAlive', None)
+        allow = (self._driver_display_allow and self._battle_live and
+                 self._driver_error is None and
+                 (not callable(alive) or alive()) and
+                 not self._local_siege_drive_locked(entity) and
+                 self._driver_display_control_seq >=
+                 getattr(self._player_driver, '_movement_control_seq', 0) and
+                 movement == self._driver_display_input and
+                 timeline.last_arrival_time is not None and
+                 now - timeline.last_arrival_time <=
+                 min(timeline.source_interval, self._camera_motion_window()))
+        candidate = timeline.candidate(now, allow)
+        canonical = timeline.canonical
+        if candidate is None or canonical is None:
+            return False
+        if candidate != canonical:
+            try:
+                clear = self._driver_display_is_clear(entity, canonical, candidate)
+            except Exception as error:
+                clear = False
+                if not self._driver_display_guard_reported:
+                    self._driver_display_guard_reported = True
+                    self._warn_optional_failure(
+                        'player driver display guard', error, disable=False)
+            if not clear:
+                # Keep only a previously checked display pose. The next
+                # canonical receipt always replaces this optional estimate.
+                candidate = timeline.candidate(now, False)
+        position = self._update_local_presentation(entity, dt, candidate)
+        timeline.commit_display(candidate)
+        callback = getattr(self._avatar, 'updateOwnVehiclePosition', None)
+        if callable(callback):
+            callback(position, self._vector((0.0, 0.0, candidate['yaw'])),
+                     self._local_speed, self._local_turn_speed)
+        return True
+
     @timed('local.presentation')
-    def _update_local_presentation(self, entity, dt=0.0):
+    def _update_local_presentation(self, entity, dt=0.0, display_pose=None):
         if self._local_matrix is None or self._local_model is None:
             raise RuntimeError('player presentation is not attached')
         previous_yaw = float(getattr(
             self._local_matrix, 'yaw', self._local_yaw))
-        position = self._vector(self._local_position)
+        pose = display_pose or {
+            'position': self._local_position, 'yaw': self._local_yaw,
+            'pitch': self._local_pitch, 'roll': self._local_roll}
+        position = self._vector(pose['position'])
         dt = max(0.0, float(dt))
+        # Receipts retain their physical event timing. Camera history advances
+        # only once per visible frame, even when a batch drains many receipts.
+        camera_dt = (0.0 if self._player_driver is not None and
+                     display_pose is None else dt)
         previous_velocity = _xyz(self._local_camera_velocity)
-        if dt > 0.0:
+        if camera_dt > 0.0:
             velocity_tuple, acceleration_tuple = self._local_camera_motion(
-                _xyz(position), dt, previous_velocity)
+                _xyz(position), camera_dt, previous_velocity)
         else:
             velocity_tuple = previous_velocity
             acceleration_tuple = (0.0, 0.0, 0.0)
         velocity = self._vector(velocity_tuple)
         acceleration = self._vector(acceleration_tuple)
         self._local_matrix.setRotateYPR((
-            self._local_yaw, self._local_pitch, self._local_roll))
+            pose['yaw'], pose['pitch'], pose['roll']))
         self._local_matrix.translation = position
-        if not self._replay_mode:
+        if self._player_driver is not None:
+            matrix = self._local_siege_aim_matrix
+            if matrix is not None:
+                matrix.setRotateYPR((0.0, self._local_siege_aim_pitch, 0.0))
+                matrix.translation = self._vector(
+                    hull_aiming.correction_translation(
+                        self._local_siege_aim_pitch,
+                        self._local_siege_aim_center_z))
+        elif not self._replay_mode:
             self._update_local_hull_aiming(entity, dt)
         self._refresh_local_stabilised_snapshot()
         # Exact #1513's CompoundAppearance.__linkCompound rebinds
@@ -7586,13 +7791,18 @@ class BattleRuntime(object):
         # comparing a native PyCompoundModel provider every render frame can
         # create a fresh Python wrapper and spuriously relink the hierarchy.
         self._runtime.compatibility.set_vehicle_pose_overlay(
-            entity, position, self._local_yaw, self._local_body_pose(),
+            entity, position, pose['yaw'], self._local_body_pose(),
             self._local_speed, self._local_turn_speed,
             velocity, acceleration,
             steady_rotation_matrix=self._local_steady_rotation(),
             stabilised_matrix=self._local_stabilised_pose())
-        self._reset_full_turret_sniper_aim(previous_yaw)
+        if self._player_driver_mode:
+            self._local_camera_velocity = velocity
+            return position
+        self._reset_full_turret_sniper_aim(previous_yaw, pose['yaw'])
         self._local_camera_velocity = velocity
+        if display_pose is not None:
+            return position
         # A stock compound refresh rebuilds the appearance and its animator,
         # which would silently drop this port's rebind for the rest of the
         # round. Re-assert it here; an unchanged animator costs one test.
@@ -7607,9 +7817,11 @@ class BattleRuntime(object):
             'local track animation', self._update_local_tracks, (entity,))
         return position
 
-    def _reset_full_turret_sniper_aim(self, previous_yaw):
+    def _reset_full_turret_sniper_aim(self, previous_yaw, display_yaw=None):
         """Keep #1513's world aim stable across a copied hull-yaw step."""
-        yaw_delta = ((float(self._local_yaw) - float(previous_yaw) + math.pi) %
+        if display_yaw is None:
+            display_yaw = self._local_yaw
+        yaw_delta = ((float(display_yaw) - float(previous_yaw) + math.pi) %
                      (2.0 * math.pi) - math.pi)
         if abs(yaw_delta) <= 0.000001:
             return False
@@ -8125,7 +8337,7 @@ class BattleRuntime(object):
         target descriptor.  Worker loadouts therefore come only from the
         target descriptor or a human player's donated effective parameters.
         """
-        if self._worker_mode:
+        if self._worker_mode or self._player_driver_mode:
             return None
         try:
             from CurrentVehicle import g_currentVehicle
@@ -8151,19 +8363,24 @@ class BattleRuntime(object):
         """
         if self._garage_loadout is not None:
             return self._garage_loadout
-        if getattr(self, '_replay_mode', False):
-            from gui.mods.offline_lan_0922 import replay_presentation
-            row = replay_presentation.recorded_player(self.client.reader.header)
+        if self._replay_mode or self._player_driver_mode:
+            if self._player_driver_mode:
+                row = self._local_state()
+                crew_group = 0
+            else:
+                from gui.mods.offline_lan_0922 import replay_presentation
+                row = replay_presentation.recorded_player(self.client.reader.header)
+                crew_group = int(self.client.reader.header.get('local_crew_group', 0))
             recorded = row.get('effective_params') or {}
             encoded = lan_protocol._canonical_vehicle_compact_descr(row.get('vehicle_compact_descr'))
             if encoded is None:
-                raise RuntimeError('replay local mounted descriptor is missing')
+                raise RuntimeError('mirrored local mounted descriptor is missing')
             self._garage_loadout = {
                 'shells': dict((int(k), int(n)) for k, n in recorded.get('ammo', ())),
                 'shell_order': tuple(int(x['compact_descr']) for x in recorded['gun']['shots']),
                 'equipment_ids': [int(x['compactDescr']) for x in recorded.get('equipment', ())],
                 'equipments': (), 'battle_boosters': (), 'crew': (),
-                'crew_group': int(self.client.reader.header.get('local_crew_group', 0)),
+                'crew_group': crew_group,
                 'camouflage_id': (recorded.get('camouflage') or {}).get('camouflage_id'),
                 'outfit': self._remote_outfit(row, 'player'),
                 'fitting': (base64.b64decode(encoded.encode('ascii')), row['vehicle']),
@@ -8340,6 +8557,28 @@ class BattleRuntime(object):
         equipment bonus the garage shows and the battle ignores shows up here
         as a difference, not as a feeling.
         """
+        if self._player_driver_mode:
+            snapshot = self._accepted_local_effective_params()
+            physics = self._local_physics
+            profile = snapshot['spotting']
+            camouflage = snapshot['camouflage']
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] PARAMS source=accepted-player-driver '
+                'view=%.1f conceal_move=%.2f%% conceal_still=%.2f%% '
+                'hull_deg=%.2f terrain=%s power_hp=%.0f speed=%.1f/%.1f '
+                'reload=%.2fs recon=%.1f camo_crew=%.1f\n' % (
+                    self._vision_radius(descriptor, local=True),
+                    (camouflage['base_moving'] + profile['invisibility_moving'][0]) *
+                    profile['invisibility_moving'][1] * 100.0,
+                    (camouflage['base_still'] + profile['invisibility_still'][0]) *
+                    profile['invisibility_still'][1] * 100.0,
+                    math.degrees(physics['rotSpd']),
+                    ','.join('%.3f' % value for value in physics['terrainResist']),
+                    physics['powerW'] / 735.49875,
+                    physics['speedFwd'] * 3.6, physics['speedBwd'] * 3.6,
+                    self._gun_state.reload, profile['recon_level'],
+                    profile['camouflage_level']))
+            return True
         if getattr(self, '_replay_mode', False):
             from gui.mods.offline_lan_0922 import replay_presentation
             accepted = self._accepted_local_effective_params()
@@ -8503,6 +8742,10 @@ class BattleRuntime(object):
         """
         if self._local_loadout_cache is not None:
             return self._local_loadout_cache
+        if (self._player_driver_mode and
+                self._accepted_local_effective_params() is None):
+            raise RuntimeError(
+                'player driver loadout parameters are unavailable')
         if self._local_effective_params is not None:
             self._local_loadout_cache = dict(
                 self._local_effective_params['loadout'])
@@ -8926,7 +9169,7 @@ class BattleRuntime(object):
         publications.  A trigger must first consume that same elapsed time or
         it can reject a round which the native HUD already presents as ready.
         """
-        if getattr(self, '_replay_mode', False):
+        if self._replay_mode or self._player_driver_mode:
             return self._gun_state
         if entity is None or entity.typeDescriptor is None:
             raise RuntimeError('player Vehicle descriptor is unavailable')
@@ -8981,7 +9224,7 @@ class BattleRuntime(object):
         return state
 
     def _ammo_tick(self):
-        if getattr(self, '_replay_mode', False):
+        if self._replay_mode or self._player_driver_mode:
             # Timeline presentation owns every reload/clip/ammo edge. No
             # independent 10 Hz gun or server-marker clock runs in replay.
             return
@@ -9166,6 +9409,8 @@ class BattleRuntime(object):
             if (not isinstance(value, _INTEGER_TYPES) or
                     int(value) not in (0, 1)):
                 return False
+            if self._player_driver is not None:
+                return self._send_driver_control(siege_request=bool(value))
             if self._server is None:
                 return False
             entity = self._server_entity(self._server.vehicle_id)
@@ -9267,6 +9512,7 @@ class BattleRuntime(object):
         return False
 
     def on_snapshot(self, message):
+        self._forward_driver_message(message)
         if self.state in ('failed', 'stopped', 'leaving'):
             return False
         previous_snapshot = self._last_snapshot
@@ -9597,6 +9843,7 @@ class BattleRuntime(object):
         ended by the server; this client never takes the bot
         simulation over.
         """
+        self._forward_driver_message(message)
         if self.state in ('failed', 'stopped', 'leaving'):
             return False
         message = message if isinstance(message, dict) else {}
@@ -9739,6 +9986,7 @@ class BattleRuntime(object):
 
     def on_player_destructible_contact_result(self, message):
         """Correct one visible prediction after the worker rejects it."""
+        self._forward_driver_message(message)
         if self._worker_mode or not isinstance(message, dict):
             return False
         required = {
@@ -9885,6 +10133,7 @@ class BattleRuntime(object):
         return changed
 
     def on_events(self, message):
+        self._forward_driver_message(message)
         if self.state in ('failed', 'stopped', 'leaving'):
             return False
         try:
@@ -12698,6 +12947,11 @@ class BattleRuntime(object):
         return audio
 
     def _apply_replay_gun_pose(self, sample):
+        if not self._replay_mode:
+            return False
+        return self._apply_mirrored_gun_pose(sample)
+
+    def _apply_mirrored_gun_pose(self, sample):
         """Restore #1513's native gun owner and animation, not its read-only API.
 
         turretYaw/gunPitch are getter-only properties.  forceGunParams owns
@@ -12710,7 +12964,7 @@ class BattleRuntime(object):
         Recreate the packed echo from the recorded floating-point angles using
         the existing descriptor-aware binding, never from that obsolete alias.
         """
-        if not self._replay_mode:
+        if not self._replay_mode and not self._player_driver_mode:
             return False
         if 'turret_yaw' not in sample and 'gun_pitch' not in sample:
             # Motion-only legacy fixtures/records carry no new gun evidence.
@@ -12742,7 +12996,7 @@ class BattleRuntime(object):
         turret_matrix(yaw, 0.0)
         gun_matrix(pitch, 0.0)
         self._replay_gun_signature = signature
-        if self._replay_local_applied is None:
+        if self._replay_mode and self._replay_local_applied is None:
             from gui.mods.offline_lan_0922 import offline_replay
             offline_replay.log(
                 'play_gun_pose interface=forceGunParams '
@@ -12750,6 +13004,8 @@ class BattleRuntime(object):
         return True
 
     def _show_shot(self, event, update_state=True):
+        if self._player_driver_mode:
+            return True
         key = self._event_entity_key(event, 'attacker')
         if key is None:
             raise RuntimeError('ordered shot event has no attacker')
@@ -12921,7 +13177,7 @@ class BattleRuntime(object):
         self._runtime.bigworld.callback(0.0, present_after_mailbox_returns)
 
     def _projectile_is_authority(self):
-        if self._replay_mode:
+        if self._replay_mode or self._player_driver_mode:
             return False
         if not self._worker_mode:
             player_id = getattr(self.client, 'player_id', None)
@@ -13664,6 +13920,8 @@ class BattleRuntime(object):
 
     def _reconcile_projectile_snapshot(self, message):
         """Restore the authoritative cursor without rescanning elapsed time."""
+        if self._player_driver_mode:
+            return False
         if self._projectiles is None or not isinstance(message, dict):
             return False
         rows = message.get('projectiles')
@@ -14912,8 +15170,7 @@ class BattleRuntime(object):
         body_matrix = None
         chassis_matrix = None
         if record.get('local') and self._local_matrix is not None:
-            body_matrix = self._local_body_pose()
-            chassis_matrix = self._local_matrix
+            body_matrix, chassis_matrix = self._local_collision_matrices()
         elif record.get('native_remote'):
             body_matrix, chassis_matrix = \
                 self._projectile_vehicle_matrices(record, target)
@@ -14938,16 +15195,19 @@ class BattleRuntime(object):
         if not (record.get('local') or record.get('native_remote')):
             return target
         body = chassis = None
+        position = target.position
         if record.get('local'):
             if self._local_matrix is not None:
-                body, chassis = self._local_body_pose(), self._local_matrix
+                body, chassis = self._local_collision_matrices()
+                if self._player_driver is not None:
+                    position = self._vector(self._local_position)
         else:
             body, chassis = self._projectile_vehicle_matrices(record, target)
         matrix = self._runtime.math.Matrix
         return _ProjectileCollisionTarget(
             target, target.typeDescriptor,
             matrix(body) if body is not None else None,
-            target.position, getattr(target, 'appearance', None),
+            position, getattr(target, 'appearance', None),
             self._runtime.math,
             matrix(chassis) if chassis is not None else None)
 
@@ -15540,8 +15800,9 @@ class BattleRuntime(object):
             if historic:
                 body_matrix = getattr(target, 'matrix', None)
             elif record.get('local') and self._local_matrix is not None:
-                body_matrix = self._local_body_pose()
-                chassis_matrix = self._local_matrix
+                # The query is canonical. Encode its component-local ray
+                # there; stock presentation applies it to the displayed body.
+                body_matrix, chassis_matrix = self._local_collision_matrices()
             elif record.get('native_remote'):
                 body_matrix, chassis_matrix = \
                     self._projectile_vehicle_matrices(record, target)
@@ -15706,8 +15967,7 @@ class BattleRuntime(object):
                 return None
             body_matrix = probe_target.matrix
         elif record.get('local') and self._local_matrix is not None:
-            body_matrix = self._local_body_pose()
-            chassis_matrix = self._local_matrix
+            body_matrix, chassis_matrix = self._local_collision_matrices()
         elif record.get('native_remote'):
             body_matrix, chassis_matrix = self._projectile_vehicle_matrices(
                 record, target)
@@ -17589,7 +17849,8 @@ class BattleRuntime(object):
             self._retry_bot_manifest(now)
             self._maybe_send_battle_ready()
             from gui.mods.offline_lan_0922 import offline_replay
-            offline_replay.ensure_recording(self)
+            if not self._player_driver_mode:
+                offline_replay.ensure_recording(self)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['house'] = max(0.0, next_boundary - boundary)
@@ -17602,9 +17863,11 @@ class BattleRuntime(object):
                 next_boundary = _PROFILE_CLOCK()
                 stages['sync'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if self._battle_live and not self._worker_mode and not self._replay_mode:
+            if (self._battle_live and not self._worker_mode and
+                    not self._replay_mode and not self._player_driver_mode):
                 self._tick_critical_states(rule_dt)
-            if not self._worker_mode and not self._replay_mode:
+            if (not self._worker_mode and not self._replay_mode and
+                    not self._player_driver_mode):
                 self._run_optional_feature(
                     'Expert damaged-device presentation',
                     self._tick_expert_target, (now,),
@@ -17618,7 +17881,8 @@ class BattleRuntime(object):
                 next_boundary = _PROFILE_CLOCK()
                 stages['critical'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if self._battle_live and not self._worker_mode and not self._replay_mode:
+            if (self._battle_live and not self._worker_mode and
+                    not self._replay_mode and self._player_driver is None):
                 self._tick_drowning(rule_dt, now)
                 self._tick_overturn(rule_dt, now)
             if profiling:
@@ -17719,28 +17983,38 @@ class BattleRuntime(object):
                 if self._worker_mode:
                         self._publish_player_environment(rule_dt, now)
                 elif not self._replay_mode:
-                    self._tick_critical_states(rule_dt)
-                    self._tick_drowning(rule_dt, now)
-                    self._tick_overturn(rule_dt, now)
+                    if not self._player_driver_mode:
+                        self._tick_critical_states(rule_dt)
+                    if self._player_driver is None:
+                        self._tick_drowning(rule_dt, now)
+                        self._tick_overturn(rule_dt, now)
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['transition'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
+            if self._player_driver is not None:
+                self._send_driver_control()
+                self._consume_driver_receipts()
+                self._present_player_driver(self._clock())
             if self._battle_live and not self._worker_mode and not self._replay_mode:
                 self._local_frame_stages = stages if profiling else None
                 try:
-                    self._drive_local(dt)
-                    self._advance_local_player_burst()
+                    if self._player_driver is None:
+                        self._drive_local(dt)
+                    if not self._player_driver_mode:
+                        self._advance_local_player_burst()
                 finally:
                     self._local_frame_stages = None
             if profiling:
                 next_boundary = _PROFILE_CLOCK()
                 stages['local'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if not self._worker_mode and not self._replay_mode:
+            if (not self._worker_mode and not self._replay_mode and
+                    not self._player_driver_mode):
                 self._run_optional_feature(
                     'live reload sound pump', self._pump_live_reload_sound, (now,))
-            if self._battle_live and not self._worker_mode and not self._replay_mode:
+            if (self._battle_live and not self._worker_mode and
+                    not self._replay_mode and not self._player_driver_mode):
                 self._run_optional_feature(
                     'target outline', self._update_target_outline, (now,),
                     self._disable_target_outline_presentation)
@@ -17882,7 +18156,8 @@ class BattleRuntime(object):
                 next_boundary = _PROFILE_CLOCK()
                 stages['bot_events'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if not self._worker_mode and not self._replay_mode:
+            if (not self._worker_mode and not self._replay_mode and
+                    not self._player_driver_mode):
                 if self._battle_live:
                     self._run_optional_feature(
                         'spotting', self._update_spotting, (now,),
@@ -17898,7 +18173,8 @@ class BattleRuntime(object):
                 next_boundary = _PROFILE_CLOCK()
                 stages['spot'] = max(0.0, next_boundary - boundary)
                 boundary = next_boundary
-            if self._battle_live and not self._worker_mode and not self._replay_mode:
+            if (self._battle_live and not self._worker_mode and
+                    not self._replay_mode and not self._player_driver_mode):
                 validate_lock = getattr(
                     self._runtime.compatibility,
                     'validate_target_lock', None)
@@ -17910,7 +18186,7 @@ class BattleRuntime(object):
                     disable=False)
             if self._replay_mode:
                 self._present_replay_local(dt)
-            else:
+            elif not self._player_driver_mode:
                 offline_replay.record_local(self)
             self._worker_probe_bot_count = bot_count
             self._run_optional_feature(
@@ -17980,13 +18256,15 @@ class BattleRuntime(object):
                         })
                     except Exception:
                         pass
+                self._report_player_driver_performance()
             diagnostics.finish(
                 frame_id, entry_wall, tick_dt, dt, stages, probes, {
                     'round': (self._start_message or {}).get('round_id', '-'),
                     'authority_time': now,
                     'map': (self._config or {}).get('map', '-'),
                     'phase': 'live' if self._battle_live else 'prebattle',
-                    'role': ('worker' if self._worker_mode else
+                    'role': ('driver' if self._player_driver_mode else
+                             'worker' if self._worker_mode else
                              ('authority' if authority else 'guest')),
                     'probe_timing': probe_timing,
                     'bot_count': bot_count,
@@ -19083,6 +19361,14 @@ class BattleRuntime(object):
         """
         if self._ready_sent or self._battle_live:
             return False
+        if (self._player_driver is not None and
+                not self._player_driver.ready and
+                not getattr(self._player_driver, 'error', None) and
+                self._driver_error is None):
+            # Wait while the body driver is still loading. A failed private
+            # body stays frozen, but may not hold every other player's room
+            # countdown once this visible line-up has actually entered.
+            return False
         expected_players = len(self._start_message.get('players') or ())
         player_records = [record for record in self._records.values()
                           if record.get('kind') == 'player' and
@@ -19109,6 +19395,24 @@ class BattleRuntime(object):
         self._ready_sent = True
         self._report_lineup_windows(len(bot_records))
         return True
+
+    def player_driver_ready_for_draw_off(self):
+        """Keep native drawing until every mirrored collision body is ready."""
+        return bool(self._player_driver_mode and self.state == 'running' and
+                    self._ready_sent and self._local_model is not None and
+                    self._local_matrix is not None)
+
+    def _present_driver_failure(self):
+        """Report one local movement failure without sending a chat message.
+
+        Exact #1513 GUIDecorator.addClientMessage forwards to BattleEntry's
+        local view; it neither sends a room command nor changes input focus.
+        """
+        from messenger import MessengerEntry
+        from gui.mods.offline_lan_0922.ui_i18n import tr
+        MessengerEntry.g_instance.gui.addClientMessage(tr(
+            'Vehicle movement stopped. Exit the game and restart it from the launcher.'),
+            isCurrentPlayer=False)
 
     def _report_lineup_windows(self, bot_count):
         """Say how long this process held the shared countdown closed.
@@ -19494,6 +19798,10 @@ class BattleRuntime(object):
                     return False
             elif callable(predictor):
                 predictor(catalog_token)
+        if self._player_driver_mode:
+            self._queue_driver_destructible_prediction(
+                detail, start_position, start_yaw, end_position, end_yaw,
+                speed, dt, catalog_speed)
         return True
 
     def _commit_local_tree_contact(
@@ -20671,8 +20979,9 @@ class BattleRuntime(object):
             if avatar is owner._avatar:
                 try:
                     owner._collision_feedback.observed(veh_a, veh_b, contact_time)
-                    owner._observe_native_ram_contact(
-                        veh_a, veh_b, hit_point, contact_time)
+                    if owner._player_driver is None:
+                        owner._observe_native_ram_contact(
+                            veh_a, veh_b, hit_point, contact_time)
                 except Exception as error:
                     owner._warn_optional_failure(
                         'native ram contact proof', error)
@@ -21939,6 +22248,9 @@ class BattleRuntime(object):
             return False
         low = max(own['y']+own['shape'][2], other['y']+other['shape'][2])
         high = min(own['y']+own['shape'][3], other['y']+other['shape'][3])
+        if self._player_driver_mode:
+            return self._queue_driver_collision(
+                own, other, (point[0], (low+high)*0.5, point[1]), now)
         # Call only stock presentation. The observed native callback remains
         # the separate owner of an armour proof; synthetic OBB contact is not
         # evidence of any particular armour plate or an HP event.
@@ -22771,6 +23083,8 @@ class BattleRuntime(object):
         """Bind a queued landing to the next admitted local pose sample."""
         if not self._pending_landing_impacts or self._sender is None:
             return False
+        if self._player_driver_mode:
+            return self._publish_driver_state()
         impact_speed = self._pending_landing_impacts[0]
         sender = getattr(self._sender, 'send_current', None)
         publish = getattr(self.client, 'send_landing_observation', None)
@@ -23437,7 +23751,9 @@ class BattleRuntime(object):
             return turn
         handler = getattr(self._avatar, 'inputHandler', None)
         get_autorotation = getattr(handler, 'getAutorotation', None)
-        if not callable(get_autorotation) or not get_autorotation():
+        enabled = (self._driver_autorotation if self._player_driver_mode else
+                   callable(get_autorotation) and get_autorotation())
+        if not enabled:
             return turn
         descriptor = getattr(entity, 'typeDescriptor', None)
         gun = _field(descriptor, 'gun')
@@ -23468,7 +23784,8 @@ class BattleRuntime(object):
             # target is within the arc although the actual gun is at a stop.
             relative_yaw, unused_pitch = get_shot_angles(
                 descriptor, self._runtime.math.Matrix(body),
-                (float(rotator.turretYaw), float(rotator.gunPitch)),
+                (self._driver_native_gun_angles if self._player_driver_mode
+                 else (float(rotator.turretYaw), float(rotator.gunPitch))),
                 self._vector(aim_point))
             relative_yaw = float(relative_yaw)
         else:
@@ -23504,6 +23821,12 @@ class BattleRuntime(object):
         if (isinstance(request_seq, bool) or
                 not isinstance(request_seq, _INTEGER_TYPES) or request_seq <= 0):
             request_seq = None
+        if self._player_driver_mode:
+            # The visible publisher maps this receipt to its real room input
+            # sequence. Until that acknowledgement arrives no snapshot may
+            # release the physical transition latch.
+            request_seq = 2 ** 63 - 1
+            self._driver_siege_sample_seq = self._driver_sample_seq
         self._local_siege_braking = None
         # Only the already-stopped drivetrain is locked while the server
         # acknowledges the request and advances the native transition timer.
@@ -23518,15 +23841,24 @@ class BattleRuntime(object):
         """Advance local copied physics through all elapsed battle time."""
         if self._sender is None or self._server is None:
             return
+        if self._player_driver_mode and self._driver_error is not None:
+            return
         elapsed = max(0.0, float(elapsed))
         self._local_input_sent_during_drive = False
+        if self._player_driver_mode:
+            frame_end_us = self._estimated_motion_time_us(self._clock())
+            self._driver_integration_start_us = (
+                None if frame_end_us is None else
+                max(0, int(frame_end_us) - int(round(elapsed * 1000000.0))))
+            self._driver_integration_time_us = self._driver_integration_start_us
+            self._driver_integrated_seconds = 0.0
         remaining = elapsed
         stopped = False
         if remaining <= 0.0:
-            stopped = bool(self._drive_local_step(0.0))
+            stopped = bool(self._drive_local_owned_step(0.0))
         while remaining > 0.0000001 and not stopped:
             step = min(0.1, remaining)
-            stopped = bool(self._drive_local_step(step))
+            stopped = bool(self._drive_local_owned_step(step))
             remaining = max(0.0, remaining - step)
         if stopped:
             self._local_siege_braking = None
@@ -23535,6 +23867,8 @@ class BattleRuntime(object):
             elif (self._local_damage_report is not None or
                     self._drown_level == 2 or self._overturn_level == 2):
                 self._sender.send_current()
+            elif self._player_driver_mode:
+                self._publish_driver_state()
             return
         if (self._local_siege_braking is not None and
                 self._local_speed == 0.0 and self._local_turn_speed == 0.0):
@@ -23542,6 +23876,11 @@ class BattleRuntime(object):
             if entity is not None and self._send_local_siege_request(
                     entity, self._local_siege_braking):
                 self._local_input_sent_during_drive = True
+        if self._player_driver_mode:
+            # Contact barriers may have published an intermediate sweep pose.
+            # Always deliver the completed frame after all elapsed substeps.
+            self._publish_driver_state()
+            return
         if self._local_input_sent_during_drive:
             self._input_accumulator = 0.0
         else:
@@ -23556,6 +23895,34 @@ class BattleRuntime(object):
             # intermediate network samples.
             self._input_accumulator %= NETWORK_INPUT_SECONDS
             self._sender.send_current()
+
+    def _drive_local_owned_step(self, elapsed):
+        """Publish contact barriers only after their physical slice completes.
+
+        A contact carries its own exact sweep endpoints. Its admitted body
+        sample is the completed slice, with a source time derived from that
+        elapsed interval instead of several artificial publication timestamps.
+        """
+        if not self._player_driver_mode:
+            return self._drive_local_step(elapsed)
+        control_seq = self._driver_control_seq
+        self._driver_integrating_step = True
+        try:
+            stopped = self._drive_local_step(elapsed)
+        finally:
+            self._driver_integrating_step = False
+        if (elapsed > 0.0 and stopped is False and
+                self._driver_error is None):
+            self._driver_integrated_control_seq = control_seq
+        self._driver_integrated_seconds += float(elapsed)
+        start = self._driver_integration_start_us
+        self._driver_integration_time_us = (
+            None if start is None else
+            start + int(round(self._driver_integrated_seconds * 1000000.0)))
+        if getattr(self, '_driver_receipt_due', False):
+            self._driver_receipt_due = False
+            self._publish_driver_state()
+        return bool(stopped or self._driver_error is not None)
 
     def _canonicalize_local_attitude(self, yaw):
         yaw, self._local_pitch, self._local_roll, direction = \
@@ -24022,7 +24389,7 @@ class BattleRuntime(object):
             self._local_speed, self._local_turn_speed)
         # Engine-free movement harnesses have no #1513 Entity binding.  A live
         # battle installs it before the first copied-physics frame.
-        if self._binding is not None:
+        if self._binding is not None and not self._player_driver_mode:
             self._run_optional_feature(
                 'engine RPM presentation', self._publish_rpm,
                 (self._clock(),))
@@ -24866,10 +25233,12 @@ class BattleRuntime(object):
                     end = self._vector(second)
                     if (record.get('local') and
                             self._local_matrix is not None):
+                        body_matrix, chassis_matrix = \
+                            self._local_collision_matrices()
                         collisions = collide_vehicle_at_matrix(
-                            vehicle, self._local_body_pose(), start, end,
+                            vehicle, body_matrix, start, end,
                             self._runtime.math,
-                            chassis_matrix=self._local_matrix)
+                            chassis_matrix=chassis_matrix)
                     elif record.get('native_remote'):
                         body_matrix, chassis_matrix = \
                             self._projectile_vehicle_matrices(
@@ -26585,14 +26954,17 @@ class BattleRuntime(object):
     def _spotting_profile(self, descriptor, local=False):
         """Return the device and crew spotting inputs for one descriptor.
 
-        Both sides read the same ``factors`` dictionary the garage panel
-        reads; only the crew behind it differs, because a bot has the default
-        crew instead of the player's own.
+        A hidden driver uses the accepted player's complete profile; it has
+        no garage crew from which to recompute those factors. A visible local
+        vehicle reads its captured crew, while Bots use their default crew.
         """
-        if local and getattr(self, '_replay_mode', False):
+        if local and (self._replay_mode or self._player_driver_mode):
             snapshot = self._accepted_local_effective_params()
             if snapshot is not None:
                 return snapshot['spotting']
+            if self._player_driver_mode:
+                raise RuntimeError(
+                    'player driver spotting parameters are unavailable')
         if local:
             if self._local_spotting_cache is None:
                 snapshot = self._garage_loadout_snapshot()
@@ -26620,6 +26992,34 @@ class BattleRuntime(object):
     def _local_factors(self, descriptor):
         """Cache the player's own #1513 attribute factors for this round."""
         if self._local_factors_cache is None:
+            if self._player_driver_mode:
+                snapshot = self._accepted_local_effective_params()
+                if snapshot is None:
+                    raise RuntimeError(
+                        'player driver mounted factors are unavailable')
+                # The accepted loadout already carries the exact native
+                # traverse and terrain factors. Only engine/power is absent:
+                # derive_params multiplies this travel enginePower by it.
+                # Recover that one factor once, without damaged-engine or
+                # active-consumable state, for later Siege descriptor swaps.
+                try:
+                    base_power = float(
+                        _field(descriptor, 'physics')['enginePower'])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    raise RuntimeError(
+                        'player driver base engine power is unavailable')
+                if (math.isnan(base_power) or math.isinf(base_power) or
+                        base_power <= 0.0):
+                    raise RuntimeError(
+                        'player driver base engine power is unavailable')
+                loadout = snapshot['loadout']
+                self._local_factors_cache = {
+                    'vehicle/rotationSpeed': loadout['vehicle_rotation_factor'],
+                    'chassis/terrainResistance': tuple(
+                        loadout['terrain_resistance_factors']),
+                    'engine/power': snapshot['physics']['powerW'] / base_power,
+                }
+                return self._local_factors_cache
             snapshot = self._garage_loadout_snapshot()
             # updateAttrFactorsWithSplit treats every supplied equipment as
             # active.  That is correct for passive fuel and food, but would
@@ -28308,6 +28708,8 @@ class BattleRuntime(object):
         return True
 
     def shoot(self, aim_yaw, gun_pitch, player_burst=None):
+        if self._player_driver_mode:
+            return False
         if self._replay_mode or self._worker_mode:
             return False
         if (self._local_player_burst is not None and
@@ -28365,7 +28767,7 @@ class BattleRuntime(object):
             gun_pitch = float(rotator.gunPitch)
         except (AttributeError, TypeError, ValueError):
             return self._reject_local_fire('gun_angle_unavailable')
-        local_position, hull_yaw = self.local_pose()
+        local_position, hull_yaw = self._local_display_pose()
         self._sender.aim_yaw = float(hull_yaw) + turret_yaw
         self._sender.gun_pitch = gun_pitch
         try:
@@ -28693,6 +29095,7 @@ class BattleRuntime(object):
         self._runtime.bigworld.callback(0.0, leave_after_mailbox_returns)
 
     def stop(self, show_login=False, restore_account=True):
+        self._close_player_driver('battle_stop')
         from gui.mods.offline_lan_0922 import offline_replay
         offline_replay.finish(self.client, 'battle_stop')
         if self.state in ('idle', 'stopped'):
@@ -29429,6 +29832,7 @@ class BattleRuntime(object):
         return first_error
 
     def _fail(self, error):
+        self._close_player_driver('battle_failed')
         active_traceback = None
         if sys.exc_info()[0] is not None:
             active_traceback = traceback.format_exc()

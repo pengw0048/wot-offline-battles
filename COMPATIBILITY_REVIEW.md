@@ -8107,3 +8107,132 @@ than retaining stack pointers. Periodic `combat_checkpoint` records preserve
 completed samples when the worker exits before the capture deadline. These are
 cumulative: use the latest checkpoint or final summary for a capture, never
 sum both. A diagnostic failure does not replay or reject simulation work.
+
+### Paired native player driver
+
+The launcher starts a separate hidden #1513 client for each visible player's
+body movement. It is independent of the room's mandatory Bot worker and does
+not connect to the LAN server or consume a player slot. A private loopback
+connection mirrors the accepted mounted vehicle, effective parameters, room
+state and live controls. The visible process retains its actual native gun
+angles, ammunition, reload, accepted shots and projectile ownership. The driver
+owns drivetrain, ground support, hull attitude, hydraulic movement and world,
+tank and detached-turret contacts. There is no visible-physics takeover when
+the private connection fails.
+
+Driver startup uses its own desktop, process Job, readiness markers, log role,
+in-memory Account stores and `driverprefs.xml` leaf. The listener-ready marker
+precedes visible startup; round readiness separately waits for the hidden
+Avatar, local model and mirrored collision lineup. Drawing remains enabled
+while native models initialize. One authenticated connection survives garage
+returns, with new generation and round identities fencing every binding,
+control and receipt. Unbinding restores the hidden Account and draw lease.
+Original-client and replay starts do not create a driver.
+The launcher starts the room worker and player driver before waiting for
+either readiness marker, then checks both processes before starting the
+visible client. Cancellation and failed startup clean up the processes owned
+by that launch. Overlapping startup removes the previous serial wait; its
+actual loading-time benefit and resource contention require Windows timing.
+
+The driver initializes from the accepted player's physical and loadout
+parameters, including crew-dependent traverse and terrain factors. It freezes
+the travel descriptor's mounted factors before a Siege descriptor swap, so
+later mode changes cannot reconstruct them from the hidden client's empty
+garage. Damage, stun and active equipment remain separate live modifiers.
+
+The private stream uses length-prefixed plain binary values through the shipped
+native module, with bounded frames, queues, nesting and integer ranges. Encoding
+freezes caller-owned data before enqueueing; decoding occurs in the socket
+thread. The stream preserves room-message and receipt order, including event
+barriers, without replacing snapshots. It carries no code objects or native
+engine references. The existing room protocol is unchanged. Python 3's codec
+is a contract-test reference; the production Python 2 client requires the
+matching native implementation.
+Legal signed 64-bit values and unsigned 64-bit identifiers both round-trip
+exactly. A recorded armor-impact message exposed the previous signed-only
+limit: its valid damage-sticker identifier terminated the private connection.
+The native decoder also bounds its validated marshal intermediate separately
+from the unchanged 1 MiB wire limit, because unsigned values can expand there.
+
+Physical receipts preserve elapsed substeps and source pose times. The visible
+publisher assigns the real room input sequence, retains contact and landing
+events until their existing admission boundaries, and acknowledges the driver
+only after publication. Repeated receipts at the same physical time do not
+replace server pose history. A validated destructible sweep retains both of
+its original endpoints when bound to an admitted player sample: replacing its
+start with a completed body pose would erase a translation or shift a pivot.
+An unavailable early destruction effect yields to the canonical destruction
+event instead of blocking further body movement.
+After draining a receipt burst, the visible publisher sends one cumulative
+acknowledgement for completed admissions. Every pose and one-shot event still
+crosses its existing room boundary; partial failure retains the unadmitted
+event. Identical ordinary controls are not resent, while changed input,
+acknowledgements and explicit Siege requests remain ordered.
+
+A private-driver failure drains already received receipts, stops that player's
+movement and displays a local message without ending the room or cancelling
+visible projectile work. Exact #1513 `MessengerEntry.gui` forwards
+`addClientMessage(message, isCurrentPlayer=False)` through `GUIDecorator` to
+`BattleEntry` and the battle view's black-message path. The signatures and
+consumer names are included in the client ABI audit; this path does not send
+a chat command or take input focus. An absent battle view can drop that local
+message, so visibility of the failure notice still requires Windows acceptance.
+
+Host tests cover real socket framing, two-round binding and cleanup, input and
+receipt ownership, elapsed physical substeps and server contact admission.
+Exact-client bytecode and PE audits establish the consumed interfaces, not
+native lifecycle safety or timing. This architecture adds process, memory and
+IPC costs. The first Windows playtest reported worse smoothness and exposed
+the damage-sticker failure. The captured messages reproduce that transport
+defect, and host replay verifies its repair. The repaired version's net
+frame-time benefit, input latency, visual continuity and failure presentation
+remain unproved until exercised on the exact Windows client.
+
+The paired-client trial now permits short display continuation from the last
+two physical poses, bounded by one observed source interval and the exact
+client server-tick interval. It does not integrate vehicle forces. Input edges
+must first be acknowledged by a completed physical slice; airborne, grinding
+and Siege-braking states suppress continuation. Existing arena, vehicle,
+detached-turret and native-world queries guard the proposed display movement
+without committing destruction or contact forces. An unavailable or blocked
+query holds the last checked display pose; a new physical receipt replaces it.
+This is a presentation guard, not a full suspension or world-contact solver.
+Terrain transitions and native render behavior still require Windows testing.
+
+The visible camera history advances once on its own frame clock, independently
+of receipt batches. Aim and accepted shots snapshot the displayed hull; room
+publication and incoming projectile collision use the canonical physical pose.
+The existing PERF window records movement-send to integrated canonical-apply
+latency, receipt cadence/batches and display/guard callback cost. These metrics
+do not claim display latency or a measured Windows frame-time improvement.
+
+Offline ground and world probes already query the client's native scene via
+`BigWorld.wg_collideSegment`; the mod owns integration and contact response.
+The exact #1513 Python archive initializes ordinary client physics with mass
+placement and suspension geometry. Its Forced, Editor and Server initializers
+also fully configure a supplied physics object. The PE exposes the synchronous
+`WGDynamicsSimulator.update(dt, vehicles, bodies, bspModels)` step, but this is
+not a usable replacement for the port's world-contact solver. The compiled
+space's `SceneObstaclesCollider::collidePolyhedra` and
+`collideCompositeShape` paths are unimplemented. Vehicle world contacts
+actually call the former; physical-body contacts call the latter. Historical
+#1513 Windows probes already aborted at these first-step boundaries (commits
+`1f296b2c` and `8b648e6e`). Successful configuration and readable body state
+must not be used as evidence that stepping is safe. The current PE still
+contains these paths. Track suspension uses a separate implemented scene-ray
+path; that does not supply the missing hull/world contact solver.
+
+Retail `WGVehicleFilter` has a different, implemented collision guard for
+network-pose extrapolation. Its vehicle-specific extrapolation path tests four
+line segments around the transformed model bounds against the native scene.
+These segments are prepared before the next extrapolation, not swept over the
+complete proposed movement. A blocking contact retains the preceding filtered
+position and orientation;
+triangle/material exclusions and `Vehicle._isDestructibleMayBeBroken` decide
+which hits may be ignored. This is limited presentation prediction backed by
+server-supplied motion, not a second complete vehicle dynamics simulation.
+The separate base-filter extrapolator must not be mistaken for the vehicle's
+override. The port's direct model-matrix presentation bypasses this guard.
+Reusing it requires a proved native input and presentation ownership path;
+`notifyInputKeysDown` alone does not feed position samples, and
+`setScriptInputCallback` observes incoming samples rather than supplying them.

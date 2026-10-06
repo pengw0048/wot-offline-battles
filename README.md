@@ -34,6 +34,14 @@ It does not create a separate retail platoon or use online friend invitations.
 Have the host enter first, then join the same address and select the same team
 to play together. Starting Single player on each PC creates separate rooms.
 
+The launcher also starts a hidden client on each player's PC to drive that
+player's tank. It handles body movement and physical contacts independently
+of the room's Bot worker. The visible client keeps aiming, firing and drawing
+the battle. Both hidden clients load the game, so hosting a room uses three
+game processes and requires additional memory. Closing the visible game also
+closes its paired driver. If that driver fails, movement stops with a local
+message; restart the game from the launcher to recover.
+
 The mod's waiting room and LAN notifications follow the launcher's selected
 English or Simplified Chinese language when you start the game. **Automatic**
 uses the same resolved system language as the launcher. Restart the game after
