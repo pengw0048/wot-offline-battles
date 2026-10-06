@@ -181,11 +181,13 @@ temporary output and diff it before replacing tracked catalogs.
 
 ## Current operating model
 
-- Every room has one mandatory hidden native worker. The only simulation path
-  is `visible client -> LAN server -> hidden worker -> LAN server -> replicas`.
-  Visible clients submit player input and fire intent; they never become Bot or
-  projectile authority. Do not restore visible-client authority or the removed
-  pure-Python simulation fallback.
+- Every room has one mandatory hidden native worker. Each visible player owns
+  the flight, collision, damage and destructible proposals of its own shots;
+  the worker owns Bot motion and Bot shots. The LAN server validates owners and
+  frozen launches, deduplicates results, and commits shared health, critical
+  state and destruction. A player never simulates another player's or a Bot's
+  shots. Disconnect cancels that player's remaining ledger entries; do not add
+  projectile takeover or restore the removed pure-Python simulation fallback.
 - The launcher installs and starts the matching server and worker together.
   Do not build speculative compatibility machinery for combinations it never
   creates. This is a trusted-LAN product, not an anti-cheat boundary.
@@ -196,10 +198,10 @@ temporary output and diff it before replacing tracked catalogs.
   must not freeze every Bot, end the round as a system-error draw, disconnect
   all clients, or return everyone to the garage.
 - Coalesce only state that is genuinely superseded. Preserve barriers,
-  accepted fire intents, projectile terminal events, destruction events, and
+  accepted launches, projectile terminal events, destruction events, and
   other one-shot transitions. Never silently discard an admitted shot or a
   frame merely because the next update arrived late.
-- An accepted operation needs an observable terminal outcome. A fire intent,
+- An accepted operation needs an observable terminal outcome. A trigger,
   for example, must become a launched/terminal projectile or an explicit local
   failure with correct ammunition and reload state. A sound-only no-op that
   permits immediate refiring is a bug.

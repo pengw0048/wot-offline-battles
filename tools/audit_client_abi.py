@@ -580,6 +580,7 @@ EXPECTED_ABI = {
             'self', 'isRespawn'),
         'AvatarInputHandler.__onArenaStarted': (
             'self', 'period', '*args'),
+        'AvatarInputHandler.showGunMarker2': ('self', 'isShown'),
         'AvatarInputHandler.getAutorotation': ('self',),
         'AvatarInputHandler.setAutorotation': ('self', 'bValue'),
         'AvatarInputHandler.switchAutorotation': ('self',),
@@ -690,6 +691,8 @@ EXPECTED_ABI = {
     },
     'scripts/client/VehicleGunRotator.pyc': {
         'VehicleGunRotator.start': ('self',),
+        'VehicleGunRotator.applySettings': ('self', 'diff'),
+        'VehicleGunRotator.__set_showServerMarker': ('self', 'value'),
         'VehicleGunRotator.reset': ('self',),
         'VehicleGunRotator.update': (
             'self', 'turretYaw', 'gunPitch', 'maxTurretRotationSpeed',
@@ -1453,6 +1456,10 @@ EXPECTED_CODE_NAMES = {
         'AvatarInputHandler.__constructComponents': (
             'vehicleTypeDescriptor', 'hasSiegeMode', 'SiegeModeControl',
             'siegeModeControl', 'onSiegeStateChanged'),
+        'AvatarInputHandler.showGunMarker2': (
+            'BattleReplay', 'isPlaying', '_AvatarInputHandler__curCtrl',
+            'setGunMarkerFlag', 'SERVER_MODE_ENABLED', 'CLIENT_MODE_ENABLED',
+            'useDefaultGunMarkers', 'setUseServerAim'),
         'AvatarInputHandler.getAutorotation': (
             '_AvatarInputHandler__isAutorotation',),
         'AvatarInputHandler.setAutorotation': (
@@ -1977,7 +1984,14 @@ EXPECTED_CODE_NAMES = {
         'VehicleGunRotator.start': (
             '_VehicleGunRotator__isStarted',
             '_VehicleGunRotator__maxTurretRotationSpeed',
-            '_VehicleGunRotator__avatar', 'isOnArena'),
+            '_VehicleGunRotator__avatar', 'isOnArena',
+            'settingsCore', 'getSetting', 'showServerMarker'),
+        'VehicleGunRotator.applySettings': ('showServerMarker',),
+        'VehicleGunRotator.__set_showServerMarker': (
+            'g_replayCtrl', 'isPlaying', '_VehicleGunRotator__showServerMarker',
+            'BigWorld', 'player', 'enableServerAim', 'showServerMarker',
+            '_VehicleGunRotator__isStarted', '_VehicleGunRotator__clientMode',
+            '_VehicleGunRotator__avatar', 'inputHandler', 'showGunMarker2'),
         'VehicleGunRotator.reset': (
             '_VehicleGunRotator__turretYaw',
             '_VehicleGunRotator__gunPitch',

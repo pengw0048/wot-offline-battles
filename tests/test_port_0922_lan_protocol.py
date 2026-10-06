@@ -27,7 +27,7 @@ from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
 from gui.mods.offline_lan_0922 import bot_state_codec
 from lan_battle_server import (
     BattleState, CLIENT_BUILD_0922, Player,
-    PLAYER_FIRE_INTENT_CAPABILITY, PLAYER_INPUT_FAULT_CLASSES,
+    PLAYER_PROJECTILE_OWNER_CAPABILITY, PLAYER_INPUT_FAULT_CLASSES,
     PLAYER_INPUT_FAULT_ENV, PREBATTLE_SECONDS,
     RAM_CONTACT_LEDGER_CAPABILITY, TICK_HZ,
     _bot_combat_log_message, _player_input_fault_class,
@@ -765,14 +765,21 @@ class LanProtocolTests(unittest.TestCase):
         self.assertFalse(self.client.send_battle_result(1, 'elimination'))
         self.assertEqual([], self.sent)
 
-    def test_failed_fire_send_does_not_create_sequence_gap(self):
+    def test_failed_launch_send_preserves_the_owners_frozen_shot(self):
+        self.client.authority_epoch = 1
         launch = {
-            'position': [1.0, 2.0, 3.0],
+            'shooter_kind': 'player', 'shooter_id': 1,
+            'shot_seq': 1, 'shell_index': 0,
+            'origin': [1.0, 2.0, 3.0],
+            'range_origin': [1.0, 2.0, 3.0],
             'velocity': [900.0, 0.0, 0.0],
             'gravity': 9.81,
             'max_distance': 720.0,
             'max_time_ms': 20000,
-            'trigger_server_time_ms': 100,
+            'is_he': False, 'splash_radius': 0.0,
+            'authority_epoch': self.client.authority_epoch,
+            'fire_intent_seq': 1, 'fire_input_seq': 1,
+            'launch_server_time_ms': 100,
             'source_shot': {
                 'speed': 900.0, 'gravity': 9.81,
                 'maxDistance': 720.0,
@@ -790,24 +797,14 @@ class LanProtocolTests(unittest.TestCase):
             shell_index=0, pose_time_us=123456))
         self.client._send = lambda unused_message: False
 
-        self.assertIsNone(self.client.send_fire(**launch))
-        self.assertEqual(0, self.client._fire_intent_seq)
+        self.assertIsNone(self.client.send_projectile_launch(**launch))
 
         self.client._send = lambda message: self.sent.append(message) or True
-        self.assertEqual(1, self.client.send_fire(**launch))
-        self.assertEqual({
-            'type': 'fire_intent', 'round_id': 7,
-            'intent_seq': 1, 'input_seq': 1, 'shell_index': 0,
-            'shot_origin': [1.0, 2.0, 3.0],
-            'shot_direction': [1.0, 0.0, 0.0],
-            'dispersion_angle': 0.0,
-            'presentation_ledger': [],
-            'trigger_server_time_ms': 100,
-        }, self.sent[-1])
-        self.assertFalse(any(field in self.sent[-1]
-                             for field in ('position', 'origin', 'velocity',
-                                           'gravity', 'source_shot',
-                                           'damage')))
+        self.assertEqual(1, self.client.send_projectile_launch(**launch))
+        expected = dict(launch, type='projectile_launch', round_id=7,
+                        penetration_factor=1.0, burst_group_seq=1,
+                        burst_index=0, burst_count=1)
+        self.assertEqual(expected, self.sent[-1])
 
     def test_worker_sends_hello_before_exposing_connected_socket(self):
         client = LANClient(
@@ -1342,7 +1339,7 @@ class ShippingClientInputContractTests(unittest.TestCase):
         self.client.host_player_id = 1
         self.client.bot_authority_id = -1
         self.client.capabilities = (
-            HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+            HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
             RAM_CONTACT_LEDGER_CAPABILITY)
         self.client.server_capabilities = self.client.capabilities
         self.sent = []
@@ -1622,7 +1619,7 @@ class InputFaultInjectionTests(unittest.TestCase):
             1, _Socket(), ('127.0.0.1', 1), team=1, slot=0,
             client_position=True,
             capabilities=(
-                HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+                HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 RAM_CONTACT_LEDGER_CAPABILITY),
             effective_params=effective_params())
         self.state.players[1] = self.player

@@ -15,7 +15,6 @@ from test_port_0922_postbattle import (
 from gui.mods.offline_lan_0922 import personal_campaign_battle as policy
 
 
-AUTHORITY = projectile.SIMULATION_WORKER_AUTHORITY_ID
 DEFINITIONS = [quest for quest in json.loads((Path(__file__).parent /
     'fixtures/personal_mission_td789_conditions_0922.json').read_text())['missions']
                if quest['number'] == 9]
@@ -26,6 +25,7 @@ class PiercingSeriesProjectileTests(unittest.TestCase):
         self.state = projectile._state(players=4)
 
     def launch(self, shooter=1, **changes):
+        changes.setdefault('shot_seq', self.state.players[shooter].fire_seq + 1)
         message = projectile._launch(shooter_id=shooter, **changes)
         self.assertTrue(projectile._launch_authority(self.state, message))
         return '%s:p:%s:%s' % (self.state.round_id, shooter, message['shot_seq'])
@@ -33,9 +33,10 @@ class PiercingSeriesProjectileTests(unittest.TestCase):
     def resolve(self, identity, result=2, **changes):
         direct = projectile._effect(damage=1 if result == 2 else 0,
                                     shot_result=result)
-        message = projectile._resolve(identity, direct=direct)
+        message = projectile._resolve(self.state, identity, direct=direct)
         message.update(changes)
-        self.assertTrue(self.state.resolve_projectile(AUTHORITY, message))
+        self.assertTrue(self.state.resolve_projectile(
+            int(identity.split(':')[2]), message))
         return message
 
     def series(self, shooter=1):
@@ -82,8 +83,8 @@ class PiercingSeriesProjectileTests(unittest.TestCase):
         self.assertTrue(projectile._launch_authority(self.state, launch))
         self.assertTrue(projectile._launch_authority(self.state, launch))
         terminal = self.resolve('1:p:1:1')
-        self.assertTrue(self.state.resolve_projectile(AUTHORITY, terminal))
-        self.assertFalse(self.state.resolve_projectile(AUTHORITY, dict(
+        self.assertTrue(self.state.resolve_projectile(1, terminal))
+        self.assertFalse(self.state.resolve_projectile(1, dict(
             terminal, direct=None, outcome='miss', impact=None)))
         self.assertTrue(projectile._launch_authority(self.state, launch))
         self.assertEqual(1, self.series())
@@ -93,9 +94,9 @@ class PiercingSeriesProjectileTests(unittest.TestCase):
     def test_ricochet_breaks_series_even_when_its_continuation_penetrates(self):
         self.resolve(self.launch())
         bounced = self.launch()
-        ricochet = projectile._ricochet(bounced)
-        self.assertTrue(self.state.ricochet_projectile(AUTHORITY, ricochet))
-        self.assertTrue(self.state.ricochet_projectile(AUTHORITY, ricochet))
+        ricochet = projectile._ricochet(self.state, bounced)
+        self.assertTrue(self.state.ricochet_projectile(1, ricochet))
+        self.assertTrue(self.state.ricochet_projectile(1, ricochet))
         self.resolve(bounced, base_checked_ms=100, resolved_time_ms=150,
                      checked_distance=20.0)
         self.resolve(self.launch())
@@ -137,14 +138,13 @@ class PiercingSeriesProjectileTests(unittest.TestCase):
                 self.resolve(self.launch())
                 failed = self.launch(max_time_ms=100)
                 if outcome == 'expired':
-                    self.state.tick += 3
-                    self.state.simulation_worker = None
-                    self.state.bot_authority_id = None
+                    # Human lifetime includes transport grace even while the
+                    # separate Bot worker remains connected.
+                    self.state.tick += projectile.TICK_HZ
                     self.assertEqual(1, self.state._expire_projectiles())
-                    projectile._attach_worker_authority(self.state)
                 else:
-                    self.assertFalse(self.state.resolve_projectile(AUTHORITY,
-                        projectile._resolve(failed, direct={'bad': True})))
+                    self.assertFalse(self.state.resolve_projectile(1,
+                        projectile._resolve(self.state, failed, direct={'bad': True})))
                 self.assertNotIn(failed, self.state.projectiles)
                 self.resolve(self.launch())
                 self.resolve(self.launch())
@@ -257,10 +257,11 @@ class TD9ReceiptTests(unittest.TestCase):
                 player.account_key = str(index) * 32
             state._freeze_round_participants(tuple(state.players.values()))
             for unused in range(3):
-                launch = projectile._launch()
+                launch = projectile._launch(
+                    shot_seq=state.players[1].fire_seq + 1)
                 self.assertTrue(projectile._launch_authority(state, launch))
-                self.assertTrue(state.resolve_projectile(AUTHORITY,
-                    projectile._resolve('1:p:1:%s' % launch['shot_seq'],
+                self.assertTrue(state.resolve_projectile(1,
+                    projectile._resolve(state, '1:p:1:%s' % launch['shot_seq'],
                                         direct=projectile._effect(damage=1))))
             self.assertTrue(state._finish_battle(1, 'elimination'))
             receipt = _latest_receipt(state, state.players[1].account_key)

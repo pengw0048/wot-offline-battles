@@ -95,7 +95,7 @@ class LanClientQueueTests(unittest.TestCase):
         client = self.activate()
         protected = [
             {'type': 'battle_receipt', 'receipt_id': 'server:7:1'},
-            {'type': 'fire_intent', 'player_id': 1, 'intent_seq': 2},
+            {'type': 'team_command_ack', 'player_id': 1, 'command_seq': 2},
             {'type': 'fire_intent_result', 'player_id': 1,
              'intent_seq': 2},
         ]
@@ -376,7 +376,7 @@ class LanClientQueueTests(unittest.TestCase):
         client = self.activate()
         protected = [
             {'type': 'battle_receipt', 'receipt_id': 'server:7:1'},
-            {'type': 'fire_intent', 'player_id': 1, 'intent_seq': 2},
+            {'type': 'team_command_ack', 'player_id': 1, 'command_seq': 2},
             {'type': 'fire_intent_result', 'player_id': 1,
              'intent_seq': 2},
         ]
@@ -384,7 +384,7 @@ class LanClientQueueTests(unittest.TestCase):
         lan_client_module.MAX_PENDING_MESSAGES = len(protected)
         try:
             for message_type in (
-                    'battle_receipt', 'fire_intent',
+                    'battle_receipt', 'team_command_ack',
                     'fire_intent_result'):
                 client._pending = list(protected)
                 with self.subTest(message_type=message_type):
@@ -400,7 +400,7 @@ class LanClientQueueTests(unittest.TestCase):
 
         self.assertTrue(client._send(first))
         first['nested']['values'][0] = 99
-        self.assertTrue(client._send({'type': 'fire_intent', 'intent_seq': 4}))
+        self.assertTrue(client._send({'type': 'projectile_launch', 'shot_seq': 4}))
         self.assertTrue(client._send({'type': 'input', 'fire_seq': 5}))
         self.assertTrue(client._send({'type': 'bot_state', 'revision': 8}))
         self.assertTrue(client._send({'type': 'bot_state', 'revision': 9}))
@@ -410,7 +410,7 @@ class LanClientQueueTests(unittest.TestCase):
         queued = list(client._outbound_queue)
         self.assertEqual(list(range(1, 7)), [item[0] for item in queued])
         self.assertEqual(
-            ['input', 'fire_intent', 'input', 'bot_state', 'bot_state',
+            ['input', 'projectile_launch', 'input', 'bot_state', 'bot_state',
              'bot_observation'],
             [item[1]['type'] for item in queued])
         self.assertEqual((1, 2), queued[0][1]['nested']['values'])
@@ -834,7 +834,7 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertEqual([], client._outbound_queue)
         self.assertIn('blocked transport', client.last_error)
 
-    def test_failed_fire_enqueue_does_not_consume_fire_sequence(self):
+    def test_full_queue_refuses_launch_and_preserves_owner_sequence_on_retry(self):
         source_shot = {
             'speed': 100.0, 'gravity': 9.81,
             'maxDistance': 500.0, 'piercingPower': [100.0, 100.0],
@@ -851,6 +851,19 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertTrue(client.send_input(
             0.0, 0.0, position=(0.0, 0.0, 0.0), yaw=0.0,
             shell_index=0))
+        client.authority_epoch = 1
+        launch = {
+            'shooter_kind': 'player', 'shooter_id': 1,
+            'shot_seq': 1, 'shell_index': 0,
+            'origin': [0.0, 1.0, 0.0],
+            'range_origin': [0.0, 0.0, 0.0],
+            'velocity': [100.0, 0.0, 0.0],
+            'gravity': 9.81, 'max_distance': 500.0, 'max_time_ms': 5000,
+            'is_he': False, 'splash_radius': 0.0,
+            'source_shot': source_shot, 'authority_epoch': 1,
+            'fire_intent_seq': 1, 'fire_input_seq': 1,
+            'launch_server_time_ms': 100,
+        }
         enqueue_attempts = []
         original_enqueue = client._enqueue_outbound
 
@@ -862,32 +875,22 @@ class LanClientQueueTests(unittest.TestCase):
         original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
         lan_client_module.MAX_OUTBOUND_MESSAGES = 1
         try:
-            self.assertIsNone(client.send_fire(
-                position=[0.0, 1.0, 0.0], velocity=[100.0, 0.0, 0.0],
-                gravity=9.81, max_distance=500.0, max_time_ms=5000,
-                source_shot=source_shot, trigger_server_time_ms=100))
+            self.assertIsNone(client.send_projectile_launch(**launch))
         finally:
             lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
         self.assertEqual(1, len(enqueue_attempts))
-        self.assertEqual('fire_intent', enqueue_attempts[0]['type'])
-        self.assertEqual(0, client._fire_intent_seq)
+        self.assertEqual('projectile_launch', enqueue_attempts[0]['type'])
+        self.assertEqual(1, len(client._outbound_queue))
+        self.assertEqual('input', client._outbound_queue[0][1]['type'])
 
-        client = self.activate()
-        client.ready = True
-        client.phase = 'battle'
-        client.round_id = 3
-        self.assertTrue(client.send_input(
-            0.0, 0.0, position=(0.0, 0.0, 0.0), yaw=0.0,
-            shell_index=0))
-        self.assertEqual(1, client.send_fire(
-            position=[0.0, 1.0, 0.0], velocity=[100.0, 0.0, 0.0],
-            gravity=9.81, max_distance=500.0, max_time_ms=5000,
-            source_shot=source_shot, trigger_server_time_ms=100))
-        self.assertEqual(1, client._fire_intent_seq)
-        self.assertEqual(
-            'fire_intent', client._outbound_queue[1][1]['type'])
-        self.assertEqual(1, client._outbound_queue[1][1]['intent_seq'])
-        self.assertEqual(1, client._outbound_queue[1][1]['input_seq'])
+        self.assertEqual(1, client.send_projectile_launch(**launch))
+        self.assertEqual(2, len(enqueue_attempts))
+        self.assertEqual(enqueue_attempts[0], enqueue_attempts[1])
+        queued = client._outbound_queue[1][1]
+        self.assertEqual('projectile_launch', queued['type'])
+        self.assertEqual(1, queued['shot_seq'])
+        self.assertEqual(1, queued['fire_input_seq'])
+        self.assertEqual(100, queued['launch_server_time_ms'])
 
     def test_stop_sends_best_effort_leave_and_clears_queue(self):
         client = self.activate()

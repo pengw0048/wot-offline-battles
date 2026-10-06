@@ -140,7 +140,7 @@ class ProjectileWireTests(unittest.TestCase):
             module.RICOCHET_CONTINUATION_CAPABILITY,
             module.RAM_CONTACT_LEDGER_CAPABILITY,
             module.HUMAN_RAM_TIMELINE_CAPABILITY,
-            module.PLAYER_FIRE_INTENT_CAPABILITY,
+            module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
             module.PLAYER_ENVIRONMENT_CAPABILITY,
             module.EFFECTIVE_PARAMS_CAPABILITY,
             module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
@@ -169,7 +169,7 @@ class ProjectileWireTests(unittest.TestCase):
             module.RICOCHET_CONTINUATION_CAPABILITY,
             module.RAM_CONTACT_LEDGER_CAPABILITY,
             module.HUMAN_RAM_TIMELINE_CAPABILITY,
-            module.PLAYER_FIRE_INTENT_CAPABILITY,
+            module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
             module.PLAYER_ENVIRONMENT_CAPABILITY,
             module.EFFECTIVE_PARAMS_CAPABILITY,
             module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
@@ -219,7 +219,11 @@ class ProjectileWireTests(unittest.TestCase):
                             if shooter_kind == 'bot' else None),
             launch_pose=(values.get(
                 'launch_pose', [1.0, 0.0, 3.0, 0.0, 0.0, 0.0])
-                if shooter_kind == 'bot' else None))
+                if shooter_kind == 'bot' else None),
+            range_origin=(values.get('range_origin', [1.0, 0.0, 3.0])
+                          if shooter_kind == 'player' else None),
+            launch_server_time_ms=(values.get('launch_server_time_ms', 100)
+                                   if shooter_kind == 'player' else None))
 
     @staticmethod
     def send_player_input(client, shell_index=2):
@@ -231,8 +235,59 @@ class ProjectileWireTests(unittest.TestCase):
             gun_checkpoint=ProjectileWireTests.gun_checkpoint(),
             pose_time_us=1000)
 
-    def test_worker_player_launch_is_frozen_fifo_wire_with_intent_identity(self):
-        client = self.active_worker_client()
+    def test_player_launch_and_terminal_pipeline_freezes_proof(self):
+        client = self.active_client()
+        self.assertEqual(1, self.launch(
+            client, shot_seq=1, authority_epoch=4,
+            fire_intent_seq=1, fire_input_seq=1))
+        launch = wire_copy(client._outbound_queue[-1][1])
+        values = dict(launch, projectile_id='3:p:7:1',
+                      source_vehicle='ussr:MS-1')
+        proof = dict((key, values[key])
+                     for key in module.PROJECTILE_LAUNCH_PROOF_FIELDS)
+        self.assertTrue(client.send_projectile_resolve(
+            4, '3:p:7:1', 0, 'miss', 100, None, None, [],
+            penetration_factor=1.25, launch_proof=proof))
+        proof['origin'][0] = 999.0
+        frames = [wire_copy(frame[1]) for frame in client._outbound_queue]
+        self.assertEqual(['projectile_launch', 'projectile_resolve'],
+                         [frame['type'] for frame in frames])
+        self.assertEqual(1.0, frames[1]['launch_proof']['origin'][0])
+        self.assertFalse(client.send_projectile_resolve(
+            4, '3:p:8:1', 0, 'miss', 100, None, None, [],
+            launch_proof=proof))
+        self.assertFalse(client.send_projectile_resolve(
+            4, '3:p:7:1', 0, 'miss', 100, None, None, []))
+
+    def test_player_progress_and_ricochet_require_own_frozen_launch(self):
+        client = self.active_client()
+        self.assertEqual(1, self.launch(
+            client, shot_seq=1, authority_epoch=4,
+            fire_intent_seq=1, fire_input_seq=1))
+        values = dict(wire_copy(client._outbound_queue[-1][1]),
+                      projectile_id='3:p:7:1', source_vehicle='ussr:MS-1')
+        proof = dict((key, values[key])
+                     for key in module.PROJECTILE_LAUNCH_PROOF_FIELDS)
+        cursor = dict(projectile_id='3:p:7:1', base_checked_ms=0,
+                      checked_through_ms=50, checked_distance=5.0,
+                      piercing_loss=0.0, penetration_factor=1.25,
+                      destructibles=[], launch_proof=proof)
+        self.assertTrue(client.send_projectile_progress(4, [cursor]))
+        self.assertFalse(client.send_projectile_progress(
+            4, [dict(cursor, projectile_id='3:p:8:1')]))
+        direct = dict(target_kind='player', target_id=8, damage=0,
+                      shot_result=0, x=10.0, y=2.0, z=3.0)
+        self.assertTrue(client.send_projectile_ricochet(
+            4, '3:p:7:1', 50, 100, [10.0, 2.0, 3.0],
+            [10.0, 2.0, 3.0], [-100.0, 0.0, 0.0], 0.75,
+            direct, checked_distance=10.0, penetration_factor=1.25,
+            launch_proof=proof))
+        self.assertFalse(client.send_projectile_ricochet(
+            4, '3:p:7:1', 50, 100, [10.0, 2.0, 3.0],
+            [10.0, 2.0, 3.0], [-100.0, 0.0, 0.0], 0.75, direct))
+
+    def test_player_launch_is_frozen_fifo_wire_with_local_identity(self):
+        client = self.active_client()
         origin = [1.0, 2.0, 3.0]
 
         self.assertIsNone(self.launch(
@@ -259,7 +314,7 @@ class ProjectileWireTests(unittest.TestCase):
             'max_time_ms', 'is_he', 'splash_radius', 'penetration_factor',
             'source_shot', 'authority_epoch', 'fire_intent_seq',
             'fire_input_seq', 'burst_group_seq', 'burst_index',
-            'burst_count',
+            'burst_count', 'range_origin', 'launch_server_time_ms',
         }, set(message))
         self.assertEqual('player', message['shooter_kind'])
         self.assertEqual(7, message['shooter_id'])
@@ -271,56 +326,8 @@ class ProjectileWireTests(unittest.TestCase):
             message['burst_count']))
         self.assertEqual([1.0, 2.0, 3.0], message['origin'])
 
-    def test_failed_fire_intent_enqueue_rolls_back_sequence(self):
-        client = self.active_client()
-        self.assertTrue(self.send_player_input(client))
-        client._send = lambda unused_message: False
 
-        self.assertIsNone(client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
-        self.assertEqual(0, client._fire_intent_seq)
 
-        client._send = lambda unused_message: True
-        self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
-        self.assertEqual(1, client._fire_intent_seq)
-
-    def test_visible_fire_intent_requires_input_and_sequences_monotonically(self):
-        client = self.active_client()
-
-        self.assertIsNone(client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
-        self.assertTrue(self.send_player_input(client))
-        self.assertEqual(1, client.send_fire_intent(
-            2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.01, [], 100))
-        self.assertTrue(self.send_player_input(client, shell_index=1))
-        self.assertEqual(2, client.send_fire_intent(
-            1, [1.0, 2.0, 3.0], [1.0, 0.0, 0.0], 0.02, [], 200))
-        message = wire_copy(client._outbound_queue[-1][1])
-        self.assertEqual({
-            'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
-            'shot_origin', 'shot_direction', 'dispersion_angle',
-            'presentation_ledger', 'trigger_server_time_ms',
-        }, set(message))
-        self.assertEqual('fire_intent', message['type'])
-        self.assertEqual(2, message['intent_seq'])
-        self.assertEqual(2, message['input_seq'])
-        self.assertEqual([1.0, 2.0, 3.0], message['shot_origin'])
-        self.assertEqual([1.0, 0.0, 0.0], message['shot_direction'])
-        self.assertEqual(0.02, message['dispersion_angle'])
-        self.assertEqual(200, message['trigger_server_time_ms'])
-
-    def test_visible_fire_intent_requires_an_exact_trigger_clock(self):
-        for value in (None, True, 1.0, -1,
-                      module.MAX_MOTION_TIME_US // 1000 + 1):
-            client = self.active_client()
-            self.assertTrue(self.send_player_input(client))
-
-            self.assertIsNone(client.send_fire_intent(
-                2, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0],
-                0.01, [], value))
-            self.assertEqual(0, client._fire_intent_seq)
-            self.assertEqual(1, len(client._outbound_queue))
 
     def test_player_input_carries_one_atomic_queued_shell_selection(self):
         client = self.active_client()
@@ -461,8 +468,8 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual(1, attempts[2]['observation_seq'])
         self.assertEqual(2, attempts[2]['input_seq'])
 
-    def test_visible_client_cannot_publish_player_projectile_launch(self):
-        client = self.active_client()
+    def test_worker_cannot_publish_player_projectile_launch(self):
+        client = self.active_worker_client()
 
         self.assertIsNone(self.launch(
             client, shot_seq=1, authority_epoch=4,
@@ -490,7 +497,7 @@ class ProjectileWireTests(unittest.TestCase):
             [1.0, 0.0, 3.0, 0.0, 0.0, 0.0], message['launch_pose'])
 
     def test_launch_rejects_non_plain_nonfinite_and_out_of_bounds_physics(self):
-        client = self.active_worker_client()
+        client = self.active_client()
         default_speed = math.sqrt(11300.0)
         valid_source = source_shot(
             default_speed, 9.81, 720.0, True, 4.5)
@@ -522,7 +529,7 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual([], client._outbound_queue)
 
     def test_stock_b4_gravity_is_within_the_wire_contract(self):
-        client = self.active_worker_client()
+        client = self.active_client()
 
         self.assertEqual(1, self.launch(
             client, shot_seq=1, authority_epoch=4,
@@ -532,7 +539,7 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual(143.0, message['gravity'])
 
     def test_launch_preserves_complete_he_factor_contract(self):
-        client = self.active_worker_client()
+        client = self.active_client()
         frozen = source_shot(
             math.sqrt(11300.0), 9.81, 720.0, True, 4.5)
         frozen['shell'].update({
@@ -569,30 +576,11 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertEqual(amount, parsed['shell']['damage'][1])
         self.assertEqual(amount, delta['devices'][0]['hp_loss'])
 
-    def test_send_fire_never_falls_back_to_instant_input(self):
-        client = self.active_client()
-        self.assertIsNone(client.send_fire(shell_index=1))
-        self.assertEqual([], client._outbound_queue)
-
-        self.assertTrue(self.send_player_input(client, shell_index=1))
-        self.assertEqual(1, client.send_fire(
-            shell_index=1, position=[1.0, 2.0, 3.0],
-            velocity=[100.0, 0.0, 0.0], gravity=9.81,
-            max_distance=500.0, max_time_ms=5000,
-            source_shot=source_shot(100.0, 9.81, 500.0),
-            trigger_server_time_ms=100))
-        message = wire_copy(client._outbound_queue[-1][1])
-        self.assertEqual('fire_intent', message['type'])
-        self.assertEqual({
-            'type', 'round_id', 'intent_seq', 'input_seq', 'shell_index',
-            'shot_origin', 'shot_direction', 'dispersion_angle',
-            'presentation_ledger', 'trigger_server_time_ms',
-        }, set(message))
 
     def test_progress_shape_is_exact_and_duplicate_ids_fail_closed(self):
         client = self.active_worker_client()
         cursor = {
-            'projectile_id': 'player:7:1',
+            'projectile_id': '3:b:7:1',
             'base_checked_ms': 100,
             'checked_through_ms': 150,
             'checked_distance': 52.5,
@@ -648,7 +636,7 @@ class ProjectileWireTests(unittest.TestCase):
             'bot', 17, 12.0, target_pose=(12.0, 2.0, 3.0))]
 
         self.assertTrue(client.send_projectile_resolve(
-            4, 'player:7:1', 150, 'impact', 180,
+            4, '3:b:7:1', 150, 'impact', 180,
             [11.0, 2.0, 3.0], direct, splash,
             checked_distance=61.0, piercing_loss=3.0,
             penetration_factor=0.75))
@@ -659,7 +647,7 @@ class ProjectileWireTests(unittest.TestCase):
             'checked_distance', 'piercing_loss', 'penetration_factor',
             'hit_vehicle', 'impact', 'direct', 'splash', 'destructibles'},
             set(message))
-        self.assertEqual('player:7:1', message['projectile_id'])
+        self.assertEqual('3:b:7:1', message['projectile_id'])
         self.assertTrue(message['hit_vehicle'])
         self.assertEqual(
             module.MAX_PROJECTILE_DAMAGE_STICKER,
@@ -667,31 +655,31 @@ class ProjectileWireTests(unittest.TestCase):
 
         duplicate = self.effect('player', 8)
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], direct, [duplicate]))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0],
             self.effect('player', 8, target_pose=(1.0, 2.0, 3.0)), []))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], direct,
             [self.effect('bot', 17, 12.0)]))
         splash_with_sticker = self.effect(
             'bot', 17, 12.0, target_pose=(12.0, 2.0, 3.0))
         splash_with_sticker['damage_sticker'] = 1
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], direct, [splash_with_sticker]))
         for invalid in (True, 1.0, -1,
                         module.MAX_PROJECTILE_DAMAGE_STICKER + 1):
             with self.subTest(damage_sticker=invalid):
                 self.assertFalse(client.send_projectile_resolve(
-                    4, 'player:7:2', 0, 'impact', 10,
+                    4, '3:b:7:2', 0, 'impact', 10,
                     [0.0, 0.0, 0.0],
                     dict(direct, damage_sticker=invalid), []))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'miss', 10,
+            4, '3:b:7:2', 0, 'miss', 10,
             [0.0, 0.0, 0.0], direct, []))
 
     def test_first_ricochet_wire_is_harmless_and_strict(self):
@@ -702,7 +690,7 @@ class ProjectileWireTests(unittest.TestCase):
         direct['damage_sticker'] = 12345678901234567890
 
         self.assertTrue(client.send_projectile_ricochet(
-            4, 'player:7:1', 150, 180,
+            4, '3:b:7:1', 150, 180,
             [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
             [-100.0, 20.0, 0.0], 0.75, direct,
             checked_distance=61.0, piercing_loss=3.0,
@@ -720,11 +708,11 @@ class ProjectileWireTests(unittest.TestCase):
 
         damaging = dict(direct, damage=1)
         self.assertFalse(client.send_projectile_ricochet(
-            4, 'player:7:2', 150, 180,
+            4, '3:b:7:2', 150, 180,
             [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
             [-100.0, 20.0, 0.0], 0.75, damaging))
         self.assertFalse(client.send_projectile_ricochet(
-            4, 'player:7:2', 150, 180,
+            4, '3:b:7:2', 150, 180,
             [11.0, 2.0, 3.0], [11.2, 2.0, 3.0],
             [-100.0, 20.0, 0.0], 0.75, direct))
         critical = dict(direct, critical={'fire': True},
@@ -744,7 +732,7 @@ class ProjectileWireTests(unittest.TestCase):
         for proposal in forbidden:
             with self.subTest(proposal=proposal):
                 self.assertFalse(client.send_projectile_ricochet(
-                    4, 'player:7:2', 150, 180,
+                    4, '3:b:7:2', 150, 180,
                     [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
                     [-100.0, 20.0, 0.0], 0.75, proposal))
 
@@ -754,7 +742,7 @@ class ProjectileWireTests(unittest.TestCase):
         direct['potential_damage'] = 480
 
         self.assertTrue(client.send_projectile_resolve(
-            4, 'player:7:1', 150, 'impact', 180,
+            4, '3:b:7:1', 150, 'impact', 180,
             [11.0, 2.0, 3.0], direct, []))
         message = wire_copy(client._outbound_queue[-1][1])
         # The normalizer rebuilds the effect from a fixed key set, so the
@@ -765,7 +753,7 @@ class ProjectileWireTests(unittest.TestCase):
         for invalid in (True, 1.0, -1, 5001, '480', None):
             with self.subTest(potential_damage=invalid):
                 self.assertFalse(client.send_projectile_resolve(
-                    4, 'player:7:2', 0, 'impact', 10,
+                    4, '3:b:7:2', 0, 'impact', 10,
                     [0.0, 0.0, 0.0],
                     dict(direct, potential_damage=invalid), []))
 
@@ -774,7 +762,7 @@ class ProjectileWireTests(unittest.TestCase):
         splash = self.effect('bot', 17, 12.0, target_pose=(12.0, 2.0, 3.0))
         splash['potential_damage'] = 480
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:3', 0, 'impact', 10,
+            4, '3:b:7:3', 0, 'impact', 10,
             [0.0, 0.0, 0.0], self.effect('player', 8), [splash]))
 
     def test_structural_armor_metadata_is_optional_and_soft(self):
@@ -783,7 +771,7 @@ class ProjectileWireTests(unittest.TestCase):
         direct['structural_armor_hit'] = True
 
         self.assertTrue(client.send_projectile_resolve(
-            4, 'player:7:1', 150, 'impact', 180,
+            4, '3:b:7:1', 150, 'impact', 180,
             [11.0, 2.0, 3.0], direct, []))
         message = wire_copy(client._outbound_queue[-1][1])
         self.assertIs(True, message['direct']['structural_armor_hit'])
@@ -794,7 +782,7 @@ class ProjectileWireTests(unittest.TestCase):
         for invalid in (1, 'structural', None, []):
             with self.subTest(structural_armor_hit=invalid):
                 self.assertTrue(client.send_projectile_resolve(
-                    4, 'player:7:2', 150, 'impact', 180,
+                    4, '3:b:7:2', 150, 'impact', 180,
                     [11.0, 2.0, 3.0],
                     dict(direct, structural_armor_hit=invalid), []))
                 message = wire_copy(client._outbound_queue[-1][1])
@@ -809,7 +797,7 @@ class ProjectileWireTests(unittest.TestCase):
         direct['potential_damage'] = 5000
 
         self.assertTrue(client.send_projectile_ricochet(
-            4, 'player:7:1', 150, 180,
+            4, '3:b:7:1', 150, 180,
             [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
             [-100.0, 20.0, 0.0], 0.75, direct))
         message = wire_copy(client._outbound_queue[-1][1])
@@ -819,7 +807,7 @@ class ProjectileWireTests(unittest.TestCase):
         for invalid in (True, -1, 5001, 1.0):
             with self.subTest(potential_damage=invalid):
                 self.assertFalse(client.send_projectile_ricochet(
-                    4, 'player:7:2', 150, 180,
+                    4, '3:b:7:2', 150, 180,
                     [11.0, 2.0, 3.0], [11.002, 2.0, 3.0],
                     [-100.0, 20.0, 0.0], 0.75,
                     dict(direct, potential_damage=invalid)))
@@ -830,7 +818,7 @@ class ProjectileWireTests(unittest.TestCase):
             module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY]
 
         self.assertTrue(client.send_projectile_resolve(
-            4, 'player:7:1', 0, 'impact', 10,
+            4, '3:b:7:1', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True))
 
         self.assertNotIn(
@@ -841,7 +829,7 @@ class ProjectileWireTests(unittest.TestCase):
         wreck_hit = {'target_kind': 'bot', 'target_id': 17}
 
         self.assertTrue(client.send_projectile_resolve(
-            4, 'player:7:1', 0, 'impact', 10,
+            4, '3:b:7:1', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True,
             wreck_hit=wreck_hit))
         message = wire_copy(client._outbound_queue[-1][1])
@@ -849,22 +837,22 @@ class ProjectileWireTests(unittest.TestCase):
         self.assertIsNone(message['direct'])
 
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], self.effect('bot', 17), [],
             hit_vehicle=True, wreck_hit=wreck_hit))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=False,
             wreck_hit=wreck_hit))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True,
             wreck_hit={'target_kind': 'bot', 'target_id': True}))
 
         client.server_capabilities.remove(
             module.PROJECTILE_WRECK_HIT_CAPABILITY)
         self.assertTrue(client.send_projectile_resolve(
-            4, 'player:7:2', 0, 'impact', 10,
+            4, '3:b:7:2', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle=True,
             wreck_hit=wreck_hit))
         self.assertNotIn(
@@ -887,7 +875,7 @@ class ProjectileWireTests(unittest.TestCase):
         incomplete = self.effect('bot', 17)
         incomplete['critical'] = {'fire': True}
         self.assertFalse(client.send_projectile_resolve(
-            4, 'bot:17:1', 0, 'impact', 10,
+            4, '3:b:17:1', 0, 'impact', 10,
             [0.0, 0.0, 0.0], incomplete, []))
 
         complete = dict(incomplete)
@@ -899,16 +887,16 @@ class ProjectileWireTests(unittest.TestCase):
                 'devices': [], 'crew_ko': [], 'ignite': True},
         })
         self.assertTrue(client.send_projectile_resolve(
-            4, 'bot:17:1', 0, 'impact', 10,
+            4, '3:b:17:1', 0, 'impact', 10,
             [0.0, 0.0, 0.0], complete, []))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'bot:17:2', 0, 'expired', 10,
+            4, '3:b:17:2', 0, 'expired', 10,
             (0.0, 0.0, 0.0), None, []))
         self.assertTrue(client.send_projectile_resolve(
-            4, 'bot:17:2', 0, 'expired', 10,
+            4, '3:b:17:2', 0, 'expired', 10,
             None, None, [], checked_distance=12.0))
         self.assertFalse(client.send_projectile_resolve(
-            4, 'bot:17:3', 0, 'impact', 10,
+            4, '3:b:17:3', 0, 'impact', 10,
             [0.0, 0.0, 0.0], None, [], hit_vehicle='yes'))
 
     def test_hello_advertises_ledger_before_transport_is_published(self):
@@ -945,7 +933,7 @@ class ProjectileWireTests(unittest.TestCase):
                 module.RICOCHET_CONTINUATION_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                module.PLAYER_FIRE_INTENT_CAPABILITY,
+                module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY,
                 module.PROJECTILE_HIT_VEHICLE_CAPABILITY,

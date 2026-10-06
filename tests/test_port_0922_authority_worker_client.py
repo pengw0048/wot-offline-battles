@@ -854,7 +854,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+                lan_client_module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
             ],
@@ -880,7 +880,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+                lan_client_module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
                 lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
@@ -918,7 +918,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
                 lan_client_module.LEAN_SNAPSHOT_MANIFEST_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+                lan_client_module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
                 lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
@@ -1429,7 +1429,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'native adapter failed',
             str(session._worker_failure.call_args[0][0]))
 
-    def test_worker_routes_terminal_player_launch_result_to_runtime(self):
+    def test_worker_does_not_route_another_owners_launch_rejection(self):
         world = _DrawWorld()
         client = _WorkerClient()
         runtime = _WorkerRuntime(client, world)
@@ -1448,9 +1448,9 @@ class AuthorityWorkerClientTests(unittest.TestCase):
 
             session._on_event('fire_intent_result', message)
 
-        self.assertEqual([message], runtime.fire_intent_results)
+        self.assertEqual([], runtime.fire_intent_results)
 
-    def test_bigworld_poll_flushes_fire_intent_at_batch_tail(self):
+    def test_worker_poll_has_no_human_fire_batch_tail_work(self):
         scheduled = []
 
         def callback(delay, function):
@@ -1505,8 +1505,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             session.runtime = runtime
             session._active_round_id = 7
             client.on_event = session._on_event
-            client.on_batch_drained = (
-                lambda source: session._on_batch_drained())
+            self.assertFalse(hasattr(client, 'on_batch_drained'))
+            self.assertFalse(hasattr(session, '_on_batch_drained'))
 
             client._queue_message(message)
             client._queue_message(result)
@@ -1514,12 +1514,11 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             self.assertEqual(1, len(scheduled))
             scheduled[0][1]()
 
-        self.assertEqual(['intent', 'result', 'flush'], [
-            call[0] for call in calls])
-        self.assertTrue(all(
-            threading.current_thread() is call[1] for call in calls))
-        self.assertEqual(message, calls[0][2])
-        self.assertEqual(result, calls[1][2])
+        # Stale human-fire frames cannot create worker work, even if a legacy
+        # runtime double still exposes the old methods. Polling stays alive.
+        self.assertEqual([], calls)
+        self.assertTrue(client.running)
+        self.assertEqual(2, len(scheduled))
 
     def test_worker_routes_player_destructible_contact_to_runtime(self):
         world = _DrawWorld()

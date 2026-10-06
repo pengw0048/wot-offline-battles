@@ -120,11 +120,11 @@ _SERVER_PROBES = {
         "capabilities": (
             "projectile_ledger_v2", "destructible_catalog_v5",
             "ram_contact_ledger_v2", "human_ram_timeline_v1",
-            "player_fire_intent_v6", "player_environment_v2",
+            "player_projectile_owner_v1", "player_environment_v2",
             "effective_params_v1", "ricochet_continuation_v1"),
         "server_capabilities": (
             "destructible_catalog_v5", "ram_contact_ledger_v2",
-            "human_ram_timeline_v1", "player_fire_intent_v6",
+            "human_ram_timeline_v1", "player_projectile_owner_v1",
             "player_environment_v2", "effective_params_v1",
             "ricochet_continuation_v1"),
     },

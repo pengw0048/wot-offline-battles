@@ -420,9 +420,10 @@ whose profile changed after it started must be restarted first.
 - Live combat statistics, a damage log with assists, hit and critical-damage
   messages, target outlines, vehicle fires, wrecks, and a consumables panel
   that counts down each cooldown.
-- A LAN match is one shared battle: lineups, countdown, orders, projectiles,
-  health, critical damage, destructibles, capture and results stay
-  synchronized through the room's mandatory hidden simulation worker.
+- A LAN match is one shared battle. Each player simulates their own shells;
+  the mandatory hidden worker simulates Bots and their shells. The server
+  commits shared health, critical damage and destruction once, and keeps the
+  lineups, countdown, orders, capture and results synchronized.
 - The results screen awards battle heroes, historical, special and
   commemorative medals from the client's own achievement thresholds, and both
   the vehicle and the account dossier keep counting them. Medals the client

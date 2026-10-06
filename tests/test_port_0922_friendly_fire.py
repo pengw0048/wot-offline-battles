@@ -31,7 +31,7 @@ class FriendlyFireProjectileTests(unittest.TestCase):
             'destroyed': ['leftTrackHealth'], 'crew_ko': [],
             'fire': False, 'ammo_rack_death': False, 'events': []}
         terminal = shots._resolve(
-            '1:p:1:1', direct=shots._effect(target_kind='bot', target_id=7, damage=334),
+            state, '1:p:1:1', direct=shots._effect(target_kind='bot', target_id=7, damage=334),
             splash=[shots._effect(
                 target_id=1, damage=50, target_pose=(0.0, 1.0, 0.0),
                 critical=critical, critical_target_base_revision=0,
@@ -41,7 +41,7 @@ class FriendlyFireProjectileTests(unittest.TestCase):
                     'crew_ko': [], 'ignite': False})])
         for unused in range(3):
             self.assertTrue(state.resolve_projectile(
-                shots.SIMULATION_WORKER_AUTHORITY_ID, copy.deepcopy(terminal)))
+                1, copy.deepcopy(terminal)))
         self.assertEqual(1716, ally['health'])
         self.assertEqual(950, state.players[1].health)
         self.assertEqual(334, state._statistics_row('player', 1)['team_damage'])
@@ -59,7 +59,7 @@ class FriendlyFireProjectileTests(unittest.TestCase):
         self.assertTrue(shots._launch_authority(state, shots._launch(
             is_he=True, splash_radius=15.0)))
         terminal = shots._resolve(
-            '1:p:1:1', direct=shots._effect(target_id=3, damage=334),
+            state, '1:p:1:1', direct=shots._effect(target_id=3, damage=334),
             splash=[shots._effect(target_id=2, damage=50,
                                   target_pose=(10.0, 1.0, 0.0))])
         apply = state._apply_projectile_effect
@@ -72,7 +72,7 @@ class FriendlyFireProjectileTests(unittest.TestCase):
         with mock.patch.object(state, '_apply_projectile_effect', post_hit_failure):
             for unused in range(3):
                 self.assertTrue(state.resolve_projectile(
-                    shots.SIMULATION_WORKER_AUTHORITY_ID, terminal))
+                    1, terminal))
         self.assertEqual(666, state.players[3].health)
         self.assertEqual(950, state.players[2].health)
         self.assertEqual(334, state._statistics_row('player', 1)['team_damage'])
@@ -83,8 +83,8 @@ class FriendlyFireProjectileTests(unittest.TestCase):
         state = shots._state(players=3)
         self.assertTrue(shots._launch_authority(state, shots._launch()))
         self.assertTrue(state.resolve_projectile(
-            shots.SIMULATION_WORKER_AUTHORITY_ID,
-            shots._resolve('1:p:1:1', direct=shots._effect(
+            1,
+            shots._resolve(state, '1:p:1:1', direct=shots._effect(
                 target_id=3, damage=0, shot_result=1))))
         row = state._statistics_row('player', 1)
         self.assertEqual((1, 0, 0), (row['team_hits'], row['team_damage'], row['team_kills']))
@@ -98,8 +98,8 @@ class FriendlyFireProjectileTests(unittest.TestCase):
         state._freeze_round_participants(list(state.players.values()))
         self.assertTrue(shots._launch_authority(state, shots._launch()))
         self.assertTrue(state.resolve_projectile(
-            shots.SIMULATION_WORKER_AUTHORITY_ID,
-            shots._resolve('1:p:1:1', direct=shots._effect(target_id=3, damage=334))))
+            1,
+            shots._resolve(state, '1:p:1:1', direct=shots._effect(target_id=3, damage=334))))
         state._finish_battle(2, 'battle_timeout')
         receipts = dict((row['player_id'], row) for row in state.result_receipts.values())
         offender, victim = receipts[1], receipts[3]
