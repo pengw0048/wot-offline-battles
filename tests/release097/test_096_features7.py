@@ -227,7 +227,7 @@ class ReplayTests(unittest.TestCase):
         self.clock.t=.3;c.pump_replay();damages=[m for k,m in events if k=='events'];self.assertEqual(123,damages[0]['events'][0]['damage'])
     def test_playback_cannot_fire_or_become_authority(self):
         r=self.record();p=r.close();c=ReplayClient('',0,'','',replay_path=p)
-        c.start();self.assertFalse(c.is_bot_authority());self.assertIsNone(c.send_fire_intent())
+        c.start();self.assertFalse(c.is_bot_authority());self.assertIsNone(c.send_projectile_launch())
         self.assertIsNone(c.send_equipment_intent());self.assertIsNone(c.sock);self.assertIsNone(c.thread);c.stop()
     def test_playback_session_never_accepts_rewards(self):
         from gui.mods.offline_lan_0922.lan_session import LANSession
@@ -295,7 +295,7 @@ class RuntimeReplayTests(unittest.TestCase):
         self.assertFalse(b.shoot(0.,0.));b.stop(show_login=False)
     def test_recorded_local_shot_does_not_require_or_create_live_trigger(self):
         b=BattleRuntime(_runtime());b._replay_mode=True
-        self.assertFalse(b._accept_player_fire_commit(dict(shooter_kind='player'),dict(local=True)))
+        self.assertFalse(b._commit_local_player_fire(dict(shooter_kind='player'),dict(local=True),{}))
         self.assertIsNone(b._local_fire_intent)
     def test_replay_local_voice_presentation_preserves_saved_damage(self):
         from test_port_0922_he_feedback import HEFeedbackTests

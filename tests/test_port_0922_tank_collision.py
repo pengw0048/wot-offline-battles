@@ -1,7 +1,9 @@
 from pathlib import Path
 import math
+import struct
 import sys
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,6 +232,98 @@ class TankCollisionTests(unittest.TestCase):
             0.0, lower, 2.9, upper))
         self.assertFalse(tank_collision.vertical_overlap(
             0.0, lower, 3.02, upper))
+
+    def test_pair_solver_reuses_vertical_bounds_but_updates_each_horizontal_contact(self):
+        first = _tank(1, 0., 0., mass=20000., vx=10.)
+        second = _tank(2, 2.8, 0., mass=30000.)
+        before = [dict(first), dict(second)]
+        with mock.patch.object(tank_collision, 'vertical_overlap',
+                               wraps=tank_collision.vertical_overlap) as vertical, \
+                mock.patch.object(tank_collision, '_obb_contact_projected',
+                                  wraps=tank_collision._obb_contact_projected) as horizontal:
+            result = tank_collision.resolve_pairs([first, second], .025)
+        self.assertEqual(1, vertical.call_count)
+        self.assertEqual(4, horizontal.call_count)
+        poses = [call.args for call in horizontal.call_args_list]
+        for previous, current in zip(poses, poses[1:]):
+            self.assertLess(current[0], previous[0])
+            self.assertGreater(current[2], previous[2])
+        contact = tank_collision.obb_contact(
+            first['x']+result[1]['correction'][0], 0., 0., first['shape'],
+            second['x']+result[2]['correction'][0], 0., 0., second['shape'])
+        self.assertIsNotNone(contact)
+        self.assertGreaterEqual(contact[2], tank_collision.POSITION_SLOP)
+        self.assertLess(contact[2], tank_collision.POSITION_SLOP+.000002)
+        self.assertAlmostEqual(4., first['vx']+result[1]['delta_velocity'][0])
+        self.assertAlmostEqual(4., second['vx']+result[2]['delta_velocity'][0])
+        self.assertEqual(before, [first, second])
+
+    def test_pair_solver_refreshes_vertical_pose_and_shape_on_every_call(self):
+        first, second = _tank(1, 0., 0., vx=10.), _tank(2, 2.8, 0.)
+        contact = tank_collision.resolve_pairs([first, second], .025)
+        self.assertNotEqual((0., 0.), contact[1]['delta_velocity'])
+        for update, admitted in (
+                ({'y': 10.}, False), ({'y': 0.}, True),
+                ({'y': 3.}, False), ({'pitch': math.pi/2}, True),
+                ({'pitch': 0.}, False), ({'roll': math.pi/2}, True),
+                ({'roll': 0.}, False), ({'shape': (1.5, 3.5, -2., 2.)}, True)):
+            with self.subTest(update=update):
+                second.update(update)
+                with mock.patch.object(tank_collision, '_obb_contact_projected',
+                                       wraps=tank_collision._obb_contact_projected) as horizontal:
+                    result = tank_collision.resolve_pairs([first, second], .025)
+                if admitted:
+                    self.assertEqual(contact, result)
+                else:
+                    horizontal.assert_not_called()
+                    self.assertTrue(all(value['correction'] == (0., 0.) and
+                                        value['delta_velocity'] == (0., 0.) and
+                                        value['delta_yaw'] == 0. for value in result.values()))
+
+    def test_pair_solver_keeps_missing_height_conservative(self):
+        first, second = _tank(1, 0., 0., vx=10.), _tank(2, 2.8, 0.)
+        contact = tank_collision.resolve_pairs([first, second], .025)
+        for missing in ('first', 'second', 'both'):
+            with self.subTest(missing=missing):
+                first['y'], second['y'] = 0., 10.
+                if missing in ('first', 'both'):
+                    first['y'] = None
+                if missing in ('second', 'both'):
+                    second.pop('y')
+                self.assertEqual(contact, tank_collision.resolve_pairs([first, second], .025))
+
+    def test_prepared_sat_retains_contact_bits_at_angles_and_changed_centers(self):
+        shapes = ((1.5, 3.5, -0.8, 2.0),
+                  (0.0001, 40.0, -2.0, 3.0))
+        angles = (0.0, -0.0, 1.0e-10, math.pi/2, math.pi, -math.pi+1.0e-8)
+        for shape_a in shapes:
+            for yaw_a in angles:
+                for yaw_b in angles:
+                    projection = tank_collision._obb_pair_projection(
+                        yaw_a, shape_a, yaw_b, shapes[0])
+                    for x, z in ((0.0, 0.0), (2.8, 0.0),
+                                 (3.0-1.0e-10, 0.0), (4.0, 5.0)):
+                        expected = tank_collision.obb_contact(
+                            0.0, 0.0, yaw_a, shape_a,
+                            x, z, yaw_b, shapes[0])
+                        actual = tank_collision._obb_contact_projected(
+                            0.0, 0.0, x, z, projection)
+                        self.assertEqual(expected is None, actual is None)
+                        if expected is not None:
+                            self.assertEqual(struct.pack('!3d', *expected),
+                                             struct.pack('!3d', *actual))
+
+    def test_pair_solver_prepares_new_yaw_and_shape_on_the_next_call(self):
+        first, second = _tank(1, 0., 0.), _tank(2, 2.8, 0.)
+        with mock.patch.object(tank_collision, '_obb_pair_projection',
+                               wraps=tank_collision._obb_pair_projection) as prepare:
+            tank_collision.resolve_pairs([first, second], .025)
+            second['yaw'] = math.pi/2
+            second['shape'] = (2., 4., -.8, 2.)
+            tank_collision.resolve_pairs([first, second], .025)
+        self.assertEqual(2, prepare.call_count)
+        self.assertEqual((first['yaw'], first['shape'], math.pi/2,
+                          second['shape']), prepare.call_args.args)
 
     def test_support_rise_respects_tick_climb_hard_cap_and_slop(self):
         self.assertFalse(tank_collision.support_rise_is_obstacle(

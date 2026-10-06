@@ -23,6 +23,7 @@ spawn overlap is separated using inverse-mass weighting instead of becoming an
 """
 
 import math
+from gui.mods.offline_lan_0922 import native_math
 
 
 DEFAULT_SHAPE = (1.5, 3.5, -0.8, 2.0)
@@ -527,6 +528,47 @@ def _obb_overlap(x_a, z_a, yaw_a, shape_a,
     return best_x, best_z, best_overlap
 
 
+def _obb_pair_projection(yaw_a, shape_a, yaw_b, shape_b):
+    """Prepare only the fixed axes/radii for one private solver pair."""
+    axes_a = _axes(yaw_a)
+    axes_b = _axes(yaw_b)
+    projection = []
+    for axis_x, axis_z in axes_a + axes_b:
+        radius_a = (
+            shape_a[0] * abs(
+                axis_x * axes_a[0][0] + axis_z * axes_a[0][1]) +
+            shape_a[1] * abs(
+                axis_x * axes_a[1][0] + axis_z * axes_a[1][1]))
+        radius_b = (
+            shape_b[0] * abs(
+                axis_x * axes_b[0][0] + axis_z * axes_b[0][1]) +
+            shape_b[1] * abs(
+                axis_x * axes_b[1][0] + axis_z * axes_b[1][1]))
+        projection.append((axis_x, axis_z, radius_a, radius_b))
+    return tuple(projection)
+
+
+def _obb_contact_projected(x_a, z_a, x_b, z_b, projection):
+    """Evaluate every current center projection in the original SAT order."""
+    delta_x = x_a - x_b
+    delta_z = z_a - z_b
+    best_overlap = None
+    best_x = 0.0
+    best_z = 0.0
+    for axis_x, axis_z, radius_a, radius_b in projection:
+        signed_distance = delta_x * axis_x + delta_z * axis_z
+        overlap = radius_a + radius_b - abs(signed_distance)
+        if best_overlap is None or overlap < best_overlap:
+            if signed_distance < 0.0:
+                axis_x = -axis_x
+                axis_z = -axis_z
+            best_overlap = overlap
+            best_x = axis_x
+            best_z = axis_z
+    return ((best_x, best_z, best_overlap)
+            if best_overlap > 0.0 else None)
+
+
 def rotation_fraction(position, yaw, candidate_yaw, shape, others,
                       pivot_offset=0.0, translation=(0.0, 0.0)):
     """Project kinematic traverse onto the first legal chassis contact.
@@ -547,6 +589,11 @@ def rotation_fraction(position, yaw, candidate_yaw, shape, others,
     travel = abs(delta)*(radius+abs(pivot_offset)) + linear_travel
     if travel <= 1e-9:
         return 1.0
+    native = native_math.call('rotation_fraction', position, yaw,
+                              candidate_yaw, shape, others, pivot_offset,
+                              translation)
+    if native is not None:
+        return native
     samples = max(1, int(math.ceil(travel/(POSITION_SLOP*0.5))))
     fraction = 1.0
     for other in others:
@@ -921,6 +968,9 @@ def translation_fraction(body, movement, others):
     mx, mz = movement
     if abs(mx) + abs(mz) <= 1.0e-12:
         return 1.0
+    native = native_math.call('translation_fraction', body, movement, others)
+    if native is not None:
+        return native
     shape = _tank_shape(body)
     axes = _axes(body['yaw'])
     body_radius = math.hypot(*shape[:2])
@@ -970,39 +1020,127 @@ def translation_fraction(body, movement, others):
     return fraction
 
 
-def slide_translation(body, movement, others):
-    """Retain tangential travel when another owned hull blocks the normal.
+def _slide_peers(body, others):
+    """Freeze vertical/shape data only for this synchronous translation."""
+    shape = _tank_shape(body)
+    radius = math.hypot(*shape[:2])
+    peers = []
+    for other in others:
+        if body['id'] == other['id']:
+            continue
+        peer_shape = _tank_shape(other)
+        if not vertical_overlap(
+                body.get('y'), shape, other.get('y'), peer_shape,
+                pitch_a=body.get('pitch', 0.0), roll_a=body.get('roll', 0.0),
+                pitch_b=other.get('pitch', 0.0), roll_b=other.get('roll', 0.0)):
+            continue
+        reach = radius + math.hypot(*peer_shape[:2])
+        peers.append([other['id'], other['x'], other['z'], reach,
+                      None, None, other['yaw'], peer_shape])
+    return peers
 
-    Replica positions stay solid until their owner moves them. Truncating
-    the entire vector at first contact also cancels the unconstrained tangent
-    and wedges oblique pushes. Project only the entering remainder, re-sweep
-    every projected segment, and leave momentum to the reciprocal solver.
+
+def _slide_projection(body, peer):
+    """Prepare fixed SAT geometry on the first nearby segment only."""
+    if peer[4] is None:
+        shape, peer_shape = _tank_shape(body), peer[7]
+        axes, peer_axes = _axes(body['yaw']), _axes(peer[6])
+        peer[4] = _obb_pair_projection(body['yaw'], shape, peer[6], peer_shape)
+        sweep = []
+        for nx, nz in axes + peer_axes:
+            # Keep the sweep's original four-term addition order.
+            axis_radius = sum(s[i]*abs(nx*a[i][0]+nz*a[i][1])
+                         for s, a in ((shape, axes), (peer_shape, peer_axes))
+                         for i in (0, 1)) - POSITION_SLOP
+            sweep.append((nx, nz, axis_radius))
+        peer[5] = tuple(sweep)
+    return peer[4], peer[5]
+
+
+def _slide_fraction(body, movement, peers):
+    mx, mz = movement
+    if abs(mx) + abs(mz) <= 1.0e-12:
+        return 1.0
+    fraction = 1.0
+    for peer in peers:
+        other_id, ox, oz, reach = peer[:4]
+        if (ox < body['x']+min(0.0, mx)-reach or
+                ox > body['x']+max(0.0, mx)+reach or
+                oz < body['z']+min(0.0, mz)-reach or
+                oz > body['z']+max(0.0, mz)+reach):
+            continue
+        projection, sweep = _slide_projection(body, peer)
+        dx, dz = body['x']-ox, body['z']-oz
+        contact = _obb_contact_projected(body['x'], body['z'], ox, oz, projection)
+        contact = _owner_oriented_contact(contact, dx, dz, body['id'], other_id)
+        if contact is not None and contact[2] >= POSITION_SLOP - 1.0e-9:
+            if mx*contact[0] + mz*contact[1] < -1.0e-9:
+                fraction = 0.0
+            continue
+        entry, leave = 0.0, 1.0
+        for nx, nz, axis_radius in sweep:
+            offset, travel = dx*nx + dz*nz, mx*nx + mz*nz
+            if abs(travel) <= 1.0e-12:
+                if abs(offset) >= axis_radius:
+                    entry = 2.0
+                    break
+                continue
+            first, last = sorted(((-axis_radius-offset)/travel,
+                                  (axis_radius-offset)/travel))
+            entry, leave = max(entry, first), min(leave, last)
+            if entry > leave:
+                break
+        if entry <= leave and leave >= 0.0:
+            fraction = min(fraction, max(0.0, entry))
+    return fraction
+
+
+def slide_translation(body, movement, others, first_fraction=None):
+    """Retain tangential travel and sweep every projected segment.
+
+    The caller may reuse the first fraction for this exact body, movement and
+    roster. Geometry prepared after a blocked segment belongs only to this
+    call; each segment still tests its current position in roster order.
     """
     current = dict(body)
     remaining = tuple(movement)
     total = [0.0, 0.0]
-    for unused in range(4):
-        fraction = translation_fraction(current, remaining, others)
+    if (first_fraction is None or first_fraction < 1.0) and (
+            abs(remaining[0]) + abs(remaining[1]) > 1.0e-12):
+        native = native_math.call('slide_translation', body, remaining,
+                                  others, first_fraction)
+        if native is not None:
+            return native
+    peers = None
+    for segment in range(4):
+        if segment == 0:
+            fraction = (first_fraction if first_fraction is not None else
+                        translation_fraction(current, remaining, others))
+        else:
+            fraction = _slide_fraction(current, remaining, peers)
         accepted = (remaining[0]*fraction, remaining[1]*fraction)
         for i, key in enumerate(('x', 'z')):
             current[key] += accepted[i]
             total[i] += accepted[i]
         if fraction >= 1.0:
             break
+        if peers is None:
+            peers = _slide_peers(body, others)
         remaining = (remaining[0]*(1.0-fraction), remaining[1]*(1.0-fraction))
         changed = False
-        for other in others:
-            if current['id'] == other['id'] or not vertical_overlap(
-                    current.get('y'), _tank_shape(current), other.get('y'),
-                    _tank_shape(other), pitch_a=current.get('pitch', 0.0),
-                    roll_a=current.get('roll', 0.0), pitch_b=other.get('pitch', 0.0),
-                    roll_b=other.get('roll', 0.0)):
+        for peer in peers:
+            other_id, ox, oz, reach = peer[:4]
+            # A positive SAT overlap requires intersecting circumcircles.
+            # This bound is evaluated at the actual current pose, never a
+            # predicted maximum path; the exact SAT slop below is unchanged.
+            if (abs(current['x']-ox) > reach + 1.0e-7 or
+                    abs(current['z']-oz) > reach + 1.0e-7):
                 continue
-            contact = _obb_overlap(current['x'], current['z'], current['yaw'],
-                _tank_shape(current), other['x'], other['z'], other['yaw'], _tank_shape(other))
-            contact = _owner_oriented_contact(contact, current['x']-other['x'],
-                current['z']-other['z'], current['id'], other['id'])
-            if contact[2] < POSITION_SLOP-1.0e-7:
+            projection, unused_sweep = _slide_projection(body, peer)
+            contact = _obb_contact_projected(current['x'], current['z'], ox, oz, projection)
+            contact = _owner_oriented_contact(contact, current['x']-ox,
+                current['z']-oz, current['id'], other_id)
+            if contact is None or contact[2] < POSITION_SLOP-1.0e-7:
                 continue
             entering = remaining[0]*contact[0]+remaining[1]*contact[1]
             if entering < -1.0e-9:
@@ -1168,16 +1306,20 @@ def resolve_pairs(tanks, dt, anchor=None):
             shape_a, shape_b = shapes[a['id']], shapes[b['id']]
             reach = radii[a['id']]+radii[b['id']]+CONTACT_BROADPHASE_PADDING
             if (a['x']-b['x'])**2 + (a['z']-b['z'])**2 <= reach*reach:
-                pairs.append((a, b, shape_a, shape_b))
+                # These vertical fields stay fixed in this call's four passes.
+                if not vertical_overlap(
+                        a.get('y'), shape_a, b.get('y'), shape_b,
+                        pitch_a=a.get('pitch', 0.0), roll_a=a.get('roll', 0.0),
+                        pitch_b=b.get('pitch', 0.0), roll_b=b.get('roll', 0.0)):
+                    continue
+                # Yaw/shape also stay fixed; only center distances change.
+                projection = _obb_pair_projection(
+                    a['yaw'], shape_a, b['yaw'], shape_b)
+                pairs.append((a, b, projection))
     for unused_pass in range(4):
-        for a, b, shape_a, shape_b in pairs:
-            if not vertical_overlap(
-                    a.get('y'), shape_a, b.get('y'), shape_b,
-                    pitch_a=a.get('pitch', 0.0), roll_a=a.get('roll', 0.0),
-                    pitch_b=b.get('pitch', 0.0), roll_b=b.get('roll', 0.0)):
-                continue
-            hit = obb_contact(a['x'], a['z'], a['yaw'], shape_a,
-                              b['x'], b['z'], b['yaw'], shape_b)
+        for a, b, projection in pairs:
+            hit = _obb_contact_projected(
+                a['x'], a['z'], b['x'], b['z'], projection)
             hit = _owner_oriented_contact(hit, a['x']-b['x'], a['z']-b['z'], a['id'], b['id'])
             if hit is None:
                 continue
@@ -1194,16 +1336,14 @@ def resolve_pairs(tanks, dt, anchor=None):
             # private constraint roster, then publish only the owned share.
             # The caller still sweeps against the actual remote pose; no
             # speculative remote travel can open a passage through it.
-            position_response = pair_response(
-                hit, mobility_a, mobility_b,
-                (0.0, 0.0), (0.0, 0.0))
+            # The first response's correction has the same contact/mobilities
+            # and does not depend on velocity or friction_inverse.
             apply_impulse = a.get('impulse', True) and b.get('impulse', True)
             for body, offset in ((a, 0), (b, 4)):
                 dx, dz, dvx, dvz = response[offset:offset+4]
                 dv_yaw = 0.0
                 if angular is not None:
                     dvx, dvz, dv_yaw = angular[0 if offset == 0 else 1]
-                dx, dz = position_response[offset:offset+2]
                 result = results[body['id']]
                 if not body.get('position_fixed'):
                     result['correction'] = (result['correction'][0]+dx, result['correction'][1]+dz)
@@ -1590,3 +1730,134 @@ def resolve_tank(tank, others, now=None, ram_cooldowns=None,
 # Names mirror the current 0.8.2 helpers and keep adapter call sites explicit.
 _tank_chassis_shape = chassis_shape
 _tank_resolve = resolve_tank
+
+
+def contact_roster(tanks, owner_ids, dt, previous_ram_contacts):
+    """Return native contact rows or None for the existing Python chain."""
+    return native_math.contact_roster(tanks, owner_ids, dt, previous_ram_contacts)
+
+
+def finalize_contact_row(tank, by_id, row, now=None, ram_cooldowns=None,
+                         active_ram_contacts=None, contact_armor_probe=None):
+    """Settle native ram candidates at the original synchronous engine boundary.
+
+    Geometry uses frozen bodies. Only proven, nonzero damage latches a new
+    episode; the caller serializes owner rows and then applies world motion.
+    """
+    self_id = _tank_value(tank, 'id', -1)
+    x = float(_tank_value(tank, 'x', 0.0) or 0.0)
+    z = float(_tank_value(tank, 'z', 0.0) or 0.0)
+    yaw = float(_tank_value(tank, 'yaw', 0.0) or 0.0)
+    mass_self = max(float(_tank_value(tank, 'mass', 1.0) or 1.0), 1.0)
+    velocity_x = float(_tank_value(tank, 'vx', 0.0) or 0.0)
+    velocity_y = float(_tank_value(tank, 'vy', 0.0) or 0.0)
+    velocity_z = float(_tank_value(tank, 'vz', 0.0) or 0.0)
+    own_shape = _tank_shape(tank)
+    ram_events = []
+    ram_diagnostics = []
+    cooldowns = dict(ram_cooldowns or {})
+    previous_contacts = set(active_ram_contacts or ())
+    newly_damaging_pairs = set()
+    retained_contacts = set(row[6]) if now is not None else set()
+    for candidate in row[7] if now is not None else ():
+        other_id, impact_contact, closing_speed = candidate[:3]
+        other = by_id[other_id]
+        pair = (min(self_id, other_id), max(self_id, other_id))
+        if pair in previous_contacts:
+            retained_contacts.add(pair)
+            continue
+        if pair in newly_damaging_pairs:
+            continue
+        other_x = float(_tank_value(other, 'x', 0.0) or 0.0)
+        other_z = float(_tank_value(other, 'z', 0.0) or 0.0)
+        other_yaw = float(_tank_value(other, 'yaw', 0.0) or 0.0)
+        other_shape = _tank_shape(other)
+        mass_other = max(float(_tank_value(other, 'mass', 1.0) or 1.0), 1.0)
+        if _tank_value(other, 'immovable', False):
+            other_velocity_x = other_velocity_y = other_velocity_z = 0.0
+        else:
+            other_velocity_x = float(_tank_value(other, 'vx', 0.0) or 0.0)
+            other_velocity_y = float(_tank_value(other, 'vy', 0.0) or 0.0)
+            other_velocity_z = float(_tank_value(other, 'vz', 0.0) or 0.0)
+        own_ram_inputs = _contact_ram_inputs(tank)
+        other_ram_inputs = _contact_ram_inputs(other)
+        if ((own_ram_inputs is None or other_ram_inputs is None) and
+                callable(contact_armor_probe)):
+            probed = contact_armor_probe(tank, other, impact_contact)
+            if probed is not None:
+                if not isinstance(probed, (list, tuple)) or len(probed) != 2:
+                    raise RuntimeError(
+                        'tank contact armor probe result is invalid')
+                if own_ram_inputs is None:
+                    own_ram_inputs = _contact_ram_inputs(tank, probed[0])
+                if other_ram_inputs is None:
+                    other_ram_inputs = _contact_ram_inputs(other, probed[1])
+        if own_ram_inputs is None or other_ram_inputs is None:
+            ram_diagnostics.append({
+                'pair': pair,
+                'reason': 'contact_armor_unavailable',
+                'missing_self': own_ram_inputs is None,
+                'missing_other': other_ram_inputs is None,
+            })
+            continue
+        armor_self, spall_self, bonus_self = own_ram_inputs
+        armor_other, spall_other, bonus_other = other_ram_inputs
+        relative_speed = candidate[3]
+        damage_other, damage_self = ram_damage(
+            closing_speed, mass_self, mass_other,
+            armor_self, armor_other,
+            spall_self, spall_other,
+            bonus_self, bonus_other,
+            candidate[4], candidate[5])
+        if not damage_other and not damage_self:
+            continue
+        newly_damaging_pairs.add(pair)
+        # A retail ram consumes the relative kinetic impulse at contact.  A
+        # pair remains armed until the hulls separate, even if compression
+        # briefly falls below the damage threshold. A harmless initial touch
+        # is not an impact and must not suppress a later acceleration into the
+        # other hull.
+        cooldowns[pair] = float(now)
+        ram_events.append({
+            'pair': pair,
+            'self_id': self_id,
+            'other_id': other_id,
+            'contact_positions': (x, z, other_x, other_z),
+            'self_vehicle': str(
+                _tank_value(tank, 'vehicle', '') or ''),
+            'other_vehicle': str(
+                _tank_value(other, 'vehicle', '') or ''),
+            'mass_self': mass_self,
+            'mass_other': mass_other,
+            'velocity_self': (velocity_x, velocity_z),
+            'velocity_other': (other_velocity_x, other_velocity_z),
+            'velocity_y_self': velocity_y,
+            'velocity_y_other': other_velocity_y,
+            'yaw_self': yaw,
+            'yaw_other': other_yaw,
+            'shape_self': own_shape,
+            'shape_other': other_shape,
+            'contact_normal': (impact_contact[0], impact_contact[1]),
+            'contact_penetration': impact_contact[2],
+            'closing_speed': closing_speed,
+            'relative_speed': relative_speed,
+            'impact_speed': closing_speed,
+            'armor_self': armor_self,
+            'armor_other': armor_other,
+            'spall_self': spall_self,
+            'spall_other': spall_other,
+            'ramming_bonus_self': bonus_self,
+            'ramming_bonus_other': bonus_other,
+            'damage_to_other': damage_other,
+            'damage_to_self': damage_self,
+        })
+
+    return {
+        'correction': row[1],
+        'delta_velocity': row[2],
+        'delta_yaw': row[3],
+        'ram_events': tuple(ram_events),
+        'ram_diagnostics': tuple(ram_diagnostics),
+        'cooldowns': cooldowns,
+        'contacts': frozenset(retained_contacts | newly_damaging_pairs),
+    }

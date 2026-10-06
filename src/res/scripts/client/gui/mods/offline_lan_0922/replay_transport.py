@@ -238,7 +238,7 @@ class ReplayClient(LANClient):
         # intentionally no socket, outbound thread or persistent account owner.
         return bool(self.running)
 
-    def send_fire_intent(self, *args, **kwargs):
+    def send_projectile_launch(self, *args, **kwargs):
         return None
 
     def send_equipment_intent(self, *args, **kwargs):

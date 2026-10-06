@@ -358,6 +358,7 @@ def _load_runtime():
     import Avatar
     import AvatarInputHandler
     import AvatarInputHandler.control_modes as ControlModes
+    from AvatarInputHandler import gun_marker_ctrl
     import AvatarPositionControl
     import BigWorld
     import ChatManager
@@ -407,6 +408,7 @@ def _load_runtime():
     runtime.account_module = Account
     runtime.avatar_module = Avatar
     runtime.avatar_input_handler = AvatarInputHandler
+    runtime.gun_marker_ctrl = gun_marker_ctrl
     runtime.avatar_getter = avatar_getter
     runtime.ammo_controller_type = AmmoController
     runtime.arena_info_settings = ArenaInfoSettings
@@ -691,6 +693,12 @@ class OfflineCompatibility(object):
         self._original_vehicle_collide_segment = None
         self._original_vehicle_collide_segment_ext = None
         self._vehicle_set_gun_angles_code = None
+        self._original_gun_server_marker = None
+        self._gun_server_marker_property = None
+        self._original_use_client_gun_marker = None
+        self._original_use_server_gun_marker = None
+        self._use_client_gun_marker_wrapper = None
+        self._use_server_gun_marker_wrapper = None
         self._gun_rotator_stabilised_code = None
         self._gun_rotator_predict_locked_target_code = None
         self._original_projectile_segment_may_hit = None
@@ -948,6 +956,43 @@ class OfflineCompatibility(object):
                 '#1513 steady matrix relink boundary is unavailable')
         if gun_rotator_type is None:
             raise RuntimeError('#1513 VehicleGunRotator is unavailable')
+        server_marker_property = gun_rotator_type.__dict__.get(
+            'showServerMarker')
+        if (not isinstance(server_marker_property, property) or
+                server_marker_property.fget is None or
+                server_marker_property.fset is None):
+            raise RuntimeError(
+                '#1513 server gun-marker property is unavailable')
+        self._original_gun_server_marker = server_marker_property
+
+        def set_server_marker(rotator, enabled):
+            # Both stock start() and applySettings() use this setter. Keep the
+            # persisted preference untouched while the offline owner is live.
+            if compatibility._battle_active:
+                enabled = False
+            return server_marker_property.fset(rotator, enabled)
+
+        self._gun_server_marker_property = property(
+            server_marker_property.fget, set_server_marker,
+            server_marker_property.fdel, server_marker_property.__doc__)
+        gun_marker_module = getattr(runtime, 'gun_marker_ctrl', None)
+        use_client_marker = getattr(
+            gun_marker_module, 'useClientGunMarker', None)
+        use_server_marker = getattr(
+            gun_marker_module, 'useServerGunMarker', None)
+        if not callable(use_client_marker) or not callable(use_server_marker):
+            raise RuntimeError('#1513 gun-marker selection is unavailable')
+        self._original_use_client_gun_marker = use_client_marker
+        self._original_use_server_gun_marker = use_server_marker
+
+        def use_client_gun_marker():
+            return True if compatibility._battle_active else use_client_marker()
+
+        def use_server_gun_marker():
+            return False if compatibility._battle_active else use_server_marker()
+
+        self._use_client_gun_marker_wrapper = use_client_gun_marker
+        self._use_server_gun_marker_wrapper = use_server_gun_marker
         gun_rotator_stabilised = getattr(
             gun_rotator_type, 'getAvatarOwnVehicleStabilisedMatrix', None)
         if gun_rotator_stabilised is None:
@@ -2724,6 +2769,12 @@ class OfflineCompatibility(object):
             strategic_camera_type._StrategicCamera__cameraUpdate = (
                 strategic_camera_update)
             input_handler_type.onControlModeChanged = control_mode_changed
+            gun_rotator_type.showServerMarker = (
+                self._gun_server_marker_property)
+            # __onArenaStarted reads these module attributes on every arena
+            # period edge, independently of VehicleGunRotator.start/settings.
+            gun_marker_module.useClientGunMarker = use_client_gun_marker
+            gun_marker_module.useServerGunMarker = use_server_gun_marker
             vehicle_marker_type.start = vehicle_marker_start
             vehicle_marker_type.stop = vehicle_marker_stop
             consistent_matrices_type._ConsistentMatrices__linkOwnVehicle = \
@@ -2804,6 +2855,34 @@ class OfflineCompatibility(object):
                 squad_settings.SQUAD_RANGE_TO_SHOW is self._lan_squad_range):
             squad_settings.SQUAD_RANGE_TO_SHOW = self._original_squad_range
         self._original_squad_range = None
+        gun_rotator_type = getattr(
+            getattr(runtime, 'vehicle_gun_rotator', None),
+            'VehicleGunRotator', None)
+        if (gun_rotator_type is not None and
+                self._gun_server_marker_property is not None and
+                gun_rotator_type.__dict__.get('showServerMarker') is
+                self._gun_server_marker_property):
+            gun_rotator_type.showServerMarker = (
+                self._original_gun_server_marker)
+        self._original_gun_server_marker = None
+        self._gun_server_marker_property = None
+        gun_marker_module = getattr(runtime, 'gun_marker_ctrl', None)
+        if (gun_marker_module is not None and
+                self._use_client_gun_marker_wrapper is not None and
+                getattr(gun_marker_module, 'useClientGunMarker', None) is
+                self._use_client_gun_marker_wrapper):
+            gun_marker_module.useClientGunMarker = (
+                self._original_use_client_gun_marker)
+        if (gun_marker_module is not None and
+                self._use_server_gun_marker_wrapper is not None and
+                getattr(gun_marker_module, 'useServerGunMarker', None) is
+                self._use_server_gun_marker_wrapper):
+            gun_marker_module.useServerGunMarker = (
+                self._original_use_server_gun_marker)
+        self._original_use_client_gun_marker = None
+        self._original_use_server_gun_marker = None
+        self._use_client_gun_marker_wrapper = None
+        self._use_server_gun_marker_wrapper = None
         account_type = runtime.account_module.PlayerAccount
         avatar_type = runtime.avatar_module.PlayerAvatar
         ammo_controller_type = getattr(
@@ -3069,6 +3148,8 @@ class OfflineCompatibility(object):
         self._vehicle_start_wg_physics_code = None
         self._vehicle_syncing_gun_angles = None
         self._vehicle_set_gun_angles_code = None
+        self._original_gun_server_marker = None
+        self._gun_server_marker_property = None
         self._gun_rotator_stabilised_code = None
         self._gun_rotator_predict_locked_target_code = None
         self._original_projectile_segment_may_hit = None

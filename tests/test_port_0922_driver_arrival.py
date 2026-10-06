@@ -64,7 +64,7 @@ class DriverArrivalTests(unittest.TestCase):
                     position, old_yaw, yaw, pivot_offset)
                 speed = vehicle_physics.longitudinal_step(
                     params, speed, command['throttle'], command['turn'],
-                    0.0, step, handbrake=command['brake'])
+                    0.0, step)
                 position = (position[0] + math.sin(yaw) * speed * step,
                             position[1],
                             position[2] + math.cos(yaw) * speed * step)
@@ -90,7 +90,7 @@ class DriverArrivalTests(unittest.TestCase):
                 self.assertLess(reached, 7.0)
                 self.assertLessEqual(distance, WAYPOINT_ARRIVAL_RADIUS)
                 self.assertLess(maximum, self._params()['speedFwd'])
-                self.assertTrue(any(c['brake'] and c['turn'] for c in commands))
+                self.assertTrue(any(c['throttle'] == 0.0 and c['turn'] for c in commands))
                 self.assertEqual(adapter.driver.states[17]['recovery_count'], 0)
 
     def test_clear_short_routes_converge_at_slow_and_fast_traverse_rates(self):
@@ -122,8 +122,7 @@ class DriverArrivalTests(unittest.TestCase):
             self._follow((0.0, 0.0, 40.0)))
         self.assertIsNotNone(reached)
         self.assertTrue(commands)
-        self.assertTrue(all(c['throttle'] == 1.0 and not c['brake']
-                            for c in commands))
+        self.assertTrue(all(c['throttle'] == 1.0 for c in commands))
 
     @staticmethod
     def _orbit_command(driver, **overrides):
@@ -134,13 +133,13 @@ class DriverArrivalTests(unittest.TestCase):
         args.update(overrides)
         return driver.drive(**args)
 
-    def test_alignment_brake_survives_zero_speed_then_releases_when_facing_goal(self):
+    def test_alignment_coast_survives_zero_speed_then_releases_when_facing_goal(self):
         driver = LocalDriver()
-        self.assertTrue(self._orbit_command(driver)['brake'])
-        self.assertTrue(self._orbit_command(driver, speed=0.0)['brake'])
+        self.assertEqual(self._orbit_command(driver)['throttle'], 0.0)
+        self.assertEqual(self._orbit_command(driver, speed=0.0)['throttle'], 0.0)
         aligned = self._orbit_command(driver, speed=0.0, yaw=-math.pi / 2.0)
         self.assertEqual(aligned['throttle'], 1.0)
-        self.assertFalse(aligned['brake'])
+        self.assertIsNone(driver.states[17]['coast_target'])
 
     def test_hold_reverse_new_goal_and_missing_physics_clear_alignment(self):
         for override in ({'movement_intent': False}, {'speed': -1.0},
@@ -149,9 +148,9 @@ class DriverArrivalTests(unittest.TestCase):
             with self.subTest(override=override):
                 driver = LocalDriver()
                 self._orbit_command(driver)
-                self.assertIsNotNone(driver.states[17].get('alignment_target'))
+                self.assertIsNotNone(driver.states[17].get('coast_target'))
                 self._orbit_command(driver, **override)
-                self.assertIsNone(driver.states[17].get('alignment_target'))
+                self.assertIsNone(driver.states[17].get('coast_target'))
 
     def test_terrain_avoidance_retains_its_checked_exit(self):
         driver = LocalDriver()
@@ -161,9 +160,9 @@ class DriverArrivalTests(unittest.TestCase):
             driver, direction_clear=lambda heading, *unused: heading > -1.4)
         self.assertEqual(command['recovery_mode'], 'avoid')
         self.assertEqual(command['throttle'], 1.0)
-        self.assertIsNone(driver.states[17].get('alignment_target'))
+        self.assertIsNone(driver.states[17].get('coast_target'))
 
-    def test_local_target_probe_keeps_leading_hull_and_decision_travel(self):
+    def test_local_target_keeps_current_candidate_probe_contract(self):
         target = (0.0, 0.0, 2.0)
         adapter = BotAdapter('airfield', 11,
                              navigation_target=lambda *unused: target)
@@ -173,25 +172,22 @@ class DriverArrivalTests(unittest.TestCase):
         order = {'combat_mode': 'route', 'move_position': (0.0, 0.0, 200.0)}
         probes = []
 
-        def wall_at_six_metres(yaw, maximum_distance=None):
-            # The range is callback-visible before LocalDriver asks its first
-            # candidate. Runtime can keep its ordinary vehicle-blocker check,
-            # then bound the native ray instead of seeing the wall past arrival.
-            self.assertIsNone(maximum_distance)
-            distance = state.get('navigation_probe_distance', 15.0)
-            probes.append(distance)
-            return math.cos(yaw) * distance < 6.0
+        def blocked_straight(yaw, maximum_distance=None):
+            probes.append((yaw, maximum_distance))
+            return abs(yaw) > 0.3
 
-        command = adapter.decide_with_order(state, order, wall_at_six_metres)
-        self.assertEqual(command['recovery_mode'], 'drive')
-        self.assertEqual(command['turn'], 0.0)
-        self.assertAlmostEqual(probes[0], 3.9)
-        state['speed'] = 20.0
-        adapter.decide_with_order(state, order, lambda *unused: True)
-        self.assertAlmostEqual(state['navigation_probe_distance'], 7.4)
-        order['throttle_override'] = 0.0
-        adapter.decide_with_order(state, order, lambda *unused: True)
+        command = adapter.decide_with_order(state, order, blocked_straight)
+        self.assertEqual(command['recovery_mode'], 'avoid')
+        self.assertEqual(command['move_position'], target)
+        self.assertGreater(abs(command['turn']), 0.0)
+        self.assertEqual(command['throttle'], 1.0)
+        self.assertTrue(probes)
+        self.assertTrue(all(distance is None for unused, distance in probes))
         self.assertNotIn('navigation_probe_distance', state)
+        order['throttle_override'] = 0.0
+        command = adapter.decide_with_order(state, order, blocked_straight)
+        self.assertEqual(command['throttle'], 0.0)
+        self.assertFalse(command['movement_intent'])
 
 
 if __name__ == '__main__':

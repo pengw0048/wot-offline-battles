@@ -91,7 +91,7 @@ class Gameplay083Tests(unittest.TestCase):
         self.assertIsNone(stun_mechanics.impact(
             dict(shell, kind='ARMOR_PIERCING'), 1000, 0, stun_config()))
 
-    def test_worker_generates_stun_and_server_expires_its_stat_effects(self):
+    def test_projectile_owner_generates_stun_and_server_expires_its_stat_effects(self):
         state = projectile_fixtures._state()
         launch = projectile_fixtures._launch(is_he=True, splash_radius=8.0)
         launch['source_shot']['shell']['stun'] = stun_shell()
@@ -109,8 +109,7 @@ class Gameplay083Tests(unittest.TestCase):
                 effect, launch['source_shot'], {}, target, {'cursor_time': 1.0}, 0.0))
         self.assertIsNotNone(lan_client._strict_projectile_effect(effect))
         self.assertTrue(state.resolve_projectile(
-            projectile_fixtures.SIMULATION_WORKER_AUTHORITY_ID,
-            projectile_fixtures._resolve('1:p:1:1', direct=effect)))
+            1, projectile_fixtures._resolve(state, '1:p:1:1', direct=effect)))
         victim = state.players[2]
         self.assertEqual(effect['stun_factors'], victim.stun_factors)
         self.assertEqual(effect['stun_factors'], state._public_player(victim)['stun_factors'])
@@ -123,8 +122,7 @@ class Gameplay083Tests(unittest.TestCase):
         victim = state.players[2]
         health = victim.health
         self.assertTrue(state.resolve_projectile(
-            projectile_fixtures.SIMULATION_WORKER_AUTHORITY_ID,
-            projectile_fixtures._resolve('1:p:1:1', direct=projectile_fixtures._effect(
+            1, projectile_fixtures._resolve(state, '1:p:1:1', direct=projectile_fixtures._effect(
                 stun_end_server_time_ms=1))))
         self.assertEqual(health - 100, victim.health)
         self.assertEqual(0, victim.stun_end_server_time_ms)

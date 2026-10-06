@@ -204,17 +204,17 @@ class TD7ReceiptTests(unittest.TestCase):
             self.assertTrue(projectile_fixture._launch_authority(state,
                 projectile_fixture._launch(is_he=True, splash_radius=15.0,
                                            penetration_factor=0.0)))
-            message = projectile_fixture._resolve('1:p:1:1', penetration_factor=0.0,
+            message = projectile_fixture._resolve(state, '1:p:1:1', penetration_factor=0.0,
                 direct=projectile_fixture._effect(damage=100),
                 splash=[projectile_fixture._effect(target_id=1, damage=self_damage,
                     x=10., target_pose=(0., 1., 0.))])
             self.assertTrue(state.resolve_projectile(
-                projectile_fixture.SIMULATION_WORKER_AUTHORITY_ID, message),
+                1, message),
                 state.last_projectile_resolve_reject)
             self.assertEqual(self_damage == 0, self.kill_events(state)[0][6])
             self.assertEqual(1000 - self_damage, state.players[1].health)
             self.assertTrue(state.resolve_projectile(
-                projectile_fixture.SIMULATION_WORKER_AUTHORITY_ID, message))
+                1, message))
             self.assertEqual(1, len(self.kill_events(state)))
 
     def test_fire_kill_uses_health_at_burn_not_at_ignition(self):

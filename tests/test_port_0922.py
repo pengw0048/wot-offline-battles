@@ -460,6 +460,7 @@ class PortSourceTests(unittest.TestCase):
             package = root / 'mod.wotmod'
             checksum = root / 'mod.wotmod.sha256'
             native_bridge = root / 'offline_instance_guard_native.pyd'
+            native_math = root / 'offline_math_batch_native.pyd'
             worker_starter = root / 'offline_worker_starter.exe'
             server_executable = root / 'WoT-0.9.22-LAN-Server.exe'
             graphs = root / 'navgraphs'
@@ -470,6 +471,7 @@ class PortSourceTests(unittest.TestCase):
             package.write_bytes(b'mod')
             checksum.write_text('checksum\n', encoding='ascii')
             native_bridge.write_bytes(b'native bridge')
+            native_math.write_bytes(b'native geometry')
             worker_starter.write_bytes(b'worker starter')
             server_executable.write_bytes(b'LAN server')
             overlay, archive = packager._write_client_overlay(
@@ -478,6 +480,7 @@ class PortSourceTests(unittest.TestCase):
                 str(PORT_ROOT / 'foliage'),
                 str(PORT_ROOT / 'destructibles'),
                 native_bridge_source=str(native_bridge),
+                native_math_source=str(native_math),
                 worker_starter_source=str(worker_starter),
                 server_executable_source=str(server_executable))
 
@@ -506,6 +509,9 @@ class PortSourceTests(unittest.TestCase):
                 Path(overlay) / 'mods' / '0.9.22.0.1' /
                 packager.NATIVE_BRIDGE_FILENAME)
             self.assertEqual(b'native bridge', packaged_bridge.read_bytes())
+            self.assertEqual(b'native geometry', (
+                Path(overlay) / 'mods' / '0.9.22.0.1' /
+                packager.NATIVE_MATH_FILENAME).read_bytes())
             packed_xml = _load_tool('packed_xml')
             for filename, preferences_leaf in packager.PREFERENCES_CONFIGS:
                 packaged_config = (
@@ -1928,6 +1934,106 @@ class OfflineCompatibilityTests(unittest.TestCase):
         finally:
             compatibility.fini()
         self.assertIs(original, runtime.arena_info_settings.SQUAD_RANGE_TO_SHOW)
+
+    def test_offline_marker_property_survives_start_settings_and_restart(self):
+        module = _load_port_source('compat')
+        runtime, unused = self._runtime()
+        rotator_type = runtime.vehicle_gun_rotator.VehicleGunRotator
+        original = rotator_type.__dict__['showServerMarker']
+        compatibility = module.OfflineCompatibility(runtime)
+        compatibility.install()
+        rotator = rotator_type()
+        rotator.start()
+        self.assertTrue(rotator.showServerMarker)
+        compatibility.configure_battle()
+        try:
+            for client_mode in (False, True):
+                rotator.clientMode = client_mode
+                rotator.start()
+                rotator.applySettings({'useServerAim': True})
+                rotator.start()
+                self.assertFalse(rotator.showServerMarker)
+                self.assertEqual([False, False, False],
+                                 rotator.server_aim_calls[-3:])
+                self.assertEqual([False, False, False],
+                                 rotator.server_marker_calls[-3:])
+                self.assertEqual(client_mode, rotator.clientMode)
+                self.assertEqual({'useServerAim': True}, rotator.saved_settings)
+            replacement = rotator_type()
+            replacement.start()
+            self.assertFalse(replacement.showServerMarker)
+            compatibility.deactivate_map()
+            replacement.start()
+            self.assertTrue(replacement.showServerMarker)
+        finally:
+            compatibility.fini()
+        self.assertIs(original, rotator_type.__dict__['showServerMarker'])
+        rotator.applySettings({'useServerAim': True})
+        self.assertTrue(rotator.showServerMarker)
+
+    def test_offline_marker_helpers_cover_arena_and_control_mode_edges(self):
+        module = _load_port_source('compat')
+        runtime, unused = self._runtime()
+        markers = runtime.gun_marker_ctrl
+        original_client = markers.useClientGunMarker
+        original_server = markers.useServerGunMarker
+        handler = runtime.avatar_input_handler.AvatarInputHandler()
+        compatibility = module.OfflineCompatibility(runtime)
+        compatibility.install()
+        try:
+            for saved in (False, True):
+                markers.settings['useServerAim'] = saved
+                handler._AvatarInputHandler__onArenaStarted('battle')
+                self.assertEqual(not saved, handler.marker_flags['client'])
+                self.assertEqual(saved, handler.marker_flags['server'])
+                compatibility.configure_battle()
+                for mode in ('arcade', 'sniper', 'strategic', 'arcade'):
+                    handler.onControlModeChanged(mode)
+                    handler._AvatarInputHandler__onArenaStarted('battle')
+                    self.assertEqual(
+                        {'control': True, 'client': True, 'server': False},
+                        handler.marker_flags)
+                    self.assertEqual(saved, markers.settings['useServerAim'])
+                compatibility.deactivate_map()
+                handler._AvatarInputHandler__onArenaStarted('battle')
+                self.assertEqual(not saved, handler.marker_flags['client'])
+                self.assertEqual(saved, handler.marker_flags['server'])
+        finally:
+            compatibility.fini()
+        self.assertIs(original_client, markers.useClientGunMarker)
+        self.assertIs(original_server, markers.useServerGunMarker)
+
+    def test_failed_install_restores_marker_property_and_helpers(self):
+        class RejectProjectilePatch(types.SimpleNamespace):
+            def __setattr__(self, name, value):
+                if name == 'segmentMayHitEntity':
+                    raise RuntimeError('projectile hook install failed')
+                super(RejectProjectilePatch, self).__setattr__(name, value)
+
+        module = _load_port_source('compat')
+        runtime, unused = self._runtime()
+        projectile = runtime.projectile_mover_module
+        runtime.projectile_mover_module = RejectProjectilePatch(
+            **projectile.__dict__)
+        rotator_type = runtime.vehicle_gun_rotator.VehicleGunRotator
+        original_property = rotator_type.__dict__['showServerMarker']
+        markers = runtime.gun_marker_ctrl
+        original_client = markers.useClientGunMarker
+        original_server = markers.useServerGunMarker
+        compatibility = module.OfflineCompatibility(runtime)
+        with self.assertRaisesRegex(RuntimeError, 'projectile hook install'):
+            compatibility.install()
+        self.assertIs(original_property, rotator_type.__dict__['showServerMarker'])
+        self.assertIs(original_client, markers.useClientGunMarker)
+        self.assertIs(original_server, markers.useServerGunMarker)
+        runtime.projectile_mover_module = projectile
+        compatibility.install()
+        compatibility.configure_battle()
+        self.assertTrue(markers.useClientGunMarker())
+        self.assertFalse(markers.useServerGunMarker())
+        compatibility.fini()
+        self.assertIs(original_client, markers.useClientGunMarker)
+        self.assertIs(original_server, markers.useServerGunMarker)
 
     def test_death_message_adapter_restores_owned_or_inherited_method(self):
         for owns in (True, False):
@@ -3533,11 +3639,31 @@ class OfflineCompatibilityTests(unittest.TestCase):
             def __onModelLoaded(self, unused_resources):
                 return self.entity.filter.groundPlacingMatrix
 
+        marker_settings = {'useServerAim': False}
+        gun_marker_module = types.SimpleNamespace(
+            settings=marker_settings,
+            useServerGunMarker=lambda: marker_settings['useServerAim'])
+        gun_marker_module.useClientGunMarker = (
+            lambda: not gun_marker_module.useServerGunMarker())
+
         class AvatarInputHandler(object):
             def __init__(self):
                 self._AvatarInputHandler__ctrlModeName = None
                 self.steadyVehicleMatrixCalculator = \
                     SteadyVehicleMatrixCalculator()
+                self.marker_flags = {}
+
+            def showGunMarker(self, isShown):
+                self.marker_flags['client'] = isShown
+
+            def showGunMarker2(self, isShown):
+                self.marker_flags['server'] = isShown
+                self.marker_flags['client'] = not isShown
+
+            def __onArenaStarted(self, period):
+                self.marker_flags['control'] = period == 'battle'
+                self.showGunMarker2(gun_marker_module.useServerGunMarker())
+                self.showGunMarker(gun_marker_module.useClientGunMarker())
 
             def onControlModeChanged(self, eMode, **args):
                 self.steadyVehicleMatrixCalculator.relinkSources()
@@ -3645,6 +3771,36 @@ class OfflineCompatibilityTests(unittest.TestCase):
                 return 0.0
 
         class VehicleGunRotator(object):
+            def __init__(self):
+                self._show_server_marker = False
+                self.clientMode = True
+                self.saved_settings = {'useServerAim': True}
+                self.server_aim_calls = []
+                self.server_marker_calls = []
+
+            def _get_show_server_marker(self):
+                return self._show_server_marker
+
+            def _set_show_server_marker(self, value):
+                self._show_server_marker = bool(value)
+                self.enableServerAim(bool(value))
+                self.showGunMarker2(bool(value))
+
+            showServerMarker = property(
+                _get_show_server_marker, _set_show_server_marker)
+
+            def enableServerAim(self, enabled):
+                self.server_aim_calls.append(enabled)
+
+            def showGunMarker2(self, enabled):
+                self.server_marker_calls.append(enabled)
+
+            def start(self):
+                self.showServerMarker = self.saved_settings['useServerAim']
+
+            def applySettings(self, settings):
+                self.showServerMarker = settings['useServerAim']
+
             def getAvatarOwnVehicleStabilisedMatrix(self, vehicle):
                 return vehicle.filter.interpolateStabilisedMatrix(123.0)
 
@@ -3783,6 +3939,7 @@ class OfflineCompatibilityTests(unittest.TestCase):
             avatar_module=avatar_module,
             avatar_input_handler=types.SimpleNamespace(
                 AvatarInputHandler=AvatarInputHandler),
+            gun_marker_ctrl=gun_marker_module,
             control_modes=types.SimpleNamespace(
                 ArcadeControlMode=ArcadeControlMode,
                 SniperControlMode=SniperControlMode,
@@ -6240,7 +6397,7 @@ class LANClientTests(unittest.TestCase):
                 module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                module.PLAYER_FIRE_INTENT_CAPABILITY,
+                module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY,
                 module.RANDOM_MAP_CAPABILITY,
@@ -6557,7 +6714,7 @@ class LANClientTests(unittest.TestCase):
                 module.PROJECTILE_HIT_VEHICLE_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                module.PLAYER_FIRE_INTENT_CAPABILITY,
+                module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY,
             ],
@@ -6632,7 +6789,7 @@ class LANClientTests(unittest.TestCase):
                 module.RICOCHET_CONTINUATION_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                module.PLAYER_FIRE_INTENT_CAPABILITY,
+                module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY],
             'authority_epoch': 1,
@@ -6661,7 +6818,7 @@ class LANClientTests(unittest.TestCase):
                 module.RICOCHET_CONTINUATION_CAPABILITY,
                 module.RAM_CONTACT_LEDGER_CAPABILITY,
                 module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                module.PLAYER_FIRE_INTENT_CAPABILITY,
+                module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 module.PLAYER_ENVIRONMENT_CAPABILITY,
                 module.EFFECTIVE_PARAMS_CAPABILITY],
             'authority_epoch': 1,
@@ -6955,9 +7112,24 @@ class BootstrapContractTests(unittest.TestCase):
         services_ui_module.install = mock.Mock()
         services_ui_module.uninstall = mock.Mock()
         lobby_entry.attach_mock(services_ui_module.install, 'install_services')
+        engine_audio_module = types.ModuleType(
+            'gui.mods.offline_lan_0922.engine_audio')
+        engine_audio_module.install = mock.Mock()
+        engine_audio_module.uninstall = mock.Mock()
+        diagnostics_module = types.ModuleType(
+            'gui.mods.offline_lan_0922.runtime_diagnostics')
+        diagnostics_module.install_exit_trace = mock.Mock()
+        replay_module = types.ModuleType(
+            'gui.mods.offline_lan_0922.offline_replay')
+        replay_module.replay_request = mock.Mock(return_value=False)
+        lobby_entry.attach_mock(engine_audio_module.install, 'install_audio')
+        lobby_entry.attach_mock(
+            diagnostics_module.install_exit_trace, 'install_exit_trace')
         compatibility_module = types.ModuleType(
             'gui.mods.offline_lan_0922.compat')
         compatibility_module.g_compatibility = compatibility
+        compatibility_module.pin_dossier_cache = mock.Mock()
+        compatibility_module.pin_account_settings = mock.Mock()
         account_state = types.SimpleNamespace()
         garage_store = object()
         state_module = types.ModuleType(
@@ -7047,6 +7219,9 @@ class BootstrapContractTests(unittest.TestCase):
                 postbattle_module,
             'gui.mods.offline_lan_0922.lan_session': lan_session,
             'gui.mods.offline_lan_0922.offline_services_ui': services_ui_module,
+            'gui.mods.offline_lan_0922.engine_audio': engine_audio_module,
+            'gui.mods.offline_lan_0922.runtime_diagnostics': diagnostics_module,
+            'gui.mods.offline_lan_0922.offline_replay': replay_module,
             'gui.mods.offline_lan_0922.lobby_ui': lobby_ui_module,
             'gui.mods.offline_lan_0922.worker_presentation':
                 worker_presentation_module,
@@ -7108,7 +7283,8 @@ class BootstrapContractTests(unittest.TestCase):
                 session.install.assert_called_once_with()
                 compatibility.connect.assert_called_once()
                 self.assertEqual(
-                    [mock.call.install(), mock.call.install_services(),
+                    [mock.call.install_audio(), mock.call.install_exit_trace(),
+                     mock.call.install(), mock.call.install_services(),
                      mock.call.connect(
                         show_lobby=True,
                         account_context={'selected_vehicle': {
@@ -7135,6 +7311,7 @@ class BootstrapContractTests(unittest.TestCase):
             self.assertFalse(module._started)
             module._signal_player_ready.assert_called_once_with()
             services_ui_module.uninstall.assert_called_once_with()
+            engine_audio_module.uninstall.assert_called_once_with()
 
             # A lobby-stage timeout must fully undo the connection adapter
             # and listener, then allow a clean init.  Keep the hangar not
@@ -7226,6 +7403,13 @@ class BootstrapContractTests(unittest.TestCase):
             [expected_session, expected_session],
             lan_session.LANSession.call_args_list)
         self.assertEqual(2, session.install.call_count)
+        self.assertEqual(2, engine_audio_module.install.call_count)
+        self.assertEqual(5, engine_audio_module.uninstall.call_count)
+        self.assertEqual(2, diagnostics_module.install_exit_trace.call_count)
+        self.assertEqual(
+            [mock.call(module._dossier_cache_career)] * 2,
+            compatibility_module.pin_dossier_cache.call_args_list)
+        self.assertEqual(2, compatibility_module.pin_account_settings.call_count)
         self.assertEqual(2, services_ui_module.install.call_count)
         self.assertEqual(2, announcement_ui.install.call_count)
         self.assertEqual(2, announcement_ui.uninstall.call_count)

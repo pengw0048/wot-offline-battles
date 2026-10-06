@@ -77,24 +77,26 @@ class ConditionalCrewTests(unittest.TestCase):
         entity._crew_ko.clear()
         self.assertEqual(1.0, battle._local_stat_factor(entity, 'dispersion'))
 
-    def test_worker_commits_the_same_low_hp_reload_as_the_visible_client(self):
+    def test_local_projectile_commits_low_hp_reload_once(self):
         battle, entity = self.scene()
         entity.health = 49
         expected = battle._local_stat_factor(entity, 'reload')
         gun = GunState(entity.typeDescriptor)
-        gun._effective_params = battle._local_effective_params
         gun.load_started = True
         gun.clip = 1
         gun.reload_time = 0.0
-        battle._worker_mode = True
-        battle._local_effective_params = None
-        battle._player_authority_guns[1] = gun
-        battle._player_fire_launch_pending[1] = {
-            'intent_seq': 1, 'input_seq': 2, 'shot_seq': 3}
-        self.assertTrue(battle._accept_player_fire_commit(
-            {'shooter_kind': 'player', 'shooter_id': 1, 'fire_intent_seq': 1,
-             'fire_input_seq': 2, 'shot_seq': 3, 'shell_index': 0},
-            {'engine_id': 10, 'local': False}))
+        battle._gun_state = gun
+        battle._projectile_meta['shot'] = {}
+        event = {'projectile_id': 'shot', 'shell_index': 0}
+        record = {'engine_id': 10, 'local': True}
+        ammo_before = list(gun.ammo)
+        with mock.patch.object(battle, '_advance_local_gun_edge',
+                               return_value=None), \
+                mock.patch.object(battle, '_publish_ammo_state'), \
+                mock.patch.object(battle, '_publish_reload_event'):
+            self.assertTrue(battle._commit_local_player_fire(event, record, {}))
+            self.assertFalse(battle._commit_local_player_fire(event, record, {}))
+        self.assertEqual(ammo_before[0] - 1, gun.ammo[0])
         self.assertAlmostEqual(gun.reload * expected, gun.reload_duration)
 
     def test_preventative_maintenance_follows_target_crew_on_the_worker(self):

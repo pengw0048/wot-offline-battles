@@ -264,6 +264,12 @@ class ArtilleryController(object):
             return True, None
         key = self._settled_planning_key(slot, key)
         self._replace_planning_key(slot, key)
+        now = float(now)
+        ready, result = self.queue.result(key, now)
+        if ready:
+            return ready, result
+        if key in self.queue.jobs or key in self.queue.waiting:
+            return False, None
         candidates = self._candidates(
             source, target, descriptor, shell_index)
         return self.queue.request(
@@ -393,6 +399,15 @@ class ArtilleryController(object):
         cached = self._launch_receipts.get(key)
         if cached is not None:
             return True, cached
+        now = float(now)
+        ready, result = self.launch_queue.result(key, now)
+        if ready:
+            if result is not None:
+                self._launch_receipts[key] = result
+                self.launch_queue.results.pop(key, None)
+            return ready, result
+        if key in self.launch_queue.jobs or key in self.launch_queue.waiting:
+            return False, None
         horizontal = math.cos(pitch)
         velocity = (
             math.sin(yaw) * horizontal * speed,

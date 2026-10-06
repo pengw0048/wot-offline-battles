@@ -35,6 +35,7 @@ BUILD_IDENTITY_ENV = 'WOT_OFFLINE_BUILD_IDENTITY'
 BUILD_IDENTITY_FILENAME = 'build_identity.json'
 BUILD_IDENTITY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
 NATIVE_BRIDGE_FILENAME = 'offline_instance_guard_native.pyd'
+NATIVE_MATH_FILENAME = 'offline_math_batch_native.pyd'
 WORKER_STARTER_FILENAME = 'offline_worker_starter.exe'
 SERVER_FILENAME = 'WoT-0.9.22-LAN-Server.exe'
 PREFERENCES_CONFIGS = (
@@ -197,13 +198,19 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
                           native_bridge_source=None,
                           worker_starter_source=None,
                           server_executable_source=None,
-                          build_identity=None):
+                          build_identity=None,
+                          native_math_source=None):
     release_config = _release_config()
     build_identity = (
         _generated_build_identity() if build_identity is None
         else str(build_identity))
     native_bridge_source = native_bridge_source or os.path.join(
         os.path.dirname(__file__), 'native', NATIVE_BRIDGE_FILENAME)
+    native_math_source = native_math_source or os.path.join(
+        os.path.dirname(__file__), 'native', NATIVE_MATH_FILENAME)
+    if not os.path.isfile(native_math_source):
+        raise SystemExit('native geometry module is missing: %s' %
+                         native_math_source)
     worker_starter_source = worker_starter_source or os.path.join(
         os.path.dirname(__file__), 'native', WORKER_STARTER_FILENAME)
     server_executable_source = server_executable_source or os.path.join(
@@ -233,6 +240,7 @@ def _write_client_overlay(dist_root, package_path, checksum_path, digest,
     # Windows cannot load a native extension directly from a wotmod ZIP.
     # Keep the exact-build bridge beside the package for imp.load_dynamic.
     shutil.copy2(native_bridge_source, mod_root)
+    shutil.copy2(native_math_source, mod_root)
     preferences_source = os.path.join(
         os.path.dirname(__file__), 'client_overlay', 'res_mods',
         '0.9.22.0.1')

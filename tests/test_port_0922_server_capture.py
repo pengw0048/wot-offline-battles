@@ -270,12 +270,15 @@ class ServerCaptureTests(unittest.TestCase):
         self.assertFalse(state.rules_state['bases']['1']['stopped'])
 
     def test_bot_hit_resets_only_damaged_human_contribution(self):
+        from test_port_0922_server_projectiles import _attach_worker_authority
+
         state = self._state()
         state.players[1] = _player(1, 1, 200.0, 0.0)
         state.players[2] = _player(2, 2, 0.0, 0.0)
         state.players[3] = _player(3, 2, 1.0, 0.0)
-        state.bot_authority_id = 1
-        state.bot_manifest_authority_id = 1
+        _attach_worker_authority(state)
+        authority_id = state.bot_authority_id
+        state.bot_manifest_authority_id = authority_id
         state.bot_states[11] = {
             'id': 11, 'team': 1, 'alive': True, 'world_pose': True,
             'x': 100.0, 'y': 0.0, 'z': 0.0, 'fire_seq': 2,
@@ -324,9 +327,9 @@ class ServerCaptureTests(unittest.TestCase):
                     },
                 },
             }
-            self.assertTrue(state.launch_projectile(1, launch))
+            self.assertTrue(state.launch_projectile(authority_id, launch))
             projectile_id = '%d:b:11:%d' % (state.round_id, shot_seq)
-            return state.resolve_projectile(1, {
+            return state.resolve_projectile(authority_id, {
                 'type': 'projectile_resolve',
                 'round_id': state.round_id,
                 'authority_epoch': state.authority_epoch,

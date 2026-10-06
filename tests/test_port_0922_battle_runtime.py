@@ -284,6 +284,10 @@ class _Model(object):
         self.node_bindings = []
         self.fashions = None
 
+    @property
+    def root(self):
+        return self.matrix
+
     def setupFashions(self, fashions):
         self.fashions = fashions
 
@@ -1221,6 +1225,7 @@ class _Avatar(object):
         self.other_vehicle_devices = []
         self.hit_directions = []
         self.shot_results = []
+        self.soundNotifications = types.SimpleNamespace(play=mock.Mock())
         self.dispersion_queries = []
         self.battle_events = []
         self.chat_actions = []
@@ -2104,6 +2109,7 @@ def _xyz_of(value):
 class _Client(object):
     def __init__(self):
         self.player_id = 1
+        self.authority_epoch = 4
         self.name = 'Player'
         self.vehicle = 'ussr:R11_MS-1'
         self.vehicle_compact_descr = 'dGVzdA=='
@@ -2139,22 +2145,9 @@ class _Client(object):
             'track_repair', tracks, base_revision, repair_seq))
         return True
 
-    def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle, presentation_ledger,
-                         trigger_server_time_ms, shells_before_shot=None):
-        self._fire_intent_seq += 1
-        self.sent.append((
-            'fire_intent', (shell_index,),
-            {'input_seq': self._input_seq,
-             'intent_seq': self._fire_intent_seq,
-             'shot_origin': list(shot_origin),
-             'shot_direction': list(shot_direction),
-             'dispersion_angle': float(dispersion_angle),
-             'presentation_ledger': [
-                 dict(entry) for entry in presentation_ledger],
-             'trigger_server_time_ms': trigger_server_time_ms,
-             'shells_before_shot': shells_before_shot}))
-        return self._fire_intent_seq
+    def send_projectile_launch(self, *values, **kwargs):
+        self.sent.append(('projectile_launch', values, copy.deepcopy(kwargs)))
+        return values[2]
 
 
 def _effective_params_snapshot(mass=25000.0, reload_factor=1.0,
@@ -3289,7 +3282,8 @@ class NativeRemoteVehicleFactoryTests(unittest.TestCase):
         detailed_engine = types.SimpleNamespace(
             vehicleSpeedLink=None, rotationSpeedLink=None)
         pending.appearance.detailedEngineState = detailed_engine
-        pending.appearance.engineAudition = object()
+        pending.appearance.engineAudition = types.SimpleNamespace(
+            attachToModel=mock.Mock(), setSpeedInfo=mock.Mock())
         wheels_animator = types.SimpleNamespace(
             setMovementInfo=mock.Mock())
         pending.appearance.wheelsAnimator = wheels_animator
@@ -7544,6 +7538,270 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertAlmostEqual(
             0.003, diagnostics._pending['stages']['diag_emit'])
 
+    def test_frame_totals_keep_cpu_and_bot_timing_without_combat_scopes(self):
+        wall, cpu, payloads = [0.0], [10.0], []
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], cpu_clock=lambda: cpu[0],
+            writer=payloads.append, window_seconds=0.25)
+        context = {'role': 'worker', 'bot_count': 29}
+
+        first = diagnostics.begin(0.0, 0.02)
+        wall[0], cpu[0] = 0.012, 10.009
+        diagnostics.finish(first, 0.0, 0.02, 0.02,
+                           {'bots_update': 0.008}, {}, context)
+        wall[0], cpu[0] = 0.020, 10.010
+        second = diagnostics.begin(0.020, 0.020)
+        wall[0], cpu[0] = 0.026, 10.014
+        diagnostics.finish(second, 0.020, 0.03, 0.03,
+                           {'bots_update': 0.003}, {}, context)
+        wall[0], cpu[0] = 0.050, 10.020
+        diagnostics.begin(0.050, 0.030)
+
+        diagnostics.flush()
+        snapshot = diagnostics.snapshot()
+        self.assertEqual(2, snapshot['samples'])
+        self.assertAlmostEqual(25.0, snapshot['frame_interval_ms']['p50'])
+        self.assertAlmostEqual(9.0, snapshot['python_callback_ms']['p50'])
+        self.assertEqual({'avg_ms': 5.5, 'max_ms': 8.0},
+                         snapshot['python_stages_ms']['bots_update'])
+        self.assertEqual(2, snapshot['main_thread_cpu']['samples'])
+        for key, expected in (('avg_ms', 6.5), ('max_ms', 9.0),
+                              ('matched_wall_avg_ms', 9.0)):
+            self.assertAlmostEqual(expected, snapshot['main_thread_cpu'][key])
+        self.assertEqual(1, len(payloads))
+        self.assertIn('gap_ms_p50_p95_p99_max=', payloads[0])
+        self.assertIn('python_ms_p50_p95_p99_max=', payloads[0])
+        self.assertIn('bots_update=5.500/8.000', payloads[0])
+        self.assertIn('thread_cpu samples=2/2 cpu_ms_avg_max=6.500/9.000 '
+                      'matched_callback_wall_ms_avg=9.000', payloads[0])
+        self.assertNotIn('combat_summary ', payloads[0])
+        self.assertNotIn('combat_checkpoint ', payloads[0])
+
+    @staticmethod
+    def _lan_poll_test_totals(generation=1, seconds=1.0, calls=20):
+        values = {'generation': generation}
+        for name in ('poll', 'materialize', 'handle', 'notify'):
+            values[name + '_wall_seconds'] = seconds
+            values[name + '_calls'] = calls
+        return values
+
+    def test_frame_lan_poll_matches_outside_and_excludes_in_frame_reentry(self):
+        wall, payloads = [0.0], []
+        totals = self._lan_poll_test_totals()
+        getter = lambda: dict(totals)
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=payloads.append,
+            window_seconds=30.0)
+        first = diagnostics.begin(0.0, 0.02, lan_poll_getter=getter)
+        self.assertEqual(0, diagnostics._samples)
+        # Existing lobby totals and this callback's reentrant poll are not
+        # part of the later finish -> begin outside interval.
+        totals['poll_wall_seconds'] += 0.004
+        totals['poll_calls'] += 1
+        wall[0] = 0.010
+        diagnostics.finish(first, 0.0, 0.02, 0.02, {}, {}, {'role': 'worker'})
+        for name, elapsed, calls in (
+                ('poll', 0.018, 2), ('materialize', 0.003, 1),
+                ('handle', 0.010, 5), ('notify', 0.007, 5)):
+            totals[name + '_wall_seconds'] += elapsed
+            totals[name + '_calls'] += calls
+        second = diagnostics.begin(0.100, 0.100, 0.020, getter)
+        self.assertAlmostEqual(0.070, diagnostics._slow[0]['outside'])
+        self.assertAlmostEqual(
+            0.052, diagnostics._slow[0]['outside_without_lan_poll'])
+        # A second in-frame poll must not leak into the zero-poll interval.
+        totals['poll_wall_seconds'] += 0.002
+        totals['poll_calls'] += 1
+        wall[0] = 0.110
+        diagnostics.finish(second, 0.100, 0.1, 0.1, {}, {}, {'role': 'worker'})
+        diagnostics.begin(0.200, 0.100, lan_poll_getter=getter)
+        diagnostics.flush()
+
+        snapshot = diagnostics.snapshot()
+        self.assertEqual(2, snapshot['samples'])
+        self.assertAlmostEqual(80.0, snapshot['outside_callback_ms']['p50'])
+        self.assertEqual(2, snapshot['lan_poll']['samples'])
+        self.assertEqual(0, snapshot['lan_poll']['unmatched'])
+        stages = snapshot['lan_poll']['stages_ms']
+        for name, average, maximum, count, parent in (
+                ('poll', 9.0, 18.0, 2, 'outside'),
+                ('materialize', 1.5, 3.0, 1, 'poll'),
+                ('handle', 5.0, 10.0, 5, 'poll'),
+                ('notify', 3.5, 7.0, 5, 'handle')):
+            self.assertAlmostEqual(average, stages[name]['avg_ms'])
+            self.assertAlmostEqual(maximum, stages[name]['max_ms'])
+            self.assertEqual(count, stages[name]['calls'])
+            self.assertEqual(parent, stages[name]['parent'])
+        residual = snapshot['outside_without_lan_poll_ms']
+        self.assertEqual(2, residual['samples'])
+        self.assertAlmostEqual(71.0, residual['avg_ms'])
+        self.assertAlmostEqual(90.0, residual['max_ms'])
+        self.assertFalse(residual['gpu_measured'])
+        self.assertNotIn('poll', snapshot['python_stages_ms'])
+        self.assertIn('lan_poll samples=2/2 interval=finish_to_begin', payloads[0])
+        self.assertIn('materialize_handle_parent=poll notify_parent=handle', payloads[0])
+        self.assertIn('poll=9.000/18.000 poll_calls=2', payloads[0])
+        self.assertIn('outside_without_lan_poll_ms_avg_max=71.000/90.000', payloads[0])
+        self.assertIn('lan_poll_ms=18.000 outside_without_lan_poll_ms=52.000', payloads[0])
+        trace = diagnostics._recent_frames[0]
+        self.assertEqual(18.0, trace['lan_poll_ms']['poll'])
+        self.assertEqual(52.0, trace['outside_without_lan_poll_ms'])
+
+    def test_frame_lan_poll_spanning_finish_is_unmatched_then_recovers(self):
+        from gui.mods.offline_lan_0922 import lan_client
+        wall = [0.0]
+        client = lan_client.LANClient(
+            '127.0.0.1', 20014, 'Player', 'ussr:R11_MS-1')
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=lambda unused: None)
+        getter = client.transport_performance_snapshot
+
+        def reentrant_poll():
+            wall[0] = 0.02
+            first = diagnostics.begin(0.02, 0.02, lan_poll_getter=getter)
+            wall[0] = 0.03
+            diagnostics.finish(first, 0.02, 0.02, 0.02, {}, {}, {})
+            wall[0] = 0.07
+
+        with mock.patch.object(lan_client, '_TRANSPORT_PROFILE_CLOCK',
+                               lambda: wall[0]):
+            client._poll_messages = reentrant_poll
+            client._poll()
+            self.assertAlmostEqual(0.07, getter()['poll_wall_seconds'])
+            wall[0] = 0.12
+            second = diagnostics.begin(0.12, 0.1, lan_poll_getter=getter)
+            # The 70 ms poll contains this frame's 10 ms execution. Although
+            # 70 < 90 ms outside, subtracting it would double-count that work.
+            self.assertAlmostEqual(0.09, diagnostics._slow[0]['outside'])
+            self.assertIsNone(diagnostics._slow[0]['lan_poll'])
+            wall[0] = 0.13
+            diagnostics.finish(second, 0.12, 0.1, 0.1, {}, {}, {})
+            wall[0] = 0.14
+            client._poll_messages = lambda: wall.__setitem__(0, 0.15)
+            client._poll()
+            diagnostics.begin(0.22, 0.1, lan_poll_getter=getter)
+            diagnostics.flush()
+
+        self.assertTrue(diagnostics.enabled)
+        self.assertEqual(2, diagnostics.snapshot()['samples'])
+        self.assertEqual(1, diagnostics.snapshot()['lan_poll']['unmatched'])
+        self.assertEqual(1, diagnostics.snapshot()['lan_poll']['samples'])
+        self.assertAlmostEqual(10.0, diagnostics.snapshot()[
+            'lan_poll']['stages_ms']['poll']['avg_ms'])
+        self.assertAlmostEqual(80.0, diagnostics.snapshot()[
+            'outside_without_lan_poll_ms']['avg_ms'])
+
+    def test_frame_lan_poll_connection_and_reset_boundaries_are_unmatched(self):
+        class Transport(object):
+            def __init__(self, values):
+                self.values = values
+
+            def snapshot(self):
+                return dict(self.values)
+
+        for boundary in ('generation', 'client'):
+            with self.subTest(boundary=boundary):
+                wall = [0.0]
+                totals = self._lan_poll_test_totals()
+                transport = Transport(totals)
+                diagnostics = _FrameDiagnostics(
+                    clock=lambda: wall[0], writer=lambda unused: None)
+                first = diagnostics.begin(0.0, 0.02, lan_poll_getter=transport.snapshot)
+                wall[0] = 0.01
+                diagnostics.finish(first, 0.0, 0.02, 0.02, {}, {}, {})
+                if boundary == 'generation':
+                    totals['generation'] += 1
+                else:
+                    transport = Transport(totals)
+                second = diagnostics.begin(0.1, 0.1, lan_poll_getter=transport.snapshot)
+                self.assertIsNone(diagnostics._slow[0]['lan_poll'])
+                wall[0] = 0.11
+                diagnostics.finish(second, 0.1, 0.1, 0.1, {}, {}, {})
+                totals['poll_wall_seconds'] += 0.02
+                totals['poll_calls'] += 1
+                diagnostics.begin(0.2, 0.1, lan_poll_getter=transport.snapshot)
+                diagnostics.flush()
+                self.assertEqual(2, diagnostics.snapshot()['samples'])
+                self.assertEqual(1, diagnostics.snapshot()['lan_poll']['samples'])
+                self.assertEqual(1, diagnostics.snapshot()['lan_poll']['unmatched'])
+                self.assertAlmostEqual(20.0, diagnostics.snapshot()[
+                    'lan_poll']['stages_ms']['poll']['avg_ms'])
+                diagnostics.reset()
+                diagnostics.begin(5.0, 4.8, lan_poll_getter=transport.snapshot)
+                self.assertEqual(0, diagnostics._samples)
+                self.assertEqual(0, diagnostics._lan_poll_samples)
+                self.assertIsNone(diagnostics._pending)
+
+    def test_frame_lan_poll_invalid_sample_drops_locally_and_recovers(self):
+        faults = {
+            'missing': None,
+            'missing_field': {'poll_calls': None},
+            'nan': {'poll_wall_seconds': float('nan')},
+            'infinite': {'poll_wall_seconds': float('inf')},
+            'negative': {'poll_wall_seconds': -1.0},
+            'regressed': {'poll_wall_seconds': 0.9},
+            'counter_regressed': {'poll_calls': 19},
+            'counter_bool': {'poll_calls': True},
+            'counter_fraction': {'poll_calls': 20.5},
+            'generation_bool': {'generation': True},
+            'generation_negative': {'generation': -1},
+            'poll_over_budget': {'poll_wall_seconds': 1.1},
+            'children_over_poll': {'materialize_wall_seconds': 1.02},
+            'notify_over_handle': {'notify_wall_seconds': 1.01},
+        }
+        for fault, changes in faults.items():
+            with self.subTest(fault=fault):
+                wall = [0.0]
+                totals = self._lan_poll_test_totals()
+                current = [totals]
+                getter = lambda: current[0]
+                diagnostics = _FrameDiagnostics(
+                    clock=lambda: wall[0], writer=lambda unused: None)
+                first = diagnostics.begin(0.0, 0.02, lan_poll_getter=getter)
+                wall[0] = 0.01
+                diagnostics.finish(first, 0.0, 0.02, 0.02, {}, {}, {})
+                current[0] = dict(totals, **changes) if changes is not None else None
+                second = diagnostics.begin(0.1, 0.1, lan_poll_getter=getter)
+                self.assertTrue(diagnostics.enabled)
+                self.assertEqual(1, diagnostics._samples)
+                self.assertIsNone(diagnostics._slow[0]['lan_poll'])
+                current[0] = totals
+                wall[0] = 0.11
+                diagnostics.finish(second, 0.1, 0.1, 0.1, {}, {}, {})
+                totals['poll_wall_seconds'] += 0.01
+                totals['poll_calls'] += 1
+                diagnostics.begin(0.2, 0.1, lan_poll_getter=getter)
+                diagnostics.flush()
+                snapshot = diagnostics.snapshot()
+                self.assertTrue(diagnostics.enabled)
+                self.assertEqual(1, snapshot['lan_poll']['samples'])
+                self.assertEqual(1, snapshot['lan_poll']['unmatched'])
+                self.assertAlmostEqual(80.0, snapshot[
+                    'outside_without_lan_poll_ms']['avg_ms'])
+
+    def test_frame_lan_poll_getter_failure_keeps_frame_work_running(self):
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        getter = mock.Mock(side_effect=RuntimeError('diagnostic unavailable'))
+        battle.client.transport_performance_snapshot = getter
+        diagnostics = _FrameDiagnostics(writer=lambda unused: None)
+        battle._frame_diagnostics = diagnostics
+
+        battle._frame()
+        runtime.bigworld.now += 0.02
+        battle._frame()
+        diagnostics.flush()
+
+        self.assertEqual(4, getter.call_count)
+        self.assertTrue(diagnostics.enabled)
+        self.assertEqual(1, diagnostics.snapshot()['samples'])
+        self.assertEqual(0, diagnostics.snapshot()['lan_poll']['samples'])
+        self.assertIsNone(diagnostics.snapshot()['outside_without_lan_poll_ms']['avg_ms'])
+        self.assertEqual(2, battle._drive_local.call_count)
+        self.assertEqual(2, battle._schedule.call_count)
+        battle._fail.assert_not_called()
+
     def test_frame_diagnostics_disable_themselves_when_logging_fails(self):
         wall = [0.0]
 
@@ -7632,7 +7890,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'stages': dict(('stage.%d' % index, {'calls': index})
                            for index in range(300)),
             'escaped': '\\"\n\u4e2d' * 4000}}
-        for kind in ('combat_trace', 'combat_summary'):
+        for kind in ('combat_trace', 'combat_summary', 'combat_checkpoint'):
             with self.subTest(kind=kind):
                 lines = _combat_log_lines(prefix, kind, record).splitlines()
                 self.assertGreater(len(lines), 1)
@@ -7645,6 +7903,28 @@ class BattleRuntimeContractTests(unittest.TestCase):
                                     for part in parts))
                 self.assertEqual(record, json.loads(''.join(
                     part['data'] for part in parts)))
+
+    def test_frame_diagnostics_emit_incomplete_capture_checkpoint_separately(self):
+        wall = [0.0]
+        payloads = []
+        diagnostics = _FrameDiagnostics(
+            clock=lambda: wall[0], writer=payloads.append, window_seconds=30.0)
+        frame = diagnostics.begin(0.0, 0.02)
+        wall[0] = 0.005
+        diagnostics.finish(frame, 0.0, 0.02, 0.02, {}, {},
+                           {'role': 'worker', 'round': 7, 'map': '07_lakeville'})
+        diagnostics.begin(0.02, 0.02)
+        checkpoint = {'capture': 3, 'cumulative': True, 'frames': 17,
+                      'detail': {'native_frontier': {'frames': 4}}}
+        diagnostics.note_worker_runtime({'combat_checkpoint': checkpoint})
+        diagnostics.flush()
+        lines = ''.join(payloads).splitlines()
+        rows = [json.loads(line.split('combat_checkpoint ', 1)[1])
+                for line in lines if 'combat_checkpoint ' in line]
+        self.assertEqual(1, len(rows))
+        self.assertEqual(checkpoint, rows[0]['capture'])
+        self.assertEqual(7, rows[0]['round'])
+        self.assertFalse(any('combat_summary ' in line for line in lines))
 
     def test_frame_diagnostic_percentile_storage_is_bounded(self):
         diagnostics = _FrameDiagnostics(
@@ -7757,13 +8037,91 @@ class BattleRuntimeContractTests(unittest.TestCase):
                     side_effect=AssertionError('far contact projected crew')), \
                 mock.patch.object(
                     vehicle_physics, 'derive_params',
-                    side_effect=AssertionError('far contact derived physics')):
+                    side_effect=AssertionError('far contact derived physics')), \
+                mock.patch.object(
+                    tank_collision, 'vertical_overlap',
+                    side_effect=AssertionError('far contact projected height')):
             for step in range(3):
                 # Both the observer and every candidate keep moving.
                 for record in battle._records.values():
                     record['state']['z'] += 0.1
                 self.assertEqual(
                     [], battle._contact_tanks((0.0, 0.0, step * 0.1), shape))
+
+    def test_contact_prefilter_keeps_dual_pose_vertical_rules(self):
+        # Presented and canonical height/distance gates are not independent:
+        # a nearby canonical hull is useful only with canonical overlap.
+        cases = (
+            ('presented_near', 'bot', (1.0, 0.0), (300.0, 0.0), True),
+            ('canonical_near', 'bot', (300.0, 0.0), (1.0, 0.0), True),
+            ('canonical_above', 'bot', (300.0, 0.0), (1.0, 100.0), False),
+            ('presented_above', 'bot', (1.0, 100.0), (300.0, 0.0), True),
+            ('both_airborne', 'bot', (1.0, 100.0), (1.0, 100.0), False),
+            ('player_canonical_only', 'player', (300.0, 0.0), (1.0, 0.0), False),
+        )
+        for label, kind, presented, canonical, expected in cases:
+            with self.subTest(case=label):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                battle._avatar = runtime.bigworld.avatar
+                descriptor = _Descriptor()
+                shape = tank_collision.chassis_shape(descriptor)
+                runtime.bigworld.entities[11] = _Vehicle(
+                    11, descriptor, _Vector(), (0, 0, 0), {'health': 500})
+                state = {
+                    'id': 11, 'x': 0.0, 'z': canonical[0],
+                    'y': canonical[1], 'yaw': 0.0, 'team': 2,
+                    'speed': 80.0, 'collision_shape': shape}
+                battle._records['%s:11' % kind] = {
+                    'engine_id': 11, 'network_id': 11, 'kind': kind,
+                    'ready': True, 'state': state,
+                    'presented_pose': {'z': presented[0], 'y': presented[1]}}
+                bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape, 0.1)
+                self.assertEqual([11] if expected else [],
+                                 [body['network_id'] for body in bodies])
+
+    def test_contact_prefilter_keeps_swept_travel_and_circle_boundary(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        shape = (3.0, 4.0, -0.5, 2.0)
+        runtime.bigworld.entities[11] = _Vehicle(
+            11, _Descriptor(), _Vector(), (0, 0, 0), {'health': 500})
+        state = {'id': 11, 'x': 0.0, 'y': 0.0, 'z': 10.25,
+                 'yaw': 0.0, 'speed': -80.0, 'team': 2,
+                 'collision_shape': shape}
+        battle._records['bot:11'] = {
+            'engine_id': 11, 'network_id': 11, 'kind': 'bot',
+            'ready': True, 'state': state}
+        # Two radius-five bodies plus the existing 0.25 m padding.
+        self.assertEqual(1, len(battle._contact_tanks((0., 0., 0.), shape)))
+        state['z'] += 1.0e-8
+        with mock.patch.object(
+                tank_collision, 'vertical_overlap',
+                side_effect=AssertionError('outside circle projected height')):
+            self.assertEqual([], battle._contact_tanks((0., 0., 0.), shape))
+        # A long integrated step must still test a body crossed before its
+        # final endpoint; extra_reach comes from the unchanged swept caller.
+        state['z'] = 12.0
+        endpoint = (0.0, 0.0, 30.0)
+        self.assertEqual([], battle._contact_tanks(endpoint, shape, 0.1))
+        bodies = battle._contact_tanks(endpoint, shape, 0.1, extra_reach=30.0)
+        self.assertEqual([11], [body['network_id'] for body in bodies])
+        own = {'id': -1, 'x': 0.0, 'y': 0.0, 'z': 0.0,
+               'yaw': 0.0, 'shape': shape}
+        self.assertLess(tank_collision.translation_fraction(
+            own, (0.0, 30.0), bodies), 1.0)
+
+    def test_contact_prefilter_preserves_missing_descriptor_failure(self):
+        runtime = _runtime()
+        battle = BattleRuntime(runtime)
+        battle._avatar = runtime.bigworld.avatar
+        battle._records['bot:11'] = {
+            'engine_id': 11, 'network_id': 11, 'kind': 'bot', 'ready': True,
+            'state': {'id': 11, 'x': 300.0, 'y': 0.0, 'z': 300.0}}
+        # No guessed radius may turn a missing shape into a proved miss.
+        with self.assertRaisesRegex(RuntimeError, 'descriptor is unavailable'):
+            battle._contact_tanks((0., 0., 0.), tank_collision.DEFAULT_SHAPE)
 
     def test_contact_candidates_use_presented_pose_and_keep_active_episodes(self):
         runtime = _runtime()
@@ -7778,13 +8136,20 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle._records['bot:%s' % actor_id] = {
                 'engine_id': actor_id, 'network_id': actor_id,
                 'kind': 'bot', 'ready': True,
-                'state': {'id': actor_id, 'x': 0.0, 'y': 0.0,
+                'state': {'id': actor_id, 'x': 0.0,
+                          'y': 500.0 if actor_id == 13 else 0.0,
                           'z': canonical_z, 'yaw': 0.0, 'speed': 10.0,
-                          'team': 2},
+                          'team': 2, 'alive': actor_id != 13},
                 'presented_pose': {'z': presented_z}}
         battle._local_ram_episode_contacts = frozenset((13,))
 
-        bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape)
+        with mock.patch.object(
+                tank_collision, 'vertical_overlap',
+                wraps=tank_collision.vertical_overlap) as overlap:
+            bodies = battle._contact_tanks((0.0, 0.0, 0.0), shape)
+        # The remote wreck's active episode bypasses both broad phases even
+        # while it is far away and on a different vertical level.
+        self.assertEqual(4, overlap.call_count)
 
         # Keep both the historical contact needed for armour evidence and
         # the current canonical contact needed for reciprocal separation.
@@ -9977,6 +10342,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         client = _Client()
+        client.effective_params = _effective_params_snapshot(
+            ammo=[[101, 20], [102, 10]])
+        client._published_player_effective_params[1] = client.effective_params
         descriptor = _Descriptor()
         descriptor.gun.clip = (clip_size, 1.0)
         second_shot = copy.copy(descriptor.gun.shots[0])
@@ -9988,7 +10356,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
             {'health': 500})
         runtime.bigworld.entities[10] = entity
         record = {
-            'engine_id': 10, 'state': {'health': 500, 'alive': True},
+            'engine_id': 10, 'state': {
+                'health': 500, 'alive': True, 'vehicle': client.vehicle},
             'kind': 'player', 'network_id': 1, 'local': True}
         battle.client = client
         battle.state = 'running'
@@ -10000,6 +10369,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._projectile_server_time_ms = 0
         battle._projectile_server_local_time = battle._clock()
         battle._records = {'player:1': record}
+        battle._projectiles = battle_runtime_module.InFlightProjectiles()
+        battle._config = {'perfect_accuracy': True}
         battle._gun_state = gun_mechanics.GunState(
             descriptor, ammo_layout={101: 20, 102: 10})
         battle._gun_state.reload_time = 0.0
@@ -10008,6 +10379,22 @@ class BattleRuntimeContractTests(unittest.TestCase):
         return (
             battle, battle._gun_state,
             runtime.constants.VEHICLE_SETTING, client, record)
+
+    def _local_launch(self, battle):
+        self.assertTrue(battle._projectile_meta)
+        return next(reversed(battle._projectile_meta.values()))
+
+    def _reject_local_launch(self, battle, meta=None, **changes):
+        meta = meta or self._local_launch(battle)
+        message = {
+            'type': 'fire_intent_result', 'round_id': 7,
+            'player_id': meta['shooter_id'],
+            'projectile_id': meta['projectile_id'],
+            'intent_seq': meta['fire_intent_seq'], 'accepted': False,
+            'reason': 'projectile_launch_rejected',
+        }
+        message.update(changes)
+        return battle.on_fire_intent_result(message)
 
     def _last_input_gun_checkpoint(self, client):
         messages = [message for message in client.sent
@@ -10100,14 +10487,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 if preselected:
                     battle.change_vehicle_setting(settings.NEXT_SHELLS, 102)
                 self.assertTrue(battle.shoot(0.0, 0.0))
-                pending = dict(battle._local_fire_intent)
-                self.assertTrue(battle._accept_player_fire_commit({
-                    'shooter_kind': 'player', 'shooter_id': 1,
-                    'fire_intent_seq': pending['intent_seq'],
-                    'fire_input_seq': pending['input_seq'],
-                    'shot_seq': 1, 'shell_index': 0,
-                }, record))
-
                 self.assertEqual(102, stock['current'])
                 self.assertEqual((state.reload, state.reload), stock['reload'])
                 self.assertEqual((10, 0), stock['ammo'][102])
@@ -10122,151 +10501,81 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 self.assertEqual((10, 4), stock['ammo'][102])
                 self.assertTrue(battle.shoot(0.0, 0.0))
                 fire = [message for message in client.sent
-                        if message[0] == 'fire_intent'][-1]
-                self.assertEqual((1,), fire[1])
+                        if message[0] == 'projectile_launch'][-1]
+                self.assertEqual(1, fire[1][3])
 
-    def test_pending_fire_current_switch_reloads_remaining_autoloader_clip(self):
+    def test_local_fire_commits_before_remaining_autoloader_shell_switch(self):
         battle, state, settings, client, record = \
             self._pending_fire_shell_change_battle(clip_size=4, clip=3)
         self.assertTrue(battle.shoot(0.0, 0.0))
-        pending = dict(battle._local_fire_intent)
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(2, state.clip)
         battle.change_vehicle_setting(settings.NEXT_SHELLS, 102)
         battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102)
-        self.assertEqual(0, state.shot_index)
-        self.assertTrue(battle._accept_player_fire_commit({
-            'shooter_kind': 'player', 'shooter_id': 1,
-            'fire_intent_seq': pending['intent_seq'],
-            'fire_input_seq': pending['input_seq'],
-            'shot_seq': 1, 'shell_index': 0,
-        }, record))
-        self.assertEqual([19, 10], state.ammo)
         self.assertEqual(1, state.shot_index)
         self.assertIsNone(state.pending_index)
         self.assertEqual(0, state.clip)
         self.assertEqual(state.reload, state.reload_time)
         self.assertEqual(0, self._last_input_gun_checkpoint(client)['clip'])
 
-    def test_pending_fire_commits_loaded_round_before_current_shell_switch(self):
+    def test_local_fire_freezes_loaded_round_before_current_shell_switch(self):
         battle, state, settings, client, record = \
             self._pending_fire_shell_change_battle()
-
         self.assertTrue(battle.shoot(0.0, 0.0))
-        pending = dict(battle._local_fire_intent)
-        self.assertTrue(
-            battle.change_vehicle_setting(settings.NEXT_SHELLS, 102))
-        self.assertTrue(
-            battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102))
-
-        self.assertEqual(0, state.shot_index)
-        self.assertEqual(1, state.pending_index)
-        self.assertEqual(1, state.clip)
-        self.assertEqual(0.0, state.reload_time)
-        self.assertEqual([20, 10], state.ammo)
-
-        self.assertTrue(battle._accept_player_fire_commit({
-            'shooter_kind': 'player', 'shooter_id': 1,
-            'fire_intent_seq': pending['intent_seq'],
-            'fire_input_seq': pending['input_seq'],
-            'shot_seq': 1, 'shell_index': 0,
-        }, record))
-
+        meta = copy.deepcopy(self._local_launch(battle))
         self.assertEqual([19, 10], state.ammo)
+        self.assertTrue(battle.change_vehicle_setting(settings.NEXT_SHELLS, 102))
+        self.assertTrue(battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102))
+        self.assertEqual(0, meta['shell_index'])
         self.assertEqual(1, state.shot_index)
+        self.assertEqual([19, 10], state.ammo)
         self.assertIsNone(state.pending_index)
         self.assertEqual(0, state.clip)
         self.assertEqual(state.reload, state.reload_time)
         self.assertIsNone(battle._local_fire_intent)
-        checkpoint = [message for message in client.sent
-                      if message[0] == 'input'][-1][2]
-        self.assertEqual(1, checkpoint['shell_index'])
-        self.assertEqual(1, checkpoint['next_shell_index'])
-        self.assertFalse(checkpoint['shell_change_pending'])
+        self.assertTrue(battle._accept_projectile_event(meta))
+        self.assertTrue(battle._accept_projectile_event(meta))
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(1, state.shot_index)
 
-    def test_rejected_fire_applies_deferred_current_shell_switch(self):
-        battle, state, settings, client, unused_record = \
+    def test_rejected_local_fire_preserves_current_shell_switch(self):
+        battle, state, settings, client, record = \
             self._pending_fire_shell_change_battle()
-
         self.assertTrue(battle.shoot(0.0, 0.0))
-        pending = dict(battle._local_fire_intent)
-        self.assertTrue(
-            battle.change_vehicle_setting(settings.NEXT_SHELLS, 102))
-        self.assertTrue(
-            battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102))
-
-        self.assertEqual(0, state.shot_index)
-        self.assertEqual(1, state.pending_index)
-        self.assertEqual(1, state.clip)
-        self.assertEqual(0.0, state.reload_time)
-        self.assertEqual([20, 10], state.ammo)
-
-        self.assertTrue(battle.on_fire_intent_result({
-            'type': 'fire_intent_result', 'round_id': 7,
-            'player_id': 1, 'intent_seq': pending['intent_seq'],
-            'accepted': False, 'reason': 'projectile_launch_rejected',
-        }))
-
-        self.assertEqual([20, 10], state.ammo)
+        meta = self._local_launch(battle)
+        battle.change_vehicle_setting(settings.NEXT_SHELLS, 102)
+        battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102)
+        before = (list(state.ammo), state.clip, state.reload_time, state.shot_index)
+        self.assertTrue(self._reject_local_launch(battle, meta))
+        self.assertEqual(before, (
+            list(state.ammo), state.clip, state.reload_time, state.shot_index))
+        self.assertEqual([19, 10], state.ammo)
         self.assertEqual(1, state.shot_index)
-        self.assertIsNone(state.pending_index)
+        self.assertNotIn(meta['projectile_id'], battle._projectile_meta)
+        self.assertFalse(battle._projectiles.contains(meta['manager_key']))
+        self.assertFalse(battle.shoot(0.0, 0.0))
+
+    def test_local_fire_commits_before_partial_clip_reload(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle(clip_size=3, clip=2)
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        self.assertEqual(1, state.clip)
+        self.assertEqual([19, 10], state.ammo)
+        self.assertTrue(battle.change_vehicle_setting(settings.RELOAD_PARTIAL_CLIP, 0))
         self.assertEqual(0, state.clip)
         self.assertEqual(state.reload, state.reload_time)
         self.assertIsNone(battle._local_fire_intent)
-        battle._avatar.cancelWaitingForShot.assert_called_once_with()
-        checkpoint = [message for message in client.sent
-                      if message[0] == 'input'][-1][2]
-        self.assertEqual(1, checkpoint['shell_index'])
-        self.assertEqual(1, checkpoint['next_shell_index'])
-        self.assertFalse(checkpoint['shell_change_pending'])
 
-    def test_pending_fire_commits_round_before_partial_clip_reload(self):
-        battle, state, settings, unused_client, record = \
+    def test_rejected_local_fire_preserves_partial_clip_reload(self):
+        battle, state, settings, client, record = \
             self._pending_fire_shell_change_battle(clip_size=3, clip=2)
-
         self.assertTrue(battle.shoot(0.0, 0.0))
-        pending = dict(battle._local_fire_intent)
-        self.assertTrue(battle.change_vehicle_setting(
-            settings.RELOAD_PARTIAL_CLIP, 0))
-
-        self.assertEqual(2, state.clip)
-        self.assertEqual(0.0, state.reload_time)
-        self.assertEqual([20, 10], state.ammo)
-
-        self.assertTrue(battle._accept_player_fire_commit({
-            'shooter_kind': 'player', 'shooter_id': 1,
-            'fire_intent_seq': pending['intent_seq'],
-            'fire_input_seq': pending['input_seq'],
-            'shot_seq': 1, 'shell_index': 0,
-        }, record))
-
+        self.assertTrue(battle.change_vehicle_setting(settings.RELOAD_PARTIAL_CLIP, 0))
+        self.assertTrue(self._reject_local_launch(battle))
         self.assertEqual([19, 10], state.ammo)
         self.assertEqual(0, state.clip)
         self.assertEqual(state.reload, state.reload_time)
-        self.assertIsNone(battle._local_fire_intent)
-
-    def test_rejected_fire_applies_deferred_partial_clip_reload(self):
-        battle, state, settings, unused_client, unused_record = \
-            self._pending_fire_shell_change_battle(clip_size=3, clip=2)
-
-        self.assertTrue(battle.shoot(0.0, 0.0))
-        pending = dict(battle._local_fire_intent)
-        self.assertTrue(battle.change_vehicle_setting(
-            settings.RELOAD_PARTIAL_CLIP, 0))
-
-        self.assertEqual(2, state.clip)
-        self.assertEqual(0.0, state.reload_time)
-        self.assertEqual([20, 10], state.ammo)
-
-        self.assertTrue(battle.on_fire_intent_result({
-            'type': 'fire_intent_result', 'round_id': 7,
-            'player_id': 1, 'intent_seq': pending['intent_seq'],
-            'accepted': False, 'reason': 'projectile_launch_rejected',
-        }))
-
-        self.assertEqual([20, 10], state.ammo)
-        self.assertEqual(0, state.clip)
-        self.assertEqual(state.reload, state.reload_time)
-        self.assertIsNone(battle._local_fire_intent)
-        battle._avatar.cancelWaitingForShot.assert_called_once_with()
+        self.assertFalse(battle.shoot(0.0, 0.0))
 
     def test_partial_clip_setting_starts_one_full_native_reload_cycle(self):
         runtime = _runtime()
@@ -10493,40 +10802,26 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertFalse(messages[-1][2]['shell_change_pending'])
         self.assertEqual(200.5, battle._gun_last_tick)
 
-    def test_rejected_fire_starts_deferred_shell_reload_at_rejection_edge(self):
-        battle, state, settings, client, unused_record = \
+    def test_rejection_does_not_restart_a_running_local_reload(self):
+        battle, state, settings, client, record = \
             self._pending_fire_shell_change_battle()
         state.reload = 6.0
         clock = [300.0]
         battle._clock = lambda: clock[0]
         battle._gun_last_tick = 299.5
-
         self.assertTrue(battle.shoot(0.0, 0.0))
-        pending = dict(battle._local_fire_intent)
         clock[0] = 300.1
-        self.assertTrue(battle.change_vehicle_setting(
-            settings.NEXT_SHELLS, 102))
-        self.assertTrue(battle.change_vehicle_setting(
-            settings.CURRENT_SHELLS, 102))
-
+        battle.change_vehicle_setting(settings.NEXT_SHELLS, 102)
+        battle.change_vehicle_setting(settings.CURRENT_SHELLS, 102)
         clock[0] = 301.0
+        battle._ammo_tick()
+        remaining = state.reload_time
+        self.assertLess(remaining, state.reload)
         battle._avatar.reload_updates[:] = []
-        self.assertTrue(battle.on_fire_intent_result({
-            'type': 'fire_intent_result', 'round_id': 7,
-            'player_id': 1, 'intent_seq': pending['intent_seq'],
-            'accepted': False, 'reason': 'projectile_launch_rejected',
-        }))
-
-        checkpoint = self._last_input_gun_checkpoint(client)
-        messages = [message for message in client.sent
-                    if message[0] == 'input']
-        self.assertEqual([(10, 6.0, 6.0)], [
-            event for event in battle._avatar.reload_updates
-            if event[1] > 0.0])
-        self.assertEqual(6.0, state.reload_time)
-        self.assertEqual(6.0, checkpoint['reload_time'])
-        self.assertEqual(1, messages[-1][2]['shell_index'])
-        self.assertEqual(301.0, battle._gun_last_tick)
+        self.assertTrue(self._reject_local_launch(battle))
+        self.assertEqual(remaining, state.reload_time)
+        self.assertEqual([], battle._avatar.reload_updates)
+        self.assertEqual([19, 10], state.ammo)
 
     def test_damaged_ammo_rack_shell_switch_publishes_one_scaled_cycle(self):
         battle, state, settings, client, unused_record = \
@@ -12610,6 +12905,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         runtime = _runtime()
         runtime.bigworld.defer_vehicle_entry = True
         battle = BattleRuntime(runtime)
+        self.addCleanup(battle.stop, restore_account=False)
         client = _Client()
         client.player_id = -1
         client.name = 'Worker'
@@ -12620,13 +12916,25 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'round_id': 1, 'map': '01_karelia',
             'bot_authority_id': -1, 'players': [], 'bots': []}
 
-        self.assertTrue(battle.start({
-            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
-            'name': 'Worker', 'worker_mode': True}, start, client))
-        runtime.bigworld.callbacks.pop(0)()
-        runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
-        runtime.bigworld.callbacks.pop(0)()
+        from gui.mods.offline_lan_0922.native_navigation_query import Oracle
+        oracle = object()
 
+        def bind_oracle(owner):
+            self.assertIs(owner, battle)
+            self.assertIsNotNone(owner._bots)
+            self.assertIsNotNone(owner._avatar)
+            return oracle
+
+        with mock.patch.object(Oracle, 'create', side_effect=bind_oracle) as create:
+            self.assertTrue(battle.start({
+                'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                'name': 'Worker', 'worker_mode': True}, start, client))
+            runtime.bigworld.callbacks.pop(0)()
+            runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
+            runtime.bigworld.callbacks.pop(0)()
+
+        create.assert_called_once_with(battle)
+        self.assertIs(battle._bots.navigator.grid.native_query_oracle, oracle)
         self.assertEqual('running', battle.state)
         self.assertTrue(battle._bots._fixed_control)
         self.assertEqual(
@@ -12634,6 +12942,202 @@ class BattleRuntimeContractTests(unittest.TestCase):
             battle._bots._control_seconds)
         self.assertIsNone(battle._bots._suspension_ground_probe)
         self.assertEqual(battle._suspension_ground_y, battle._bots._wreck_ground_probe)
+
+        frame_diagnostics = battle._frame_diagnostics
+        self.assertIsInstance(frame_diagnostics, _FrameDiagnostics)
+        self.assertTrue(frame_diagnostics.enabled)
+        self.assertIs(battle_runtime_module.native_math.thread_cpu_seconds,
+                      frame_diagnostics._cpu_clock)
+        self.assertIsNone(battle._combat_diagnostics)
+        self.assertIsNone(battle._bots._combat_diagnostics)
+
+        # A developer may inject a detailed observer for a bounded experiment.
+        # Normal stop/restart must retire it and keep the next round lightweight.
+        from gui.mods.offline_lan_0922.worker_diagnostics import WorkerCombatDiagnostics
+        injected = WorkerCombatDiagnostics(lambda: 0.0)
+        self.assertTrue(injected.begin_frame(1, 1.0, 'test_capture'))
+        previous_bots = battle._bots
+        battle._combat_diagnostics = previous_bots._combat_diagnostics = injected
+        battle.stop()
+        self.assertFalse(injected.active)
+        self.assertIsNone(battle._combat_diagnostics)
+
+        # The fixture retains cancelled callbacks; let their generation guards
+        # reject them before the real deferred Account restore completes.
+        while runtime.bigworld.callbacks:
+            runtime.bigworld.callbacks.pop(0)()
+        self.assertIsNone(battle._lobby_restore_token)
+        start['round_id'] = 2
+        with mock.patch.object(Oracle, 'create', side_effect=bind_oracle):
+            self.assertTrue(battle.start({
+                'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                'name': 'Worker', 'worker_mode': True}, start, client))
+            runtime.bigworld.callbacks.pop(0)()
+            runtime.bigworld.enter_pending_vehicle(battle._server.vehicle_id)
+            runtime.bigworld.callbacks.pop(0)()
+
+        self.assertEqual('running', battle.state)
+        self.assertIsNot(previous_bots, battle._bots)
+        self.assertIsNone(battle._combat_diagnostics)
+        self.assertIsNone(battle._bots._combat_diagnostics)
+        self.assertIs(frame_diagnostics, battle._frame_diagnostics)
+        self.assertTrue(frame_diagnostics.enabled)
+        self.assertEqual(0, frame_diagnostics._frame_id)
+
+    def test_combat_profile_requires_exact_process_opt_in(self):
+        for flag in (None, '', '0', 'true', 'yes', ' 1', '1 '):
+            with self.subTest(flag=flag):
+                runtime = _runtime()
+                battle = BattleRuntime(runtime)
+                environment = {} if flag is None else {
+                    'WOT_OFFLINE_COMBAT_PROFILE': flag}
+                with mock.patch.dict(battle_runtime_module.os.environ,
+                                     environment, clear=True):
+                    self.assertTrue(battle.start({
+                        'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                        'name': 'Player', 'combat_profile': True},
+                        _minimal_start(), _Client()))
+                    self.assertIsNone(battle._combat_diagnostics)
+                    battle.stop(restore_account=False)
+
+    def test_combat_profile_start_restart_and_teardown_are_round_local(self):
+        from gui.mods.offline_lan_0922.native_navigation_query import Oracle
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                runtime = _runtime()
+                runtime.bigworld.defer_vehicle_entry = True
+                battle = BattleRuntime(runtime)
+                client = _Client()
+                if worker:
+                    client.player_id = -1
+                    client.bot_authority_id = -1
+                    client.is_bot_authority = lambda: True
+                    client.send_bot_manifest = lambda *unused: True
+                previous = None
+                for round_id, flag in enumerate(('1', '1', '0'), 1):
+                    start = _minimal_start(round_id)
+                    if worker:
+                        start['players'] = []
+                    with mock.patch.dict(battle_runtime_module.os.environ, {
+                            'WOT_OFFLINE_COMBAT_PROFILE': flag}):
+                        self.assertTrue(battle.start({
+                            'map': '01_karelia', 'vehicle': 'ussr:R11_MS-1',
+                            'name': 'Player', 'worker_mode': worker},
+                            start, client))
+                    with mock.patch.object(Oracle, 'create', return_value=object()):
+                        runtime.bigworld.callbacks.pop(0)()
+                        runtime.bigworld.enter_pending_vehicle(
+                            battle._server.vehicle_id)
+                        runtime.bigworld.callbacks.pop(0)()
+                    self.assertEqual('running', battle.state, battle.error)
+                    trace = battle._combat_diagnostics
+                    self.assertIs(trace, battle._bots._combat_diagnostics)
+                    if flag == '1':
+                        self.assertIsNot(previous, trace)
+                        self.assertIs(battle_runtime_module._PROFILE_CLOCK,
+                                      trace.clock)
+                        self.assertEqual((30.0, 30.0, 3, 8), (
+                            trace.capture_seconds, trace.cooldown_seconds,
+                            trace.maximum_captures, trace.detail_stride))
+                        self.assertEqual(0, trace.capture)
+                        self.assertFalse(trace.active)
+                        self.assertIsNone(trace._deadline)
+                        self.assertTrue(trace.begin_frame(1, 1.0, 'test'))
+                        trace.begin_control()
+                        trace.finish_frame()
+                    else:
+                        self.assertIsNone(trace)
+                    battle.stop()
+                    self.assertIsNone(battle._combat_diagnostics)
+                    if trace is not None:
+                        self.assertFalse(trace.active)
+                        self.assertIsNone(trace._deadline)
+                        self.assertEqual([], trace._stack)
+                        previous = trace
+                    while runtime.bigworld.callbacks:
+                        runtime.bigworld.callbacks.pop(0)()
+                    self.assertIsNone(battle._lobby_restore_token)
+
+    def test_combat_profile_visible_frames_select_complete_detail_callbacks(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        trace = worker_diagnostics.WorkerCombatDiagnostics(
+            lambda: 1.0, detail_stride=8)
+        battle._combat_diagnostics = trace
+        rows, steps = [], []
+        battle._frame_diagnostics = types.SimpleNamespace(
+            enabled=True, begin=mock.Mock(side_effect=range(1, 17)),
+            note_combat_captures=mock.Mock(),
+            finish=lambda *args, **kwargs: rows.append(kwargs['combat']))
+        battle._sender = types.SimpleNamespace(send_current=mock.Mock())
+        battle._server = types.SimpleNamespace(vehicle_id=10)
+        battle._drive_local = lambda dt: BattleRuntime._drive_local(battle, dt)
+
+        @worker_diagnostics.observed('test.local_step')
+        def step(dt):
+            steps.append((trace._frame, dt, trace.detail_active))
+            worker_diagnostics.count('local_steps')
+            return False
+
+        battle._drive_local_step = step
+        for unused in range(16):
+            battle._frame()
+            self.assertFalse(trace.active)
+            self.assertIsNone(worker_diagnostics.current())
+            runtime.bigworld.now += 0.02
+        battle._fail.assert_not_called()
+        self.assertEqual([1, 10], [row['frame'] for row in rows
+                                  if row['detail_sampled']])
+        self.assertTrue(all(row['trigger'] == 'profile_window' for row in rows))
+        self.assertTrue(all(row['stages']['local.drive']['calls'] == 1
+                            for row in rows))
+        self.assertEqual(len(steps), sum(row['stages'].get(
+            'test.local_step', {}).get('calls', 0) for row in rows) +
+            len([step for step in steps if not step[2]]))
+        self.assertEqual(16, trace._detail_ticks)
+        self.assertTrue(trace.enabled)
+
+    def test_combat_profile_worker_frame_leaves_selection_to_bot_control(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+        runtime = _runtime()
+        runtime.bigworld.now = 1.0
+        battle = self._live_frame_battle(runtime)
+        battle._worker_mode = True
+        battle.client.is_bot_authority = lambda: True
+        trace = worker_diagnostics.WorkerCombatDiagnostics(
+            lambda: 1.0, detail_stride=8)
+        battle._combat_diagnostics = trace
+        battle._frame_diagnostics = types.SimpleNamespace(
+            enabled=True, begin=mock.Mock(return_value=1),
+            note_combat_captures=mock.Mock(), finish=mock.Mock())
+        battle._frame()
+        battle._fail.assert_not_called()
+        self.assertEqual(0, trace._detail_ticks)
+        row = battle._frame_diagnostics.finish.call_args.kwargs['combat']
+        self.assertEqual('profile_window', row['trigger'])
+        self.assertFalse(row['detail_sampled'])
+        self.assertFalse(trace.active)
+
+    def test_combat_profile_local_exception_closes_nested_scopes(self):
+        from gui.mods.offline_lan_0922 import worker_diagnostics
+        battle = BattleRuntime(_runtime())
+        trace = worker_diagnostics.WorkerCombatDiagnostics(lambda: 1.0)
+        battle._combat_diagnostics = trace
+        battle._sender = object()
+        battle._server = object()
+        battle._drive_local_step = lambda dt: battle._update_local_presentation(
+            None, dt)
+        trace.begin_frame(1, 1.0, 'test')
+        with self.assertRaisesRegex(RuntimeError, 'presentation is not attached'):
+            battle._drive_local(0.1)
+        self.assertEqual([], trace._stack)
+        self.assertIsNone(worker_diagnostics.current())
+        row = trace.finish_frame()
+        self.assertEqual(1, row['stages']['local.drive']['calls'])
+        self.assertEqual(1, row['stages']['local.presentation']['calls'])
+        self.assertTrue(trace.enabled)
 
     def test_player_identity_sync_rejects_arena_dp_mismatch(self):
         runtime = _runtime()
@@ -18609,8 +19113,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         battle._bots = types.SimpleNamespace(
             presentation_states=presentation_states,
             is_authority=lambda: True,
+            set_planning_snapshot=mock.Mock(),
             update=update)
-        battle._advance_player_fire_authority = mock.Mock()
         battle._publish_player_environment = mock.Mock()
         battle._advance_artillery_arcs = mock.Mock()
         battle._authority_players = mock.Mock(return_value=())
@@ -19010,6 +19514,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             presentation_states=mock.Mock(return_value=()),
             is_authority=lambda: True,
             probe_totals=lambda: (0, 0, 0, 0, 0),
+            set_planning_snapshot=mock.Mock(),
             set_camera_position=mock.Mock())
         battle._flush_pending_bot_create = mock.Mock()
         battle._flush_pending_entities = mock.Mock()
@@ -19032,6 +19537,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertIsNone(battle._worker_probe)
         self.assertFalse(battle._worker_probe_attempted)
         battle._bots.set_camera_position.assert_called_once_with(None)
+        battle._bots.set_planning_snapshot.assert_called_once_with(
+            battle._last_snapshot, 1.0, battle._generation)
 
     def test_worker_sample_exposes_control_astar_and_timed_logical_probes(self):
         battle = BattleRuntime(_runtime())
@@ -22640,6 +23147,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
     def test_prebattle_draws_the_reticle_but_fences_the_server_marker(self):
         runtime = _runtime()
+        # A saved retail server-aim preference must not hide the local marker.
+        runtime.gun_marker_ctrl.useClientGunMarker = lambda: False
+        runtime.gun_marker_ctrl.useServerGunMarker = lambda: True
         battle = BattleRuntime(runtime)
         battle.state = 'running'
         battle._battle_live = False
@@ -22672,9 +23182,9 @@ class BattleRuntimeContractTests(unittest.TestCase):
             'countdown_seconds': 12.0,
             'battle_duration_seconds': 900.0,
         }))
-        # The reticle is drawn during our countdown, but the server-marker
-        # echo still waits for the BATTLE transition.
-        self.assertFalse(battle._sync_local_server_marker())
+        # Prebattle already uses the local trajectory source.
+        self.assertTrue(battle._sync_local_server_marker())
+        self.assertFalse(rotator.showServerMarker)
         rotator.start.assert_called_once_with()
         rotator.getCurShotPosition.assert_not_called()
         self.assertEqual([], battle._avatar.inputHandler.started_periods)
@@ -22682,6 +23192,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             [(True, 1)], battle._avatar.inputHandler.gun_marker_flags)
         self.assertEqual([True], battle._avatar.inputHandler.client_markers)
+        self.assertEqual([False], battle._avatar.inputHandler.server_markers)
         self.assertTrue(battle._avatar._PlayerAvatar__isOnArena)
         self.assertFalse(battle._battle_live)
         # isOnArena is also PlayerAvatar.shoot's first gate, so the countdown
@@ -22820,7 +23331,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertTrue(battle._avatar._PlayerAvatar__isOnArena)
         self.assertTrue(battle._battle_live)
 
-    def test_prebattle_server_marker_waits_for_battle(self):
+    def test_prebattle_and_battle_use_local_marker_without_a_server_reply(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle._battle_live = False
@@ -22838,14 +23349,15 @@ class BattleRuntimeContractTests(unittest.TestCase):
         rotator.showServerMarker = True
         rotator.getCurShotPosition = mock.Mock()
 
-        self.assertFalse(battle._sync_local_server_marker())
+        self.assertTrue(battle._sync_local_server_marker())
+        self.assertFalse(rotator.showServerMarker)
         rotator.getCurShotPosition.assert_not_called()
         self.assertEqual([], battle._avatar.gun_marker_updates)
 
         battle._battle_live = True
-        self.assertTrue(battle._sync_local_server_marker())
+        self.assertFalse(battle._sync_local_server_marker())
         rotator.getCurShotPosition.assert_not_called()
-        self.assertEqual(1, len(battle._avatar.gun_marker_updates))
+        self.assertEqual([], battle._avatar.gun_marker_updates)
 
     def test_sniper_transition_rejects_stale_steady_sources(self):
         runtime = _runtime()
@@ -28491,133 +29003,127 @@ class BattleRuntimeContractTests(unittest.TestCase):
              'presentation_time_us': 190000},
         ], battle._presentation_ledger())
 
-    def test_trigger_freezes_the_presentation_ledger_with_the_ray(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0), {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._projectile_server_time_ms = 12000
-        battle._projectile_server_local_time = battle._clock()
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-        battle._publish_ammo_state = mock.Mock()
-        battle._publish_reload_event = mock.Mock()
-        battle._records = {'player:1': {'engine_id': 10, 'local': True}}
-        battle._bots = types.SimpleNamespace(states={})
-        battle._records['bot:5'] = {
-            'kind': 'bot', 'network_id': 5, 'ready': True,
-            'presentation_time_us': 340000}
-
-        # Before two wire samples bracket the displayed cursor there is no
-        # verifiable evidence, so the shot legally claims none and the worker
-        # collides that Bot on the authoritative trigger timeline.
-        self.assertEqual([], battle._presentation_ledger())
-
-        for revision, sample_time in ((11, 300000), (12, 400000)):
-            self.assertTrue(battle._remember_ram_bot_snapshot({
-                'bot_state_revision': revision,
-                'bot_state_time_us': sample_time,
-                'bots': [{'id': 5, 'x': 0.0, 'y': 0.0, 'z': 0.0,
-                          'yaw': 0.0, 'alive': True}],
-            }))
-
+    def test_local_shot_freezes_native_ray_and_mounted_source_before_send(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        battle._mutable_shot_ray = mock.Mock(
+            return_value=(_Vector(4, 2, 8), _Vector(.6, 0, .8)))
+        source = client.effective_params['gun']['shots'][0]['source_shot']
+        source.update(speed=625.0, gravity=17.0, maxDistance=777.0)
         self.assertTrue(battle.shoot(0.2, -0.1))
-
-        intent = next(item for item in client.sent
-                      if item[0] == 'fire_intent')
-        self.assertEqual([{
-            'bot_id': 5, 'bot_state_revision': 12,
-            'presentation_time_us': 340000,
-        }], intent[2]['presentation_ledger'])
-        self.assertEqual(12000, intent[2]['trigger_server_time_ms'])
-        # The ledger is frozen before the trigger's own input checkpoint is
-        # sent, so the intent's pose time and its evidence describe one edge.
+        meta = self._local_launch(battle)
+        launch = next(item for item in client.sent if item[0] == 'projectile_launch')
+        self.assertEqual(('player', 1, 1, 0), launch[1][:4])
+        self.assertEqual([4.0, 2.0, 8.0], launch[1][4])
+        self.assertEqual([375.0, 0.0, 500.0], launch[1][5])
+        self.assertEqual((17.0, 777.0), launch[1][6:8])
+        self.assertEqual(30, launch[2]['shells_before_shot'])
+        self.assertEqual(0, launch[2]['launch_server_time_ms'])
         order = [item[0] for item in client.sent]
-        self.assertLess(order.index('input'), order.index('fire_intent'))
+        self.assertLess(order.index('input'), order.index('projectile_launch'))
+        source['speed'] = 1.0
+        self.assertEqual(625.0, meta['source_shot']['speed'])
+        self.assertEqual(625.0, launch[2]['source_shot']['speed'])
+        battle._mutable_shot_ray.assert_called_once_with()
 
-    def test_authoritative_shot_enters_native_1513_bloom_once(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._projectile_server_time_ms = 0
-        battle._projectile_server_local_time = battle._clock()
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-        battle._publish_ammo_state = mock.Mock()
-        battle._publish_reload_event = mock.Mock()
-        battle._local_yaw = 0.4
-        battle._avatar.gunRotator.turretYaw = 0.15
-        battle._avatar.gunRotator.gunPitch = -0.08
-        battle._sender.aim_pitch = -0.25
-        battle._records = {
-            'player:1': {'engine_id': 10, 'local': True}}
-
+    def test_local_shot_commits_before_mailbox_and_enters_native_bloom_once(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        entity = battle._server_entity(10)
         def stock_show_shooting(burst, is_predicted=False):
             entity.last_shot = (burst, is_predicted)
             battle._avatar.getOwnVehicleShotDispersionAngle(
                 battle._avatar.gunRotator.turretRotationSpeed, 1)
-
         entity.showShooting = stock_show_shooting
-
-        fire_output = io.StringIO()
-        with contextlib.redirect_stdout(fire_output):
-            self.assertTrue(battle.shoot(0.2, -0.1))
-        self.assertEqual(1, fire_output.getvalue().count(
-            'FIRE TRIGGER intent=1 input=1 shell=0'))
+        self.assertTrue(battle.shoot(0.2, -0.1))
+        meta = copy.deepcopy(self._local_launch(battle))
+        self.assertEqual([19, 10], state.ammo)
         self.assertEqual([], battle._avatar.dispersion_queries)
-        self.assertEqual(1, battle._gun_state.clip)
-        intent = next(item for item in client.sent
-                      if item[0] == 'fire_intent')
-        self.assertEqual((0,), intent[1])
-        self.assertEqual({
-            'input_seq': 1, 'intent_seq': 1,
-            'shot_origin': [0.0, 2.0, 0.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.25,
-            'presentation_ledger': [],
-            'trigger_server_time_ms': 0,
-            # Read before the local gun debits this round, so the total still
-            # includes the shell being fired.
-            'shells_before_shot': 24,
-        }, intent[2])
-        current_input = next(item for item in client.sent
-                             if item[0] == 'input')
-        self.assertAlmostEqual(0.55, current_input[1][2])
-        self.assertAlmostEqual(-0.08, current_input[1][3])
-        self.assertAlmostEqual(0.55, battle._sender.aim_yaw)
-        self.assertAlmostEqual(-0.08, battle._sender.gun_pitch)
-        self.assertAlmostEqual(-0.25, battle._sender.aim_pitch)
-        battle._show_shot({
-            'attacker': 1, 'shooter_kind': 'player', 'shooter_id': 1,
-            'fire_intent_seq': 1, 'fire_input_seq': 1,
-            'shot_seq': 1, 'shell_index': 0,
-        })
-
+        self.assertEqual(1, len(battle._runtime.bigworld.callbacks))
+        # Avatar.shoot has now returned and can install its native wait token.
+        battle._runtime.bigworld.callbacks.pop(0)()
         self.assertEqual([(0.5, 1)], battle._avatar.dispersion_queries)
         self.assertEqual((1, False), entity.last_shot)
-        self.assertFalse(any(item[0] == 'fire' for item in client.sent))
+        self.assertTrue(battle._accept_projectile_event(meta))
+        battle._show_shot(dict(meta, attacker=1))
+        self.assertEqual([(0.5, 1)], battle._avatar.dispersion_queries)
+        self.assertEqual([19, 10], state.ammo)
+        self.assertFalse(any(item[0] == 'fire_intent' for item in client.sent))
+
+    def test_admitted_shot_survives_each_post_commit_publication_failure(self):
+        for boundary in ('ammunition', 'reload', 'checkpoint'):
+            with self.subTest(boundary=boundary):
+                battle, state, settings, client, record = \
+                    self._pending_fire_shell_change_battle()
+                if boundary == 'ammunition':
+                    owner, name = battle._avatar, 'updateVehicleAmmo'
+                elif boundary == 'reload':
+                    owner, name = battle._avatar, 'updateVehicleGunReloadTime'
+                else:
+                    owner, name = battle._sender, 'send_current'
+                original = getattr(owner, name)
+                launch = client.send_projectile_launch
+                failures = []
+
+                def fail_once(*args, **kwargs):
+                    if not failures:
+                        failures.append(boundary)
+                        self.assertIsNone(battle._local_fire_intent)
+                        self.assertTrue(self._local_launch(battle)[
+                            'local_gun_committed'])
+                        self.assertEqual([19, 10], state.ammo)
+                        raise RuntimeError('transient ' + boundary)
+                    return original(*args, **kwargs)
+
+                def admit_and_arm_failure(*args, **kwargs):
+                    accepted = launch(*args, **kwargs)
+                    setattr(owner, name, fail_once)
+                    return accepted
+
+                client.send_projectile_launch = admit_and_arm_failure
+                self.assertTrue(battle.shoot(0.0, 0.0))
+                self.assertEqual([boundary], failures)
+                self.assertEqual([19, 10], state.ammo)
+                self.assertGreater(state.reload_time, 0.0)
+                self.assertIsNone(battle._local_fire_intent)
+                self.assertEqual(1, len(battle._runtime.bigworld.callbacks))
+                battle._runtime.bigworld.callbacks.pop(0)()
+                self.assertEqual((1, False),
+                                 battle._server_entity(10).last_shot)
+                self.assertFalse(battle.shoot(0.0, 0.0))
+                battle._runtime.bigworld.now += 100.0
+                self.assertTrue(battle.shoot(0.0, 0.0))
+                self.assertEqual([18, 10], state.ammo)
+                self.assertIsNone(battle._local_fire_intent)
+                self.assertEqual(2, len([
+                    row for row in client.sent
+                    if row[0] == 'projectile_launch']))
+
+    def test_confirmed_local_launch_mismatch_does_not_discard_other_snapshot_rows(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        meta = self._local_launch(battle)
+        echo = copy.deepcopy(meta)
+        self.assertTrue(battle._accept_projectile_event(echo))
+        self.assertNotIn('local_launch_pending', meta)
+        original = copy.deepcopy(battle._projectiles.snapshot())
+        mismatch = copy.deepcopy(echo)
+        mismatch['penetration_factor'] += 0.01
+        other = copy.deepcopy(echo)
+        other.update(projectile_id='7:b:2:1', shooter_kind='bot', shooter_id=2)
+        other.pop('fire_intent_seq')
+        other.pop('fire_input_seq')
+
+        self.assertTrue(battle._reconcile_projectile_snapshot({
+            'projectiles': [mismatch, other], 'projectile_revision': 2}))
+
+        self.assertEqual(original, battle._projectiles.snapshot())
+        self.assertEqual(echo['penetration_factor'], meta['penetration_factor'])
+        self.assertIn('7:b:2:1', battle._projectile_meta)
+        self.assertEqual(2, battle._projectile_revision)
+        self.assertFalse(battle._accept_projectile_event(mismatch))
+        self.assertEqual([19, 10], state.ammo)
 
     def test_authoritative_shot_seeds_stateful_native_convergence(self):
         class StockLikeDispersion(object):
@@ -28634,31 +29140,11 @@ class BattleRuntimeContractTests(unittest.TestCase):
                 return [0.1 * self.factor,
                         0.1 * (math.sqrt(17.0) if with_shot else 1.0)]
 
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        entity = battle._server_entity(10)
         producer = StockLikeDispersion()
-        runtime.bigworld.avatar.getOwnVehicleShotDispersionAngle = producer
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._projectile_server_time_ms = 0
-        battle._projectile_server_local_time = battle._clock()
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-        battle._publish_ammo_state = mock.Mock()
-        battle._publish_reload_event = mock.Mock()
-        battle._records = {
-            'player:1': {'engine_id': 10, 'local': True}}
+        battle._avatar.getOwnVehicleShotDispersionAngle = producer
 
         def stock_show_shooting(burst, is_predicted=False):
             entity.last_shot = (burst, is_predicted)
@@ -28668,16 +29154,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         self.assertTrue(battle.shoot(0.2, -0.1))
         self.assertEqual([], producer.calls)
-        intent = [message for message in client.sent
-                  if message[0] == 'fire_intent'][-1]
-        self.assertEqual((0,), intent[1])
-        self.assertNotIn('source_shot', intent[2])
-        self.assertNotIn('velocity', intent[2])
-        battle._show_shot({
-            'attacker': 1, 'shooter_kind': 'player', 'shooter_id': 1,
-            'fire_intent_seq': 1, 'fire_input_seq': 1,
-            'shot_seq': 1, 'shell_index': 0,
-        })
+        battle._runtime.bigworld.callbacks.pop(0)()
         shot_angle = producer.factor
         first_tick = producer(0.5, 0)[0]
         second_tick = producer(0.5, 0)[0]
@@ -28688,94 +29165,43 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertGreater(first_tick, second_tick)
         self.assertGreater(second_tick, 0.1)
 
-    def test_rejected_shot_does_not_enter_native_1513_bloom(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        client.send_fire_intent = mock.Mock(return_value=0)
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._projectile_server_time_ms = 0
-        battle._projectile_server_local_time = battle._clock()
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-        battle._avatar.gunRotator.turretYaw = 0.2
-        battle._avatar.gunRotator.gunPitch = -0.1
-
-        fire_output = io.StringIO()
-        with contextlib.redirect_stdout(fire_output):
-            self.assertFalse(battle.shoot(0.2, -0.1))
-        self.assertNotIn('FIRE TRIGGER', fire_output.getvalue())
+    def test_failed_local_launch_send_preserves_ammo_and_native_bloom(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        client.send_projectile_launch = mock.Mock(return_value=None)
+        self.assertFalse(battle.shoot(0.2, -0.1))
+        client.send_projectile_launch.assert_called_once()
+        self.assertEqual(30, client.send_projectile_launch.call_args.kwargs[
+            'shells_before_shot'])
         self.assertEqual([], battle._avatar.dispersion_queries)
-        # The trailing argument is the shell total standing at the trigger
-        # edge, which Fadin's medal reads.
-        client.send_fire_intent.assert_called_once_with(
-            0, [0.0, 2.0, 0.0], [0.0, 0.0, 1.0], 0.25, [], 0, 24)
+        self.assertEqual([20, 10], state.ammo)
+        self.assertEqual(1, state.clip)
+        self.assertEqual(0.0, state.reload_time)
+        self.assertEqual({}, battle._projectile_meta)
+        self.assertEqual([], battle._runtime.bigworld.callbacks)
 
     def test_trigger_without_a_server_clock_is_rejected_before_send(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        client.send_fire_intent = mock.Mock(return_value=1)
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.0
-        battle._gun_state.clip = 1
-
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        battle._projectile_server_time_ms = None
+        client.send_projectile_launch = mock.Mock(return_value=1)
         self.assertFalse(battle.shoot(0.2, -0.1))
-
-        client.send_fire_intent.assert_not_called()
+        client.send_projectile_launch.assert_not_called()
         self.assertEqual([], client.sent)
-        self.assertIsNone(battle._local_fire_intent)
+        self.assertEqual([20, 10], state.ammo)
 
-    def test_trigger_advances_gun_through_hud_ready_edge_before_validation(self):
-        runtime = _runtime()
-        runtime.bigworld.now = 10.0
-        battle = BattleRuntime(runtime)
-        client = _Client()
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            10, descriptor, _Vector(0, 0, 0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[10] = entity
-        battle.client = client
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._projectile_server_time_ms = 10000
-        battle._projectile_server_local_time = battle._clock()
-        battle._avatar = runtime.bigworld.avatar
-        battle._server = types.SimpleNamespace(vehicle_id=10)
-        battle._sender = _LANInputSender(battle)
-        battle._gun_state = gun_mechanics.GunState(descriptor)
-        battle._gun_state.reload_time = 0.05
-        battle._gun_state.clip = 0
+    def test_trigger_advances_ready_edge_and_immediately_commits_its_round(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        battle._runtime.bigworld.now = 10.0
+        state.reload_time = 0.05
+        state.clip = 0
         battle._gun_last_tick = 9.94
-
         self.assertTrue(battle.shoot(0.0, 0.0))
-
-        self.assertEqual(0.0, battle._gun_state.reload_time)
-        self.assertEqual(1, battle._gun_state.clip)
-        self.assertEqual(1, battle._local_fire_intent['intent_seq'])
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(0, state.clip)
+        self.assertEqual(state.reload, state.reload_time)
+        self.assertIsNone(battle._local_fire_intent)
 
     def test_delayed_input_consumes_full_reload_gap_in_same_checkpoint(self):
         runtime = _runtime()
@@ -28808,314 +29234,195 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(0.0, checkpoint['reload_time'])
         self.assertEqual(1, checkpoint['clip'])
 
-    def test_fire_intent_result_releases_visible_pending_trigger(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._avatar = runtime.bigworld.avatar
-        battle._start_message = {'round_id': 7}
-        battle._gun_state = types.SimpleNamespace(
-            ammo=[20, 10], clip=2, reload_time=1.25,
-            reload_duration=5.0, shot_index=0, pending_index=None)
-        battle._local_fire_intent = {
-            'intent_seq': 3, 'input_seq': 4, 'sent_at': 1.0}
-        gun_before = (
-            list(battle._gun_state.ammo), battle._gun_state.clip,
-            battle._gun_state.reload_time,
-            battle._gun_state.reload_duration,
-            battle._gun_state.shot_index,
-            battle._gun_state.pending_index)
+    def test_rejection_is_fenced_to_own_projectile_round_and_intent(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        meta = self._local_launch(battle)
+        for changes in (
+                {'round_id': 8}, {'intent_seq': 9},
+                {'projectile_id': '7:p:2:1'}, {'accepted': True}):
+            self.assertFalse(self._reject_local_launch(battle, meta, **changes))
+            self.assertTrue(battle._projectiles.contains(meta['manager_key']))
+        self.assertTrue(self._reject_local_launch(battle, meta))
+        self.assertFalse(self._reject_local_launch(battle, meta))
+        self.assertFalse(battle._accept_projectile_event(meta))
+        self.assertEqual([19, 10], state.ammo)
 
-        self.assertTrue(battle.on_fire_intent_result({
-            'type': 'fire_intent_result', 'round_id': 7,
-            'player_id': 1, 'intent_seq': 3, 'accepted': False,
-            'reason': 'projectile_launch_rejected',
-        }))
-
-        self.assertIsNone(battle._local_fire_intent)
-        battle._avatar.cancelWaitingForShot.assert_called_once_with()
-        self.assertEqual(gun_before, (
-            list(battle._gun_state.ammo), battle._gun_state.clip,
-            battle._gun_state.reload_time,
-            battle._gun_state.reload_duration,
-            battle._gun_state.shot_index,
-            battle._gun_state.pending_index))
-
-    def test_worker_fire_intent_ignores_transport_receipt_time(self):
+    def test_worker_has_no_human_fire_admission_or_gun_simulation_owner(self):
         battle = BattleRuntime(_runtime())
         battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._projectile_is_authority = lambda: True
         battle.client = _Client()
-        battle.client.authority_epoch = 4
-        battle._start_message = {'round_id': 7}
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'trigger_launch_time_ms': 900,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 4.0,
-            'shot_origin': [1.0, 3.0, 3.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'presentation_ledger': [],
-            '_client_received_time': 10.0,
-            '_client_dispatch_delay': 0.01,
-        }
+        battle.client.is_bot_authority = lambda: True
+        for name in (
+                'on_fire_intent', '_advance_player_fire_authority',
+                'flush_admitted_player_fire_intents', '_player_fire_intents',
+                '_player_authority_guns', '_apply_player_gun_checkpoint'):
+            self.assertFalse(hasattr(battle, name), name)
+        self.assertTrue(battle._owns_projectile(
+            {'shooter_kind': 'bot', 'shooter_id': 2}))
+        self.assertFalse(battle._owns_projectile(
+            {'shooter_kind': 'player', 'shooter_id': 1}))
+        self.assertFalse(battle.shoot(0.0, 0.0))
+        self.assertFalse(battle.on_fire_intent_result(
+            {'round_id': 7, 'accepted': False}))
 
-        output = io.StringIO()
-        with mock.patch.object(
-                battle_runtime_module, '_PROFILE_CLOCK', return_value=20.0), \
-                contextlib.redirect_stdout(output):
-            self.assertTrue(battle.on_fire_intent(intent))
-            retry = dict(
-                intent, _client_received_time=10.5,
-                _client_dispatch_delay=0.02)
-            self.assertTrue(battle.on_fire_intent(retry))
+    def test_local_physical_burst_debits_each_due_round_once(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle(clip_size=3)
+        battle._server_entity(10).typeDescriptor.gun.burst = (3, 0.1)
+        native_ray = battle._mutable_shot_ray
+        battle._mutable_shot_ray = mock.Mock(wraps=native_ray)
+        start = battle._clock()
 
-        stored = battle._player_fire_intents[(2, 3)]
-        self.assertNotIn('_client_received_time', stored)
-        self.assertNotIn('_client_dispatch_delay', stored)
-        self.assertEqual(1, len(battle._player_fire_intents))
-        self.assertEqual(
-            20.0, battle._fire_timeline[(2, 3)]['received_wall'])
-        self.assertEqual(1, output.getvalue().count(
-            'FIRE INTENT RECEIVED player=2 intent=3'))
-        with self.assertRaisesRegex(
-                RuntimeError, 'worker fire intent is malformed'):
-            battle.on_fire_intent(dict(intent, unexpected='wire field'))
-        # The relayed shell total is optional, and carrying it is not a
-        # malformed intent.
-        other = BattleRuntime(_runtime())
-        other._worker_mode = True
-        other.state = 'running'
-        other._battle_live = True
-        other._projectile_is_authority = lambda: True
-        other.client = _Client()
-        other.client.authority_epoch = 4
-        other._start_message = {'round_id': 7}
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertTrue(other.on_fire_intent(
-                dict(intent, shells_before_shot=1)))
-        # The worker resolves ballistics and never needs the count, so it
-        # accepts the relay and keeps its own frozen intent unchanged.
-        self.assertEqual(
-            battle._player_fire_intents[(2, 3)],
-            other._player_fire_intents[(2, 3)])
-        for invalid in (True, 1.0, -1,
-                        battle_runtime_module.lan_protocol.MAX_MOTION_TIME_US //
-                        1000 + 1):
-            with self.subTest(trigger_launch_time_ms=invalid), \
-                    self.assertRaisesRegex(
-                        RuntimeError, 'violates its contract'):
-                battle.on_fire_intent(dict(
-                    intent, intent_seq=4,
-                    trigger_launch_time_ms=invalid))
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(0.0, state.reload_time)
+        self.assertFalse(battle.shoot(0.0, 0.0))
+        self.assertFalse(battle._advance_local_player_burst())
+        for index in (1, 2):
+            battle._runtime.bigworld.now = start + index * 0.1
+            self.assertTrue(battle._advance_local_player_burst())
+            self.assertEqual(19 - index, state.ammo[0])
+        self.assertIsNone(battle._local_player_burst)
+        self.assertEqual(0, state.clip)
+        self.assertEqual(state.reload, state.reload_time)
+        self.assertEqual(3, battle._mutable_shot_ray.call_count)
+        launches = [item for item in client.sent
+                    if item[0] == 'projectile_launch']
+        self.assertEqual([1, 2, 3], [item[1][2] for item in launches])
+        self.assertEqual([0, 1, 2],
+                         [item[2]['burst_index'] for item in launches])
+        self.assertEqual([1, 1, 1],
+                         [item[2]['burst_group_seq'] for item in launches])
+        self.assertEqual([3, 3, 3],
+                         [item[2]['burst_count'] for item in launches])
+        for meta in list(battle._projectile_meta.values()):
+            self.assertTrue(battle._accept_projectile_event(dict(meta)))
+        self.assertEqual([17, 10], state.ammo)
 
-    def test_worker_fire_fast_path_revisits_older_intents_in_order(self):
+    def test_local_burst_defers_current_shell_switch_until_final_round(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle(clip_size=3)
+        battle._server_entity(10).typeDescriptor.gun.burst = (3, 0.1)
+        start = battle._clock()
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        self.assertTrue(battle.change_vehicle_setting(
+            settings.CURRENT_SHELLS, 102))
+        self.assertEqual(0, state.shot_index)
+        for index in (1, 2):
+            battle._runtime.bigworld.now = start + index * 0.1
+            self.assertTrue(battle._advance_local_player_burst())
+        self.assertEqual([17, 10], state.ammo)
+        self.assertEqual(1, state.shot_index)
+        self.assertEqual(0, state.clip)
+        self.assertEqual(state.reload, state.reload_time)
+        self.assertEqual([0, 0, 0], [item[1][3] for item in client.sent
+                                   if item[0] == 'projectile_launch'])
+
+    def test_failed_burst_tail_keeps_launched_round_and_starts_reload(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle(clip_size=3)
+        battle._server_entity(10).typeDescriptor.gun.burst = (3, 0.1)
+        start = battle._clock()
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        first = self._local_launch(battle)
+        client.send_projectile_launch = mock.Mock(return_value=None)
+        battle._runtime.bigworld.now = start + 0.1
+        self.assertFalse(battle._advance_local_player_burst())
+        self.assertIsNone(battle._local_player_burst)
+        self.assertEqual(0, state._burst_remaining)
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(2, state.clip)
+        self.assertGreater(state.reload_time, 0.0)
+        self.assertEqual([first['projectile_id']],
+                         list(battle._projectile_meta))
+        self.assertTrue(battle._projectiles.contains(first['manager_key']))
+        self.assertFalse(battle.shoot(0.0, 0.0))
+
+    def test_player_death_cancels_unlaunched_burst_tail(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle(clip_size=3)
+        entity = battle._server_entity(10)
+        entity.typeDescriptor.gun.burst = (3, 0.1)
+        start = battle._clock()
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        entity.health = 0
+        battle._runtime.bigworld.now = start + 0.1
+        self.assertFalse(battle._advance_local_player_burst())
+        self.assertIsNone(battle._local_player_burst)
+        self.assertEqual([19, 10], state.ammo)
+        self.assertEqual(1, len([item for item in client.sent
+                                if item[0] == 'projectile_launch']))
+
+    def test_visible_client_simulates_only_its_own_player_projectiles(self):
         battle = BattleRuntime(_runtime())
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
         battle.client = _Client()
-        battle.client.authority_epoch = 4
-        battle._start_message = {'round_id': 7}
-        battle._clock = mock.Mock(return_value=12.5)
-        older_key = (1, 2)
-        battle._player_fire_intents[older_key] = {'player_id': 1}
-        battle._advance_player_fire_authority = mock.Mock(return_value=True)
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'trigger_launch_time_ms': 900,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 4.0,
-            'shot_origin': [1.0, 3.0, 3.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'presentation_ledger': [],
-        }
+        self.assertTrue(battle._owns_projectile(
+            {'shooter_kind': 'player', 'shooter_id': 1}))
+        self.assertFalse(battle._owns_projectile(
+            {'shooter_kind': 'player', 'shooter_id': 2}))
+        self.assertFalse(battle._owns_projectile(
+            {'shooter_kind': 'bot', 'shooter_id': 1}))
+        battle._replay_mode = True
+        self.assertFalse(battle._owns_projectile(
+            {'shooter_kind': 'player', 'shooter_id': 1}))
 
-        self.assertTrue(battle.on_fire_intent(intent))
-        battle._advance_player_fire_authority.assert_not_called()
-        self.assertTrue(battle.flush_admitted_player_fire_intents())
+    def test_deferred_local_presentation_ignores_retired_round(self):
+        for retire in ('generation', 'round', 'record'):
+            with self.subTest(retire=retire):
+                battle, state, settings, client, record = \
+                    self._pending_fire_shell_change_battle()
+                self.assertTrue(battle.shoot(0.0, 0.0))
+                battle._show_shot = mock.Mock()
+                if retire == 'generation':
+                    battle._generation += 1
+                elif retire == 'round':
+                    battle._start_message = {'round_id': 8}
+                else:
+                    record['tombstone'] = True
+                battle._runtime.bigworld.callbacks.pop(0)()
+                battle._show_shot.assert_not_called()
+                self.assertEqual([19, 10], state.ammo)
 
-        battle._advance_player_fire_authority.assert_called_once_with(
-            0.0, 12.5, intent_keys=(older_key, (2, 3)),
-            defer_missing_player=True)
+    def test_deferred_local_shot_cannot_cross_projectile_epoch(self):
+        battle, state, settings, client, record = \
+            self._pending_fire_shell_change_battle()
+        entity = battle._server_entity(10)
+        entity.showShooting = mock.Mock(wraps=entity.showShooting)
+        battle._ensure_projectile_visual = mock.Mock(
+            wraps=battle._ensure_projectile_visual)
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        old_id = self._local_launch(battle)['projectile_id']
+        old_callback = battle._runtime.bigworld.callbacks.pop(0)
+        self.assertEqual(4, battle._projectile_epoch)
+        self.assertEqual([19, 10], state.ammo)
 
-    def test_worker_fire_fast_path_retries_player_missing_at_dispatch(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._start_message = {'round_id': 7}
-        battle._projectile_is_authority = lambda: True
-        battle._config = {'perfect_accuracy': True}
-        client = _Client()
-        client.authority_epoch = 4
-        client.send_projectile_launch = mock.Mock(
-            side_effect=lambda *args, **unused_kwargs: args[2])
-        client.send_fire_intent_result = mock.Mock(return_value=True)
-        battle.client = client
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'trigger_launch_time_ms': 900,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
-            'shot_origin': [4.0, 2.0, 8.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'presentation_ledger': [],
-        }
-        key = (2, 3)
-        battle._advance_projectiles = mock.Mock(return_value=True)
+        client.authority_epoch = 5
+        self.assertTrue(battle._set_projectile_epoch(5, battle._clock()))
+        old_callback()
 
-        # The transport can beat the snapshot/native entity lifecycle.  The
-        # fast path must not turn that harmless ordering into a terminal
-        # rejection or lose the admitted shot.
-        self.assertTrue(battle.on_fire_intent(intent))
-        self.assertTrue(battle.flush_admitted_player_fire_intents())
-        self.assertIn(key, battle._player_fire_intents)
-        self.assertNotIn(key, battle._player_fire_intent_history)
-        client.send_projectile_launch.assert_not_called()
-        client.send_fire_intent_result.assert_not_called()
-        battle._advance_projectiles.assert_not_called()
+        self.assertEqual({}, battle._projectile_meta)
+        self.assertEqual({}, battle._projectile_visual_meta)
+        battle._ensure_projectile_visual.assert_not_called()
+        entity.showShooting.assert_not_called()
+        self.assertEqual([19, 10], state.ammo)
 
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[11] = entity
-        effective = _effective_params_snapshot(ammo=[[101, 40]])
-        battle._records = {'player:2': {
-            'engine_id': 11, 'network_id': 2, 'kind': 'player',
-            'local': False, 'ready': True, 'tombstone': False,
-            'state': {
-                'alive': True, 'shell_index': 0, 'speed': 0.0,
-                'turn': 0.0, 'effective_params': effective,
-            },
-        }}
+        # Retiring the old callback must not suppress a later valid shot.
+        battle._runtime.bigworld.now += 100.0
+        self.assertTrue(battle.shoot(0.0, 0.0))
+        new_id = self._local_launch(battle)['projectile_id']
+        self.assertNotEqual(old_id, new_id)
+        battle._runtime.bigworld.callbacks.pop(0)()
 
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            self.assertTrue(
-                battle._advance_player_fire_authority(0.1, 10.0))
-        self.assertNotIn(key, battle._player_fire_intents)
-        self.assertIn(key, battle._player_fire_intent_history)
-        self.assertEqual(1, client.send_projectile_launch.call_count)
-        self.assertEqual(1, output.getvalue().count('FIRE LAUNCH'))
-        self.assertIn('path=frame_retry', output.getvalue())
-
-        # The ordinary frame remains safe to call after the deferred intent
-        # has been launched: no second canonical projectile is emitted.
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.1))
-        self.assertEqual(1, client.send_projectile_launch.call_count)
-        client.send_fire_intent_result.assert_not_called()
-
-    def test_worker_fast_path_preinstalls_and_advances_before_echo(self):
-        runtime = _runtime()
-        runtime.bigworld.now = 10.0
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._start_message = {'round_id': 7}
-        battle._config = {'perfect_accuracy': True}
-        client = _Client()
-        client.authority_epoch = 4
-        client.is_bot_authority = lambda: True
-        client.send_projectile_launch = mock.Mock(
-            side_effect=lambda *args, **unused_kwargs: args[2])
-        client.send_projectile_progress = mock.Mock(return_value=True)
-        battle.client = client
-        battle._projectiles = battle_runtime_module.InFlightProjectiles(
-            initial_time=10.0)
-        battle._projectile_epoch = 4
-        battle._projectile_server_time_ms = 1000
-        battle._projectile_server_local_time = 10.0
-        # A newly admitted click must publish its first safe cursor even when
-        # the ordinary 10 Hz progress deadline is still in the future.
-        battle._next_projectile_progress_time = 11.0
-        descriptor = _Descriptor()
-        entity = _Vehicle(
-            11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[11] = entity
-        battle._records = {'player:2': {
-            'engine_id': 11, 'network_id': 2, 'kind': 'player',
-            'local': False, 'ready': True, 'tombstone': False,
-            'state': {
-                'vehicle': 'ussr:R11_MS-1',
-                'alive': True, 'shell_index': 0,
-                'speed': 0.0, 'turn': 0.0,
-                'effective_params': _effective_params_snapshot(
-                    ammo=[[101, 40]]),
-            },
-        }}
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'trigger_launch_time_ms': 900,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
-            'shot_origin': [4.0, 2.0, 8.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'presentation_ledger': [],
-        }
-        battle._projectile_record_poses = mock.Mock(return_value={})
-        battle._sample_projectile_positions = mock.Mock()
-        battle._prune_projectile_position_history = mock.Mock()
-        battle._build_projectile_spatial_bins = mock.Mock()
-        battle._clear_projectile_spatial_index = mock.Mock()
-        battle._projectile_chord = mock.Mock(return_value=None)
-        battle._projectile_terminal = mock.Mock(return_value=None)
-        output = io.StringIO()
-
-        with contextlib.redirect_stdout(output):
-            self.assertTrue(battle.on_fire_intent(intent))
-            client.send_projectile_launch.assert_not_called()
-            self.assertTrue(battle.flush_admitted_player_fire_intents())
-
-        projectile_id = '7:p:2:5'
-        self.assertTrue(battle._projectiles.contains(projectile_id))
-        self.assertTrue(battle._projectile_meta[
-            projectile_id]['local_launch_pending'])
-        self.assertEqual(1, client.send_projectile_launch.call_count)
-        self.assertIn('path=poll', output.getvalue())
-
-        client.send_projectile_progress.assert_called_once()
-        cursor = client.send_projectile_progress.call_args.args[1][0]
-        self.assertEqual(projectile_id, cursor['projectile_id'])
-        self.assertGreater(cursor['checked_through_ms'], 0)
-        self.assertEqual(11.0, battle._next_projectile_progress_time)
+        self.assertEqual(5, battle._projectile_epoch)
+        self.assertEqual({new_id}, set(battle._projectile_meta))
+        battle._ensure_projectile_visual.assert_called_once()
+        self.assertEqual(new_id,
+                         battle._ensure_projectile_visual.call_args[0][0][
+                             'projectile_id'])
+        entity.showShooting.assert_called_once_with(1, False)
+        self.assertEqual([18, 10], state.ammo)
 
     def test_worker_resolves_immediate_player_destructible_contact(self):
         battle = BattleRuntime(_runtime())
@@ -30084,355 +30391,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
             damage_sticker=12345678901234567890)
         self.assertEqual(
             12345678901234567890, direct['damage_sticker'])
-
-    def test_worker_player_gun_reuses_unchanged_effective_params_source(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle._projectile_is_authority = lambda: True
-        entity = _Vehicle(
-            11, _Descriptor(), _Vector(50.0, 0.0, 50.0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[11] = entity
-        effective = _effective_params_snapshot(ammo=[[101, 40]])
-        state = {'effective_params': effective}
-        battle._records = {'player:2': {
-            'engine_id': 11, 'network_id': 2, 'kind': 'player',
-            'local': False, 'ready': True, 'tombstone': False,
-            'state': state,
-        }}
-
-        with mock.patch.object(
-                battle_runtime_module.effective_params, 'canonical',
-                wraps=battle_runtime_module.effective_params.canonical
-        ) as canonical:
-            self.assertTrue(
-                battle._advance_player_fire_authority(0.1, 10.0))
-            gun = battle._player_authority_guns[2]
-            self.assertIs(effective, gun._effective_params_source)
-            self.assertTrue(
-                battle._advance_player_fire_authority(0.1, 10.1))
-            self.assertEqual(1, canonical.call_count)
-
-            equal_source = copy.deepcopy(effective)
-            state['effective_params'] = equal_source
-            self.assertTrue(
-                battle._advance_player_fire_authority(0.1, 10.2))
-            self.assertEqual(2, canonical.call_count)
-            self.assertIs(equal_source, gun._effective_params_source)
-
-            changed = copy.deepcopy(effective)
-            changed['physics']['mass'] += 1.0
-            state['effective_params'] = changed
-            self.assertRaises(
-                RuntimeError, battle._advance_player_fire_authority,
-                0.1, 10.3)
-
-        battle._records = {}
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.4))
-        self.assertNotIn(2, battle._player_authority_guns)
-
-    def test_worker_launch_uses_visible_trigger_ray_not_model_node(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._start_message = {'round_id': 7}
-        battle._projectile_is_authority = lambda: True
-        battle._config = {'perfect_accuracy': True}
-        client = _Client()
-        client.authority_epoch = 4
-        client.send_projectile_launch = mock.Mock(
-            side_effect=lambda *args, **unused_kwargs: args[2])
-        battle.client = client
-        entity = _Vehicle(
-            11, _Descriptor(), _Vector(50.0, 0.0, 50.0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[11] = entity
-        effective = _effective_params_snapshot(
-            ammo=[[101, 40]], deadeye=True)
-        donated_shot = effective['gun']['shots'][0]['source_shot']
-        donated_shot['speed'] = 625.0
-        donated_shot['gravity'] = 17.0
-        donated_shot['maxDistance'] = 777.0
-        donated_shot['piercingPower'] = [321.0, 222.0]
-        donated_shot['shell']['damage'] = [390.0, 165.0]
-        battle._records = {'player:2': {
-            'engine_id': 11, 'network_id': 2, 'kind': 'player',
-            'local': False, 'ready': True, 'tombstone': False,
-            'state': {
-                'alive': True, 'shell_index': 0, 'speed': 0.0,
-                'turn': 0.0, 'effective_params': effective,
-                'critical': {'crew_ko': ['gunner']},
-            },
-        }}
-        gun = gun_mechanics.GunState(
-            entity.typeDescriptor, effective['loadout'])
-        gun.bind_client_contract(effective['gun'], {101: 40})
-        # The worker's independently advanced copy is deliberately stale.
-        # The input-bound visible checkpoint below is the final fire edge.
-        gun.reload_time = 4.0
-        gun.clip = 0
-        gun._effective_params = effective
-        battle._player_authority_guns = {2: gun}
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'trigger_launch_time_ms': 900,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
-            'shot_origin': [4.0, 2.0, 8.0],
-            'shot_direction': [0.6, 0.0, 0.8],
-            'dispersion_angle': 0.02,
-            'presentation_ledger': [{
-                'bot_id': 6, 'bot_state_revision': 41,
-                'presentation_time_us': 910}],
-        }
-
-        with mock.patch.object(
-                type(entity.model), 'node',
-                side_effect=AssertionError(
-                    'stale model node must not be read')) as node:
-            self.assertTrue(battle.on_fire_intent(intent))
-            client.send_projectile_launch.assert_not_called()
-            # WorkerSession invokes this after the current LAN batch is fully
-            # applied but before the next full Bot frame.
-            self.assertTrue(battle.flush_admitted_player_fire_intents())
-            self.assertEqual(1, client.send_projectile_launch.call_count)
-            self.assertNotIn((2, 3), battle._player_fire_intents)
-            self.assertTrue(
-                battle._advance_player_fire_authority(0.1, 10.0))
-            node.assert_not_called()
-
-        call = client.send_projectile_launch.call_args
-        self.assertEqual(['player', 2, 5, 0], list(call.args[:4]))
-        self.assertEqual([4.0, 2.0, 8.0], call.args[4])
-        self.assertEqual([375.0, 0.0, 500.0], call.args[5])
-        self.assertEqual((17.0, 777.0), call.args[6:8])
-        self.assertEqual([321.0, 222.0],
-                         call.kwargs['source_shot']['piercingPower'])
-        self.assertEqual([390.0, 165.0],
-                         call.kwargs['source_shot']['shell']['damage'])
-        self.assertFalse(call.kwargs['source_shot']['deadeye'])
-        self.assertTrue(donated_shot['deadeye'])
-
-        # A retransmitted trigger is the same admitted shot: it keeps the
-        # frozen ray and evidence and never resamples an authoritative
-        # dispersion or publishes a second canonical launch.
-        self.assertTrue(battle.on_fire_intent(dict(intent)))
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.1))
-        self.assertEqual(1, client.send_projectile_launch.call_count)
-        self.assertEqual(
-            [{'bot_id': 6, 'bot_state_revision': 41,
-              'presentation_time_us': 910}],
-            battle._player_fire_intent_history[
-                (2, 3)]['presentation_ledger'])
-        # A conflicting retry under the same identity is a hard contract
-        # failure, not a silent rebind of the frozen evidence.
-        self.assertRaises(
-            RuntimeError, battle.on_fire_intent,
-            dict(intent, presentation_ledger=[]))
-
-    def test_worker_promotes_the_queued_shell_at_the_shot_boundary(self):
-        runtime = _runtime()
-        battle = BattleRuntime(runtime)
-        battle._worker_mode = True
-        battle.state = 'running'
-        battle._battle_live = True
-        battle._start_message = {'round_id': 7}
-        battle._projectile_is_authority = lambda: True
-        battle._config = {'perfect_accuracy': True}
-        client = _Client()
-        client.authority_epoch = 4
-        client.send_projectile_launch = mock.Mock(
-            side_effect=lambda *args, **unused_kwargs: args[2])
-        battle.client = client
-        descriptor = _Descriptor()
-        second_shot = copy.copy(descriptor.gun.shots[0])
-        second_shot.shell = copy.copy(second_shot.shell)
-        second_shot.shell.compactDescr = 102
-        descriptor.gun.shots = tuple(descriptor.gun.shots) + (second_shot,)
-        entity = _Vehicle(
-            11, descriptor, _Vector(50.0, 0.0, 50.0), (0, 0, 0),
-            {'health': 500})
-        runtime.bigworld.entities[11] = entity
-        effective = _effective_params_snapshot(
-            ammo=[[101, 20], [102, 20]])
-        record = {
-            'engine_id': 11, 'network_id': 2, 'kind': 'player',
-            'local': False, 'ready': True, 'tombstone': False,
-            'state': {
-                'alive': True, 'shell_index': 0,
-                'next_shell_index': 1, 'shell_change_pending': True,
-                'speed': 0.0, 'turn': 0.0,
-                'effective_params': effective,
-            },
-        }
-        battle._records = {'player:2': record}
-        gun = gun_mechanics.GunState(
-            descriptor, effective['loadout'],
-            ammo_layout={101: 20, 102: 20})
-        gun.reload_time = 0.0
-        gun.clip = 1
-        gun._effective_params = effective
-        battle._player_authority_guns = {2: gun}
-        intent = {
-            'type': 'fire_intent', 'round_id': 7,
-            'authority_epoch': 4, 'player_id': 2, 'intent_seq': 3,
-            'shot_seq': 5, 'input_seq': 8, 'pose_time_us': 1000,
-            'trigger_launch_time_ms': 900,
-            'shell_index': 0, 'next_shell_index': 1,
-            'shell_change_pending': True,
-            'gun_checkpoint_seq': 8,
-            'gun_checkpoint': _human_gun_checkpoint(),
-            'aim_yaw': 0.2, 'gun_pitch': -0.1,
-            'x': 50.0, 'y': 0.0, 'z': 50.0, 'yaw': 0.0,
-            'pitch': 0.0, 'roll': 0.0, 'speed': 0.0,
-            'shot_origin': [4.0, 2.0, 8.0],
-            'shot_direction': [0.0, 0.0, 1.0],
-            'dispersion_angle': 0.02,
-            'presentation_ledger': [],
-        }
-
-        self.assertTrue(battle.on_fire_intent(intent))
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
-        self.assertEqual(1, gun.pending_index)
-        self.assertTrue(battle._accept_player_fire_commit({
-            'shooter_kind': 'player', 'shooter_id': 2,
-            'fire_intent_seq': 3, 'fire_input_seq': 8,
-            'shot_seq': 5, 'shell_index': 0,
-        }, record))
-        self.assertEqual(1, gun.shot_index)
-        self.assertIsNone(gun.pending_index)
-
-    def test_worker_applies_intuition_ready_shell_without_restarting_reload(self):
-        descriptor = _Descriptor()
-        second_shot = copy.copy(descriptor.gun.shots[0])
-        second_shot.shell = copy.copy(second_shot.shell)
-        second_shot.shell.compactDescr = 102
-        descriptor.gun.shots = tuple(descriptor.gun.shots) + (second_shot,)
-        gun = gun_mechanics.GunState(
-            descriptor, ammo_layout={101: 20, 102: 20})
-        gun.reload_time = 4.0
-        gun.clip = 0
-        intent = {
-            'input_seq': 9, 'gun_checkpoint_seq': 9,
-            'shell_index': 1, 'next_shell_index': 1,
-            'shell_change_pending': False,
-            'gun_checkpoint': _human_gun_checkpoint(),
-        }
-
-        self.assertTrue(BattleRuntime._apply_player_gun_checkpoint(
-            gun, intent))
-        self.assertEqual(1, gun.shot_index)
-        self.assertEqual(0.0, gun.reload_time)
-        self.assertEqual(1, gun.clip)
-        self.assertEqual([20, 20], gun.ammo)
-
-    def test_worker_rejects_stale_or_not_ready_human_gun_checkpoint(self):
-        gun = gun_mechanics.GunState(
-            _Descriptor(), ammo_layout={101: 20})
-        not_ready = {
-            'input_seq': 9, 'gun_checkpoint_seq': 9,
-            'shell_index': 0, 'next_shell_index': 0,
-            'shell_change_pending': False,
-            'gun_checkpoint': _human_gun_checkpoint(
-                reload_time=1.0, clip=0),
-        }
-
-        self.assertFalse(BattleRuntime._apply_player_gun_checkpoint(
-            gun, not_ready))
-        with self.assertRaisesRegex(RuntimeError, 'checkpoint is invalid'):
-            BattleRuntime._apply_player_gun_checkpoint(gun, not_ready)
-
-    def test_worker_launch_pending_survives_stall_until_result(self):
-        battle = BattleRuntime(_runtime())
-        battle._worker_mode = True
-        battle._start_message = {'round_id': 7}
-        battle._player_fire_launch_pending = {2: {
-            'intent_seq': 3, 'input_seq': 4, 'shot_seq': 5,
-            'sent_at': 1.0,
-        }}
-        battle._projectile_is_authority = lambda: True
-
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
-        self.assertIn(2, battle._player_fire_launch_pending)
-
-        self.assertTrue(battle.on_fire_intent_result({
-            'type': 'fire_intent_result', 'round_id': 7,
-            'player_id': 2, 'intent_seq': 3, 'accepted': False,
-            'reason': 'projectile_launch_rejected',
-        }))
-
-        self.assertEqual({}, battle._player_fire_launch_pending)
-        self.assertTrue(battle._advance_player_fire_authority(0.1, 10.0))
-
-    def test_worker_fire_rejection_rolls_back_provisional_projectile(self):
-        battle = BattleRuntime(_runtime())
-        battle._worker_mode = True
-        battle._start_message = {'round_id': 7}
-        battle._projectiles = battle_runtime_module.InFlightProjectiles()
-        projectile_id = '7:p:2:5'
-        self.assertTrue(battle._projectiles.launch(
-            projectile_id, (0.0, 1.0, 0.0), (10.0, 0.0, 0.0),
-            (0.0, -9.81, 0.0), 0.0, 10.0, 500.0))
-        battle._projectile_meta = {projectile_id: {
-            'projectile_id': projectile_id,
-            'manager_key': projectile_id,
-            'local_launch_pending': True,
-        }}
-        battle._player_fire_launch_pending = {2: {
-            'intent_seq': 3, 'input_seq': 4, 'shot_seq': 5,
-            'projectile_id': projectile_id,
-            'sent_at': 1.0, 'sent_wall': 2.0,
-        }}
-
-        self.assertTrue(battle.on_fire_intent_result({
-            'type': 'fire_intent_result', 'round_id': 7,
-            'player_id': 2, 'intent_seq': 3, 'accepted': False,
-            'reason': 'projectile_launch_rejected',
-        }))
-
-        self.assertFalse(battle._projectiles.contains(projectile_id))
-        self.assertNotIn(projectile_id, battle._projectile_meta)
-        self.assertEqual({}, battle._player_fire_launch_pending)
-        self.assertTrue(battle._projectiles.launch(
-            projectile_id, (0.0, 1.0, 0.0), (10.0, 0.0, 0.0),
-            (0.0, -9.81, 0.0), 0.0, 10.0, 500.0))
-
-    def test_worker_commit_timeline_uses_monotonic_process_clock(self):
-        battle = BattleRuntime(_runtime())
-        battle._worker_mode = True
-        battle._clock = mock.Mock(return_value=999.0)
-        gun = types.SimpleNamespace(
-            shot_index=0, commit_fire=mock.Mock(return_value=True))
-        battle._player_authority_guns = {2: gun}
-        battle._player_fire_launch_pending = {2: {
-            'intent_seq': 3, 'input_seq': 4, 'shot_seq': 5,
-            'sent_at': 999.0, 'sent_wall': 10.0,
-        }}
-        output = io.StringIO()
-
-        with mock.patch.object(
-                battle_runtime_module, '_PROFILE_CLOCK', return_value=10.125), \
-                contextlib.redirect_stdout(output):
-            self.assertTrue(battle._accept_player_fire_commit({
-                'shooter_kind': 'player', 'shooter_id': 2,
-                'fire_intent_seq': 3, 'fire_input_seq': 4,
-                'shot_seq': 5, 'shell_index': 0,
-            }, {'engine_id': None}))
-
-        self.assertIn(
-            'FIRE COMMIT player=2 intent=3 shot_seq=5 '
-            'launch_to_commit_ms=125', output.getvalue())
-        battle._clock.assert_not_called()
 
     def test_server_shot_event_confirms_local_after_mailbox_returns(self):
         runtime = _runtime()
@@ -31412,7 +31370,7 @@ class BattleRuntimeContractTests(unittest.TestCase):
             0.75 * (0.57 + 0.0043 * 110.0),
             runtime.bigworld.avatar.targeting_updates[-1][3])
 
-    def test_ammo_tick_keeps_server_marker_separate_from_client_angle(self):
+    def test_ammo_tick_keeps_local_marker_and_native_dispersion(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
         battle.state = 'running'
@@ -31438,11 +31396,8 @@ class BattleRuntimeContractTests(unittest.TestCase):
 
         battle._ammo_tick()
 
-        updates = runtime.bigworld.avatar.gun_marker_updates
-        self.assertEqual(1, len(updates))
-        self.assertEqual((10, .0375), (updates[0][0], updates[0][3]))
-        self.assertEqual((1., 2., 3.), tuple(updates[0][1]))
-        self.assertEqual((0., 0., 250.), tuple(updates[0][2]))
+        self.assertEqual([], runtime.bigworld.avatar.gun_marker_updates)
+        self.assertFalse(battle._avatar.gunRotator.showServerMarker)
         self.assertEqual(0.25, battle._native_dispersion_angle())
         self.assertEqual([0.25, 0.01],
                          battle._avatar.gunRotator._VehicleGunRotator__dispersionAngles)
@@ -33798,7 +33753,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
         bots.apply_snapshot.assert_called_once_with(snapshot)
         self.assertEqual({}, battle._bot_fire_seen)
 
-
     def test_local_track_feed_publishes_engine_mode_and_belt_speeds(self):
         runtime = _runtime()
         battle = BattleRuntime(runtime)
@@ -33895,7 +33849,6 @@ class BattleRuntimeContractTests(unittest.TestCase):
         self.assertEqual(
             1, log.getvalue().count(
                 'optional local track animation disabled for this round'))
-
 
     def test_damage_info_is_skipped_when_the_battle_gui_is_gone(self):
         runtime = _runtime()
@@ -35039,7 +34992,8 @@ class LocalEngineAudioMotionTests(unittest.TestCase):
         with mock.patch('sys.stdout', io.StringIO()):
             battle._attach_local_presentation()
         self.assertEqual(
-            ['vehicleSpeedLink', 'rotationSpeedLink'], writes)
+            ['vehicleSpeedLink', 'rotationSpeedLink', 'vehicleMatrixLink'],
+            writes)
         del writes[:]
 
         with mock.patch('sys.stdout', io.StringIO()):

@@ -21,7 +21,7 @@ from lan_battle_server import (
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
     HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_ENVIRONMENT_CAPABILITY,
-    PLAYER_FIRE_INTENT_CAPABILITY, Player,
+    PLAYER_PROJECTILE_OWNER_CAPABILITY, Player,
     PROJECTILE_CAPABILITY, RAM_CONTACT_LEDGER_CAPABILITY,
     RICOCHET_CONTINUATION_CAPABILITY,
     SIMULATION_WORKER_AUTHORITY_ID, SIMULATION_WORKER_CAPABILITY,
@@ -472,7 +472,7 @@ class ServerBotStateRevisionTests(unittest.TestCase):
                 SIMULATION_WORKER_CAPABILITY,
                 RAM_CONTACT_LEDGER_CAPABILITY,
                 HUMAN_RAM_TIMELINE_CAPABILITY,
-                PLAYER_FIRE_INTENT_CAPABILITY,
+                PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 PLAYER_ENVIRONMENT_CAPABILITY,
                 EFFECTIVE_PARAMS_CAPABILITY,
                 RICOCHET_CONTINUATION_CAPABILITY,
@@ -7409,11 +7409,15 @@ class BotRuntimeTests(unittest.TestCase):
                     int(round(step * 1000000.0))
                     for calls in callback_calls for step, unused in calls)
                 self.assertEqual({
-                    'accumulator_us': [0] * frame_count,
+                    # A 250ms callback banks its 50ms tail, then consumes
+                    # 300ms next callback. Total time and the 200ms cap hold.
+                    'accumulator_us': ([50000, 0] * (frame_count // 2)
+                                       if fps == 4 else [0] * frame_count),
                     'sample_time_us': wall_seconds * 1000000,
-                    'callback_elapsed_us': [
-                        int(round(frame_seconds * 1000000.0))
-                    ] * frame_count,
+                    'callback_elapsed_us': ([200000, 300000] * (frame_count // 2)
+                                            if fps == 4 else [
+                                                int(round(frame_seconds * 1000000.0))
+                                            ] * frame_count),
                     'refresh_counts': [1] * frame_count,
                     'refresh_ordered': True,
                     'step_bound_held': True,
@@ -7849,12 +7853,23 @@ class BotRuntimeTests(unittest.TestCase):
             'move_position': (100.0, 0.0, 100.0),
             'recovery_mode': 'drive', 'movement_intent': True,
         })
-        adapter = _FixedAdapter(command)
+        planning = [False]
+
+        class TrackedAdapter(_FixedAdapter):
+            def decide(self, *args, **kwargs):
+                planning[0] = True
+                try:
+                    return super(TrackedAdapter, self).decide(*args, **kwargs)
+                finally:
+                    planning[0] = False
+
+        adapter = TrackedAdapter(command)
         direction_calls = []
         runtime = self.module.BotRuntime(
             1, descriptor_resolver=lambda unused: _combat_descriptor(),
             adapter_factory=lambda *unused, **kwargs: adapter,
-            direction_probe=lambda *unused: direction_calls.append(1) or {
+            direction_probe=lambda *unused: direction_calls.append(
+                'planner' if planning[0] else 'physics') or {
                 'clear': True, 'collision': False, 'slope': 0.0},
             ground_probe=lambda *unused: 0.0,
             physics_ground_probe=lambda *unused: 0.0,
@@ -7870,8 +7885,10 @@ class BotRuntimeTests(unittest.TestCase):
             lambda *unused, **unused_kwargs: True)
         try:
             samples = []
+            physical_slices = 0
             for frame in range(4):
                 runtime.update(0.25, (frame + 1) * 0.25)
+                physical_slices += runtime._last_update_control_steps
                 samples.append((
                     state['x'], state['z'], state['yaw'], state['speed'],
                     state['movement_dir']))
@@ -7886,7 +7903,12 @@ class BotRuntimeTests(unittest.TestCase):
             later[0] > earlier[0] and later[1] > earlier[1] and
             later[2] > earlier[2]
             for earlier, later in zip(samples, samples[1:])))
-        self.assertEqual(12, len(direction_calls))
+        # The two retained 50ms tails reduce eight roster slices to six;
+        # every consumed physical slice still makes its safety probe.
+        self.assertEqual(6, physical_slices)
+        self.assertEqual(4, direction_calls.count('planner'))
+        self.assertEqual(physical_slices, direction_calls.count('physics'))
+        self.assertEqual(10, len(direction_calls))
         self.assertEqual(1000000, runtime._sample_time_us)
         self.assertAlmostEqual(0.0, runtime._accumulator)
 
@@ -11788,11 +11810,13 @@ class BotRuntimeTests(unittest.TestCase):
                     step for calls in callback_calls
                     for step, unused in calls]
                 self.assertEqual({
-                    'accumulator_us': [0] * fps,
+                    'accumulator_us': ([50000, 0] * (fps // 2)
+                                       if fps == 4 else [0] * fps),
                     'sample_time_us': 1000000,
-                    'callback_elapsed_us': [
-                        int(round(frame_seconds * 1000000.0))
-                    ] * fps,
+                    'callback_elapsed_us': ([200000, 300000] * (fps // 2)
+                                            if fps == 4 else [
+                                                int(round(frame_seconds * 1000000.0))
+                                            ] * fps),
                     'refresh_counts': [1] * fps,
                     'refresh_ordered': True,
                     'step_bound_held': True,
@@ -20238,6 +20262,66 @@ class BotRuntimeTests(unittest.TestCase):
         # current critical crew/fire state; the compact record remains valid.
         profile = runtime._spotting_profile(target)
         self.assertEqual(3, len(profile))
+
+    def test_shared_radio_pose_stays_separate_from_post_motion_direct_pose(self):
+        runtime = self.module.BotRuntime(
+            1, descriptor_resolver=lambda unused: _combat_descriptor())
+        bot = {
+            'id': 25, 'team': 2, 'alive': True,
+            'x': 10.0, 'y': 1.0, 'z': 20.0, 'yaw': 0.2,
+            'pitch': 0.1, 'roll': -0.1, 'aim_yaw': 0.4,
+            'turret_yaw': 0.3, 'gun_pitch': 0.5,
+            'speed': 3.0, 'velocity': (1.0, 0.0, 2.0),
+        }
+        runtime.states = {25: bot}
+        sources = dict((key, {'id': key, 'team': 1})
+                       for key in (11, 12, 13, 14))
+        runtime._radio_network.configure({
+            ('bot', key): (1, (0.0 if key != 14 else 5000.0, 0.0, 0.0), 100.0)
+            for key in sources}, 1.0)
+        runtime._visible = lambda source, *unused: source['id'] in (11, 13)
+        tick = {}
+        before, unused = runtime._contacts_for(
+            sources[11], [], 1.0, visibility_tick=tick,
+            processed_bot_ids=set())
+        before_pose = dict(runtime._visible_target_poses[(1, 'bot', 25)])
+        # A same-timestamp radio donor retains its old pose after integration.
+        bot.update(x=40.0, yaw=0.7, gun_pitch=0.9,
+                   velocity=(4.0, 0.0, 5.0))
+        shared, unused = runtime._contacts_for(
+            sources[12], [], 1.0, visibility_tick=tick,
+            processed_bot_ids={25})
+        self.assertTrue(shared[0]['visible'])
+        self.assertTrue(shared[0]['fresh_visible'])
+        self.assertFalse(shared[0]['direct_visible'])
+        for name, value in before_pose.items():
+            self.assertEqual(value, shared[0][name], name)
+        shared[0].update(x=999.0, gun_pitch=9.0)
+
+        direct, unused = runtime._contacts_for(
+            sources[13], [], 1.0, visibility_tick=tick,
+            processed_bot_ids={25})
+        self.assertTrue(direct[0]['direct_visible'])
+        self.assertEqual((40.0, 1.0, 20.0), direct[0]['position'])
+        self.assertEqual(0.9, direct[0]['gun_pitch'])
+        self.assertEqual((4.0, 0.0, 5.0), direct[0]['velocity'])
+        self.assertEqual(10.0, before[0]['x'])
+        self.assertEqual(before_pose,
+                         runtime._radio_network.observations[
+                             ('bot', 11)][('bot', 25)][2])
+
+        # The disconnected observer gets no optional live or donated pose,
+        # even though another hidden observer used this exact template first.
+        unknown, lookup = runtime._contacts_for(
+            sources[14], [], 1.0, visibility_tick=tick,
+            processed_bot_ids={25})
+        self.assertEqual({}, lookup)
+        self.assertFalse(unknown[0]['visible'])
+        self.assertFalse(unknown[0]['fresh_visible'])
+        self.assertEqual((0.0, 0.0, 0.0), unknown[0]['position'])
+        for name in ('pitch', 'roll', 'aim_yaw', 'turret_yaw',
+                     'gun_pitch', 'velocity'):
+            self.assertNotIn(name, unknown[0])
 
     def test_human_observation_visits_each_enemy_target_once(self):
         runtime = self.module.BotRuntime(

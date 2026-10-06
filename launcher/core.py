@@ -103,6 +103,7 @@ STARTER_SHUTDOWN_TIMEOUT_SECONDS_0922 = 45.0
 _CLIENT_RUNTIME_FILES_0_9_22 = (
     WORKER_STARTER_FILENAME_0922,
     "mods/0.9.22.0.1/offline_instance_guard_native.pyd",
+    "mods/0.9.22.0.1/offline_math_batch_native.pyd",
     "res_mods/0.9.22.0.1/engine_config.offline-player.xml",
     "res_mods/0.9.22.0.1/engine_config.offline-worker.xml",
 )
@@ -119,11 +120,11 @@ _SERVER_PROBES = {
         "capabilities": (
             "projectile_ledger_v2", "destructible_catalog_v5",
             "ram_contact_ledger_v2", "human_ram_timeline_v1",
-            "player_fire_intent_v6", "player_environment_v2",
+            "player_projectile_owner_v1", "player_environment_v2",
             "effective_params_v1", "ricochet_continuation_v1"),
         "server_capabilities": (
             "destructible_catalog_v5", "ram_contact_ledger_v2",
-            "human_ram_timeline_v1", "player_fire_intent_v6",
+            "human_ram_timeline_v1", "player_projectile_owner_v1",
             "player_environment_v2", "effective_params_v1",
             "ricochet_continuation_v1"),
     },

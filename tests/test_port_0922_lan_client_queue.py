@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 import unittest
+from unittest import mock
 
 import bot_state_rows
 from gui.mods.offline_lan_0922 import bot_state_codec
@@ -15,6 +16,7 @@ sys.path.insert(0, str(
     ROOT / 'src' / 'res' / 'scripts' / 'client'))
 
 from gui.mods.offline_lan_0922 import lan_client as lan_client_module
+from gui.mods.offline_lan_0922 import snapshot_delta
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.lan_client import LANClient
@@ -72,6 +74,418 @@ class LanClientQueueTests(unittest.TestCase):
             client._outbound_accepting = True
         return client
 
+    @staticmethod
+    def _snapshot_delta_chain():
+        first = LanClientQueueTests.order_snapshot(1, bots=[{
+            'id': 11, 'x': 1.0, 'y': 0.0, 'z': 2.0, 'health': 100,
+            'critical': {'devices': [], 'events': []}}])
+        second = LanClientQueueTests.order_snapshot(2, bots=[{
+            'id': 11, 'x': 2.0, 'y': 0.0, 'z': 2.0, 'health': 80,
+            'critical': {'devices': [{'name': 'engine', 'hp': 50}],
+                         'events': []}}])
+        third = dict(second, server_tick=3, bots=[dict(second['bots'][0], x=3.0)])
+        wire = []
+        baseline = None
+        for sequence, message in enumerate((first, second, third), 1):
+            encoded, baseline = snapshot_delta.encode(message, baseline, sequence)
+            wire.append(encoded)
+        return (first, second, third), wire
+
+    def test_wire_delta_rebuilds_before_queue_and_poll_coalescing(self):
+        messages, wire = self._snapshot_delta_chain()
+        self.assertTrue(wire[1]['snapshot_delta'])
+        self.assertTrue(wire[2]['snapshot_delta'])
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                client = self.activate(worker=worker)
+                generation = client._transport_generation
+                old_limit = lan_client_module.MAX_PENDING_MESSAGES
+                lan_client_module.MAX_PENDING_MESSAGES = 1
+                try:
+                    for message in wire:
+                        restored = client._decode_received_snapshot(message, generation)
+                        client._queue_message(restored, generation)
+                finally:
+                    lan_client_module.MAX_PENDING_MESSAGES = old_limit
+                self.assertEqual(1, len(client._pending))
+                self.assertNotIn('bots', client._pending[0])
+                seen = []
+                client._handle_message = seen.append
+                client.connected = False
+                with mock.patch.object(
+                        snapshot_delta, 'materialize',
+                        wraps=snapshot_delta.materialize) as materialize:
+                    client._poll()
+                self.assertEqual(1, materialize.call_count)
+                self.assertEqual([messages[-1]], seen)
+                self.assertEqual(80, seen[0]['bots'][0]['health'])
+                self.assertEqual(50, seen[0]['bots'][0]['critical']['devices'][0]['hp'])
+
+    def queue_wire_messages(self, client, messages):
+        baseline = None
+        for sequence, message in enumerate(messages, 1):
+            if message.get('type') == 'snapshot':
+                wire, baseline = snapshot_delta.encode(message, baseline, sequence)
+            else:
+                wire = message
+            pending = client._decode_received_snapshot(
+                wire, client._transport_generation)
+            client._queue_message(pending, client._transport_generation)
+
+    def test_pending_actor_versions_survive_every_poll_dispatch_barrier(self):
+        frames, unused = self._snapshot_delta_chain()
+        first, second = frames[:2]
+        manifest = dict(first, bot_manifest=[{'id': 11}])
+        turret = dict(first, detached_turrets=[{'id': 11, 'yaw': 0.5}])
+        event = {'type': 'events', 'round_id': 7, 'server_tick': 1, 'events': []}
+        roster = {'type': 'roster', 'round_id': 8}
+        next_round = dict(second, round_id=8)
+        cases = (
+            ([first, second], [second]),
+            ([manifest, second], [manifest, second]),
+            ([turret, second], [turret, second]),
+            ([first, event, second], [event, first, second]),
+            ([first, roster, next_round], [first, roster, next_round]),
+        )
+        for worker in (False, True):
+            for incoming, expected in cases:
+                with self.subTest(worker=worker, expected=expected):
+                    client = self.activate(worker=worker)
+                    client.connected = False
+                    self.queue_wire_messages(client, incoming)
+                    seen = []
+
+                    def handle(message):
+                        # No private key/holder may reach either virtual handler.
+                        json.dumps(message)
+                        seen.append(message)
+
+                    client._handle_message = handle
+                    client._poll()
+                    self.assertEqual(expected, seen)
+
+    def test_pending_sparse_orders_survive_queue_pressure_and_shallow_merge(self):
+        client = self.activate()
+        client.connected = False
+        first = self.order_snapshot(1, bot_orders=[{'id': 11, 'route_index': 3}])
+        second = self.order_snapshot(2, bots=[{'id': 11, 'x': 20.0}])
+        with mock.patch.object(lan_client_module, 'MAX_PENDING_MESSAGES', 1):
+            self.queue_wire_messages(client, [first, second])
+        self.assertEqual(1, len(client._pending))
+        self.assertNotIn('bots', client._pending[0])
+        seen = []
+        client._handle_message = seen.append
+        with mock.patch.object(snapshot_delta, 'materialize',
+                               wraps=snapshot_delta.materialize) as materialize:
+            client._poll()
+        self.assertEqual(1, materialize.call_count)
+        self.assertEqual([dict(second, bot_orders=first['bot_orders'])], seen)
+
+    def test_materialization_failure_is_local_and_keeps_baseline_and_polling(self):
+        client = self.activate()
+        client.connected = False
+        client.phase = 'battle'
+        first = self.order_snapshot(1, bot_manifest=[])
+        second = self.order_snapshot(2)
+        event = {'type': 'events', 'round_id': 7, 'server_tick': 2, 'events': []}
+        self.queue_wire_messages(client, [first, second, event])
+        baseline = client._snapshot_wire_baseline
+        original = snapshot_delta.materialize
+
+        def fail_first(message):
+            if message.get('type') == 'snapshot' and message['server_tick'] == 1:
+                raise snapshot_delta.SnapshotDeltaError('injected copy failure')
+            return original(message)
+
+        seen = []
+        client._handle_message = seen.append
+        with mock.patch.object(snapshot_delta, 'materialize', side_effect=fail_first):
+            with mock.patch.object(client, '_schedule_poll') as schedule:
+                client._poll()
+        self.assertEqual([event, second], seen)
+        self.assertIs(baseline, client._snapshot_wire_baseline)
+        self.assertEqual(1, schedule.call_count)
+        self.assertEqual('actor_materialization', client._snapshot_drop_reason)
+        self.assertTrue(client.running)
+        self.assertIsNone(client.last_error)
+
+    def test_dispatch_does_not_hide_runtime_handler_errors(self):
+        client = self.activate()
+        client.connected = False
+        self.queue_wire_messages(client, [self.order_snapshot(1)])
+        client._handle_message = mock.Mock(side_effect=RuntimeError('handler failure'))
+        with self.assertRaisesRegex(RuntimeError, 'handler failure'):
+            client._poll()
+
+    def test_eof_drains_same_generation_manifest_events_and_terminal_messages(self):
+        client = self.activate()
+        client.connected = False
+        first = self.order_snapshot(1, bot_manifest=[])
+        second = self.order_snapshot(2)
+        event = {'type': 'events', 'round_id': 7, 'server_tick': 2, 'events': []}
+        receipt = {'type': 'battle_receipt', 'receipt_id': 'server:7:1'}
+        self.queue_wire_messages(client, [first, second, event, receipt])
+        # The receive thread's normal finally block stops reads, not dispatch.
+        client.running = False
+        self.assertFalse(client._stopping)
+        seen = []
+        client._handle_message = seen.append
+        with mock.patch.object(client, '_schedule_poll') as schedule:
+            client._poll()
+        self.assertEqual([first, event, second, receipt], seen)
+        self.assertEqual(0, schedule.call_count)
+
+    def test_poll_reports_fatal_handler_error_after_same_generation_stop(self):
+        client = self.activate()
+        client.connected = False
+        seen = []
+        client.on_event = lambda kind, message: seen.append((kind, message))
+        self.queue_wire_messages(client, [{'type': 'welcome', 'protocol': -1},
+                                          self.order_snapshot(1)])
+        client._poll()
+        self.assertEqual([('error', {'message': 'protocol mismatch'})], seen)
+        self.assertFalse(client.running)
+        self.assertTrue(client._stopping)
+        self.assertIsNone(client.last_error)
+
+    def test_reentrant_stop_start_drops_old_local_batch_and_preserves_new_poll(self):
+        for events_first in (False, True):
+            with self.subTest(events_first=events_first):
+                client = self.activate()
+                client.connected = False
+                client.round_id = 7
+                client.phase = 'battle'
+                first = self.order_snapshot(1, bot_manifest=[])
+                event = {'type': 'events', 'protocol': 5, 'round_id': 7,
+                         'server_tick': 1, 'events': []}
+                incoming = ([first, event] if events_first else
+                            [first, self.order_snapshot(2)])
+                self.queue_wire_messages(client, incoming)
+                old_generation = client._transport_generation
+                new_message = {'type': 'new_transport_marker'}
+                seen = []
+
+                def restart(kind, message):
+                    seen.append(kind)
+                    client.stop()
+                    client.start()
+                    client._queue_message(new_message, client._transport_generation)
+
+                client.on_event = restart
+                with mock.patch.object(lan_client_module.threading, 'Thread'):
+                    client._poll()
+                self.assertEqual(['events' if events_first else 'snapshot'], seen)
+                self.assertGreater(client._transport_generation, old_generation)
+                self.assertEqual([new_message], client._pending)
+                self.assertIsNotNone(client._poll_callback)
+                self.assertTrue(client.running)
+
+    def test_reentrant_restart_during_materialization_cannot_dispatch_old_state(self):
+        client = self.activate()
+        client.connected = False
+        self.queue_wire_messages(client, [self.order_snapshot(1)])
+        original = snapshot_delta.materialize
+
+        def restart(message):
+            prepared = original(message)
+            client.stop()
+            client.start()
+            return prepared
+
+        client._handle_message = mock.Mock()
+        with mock.patch.object(snapshot_delta, 'materialize', side_effect=restart):
+            with mock.patch.object(lan_client_module.threading, 'Thread'):
+                client._poll()
+        self.assertEqual(0, client._handle_message.call_count)
+        self.assertIsNotNone(client._poll_callback)
+        self.assertTrue(client.running)
+
+    def test_stale_dispatch_skips_materialization_and_runtime_handler(self):
+        client = self.activate()
+        generation = client._transport_generation
+        self.queue_wire_messages(client, [self.order_snapshot(1)])
+        pending = client._pending[0]
+        client._transport_generation += 1
+        client._handle_message = mock.Mock()
+        with mock.patch.object(snapshot_delta, 'materialize') as materialize:
+            self.assertFalse(client._dispatch_message(pending, generation))
+        self.assertEqual(0, materialize.call_count)
+        self.assertEqual(0, client._handle_message.call_count)
+
+    def test_wire_baseline_ignores_runtime_mutation_and_business_rejection(self):
+        messages, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        first = snapshot_delta.materialize(
+            client._decode_received_snapshot(wire[0], generation))
+        client.last_snapshot = first
+        first['bots'][0]['critical']['devices'].append({'name': 'local-only'})
+        second = snapshot_delta.materialize(
+            client._decode_received_snapshot(wire[1], generation))
+        self.assertEqual(messages[1], second)
+        # A gameplay consumer can retain the prior actor or reject this whole
+        # frame without changing which ordered raw patch the socket has read.
+        third = snapshot_delta.materialize(
+            client._decode_received_snapshot(wire[2], generation))
+        self.assertEqual(messages[2], third)
+        self.assertEqual(3, client._snapshot_wire_sequence)
+        self.assertEqual([], client._outbound_queue)
+
+    def test_bad_delta_requests_one_full_and_preserves_other_protocol_messages(self):
+        messages, wire = self._snapshot_delta_chain()
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                client = self.activate(worker=worker)
+                generation = client._transport_generation
+                client._decode_received_snapshot(wire[0], generation)
+                broken = dict(wire[1], snapshot_base_seq=999)
+                self.assertIsNone(client._decode_received_snapshot(broken, generation))
+                self.assertIsNone(client._decode_received_snapshot(wire[2], generation))
+                self.assertIsNone(client._snapshot_wire_baseline)
+                requests = [entry[1] for entry in client._outbound_queue]
+                self.assertEqual([{
+                    'type': 'snapshot_resync', 'round_id': 7,
+                    'authority_epoch': 1, 'last_sequence': 1}], requests)
+                event = {'type': 'events', 'round_id': 7, 'events': []}
+                self.assertIs(event, client._decode_received_snapshot(event, generation))
+                self.assertTrue(client.running)
+                self.assertTrue(client.connected)
+                self.assertIsNone(client.last_error)
+                full, baseline = snapshot_delta.encode(messages[2], None, 3)
+                self.assertEqual(messages[2], snapshot_delta.materialize(
+                    client._decode_received_snapshot(full, generation)))
+                self.assertFalse(client._snapshot_resync_pending)
+                next_message = dict(messages[2], server_tick=4)
+                next_wire, unused = snapshot_delta.encode(next_message, baseline, 4)
+                self.assertEqual(next_message, snapshot_delta.materialize(
+                    client._decode_received_snapshot(next_wire, generation)))
+
+    def test_recovery_full_can_replace_a_bad_high_wire_sequence(self):
+        messages, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        runtime_state = {'bots': [{'id': 11, 'health': 100}]}
+        client.last_snapshot = runtime_state
+        high, unused = snapshot_delta.encode(messages[0], None, 100)
+        client._decode_received_snapshot(high, generation)
+        self.assertEqual(100, client._snapshot_wire_sequence)
+        self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        self.assertIsNone(client._snapshot_wire_baseline)
+        self.assertEqual(100, client._snapshot_wire_sequence)
+        self.assertIs(runtime_state, client.last_snapshot)
+        full, unused = snapshot_delta.encode(messages[2], None, 3)
+        self.assertEqual(messages[2], snapshot_delta.materialize(
+                    client._decode_received_snapshot(full, generation)))
+        self.assertEqual(3, client._snapshot_wire_sequence)
+        self.assertFalse(client._snapshot_resync_pending)
+
+    def test_recovery_queue_pressure_retries_until_request_is_accepted(self):
+        unused, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
+        lan_client_module.MAX_OUTBOUND_MESSAGES = 0
+        try:
+            self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        finally:
+            lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
+        self.assertFalse(client._snapshot_resync_pending)
+        self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        self.assertTrue(client._snapshot_resync_pending)
+        self.assertEqual(1, len(client._outbound_queue))
+
+    def test_stale_receiver_cannot_publish_or_request_on_reconnected_transport(self):
+        unused, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        original_decode = snapshot_delta.decode
+
+        def reconnect_during_decode(message, baseline, **options):
+            result = original_decode(message, baseline, **options)
+            client._transport_generation += 1
+            client._snapshot_wire_baseline = None
+            client._snapshot_wire_sequence = None
+            return result
+
+        snapshot_delta.decode = reconnect_during_decode
+        try:
+            self.assertIsNone(client._decode_received_snapshot(wire[0], generation))
+        finally:
+            snapshot_delta.decode = original_decode
+        self.assertIsNone(client._snapshot_wire_baseline)
+        self.assertIsNone(client._snapshot_wire_sequence)
+        self.assertIsNone(client._decode_received_snapshot(wire[1], generation))
+        self.assertEqual([], client._outbound_queue)
+
+    def test_wire_full_after_round_or_epoch_change_replaces_baseline(self):
+        messages, wire = self._snapshot_delta_chain()
+        client = self.activate()
+        generation = client._transport_generation
+        client._decode_received_snapshot(wire[0], generation)
+        for sequence, changes in (
+                (2, {'authority_epoch': 2}),
+                (4, {'round_id': 8, 'authority_epoch': 3})):
+            value = dict(messages[0], **changes)
+            full, baseline = snapshot_delta.encode(value, None, sequence)
+            self.assertEqual(value, snapshot_delta.materialize(
+                    client._decode_received_snapshot(full, generation)))
+            changed = dict(value, server_tick=5)
+            delta, unused = snapshot_delta.encode(changed, baseline, sequence + 1)
+            self.assertEqual(changed, snapshot_delta.materialize(
+                    client._decode_received_snapshot(delta, generation)))
+
+    def test_network_worker_queues_private_actor_versions_until_dispatch(self):
+        messages, wire = self._snapshot_delta_chain()
+        payload = b''.join((json.dumps(value) + '\n').encode('utf-8')
+                           for value in wire)
+
+        class IncomingSocket(RecordingSocket):
+            def __init__(self):
+                RecordingSocket.__init__(self)
+                self.chunks = [payload, b'']
+
+            def settimeout(self, unused_timeout):
+                pass
+
+            def connect(self, unused_address):
+                pass
+
+            def setsockopt(self, *unused_arguments):
+                pass
+
+            def recv(self, unused_size):
+                return self.chunks.pop(0)
+
+        client = self.activate()
+        client.effective_params = effective_params()
+        seen = []
+        client._queue_message = lambda message, unused_generation: seen.append(message)
+        client._publish_connected_transport = lambda unused_socket, unused_generation: True
+        with mock.patch.object(lan_client_module.socket, 'socket',
+                               return_value=IncomingSocket()):
+            client._worker()
+        self.assertEqual(3, len(seen))
+        for expected, actual in zip(messages, seen):
+            self.assertIn('_client_received_time', actual)
+            self.assertNotIn('bots', actual)
+            actual = snapshot_delta.materialize(actual)
+            actual.pop('_client_received_time')
+            self.assertEqual(expected, actual)
+            self.assertNotIn('snapshot_seq', actual)
+            self.assertNotIn('snapshot_delta', actual)
+
+    def test_start_resets_wire_baseline_and_pending_recovery(self):
+        client = self.activate()
+        client.running = False
+        client._snapshot_wire_baseline = object()
+        client._snapshot_wire_sequence = 99
+        client._snapshot_resync_pending = True
+        with mock.patch.object(lan_client_module.threading, 'Thread'):
+            self.assertTrue(client.start())
+        self.assertIsNone(client._snapshot_wire_baseline)
+        self.assertIsNone(client._snapshot_wire_sequence)
+        self.assertFalse(client._snapshot_resync_pending)
+
     def test_notify_reports_socket_to_main_thread_dispatch_delay(self):
         events = []
         client = LANClient(
@@ -95,7 +509,7 @@ class LanClientQueueTests(unittest.TestCase):
         client = self.activate()
         protected = [
             {'type': 'battle_receipt', 'receipt_id': 'server:7:1'},
-            {'type': 'fire_intent', 'player_id': 1, 'intent_seq': 2},
+            {'type': 'team_command_ack', 'player_id': 1, 'command_seq': 2},
             {'type': 'fire_intent_result', 'player_id': 1,
              'intent_seq': 2},
         ]
@@ -376,7 +790,7 @@ class LanClientQueueTests(unittest.TestCase):
         client = self.activate()
         protected = [
             {'type': 'battle_receipt', 'receipt_id': 'server:7:1'},
-            {'type': 'fire_intent', 'player_id': 1, 'intent_seq': 2},
+            {'type': 'team_command_ack', 'player_id': 1, 'command_seq': 2},
             {'type': 'fire_intent_result', 'player_id': 1,
              'intent_seq': 2},
         ]
@@ -384,7 +798,7 @@ class LanClientQueueTests(unittest.TestCase):
         lan_client_module.MAX_PENDING_MESSAGES = len(protected)
         try:
             for message_type in (
-                    'battle_receipt', 'fire_intent',
+                    'battle_receipt', 'team_command_ack',
                     'fire_intent_result'):
                 client._pending = list(protected)
                 with self.subTest(message_type=message_type):
@@ -400,7 +814,7 @@ class LanClientQueueTests(unittest.TestCase):
 
         self.assertTrue(client._send(first))
         first['nested']['values'][0] = 99
-        self.assertTrue(client._send({'type': 'fire_intent', 'intent_seq': 4}))
+        self.assertTrue(client._send({'type': 'projectile_launch', 'shot_seq': 4}))
         self.assertTrue(client._send({'type': 'input', 'fire_seq': 5}))
         self.assertTrue(client._send({'type': 'bot_state', 'revision': 8}))
         self.assertTrue(client._send({'type': 'bot_state', 'revision': 9}))
@@ -410,7 +824,7 @@ class LanClientQueueTests(unittest.TestCase):
         queued = list(client._outbound_queue)
         self.assertEqual(list(range(1, 7)), [item[0] for item in queued])
         self.assertEqual(
-            ['input', 'fire_intent', 'input', 'bot_state', 'bot_state',
+            ['input', 'projectile_launch', 'input', 'bot_state', 'bot_state',
              'bot_observation'],
             [item[1]['type'] for item in queued])
         self.assertEqual((1, 2), queued[0][1]['nested']['values'])
@@ -834,7 +1248,7 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertEqual([], client._outbound_queue)
         self.assertIn('blocked transport', client.last_error)
 
-    def test_failed_fire_enqueue_does_not_consume_fire_sequence(self):
+    def test_full_queue_refuses_launch_and_preserves_owner_sequence_on_retry(self):
         source_shot = {
             'speed': 100.0, 'gravity': 9.81,
             'maxDistance': 500.0, 'piercingPower': [100.0, 100.0],
@@ -851,6 +1265,19 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertTrue(client.send_input(
             0.0, 0.0, position=(0.0, 0.0, 0.0), yaw=0.0,
             shell_index=0))
+        client.authority_epoch = 1
+        launch = {
+            'shooter_kind': 'player', 'shooter_id': 1,
+            'shot_seq': 1, 'shell_index': 0,
+            'origin': [0.0, 1.0, 0.0],
+            'range_origin': [0.0, 0.0, 0.0],
+            'velocity': [100.0, 0.0, 0.0],
+            'gravity': 9.81, 'max_distance': 500.0, 'max_time_ms': 5000,
+            'is_he': False, 'splash_radius': 0.0,
+            'source_shot': source_shot, 'authority_epoch': 1,
+            'fire_intent_seq': 1, 'fire_input_seq': 1,
+            'launch_server_time_ms': 100,
+        }
         enqueue_attempts = []
         original_enqueue = client._enqueue_outbound
 
@@ -862,32 +1289,22 @@ class LanClientQueueTests(unittest.TestCase):
         original_limit = lan_client_module.MAX_OUTBOUND_MESSAGES
         lan_client_module.MAX_OUTBOUND_MESSAGES = 1
         try:
-            self.assertIsNone(client.send_fire(
-                position=[0.0, 1.0, 0.0], velocity=[100.0, 0.0, 0.0],
-                gravity=9.81, max_distance=500.0, max_time_ms=5000,
-                source_shot=source_shot, trigger_server_time_ms=100))
+            self.assertIsNone(client.send_projectile_launch(**launch))
         finally:
             lan_client_module.MAX_OUTBOUND_MESSAGES = original_limit
         self.assertEqual(1, len(enqueue_attempts))
-        self.assertEqual('fire_intent', enqueue_attempts[0]['type'])
-        self.assertEqual(0, client._fire_intent_seq)
+        self.assertEqual('projectile_launch', enqueue_attempts[0]['type'])
+        self.assertEqual(1, len(client._outbound_queue))
+        self.assertEqual('input', client._outbound_queue[0][1]['type'])
 
-        client = self.activate()
-        client.ready = True
-        client.phase = 'battle'
-        client.round_id = 3
-        self.assertTrue(client.send_input(
-            0.0, 0.0, position=(0.0, 0.0, 0.0), yaw=0.0,
-            shell_index=0))
-        self.assertEqual(1, client.send_fire(
-            position=[0.0, 1.0, 0.0], velocity=[100.0, 0.0, 0.0],
-            gravity=9.81, max_distance=500.0, max_time_ms=5000,
-            source_shot=source_shot, trigger_server_time_ms=100))
-        self.assertEqual(1, client._fire_intent_seq)
-        self.assertEqual(
-            'fire_intent', client._outbound_queue[1][1]['type'])
-        self.assertEqual(1, client._outbound_queue[1][1]['intent_seq'])
-        self.assertEqual(1, client._outbound_queue[1][1]['input_seq'])
+        self.assertEqual(1, client.send_projectile_launch(**launch))
+        self.assertEqual(2, len(enqueue_attempts))
+        self.assertEqual(enqueue_attempts[0], enqueue_attempts[1])
+        queued = client._outbound_queue[1][1]
+        self.assertEqual('projectile_launch', queued['type'])
+        self.assertEqual(1, queued['shot_seq'])
+        self.assertEqual(1, queued['fire_input_seq'])
+        self.assertEqual(100, queued['launch_server_time_ms'])
 
     def test_stop_sends_best_effort_leave_and_clears_queue(self):
         client = self.activate()

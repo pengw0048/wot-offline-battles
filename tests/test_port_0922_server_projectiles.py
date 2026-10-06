@@ -20,7 +20,7 @@ from lan_battle_server import (  # noqa: E402
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY, PREBATTLE_SECONDS,
     HUMAN_RAM_TIMELINE_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
-    PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+    PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
     RAM_CONTACT_LEDGER_CAPABILITY,
     MODERN_VISIBLE_MESSAGE_TYPES,
     PROJECTILE_CAPABILITY, PROJECTILE_MAX_ACTIVE,
@@ -51,7 +51,7 @@ def _player(player_id, team=1, x=0.0):
         capabilities=(
             PROJECTILE_CAPABILITY, DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
             HUMAN_RAM_TIMELINE_CAPABILITY, RAM_CONTACT_LEDGER_CAPABILITY,
-            PLAYER_FIRE_INTENT_CAPABILITY,
+            PLAYER_PROJECTILE_OWNER_CAPABILITY,
             PLAYER_ENVIRONMENT_CAPABILITY,
             EFFECTIVE_PARAMS_CAPABILITY,
             RICOCHET_CONTINUATION_CAPABILITY),
@@ -87,7 +87,7 @@ def _attach_worker_authority(state):
         _Socket(), ('127.0.0.1', 28782), capabilities=(
             PROJECTILE_CAPABILITY, DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
             HUMAN_RAM_TIMELINE_CAPABILITY, RAM_CONTACT_LEDGER_CAPABILITY,
-            PLAYER_FIRE_INTENT_CAPABILITY,
+            PLAYER_PROJECTILE_OWNER_CAPABILITY,
             PLAYER_ENVIRONMENT_CAPABILITY,
             EFFECTIVE_PARAMS_CAPABILITY,
             RICOCHET_CONTINUATION_CAPABILITY))
@@ -113,22 +113,6 @@ def _update_player_input(state, player_id, **changes):
     }
     message.update(changes)
     return state.update_input(player_id, message)
-
-
-def _fire_intent(state, player_id=1, **changes):
-    player = state.players[player_id]
-    message = {
-        'type': 'fire_intent', 'round_id': state.round_id,
-        'intent_seq': player.fire_intent_seq + 1,
-        'input_seq': player.input_seq, 'shell_index': player.shell_index,
-        'shot_origin': [player.x, player.y + 1.0, player.z],
-        'shot_direction': [0.0, 0.0, 1.0],
-        'dispersion_angle': 0.01,
-        'presentation_ledger': [],
-        'trigger_server_time_ms': state._server_time_ms(),
-    }
-    message.update(changes)
-    return message
 
 
 def _source_shot(speed, gravity, maximum, is_he=False, radius=0.0,
@@ -177,52 +161,47 @@ def _launch(shooter_id=1, shot_seq=1, shooter_kind='player', **changes):
 
 
 def _launch_authority(state, message, before_launch=None):
-    """Admit a player trigger, then let only worker -1 launch it."""
+    """Admit a shot from its actual human or Bot owner."""
     if message.get('shooter_kind') == 'bot':
         return state.launch_projectile(
             SIMULATION_WORKER_AUTHORITY_ID, message)
-    if 'fire_intent_seq' not in message:
-        player_id = int(message['shooter_id'])
-        player = state.players[player_id]
-        input_seq = player.input_processed_seq + 1
-        self_time = state._logical_motion_time_us()
-        if not state.update_input(player_id, {
-                'type': 'input', 'round_id': state.round_id,
-                'input_seq': input_seq, 'pose_time_us': self_time,
-                'forward': 0.0, 'turn': 0.0, 'speed': 0.0,
-                'aim_yaw': player.aim_yaw, 'gun_pitch': player.gun_pitch,
-                'x': player.x, 'y': player.y, 'z': player.z,
-                'yaw': player.yaw, 'pitch': player.pitch,
-                'roll': player.roll, 'fire_seq': player.fire_seq,
-                'shell_index': message['shell_index'],
-                'next_shell_index': message['shell_index'],
-                'shell_change_pending': False,
-                'gun_checkpoint': _gun_checkpoint()}):
+    player_id = int(message['shooter_id'])
+    player = state.players[player_id]
+    if not player.input_processed_seq:
+        if not _update_player_input(state, player_id):
             return False
-        intent_seq = player.fire_intent_seq + 1
-        launch_speed = math.sqrt(sum(
-            component * component for component in message['velocity']))
-        if not state.submit_fire_intent(player_id, _fire_intent(
-                state, player_id, intent_seq=intent_seq,
-                input_seq=input_seq,
-                shell_index=message['shell_index'],
-                shot_origin=list(message['origin']),
-                shot_direction=[
-                    component / launch_speed
-                    for component in message['velocity']],
-                dispersion_angle=0.0)):
-            return False
-        relay = player.pending_fire_intents[intent_seq]
-        message.update({
-            'authority_epoch': state.authority_epoch,
-            'shot_seq': relay['shot_seq'],
-            'fire_intent_seq': intent_seq,
-            'fire_input_seq': input_seq,
-        })
+    message.setdefault('authority_epoch', state.authority_epoch)
+    message.setdefault('fire_intent_seq', message['shot_seq'])
+    message.setdefault('fire_input_seq', player.input_processed_seq)
+    message.setdefault('range_origin', [player.x, player.y, player.z])
+    message.setdefault('launch_server_time_ms', state._server_time_ms())
     if callable(before_launch):
         before_launch()
-    return state.launch_projectile(
-        SIMULATION_WORKER_AUTHORITY_ID, message)
+    return state.launch_projectile(player_id, message)
+
+
+def _launch_proof(state, projectile_id):
+    record = state.projectiles.get(projectile_id)
+    if record is None or record['shooter_kind'] == 'bot':
+        return None
+    return dict((key, copy.deepcopy(record[key])) for key in
+                lan_server_module.PROJECTILE_LAUNCH_PROOF_FIELDS)
+
+
+def _projectile_owner(message):
+    if message.get('shooter_kind') is not None:
+        return (message['shooter_id'] if message['shooter_kind'] == 'player'
+                else SIMULATION_WORKER_AUTHORITY_ID)
+    projectile_id = message.get('projectile_id')
+    if projectile_id is None:
+        cursors = message.get('cursors')
+        if not isinstance(cursors, list) or not cursors:
+            return 1
+        projectile_id = cursors[0].get('projectile_id', '')
+    parts = projectile_id.split(':')
+    if len(parts) != 4:
+        return 1
+    return int(parts[2]) if parts[1] == 'p' else SIMULATION_WORKER_AUTHORITY_ID
 
 
 def _effect(target_id=2, target_kind='player', damage=100, x=10.0,
@@ -241,7 +220,7 @@ def _effect(target_id=2, target_kind='player', damage=100, x=10.0,
     return value
 
 
-def _resolve(projectile_id, epoch=1, **changes):
+def _resolve(state, projectile_id, epoch=1, **changes):
     message = {
         'type': 'projectile_resolve', 'round_id': 1,
         'authority_epoch': epoch, 'projectile_id': projectile_id,
@@ -251,11 +230,14 @@ def _resolve(projectile_id, epoch=1, **changes):
         'impact': [10.0, 1.0, 0.0],
         'direct': _effect(), 'splash': [], 'destructibles': [],
     }
+    proof = _launch_proof(state, projectile_id)
+    if proof is not None:
+        message['launch_proof'] = proof
     message.update(changes)
     return message
 
 
-def _ricochet(projectile_id, epoch=1, **changes):
+def _ricochet(state, projectile_id, epoch=1, **changes):
     message = {
         'type': 'projectile_ricochet', 'round_id': 1,
         'authority_epoch': epoch, 'projectile_id': projectile_id,
@@ -269,11 +251,14 @@ def _ricochet(projectile_id, epoch=1, **changes):
         'direct': _effect(damage=0, shot_result=0),
         'destructibles': [],
     }
+    proof = _launch_proof(state, projectile_id)
+    if proof is not None:
+        message['launch_proof'] = proof
     message.update(changes)
     return message
 
 
-def _progress(projectile_id, checked_through_ms, checked_distance,
+def _progress(state, projectile_id, checked_through_ms, checked_distance,
               base_checked_ms=0, **changes):
     cursor = {
         'projectile_id': projectile_id,
@@ -284,10 +269,15 @@ def _progress(projectile_id, checked_through_ms, checked_distance,
         'destructibles': [],
     }
     cursor.update(changes)
-    return {
+    message = {
         'type': 'projectile_progress', 'round_id': 1,
         'authority_epoch': 1, 'cursors': [cursor],
     }
+
+    proof = _launch_proof(state, projectile_id)
+    if proof is not None:
+        message['cursors'][0]['launch_proof'] = proof
+    return message
 
 
 def _terminal_critical():
@@ -350,6 +340,123 @@ def _player_destructible_contact(seq=1, **changes):
 
 
 class ServerProjectileLedgerTests(unittest.TestCase):
+
+    def test_player_pipeline_launch_progress_ricochet_terminal_without_echo(self):
+        state = _state(players=3)
+        self.assertTrue(_launch_authority(state, _launch()))
+        projectile_id = '1:p:1:1'
+        proof = _launch_proof(state, projectile_id)
+        self.assertTrue(state.progress_projectiles(
+            1, _progress(state, projectile_id, 50, 5.0)))
+        self.assertTrue(state.ricochet_projectile(
+            1, _ricochet(state, projectile_id, base_checked_ms=50)))
+        self.assertEqual(proof, _launch_proof(state, projectile_id))
+        terminal = _resolve(
+            state, projectile_id, base_checked_ms=100, resolved_time_ms=150,
+            checked_distance=15.0, outcome='miss', impact=None, direct=None)
+        self.assertTrue(state.resolve_projectile(1, terminal))
+        self.assertTrue(state.resolve_projectile(1, copy.deepcopy(terminal)))
+        self.assertNotIn(projectile_id, state.projectiles)
+        self.assertEqual(['shot', 'projectile_ricochet', 'projectile_impact'],
+                         [event['kind'] for event in state.pending_events
+                          if event['kind'] in ('shot', 'projectile_ricochet',
+                                               'projectile_impact')])
+        self.assertEqual(1, state._statistics_row('player', 1)['shots_fired'])
+
+    def test_player_owner_and_launch_proof_precede_all_effects(self):
+        state = _state(players=3)
+        launch = _launch()
+        self.assertTrue(_launch_authority(state, launch))
+        projectile_id = '1:p:1:1'
+        self.assertFalse(state.launch_projectile(-1, launch))
+        self.assertFalse(state.launch_projectile(2, launch))
+        resolution = _resolve(state, projectile_id, destructibles=[_destructible()])
+        for owner in (-1, 2):
+            self.assertFalse(state.resolve_projectile(owner, resolution))
+        progress = _progress(state, projectile_id, 100, 10.0,
+                             destructibles=[_destructible()])
+        ricochet = _ricochet(state, projectile_id,
+                             destructibles=[_destructible()])
+        for method, message in ((state.progress_projectiles, progress),
+                                (state.ricochet_projectile, ricochet),
+                                (state.resolve_projectile, resolution)):
+            with self.subTest(message=message['type']):
+                bad = copy.deepcopy(message)
+                proof_owner = bad['cursors'][0] if 'cursors' in bad else bad
+                proof_owner['launch_proof']['origin'][0] += 1.0
+                self.assertFalse(method(1, bad))
+                self.assertEqual(1000, state.players[2].health)
+                self.assertEqual({}, state.destructibles)
+                self.assertIn(projectile_id, state.projectiles)
+        self.assertTrue(state.resolve_projectile(1, resolution))
+        self.assertEqual(900, state.players[2].health)
+        self.assertEqual(1, len(state.destructibles))
+        self.assertTrue(state.resolve_projectile(1, resolution))
+        self.assertEqual(900, state.players[2].health)
+
+    def test_player_progress_cannot_mix_other_owners_into_one_batch(self):
+        state = _state(players=3)
+        self.assertTrue(_launch_authority(state, _launch()))
+        self.assertTrue(_launch_authority(state, _launch(shooter_id=2)))
+        first = _progress(state, '1:p:1:1', 100, 10.0)
+        first['cursors'].extend(_progress(state, '1:p:2:1', 100, 10.0)['cursors'])
+        self.assertFalse(state.progress_projectiles(1, first))
+        self.assertEqual([0, 0], sorted(record['checked_through_ms']
+                                       for record in state.projectiles.values()))
+
+    def test_player_launch_rejection_is_local_and_next_sequence_recovers(self):
+        state = _state(players=3)
+        player = state.players[1]
+        replies = []
+        player.offer_reliable = lambda message: replies.append(message) or True
+        bad = _launch(gravity=-1.0)
+        self.assertFalse(_launch_authority(state, bad))
+        self.assertTrue(state.reject_player_projectile_launch(1, bad))
+        self.assertEqual('1:p:1:1', replies[0]['projectile_id'])
+        self.assertEqual(1, replies[0]['shot_seq'])
+        self.assertIs(False, replies[0]['accepted'])
+        self.assertEqual({}, state.projectiles)
+        self.assertIsNone(state.battle_result)
+        self.assertTrue(_launch_authority(state, _launch(shot_seq=2)))
+        self.assertEqual(2, player.fire_seq)
+        self.assertEqual(1, state._statistics_row('player', 1)['shots_fired'])
+
+    def test_player_launch_clock_and_burst_are_frozen_at_the_owner(self):
+        state = _state(players=3)
+        launch_time = state._server_time_ms() + 100
+        for seq, shells in ((1, 2), (2, 1)):
+            launch = _launch(shot_seq=seq, burst_group_seq=1,
+                             burst_index=seq - 1, burst_count=2,
+                             shells_before_shot=shells,
+                             launch_server_time_ms=launch_time)
+            self.assertTrue(_launch_authority(state, launch))
+            projectile_id = '1:p:1:%d' % seq
+            self.assertEqual(launch_time,
+                             state.projectiles[projectile_id]['launch_server_time_ms'])
+            self.assertEqual(shells == 1, state.last_shell_shots[projectile_id])
+        self.assertEqual(2, state.players[1].fire_seq)
+        self.assertEqual({'0': 2}, state._statistics_row('player', 1)['shells_fired'])
+        self.assertFalse(_launch_authority(state, _launch(
+            shot_seq=3, launch_server_time_ms=launch_time + 1000)))
+
+    def test_player_launch_retry_keeps_its_clock_after_freshness_window(self):
+        state = _state(players=3)
+        launch = _launch()
+        self.assertTrue(_launch_authority(state, launch))
+        launch_time = launch['launch_server_time_ms']
+        state._server_time_ms = lambda: launch_time + 1000
+
+        self.assertTrue(state.launch_projectile(1, copy.deepcopy(launch)))
+        self.assertEqual(launch_time,
+                         state.projectiles['1:p:1:1']['launch_server_time_ms'])
+        self.assertTrue(state.resolve_projectile(
+            1, _resolve(state, '1:p:1:1')))
+        self.assertTrue(state.launch_projectile(1, copy.deepcopy(launch)))
+        self.assertEqual(1, state._statistics_row('player', 1)['shots_fired'])
+        self.assertEqual(900, state.players[2].health)
+        self.assertFalse(_launch_authority(state, _launch(
+            shot_seq=2, launch_server_time_ms=launch_time)))
+
     def test_projectile_wire_round_is_cross_runtime_half_even(self):
         self.assertEqual(0.007812, _projectile_wire_round(0.0078125))
         self.assertEqual(-0.007812, _projectile_wire_round(-0.0078125))
@@ -610,16 +717,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(state._player_overturn_danger(1))
         self.assertEqual((0.0, 0.0, 0.0),
                          (player.forward, player.turn, player.speed))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual([{
-            'type': 'fire_intent_result', 'round_id': state.round_id,
-            'intent_seq': 1, 'accepted': False,
-            'reason': 'player_overturned',
-        }], results)
-        self.assertEqual(1, player.fire_intent_seq)
-        self.assertEqual((False, 'player_overturned'),
-                         player.fire_intent_results[1])
-        self.assertFalse(player.pending_fire_intents)
         self.assertEqual(1, state._tick_player_overturn(29.9))
         self.assertFalse(player.alive)
         self.assertEqual(0, player.health)
@@ -1583,7 +1680,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self._armed_bot(state)
 
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=1)),
             _launch(shooter_id=16, shooter_kind='bot',
                     shells_before_shot=1)))
 
@@ -1598,7 +1696,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self._armed_bot(state)
 
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=0)),
             _launch(shooter_id=16, shooter_kind='bot',
                     shells_before_shot=0)))
 
@@ -1610,7 +1709,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self._armed_bot(state)
 
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=2)),
             _launch(shooter_id=16, shooter_kind='bot',
                     shells_before_shot=2)))
 
@@ -1621,7 +1721,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self._armed_bot(state)
 
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot',
+                    shells_before_shot=7)),
             _launch(shooter_id=16, shooter_kind='bot',
                     shells_before_shot=7)))
 
@@ -1655,8 +1756,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 'devices': [], 'crew_ko': [], 'ignite': True,
             })
         if not state.resolve_projectile(
-                SIMULATION_WORKER_AUTHORITY_ID,
-                _resolve(projectile_id, direct=direct)):
+                _projectile_owner(_resolve(state, projectile_id, direct=direct)),
+                _resolve(state, projectile_id, direct=direct)):
             raise AssertionError(state.last_projectile_resolve_reject)
         return target
 
@@ -1709,7 +1810,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self._armed_bot(state)
 
         self.assertFalse(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot',
+                    unexpected_field=1)),
             _launch(shooter_id=16, shooter_kind='bot',
                     unexpected_field=1)))
 
@@ -1721,8 +1823,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_launch_authority(
             state, message,
             before_launch=lambda: mapped.append(
-                state.players[1].pending_fire_intents[1][
-                    'trigger_launch_time_ms'])))
+                message['launch_server_time_ms'])))
         self.assertEqual(1, state.players[1].fire_seq)
         self.assertEqual(['1:p:1:1'], sorted(state.projectiles))
         shot = state.pending_events[-1]
@@ -1781,88 +1882,11 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                          state.pending_events[-1]['range_origin'])
 
         rejected = _state()
-        self.assertFalse(_launch_authority(
+        self.assertTrue(_launch_authority(
             rejected, dict(_launch(), range_origin=[500.0, 0.0, 0.0])))
-        self.assertFalse(rejected.projectiles)
+        self.assertEqual([500.0, 0.0, 0.0],
+                         rejected.projectiles['1:p:1:1']['range_origin'])
 
-    def test_player_fire_intent_freezes_order_but_trusts_worker_ballistics(self):
-        state = _state()
-        player = state.players[1]
-        relayed = []
-        state.simulation_worker.offer_reliable = lambda message: (
-            relayed.append(dict(message)) or True)
-        self.assertTrue(_update_player_input(
-            state, 1, x=3.25, y=1.5, z=-4.75, yaw=0.25,
-            aim_yaw=-0.5, gun_pitch=0.125))
-        message = _fire_intent(
-            state, 1, shot_origin=[3.25, 2.5, -4.75])
-
-        self.assertTrue(state.submit_fire_intent(1, message))
-        self.assertEqual(1, len(relayed))
-        relay = relayed[0]
-        self.assertEqual(SIMULATION_WORKER_AUTHORITY_ID,
-                         state.bot_authority_id)
-        self.assertEqual(1, relay['intent_seq'])
-        self.assertEqual(1, relay['shot_seq'])
-        self.assertEqual(player.input_seq, relay['input_seq'])
-        self.assertEqual(player.pose_time_us, relay['pose_time_us'])
-        self.assertEqual(message['trigger_server_time_ms'],
-                         relay['trigger_launch_time_ms'])
-        self.assertEqual(relay, player.pending_fire_intents[1])
-        self.assertEqual((3.25, 1.5, -4.75),
-                         (relay['x'], relay['y'], relay['z']))
-        self.assertEqual((-0.5, 0.125),
-                         (relay['aim_yaw'], relay['gun_pitch']))
-        self.assertEqual([3.25, 2.5, -4.75], relay['shot_origin'])
-        self.assertEqual([0.0, 0.0, 1.0], relay['shot_direction'])
-        self.assertEqual(0.01, relay['dispersion_angle'])
-        self.assertEqual(0, relay['next_shell_index'])
-        self.assertFalse(relay['shell_change_pending'])
-        self.assertEqual(player.input_seq, relay['gun_checkpoint_seq'])
-        self.assertEqual(_gun_checkpoint(), relay['gun_checkpoint'])
-        self.assertNotIn('deadline_server_time_ms', relay)
-
-        self.assertTrue(state.submit_fire_intent(1, dict(message)))
-        self.assertEqual(1, len(relayed))
-        self.assertFalse(state.submit_fire_intent(
-            1, dict(message, shell_index=1)))
-        self.assertFalse(state.submit_fire_intent(
-            1, dict(message, intent_seq=3)))
-        self.assertFalse(state.submit_fire_intent(
-            1, dict(message, shot_direction=[1.0, 0.0, 0.0])))
-        self.assertEqual([1], list(player.pending_fire_intents))
-        launch = _launch(
-            origin=list(relay['shot_origin']), velocity=[100.0, 0.0, 0.0],
-            authority_epoch=state.authority_epoch,
-            fire_intent_seq=relay['intent_seq'],
-            fire_input_seq=relay['input_seq'])
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, launch))
-
-    def test_player_fire_intent_survives_worker_stall_beyond_five_seconds(self):
-        state = _state(players=1)
-        now_ms = [1000]
-        state._server_time_ms = lambda: now_ms[0]
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        player = state.players[1]
-        relay = player.pending_fire_intents[1]
-
-        now_ms[0] += 6001
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _launch(
-                origin=list(relay['shot_origin']),
-                velocity=[0.0, 0.0, 100.0],
-                authority_epoch=state.authority_epoch,
-                fire_intent_seq=relay['intent_seq'],
-                fire_input_seq=relay['input_seq'])))
-
-        projectile_id = state._projectile_id(1, 'player', 1, 1)
-        self.assertNotIn(1, player.pending_fire_intents)
-        self.assertEqual(
-            (True, projectile_id), player.fire_intent_results[1])
-        self.assertIn(projectile_id, state.projectiles)
 
     def test_late_next_gun_checkpoint_is_kept_and_old_retry_cannot_replace_it(self):
         state = _state(players=1)
@@ -1905,15 +1929,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                     shell_change_pending=True,
                     gun_checkpoint=_gun_checkpoint(
                         clip=clip, clip_size=clip_size)))
-                self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-                    state, shot_direction=[1.0, 0.0, 0.0])))
-                relay = player.pending_fire_intents[1]
-
-                self.assertTrue(state.launch_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                        authority_epoch=state.authority_epoch,
-                        fire_intent_seq=relay['intent_seq'],
-                        fire_input_seq=relay['input_seq'])))
+                self.assertTrue(_launch_authority(state, _launch()))
 
                 public = state._public_player(player)
                 self.assertEqual(0, public['shell_index'])
@@ -1940,21 +1956,13 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             state, 1, shell_index=0, next_shell_index=1,
             shell_change_pending=True,
             gun_checkpoint=_gun_checkpoint(clip=3, clip_size=3)))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, shot_direction=[1.0, 0.0, 0.0])))
-        relay = player.pending_fire_intents[1]
-        self.assertEqual(1, relay['next_shell_index'])
-        self.assertTrue(relay['shell_change_pending'])
+        launch = _launch(fire_input_seq=player.input_processed_seq)
         self.assertTrue(_update_player_input(
             state, 1, shell_index=0, next_shell_index=2,
             shell_change_pending=True,
             gun_checkpoint=_gun_checkpoint(clip=3, clip_size=3)))
 
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                authority_epoch=state.authority_epoch,
-                fire_intent_seq=relay['intent_seq'],
-                fire_input_seq=relay['input_seq'])))
+        self.assertTrue(_launch_authority(state, launch))
 
         self.assertEqual(0, player.shell_index)
         self.assertEqual(2, player.next_shell_index)
@@ -1970,22 +1978,14 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_update_player_input(
             state, 1, shell_index=0, next_shell_index=1,
             shell_change_pending=True))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, shot_direction=[1.0, 0.0, 0.0])))
-        relay = player.pending_fire_intents[1]
-        launch = _launch(
-            authority_epoch=state.authority_epoch,
-            fire_intent_seq=relay['intent_seq'],
-            fire_input_seq=relay['input_seq'])
-
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, launch))
+        launch = _launch()
+        self.assertTrue(_launch_authority(state, launch))
         statistics = state._statistics_row('player', 1)
         self.assertEqual(1, statistics['shots_fired'])
         self.assertEqual({'0': 1}, statistics['shells_fired'])
         self.assertEqual(0, state.pending_events[-1]['shell_index'])
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, dict(launch)))
+            _projectile_owner(dict(launch)), dict(launch)))
         self.assertEqual(1, statistics['shots_fired'])
         self.assertEqual({'0': 1}, statistics['shells_fired'])
 
@@ -1997,285 +1997,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(2, statistics['shots_fired'])
         self.assertEqual({'0': 1, '1': 1}, statistics['shells_fired'])
 
-    def test_unidentifiable_fire_intents_do_not_advance_the_frontier(self):
-        state = _state()
-        player = state.players[1]
-        results = []
-        player.offer_reliable = lambda message: (
-            results.append(dict(message)) or True)
-        self.assertTrue(_update_player_input(state, 1))
-        unidentifiable = (
-            _fire_intent(state, round_id=state.round_id + 1),
-            _fire_intent(state, round_id=float(state.round_id)),
-            _fire_intent(state, type='equipment_intent'),
-            _fire_intent(state, intent_seq=2),
-            _fire_intent(state, intent_seq='1'),
-        )
-        missing_round = _fire_intent(state)
-        missing_round.pop('round_id')
-        missing_sequence = _fire_intent(state)
-        missing_sequence.pop('intent_seq')
-
-        for message in unidentifiable + (missing_round, missing_sequence):
-            with self.subTest(message=message):
-                self.assertFalse(state.submit_fire_intent(1, message))
-                self.assertEqual(0, player.fire_intent_seq)
-                self.assertFalse(player.fire_intent_fingerprints)
-                self.assertFalse(player.fire_intent_results)
-                self.assertFalse(results)
-        self.assertFalse(state.submit_fire_intent(
-            99, _fire_intent(state)))
-        self.assertEqual(0, player.fire_intent_seq)
-        self.assertFalse(results)
-
-    def test_identified_malformed_fire_intents_receive_one_terminal(self):
-        cases = (
-            ('input_type', {'input_seq': '1'}, None,
-             'fire_intent_field_invalid'),
-            ('origin_type', {'shot_origin': '0,1,0'}, None,
-             'fire_intent_field_invalid'),
-            ('origin_bounds', {'shot_origin': [5001.0, 1.0, 0.0]}, None,
-             'fire_intent_field_invalid'),
-            ('direction_nan', {
-                'shot_direction': [float('nan'), 0.0, 1.0]}, None,
-             'fire_intent_field_invalid'),
-            ('dispersion_inf', {'dispersion_angle': float('inf')}, None,
-             'fire_intent_field_invalid'),
-            ('dispersion_bounds', {'dispersion_angle': 0.5001}, None,
-             'fire_intent_field_invalid'),
-            ('missing_origin', {}, 'shot_origin',
-             'fire_intent_wire_shape'),
-            ('canonical_launch_clock_injection',
-             {'trigger_launch_time_ms': 1}, None,
-             'fire_intent_wire_shape'),
-            ('extra_field', {'unexpected': True}, None,
-             'fire_intent_wire_shape'),
-        )
-        for label, changes, missing, reason in cases:
-            with self.subTest(label=label):
-                state = _state()
-                player = state.players[1]
-                results = []
-                relayed = []
-                player.offer_reliable = lambda result: (
-                    results.append(dict(result)) or True)
-                state.simulation_worker.offer_reliable = lambda relay: (
-                    relayed.append(dict(relay)) or True)
-                self.assertTrue(_update_player_input(state, 1))
-                message = _fire_intent(state, **changes)
-                if missing is not None:
-                    message.pop(missing)
-
-                self.assertTrue(state.submit_fire_intent(1, message))
-                self.assertEqual(1, player.fire_intent_seq)
-                self.assertEqual((False, reason),
-                                 player.fire_intent_results[1])
-                self.assertEqual(reason, results[0]['reason'])
-                self.assertFalse(player.pending_fire_intents)
-                self.assertFalse(relayed)
-
-                # One exact malformed retry folds into the recorded terminal;
-                # a changed retry conflicts without replacing or redelivering
-                # it, and the next legal trigger still reaches authority.
-                self.assertTrue(state.submit_fire_intent(1, dict(message)))
-                self.assertFalse(state.submit_fire_intent(
-                    1, dict(message, shell_index=1)))
-                self.assertEqual(1, len(results))
-                self.assertEqual((False, reason),
-                                 player.fire_intent_results[1])
-                self.assertTrue(_update_player_input(state, 1))
-                self.assertTrue(state.submit_fire_intent(
-                    1, _fire_intent(state)))
-                self.assertIn(2, player.pending_fire_intents)
-                self.assertEqual(2, relayed[0]['intent_seq'])
-
-    def test_finite_untrusted_fire_rays_receive_terminal_results(self):
-        cases = (
-            ({'shot_origin': [100.0, 1.0, 0.0]},
-             'shot_origin_untrusted'),
-            ({'shot_direction': [0.0, 0.0, 0.0]},
-             'shot_direction_untrusted'),
-            ({'shot_direction': [0.0, 0.0, 0.5]},
-             'shot_direction_untrusted'),
-        )
-        for changes, reason in cases:
-            with self.subTest(changes=changes):
-                state = _state()
-                player = state.players[1]
-                results = []
-                player.offer_reliable = lambda message: (
-                    results.append(dict(message)) or True)
-                self.assertTrue(_update_player_input(state, 1))
-
-                self.assertTrue(state.submit_fire_intent(
-                    1, _fire_intent(state, **changes)))
-
-                self.assertEqual(1, player.fire_intent_seq)
-                self.assertEqual((False, reason),
-                                 player.fire_intent_results[1])
-                self.assertEqual(reason, results[0]['reason'])
-                self.assertFalse(player.pending_fire_intents)
-                self.assertEqual(0, player.fire_seq)
-
-    def test_operational_fire_rejections_advance_exactly_once(self):
-        cases = (
-            ('battle_finished',
-             lambda state, unused_player: setattr(
-                 state, 'battle_result', {'winner': 0}), {}),
-            ('combat_not_accepting',
-             lambda state, unused_player: setattr(state, 'tick', 0), {}),
-            ('player_not_participating',
-             lambda unused_state, player: setattr(
-                 player, 'participating', False), {}),
-            ('player_dead',
-             lambda unused_state, player: setattr(player, 'alive', False),
-             {}),
-            ('input_checkpoint_stale',
-             lambda unused_state, player: setattr(player, 'input_seq', 2),
-             {'input_seq': 1}),
-            ('shell_mismatch', lambda unused_state, unused_player: None,
-             {'shell_index': 1}),
-            ('pose_unavailable',
-             lambda unused_state, player: setattr(
-                 player, 'pose_time_us', None), {}),
-            ('fire_sequence_exhausted',
-             lambda unused_state, player: setattr(
-                 player, 'fire_seq', PROJECTILE_MAX_ID), {}),
-        )
-        for reason, mutate, changes in cases:
-            with self.subTest(reason=reason):
-                state = _state(players=1)
-                player = state.players[1]
-                results = []
-                player.offer_reliable = lambda message: (
-                    results.append(dict(message)) or True)
-                self.assertTrue(_update_player_input(state, 1))
-                mutate(state, player)
-
-                self.assertTrue(state.submit_fire_intent(
-                    1, _fire_intent(state, **changes)))
-
-                self.assertEqual(1, player.fire_intent_seq)
-                self.assertEqual((False, reason),
-                                 player.fire_intent_results[1])
-                self.assertEqual(reason, results[0]['reason'])
-                self.assertFalse(player.pending_fire_intents)
-
-    def test_no_worker_rejection_is_idempotent_and_next_intent_recovers(self):
-        state = _state(players=1)
-        player = state.players[1]
-        results = []
-        player.offer_reliable = lambda message: (
-            results.append(dict(message)) or True)
-        self.assertTrue(_update_player_input(state, 1))
-        message = _fire_intent(state)
-        state.simulation_worker = None
-        state.bot_authority_id = None
-
-        self.assertTrue(state.submit_fire_intent(1, message))
-        self.assertEqual([{
-            'type': 'fire_intent_result', 'round_id': state.round_id,
-            'intent_seq': 1, 'accepted': False,
-            'reason': 'worker_unavailable',
-        }], results)
-        self.assertEqual((False, 'worker_unavailable'),
-                         player.fire_intent_results[1])
-        self.assertEqual(1, player.fire_intent_seq)
-        self.assertFalse(player.pending_fire_intents)
-        self.assertEqual((0, 0), (player.fire_seq, player.shell_index))
-
-        self.assertTrue(state.submit_fire_intent(1, dict(message)))
-        self.assertEqual(1, len(results))
-        self.assertFalse(state.submit_fire_intent(
-            1, dict(message, dispersion_angle=0.010000001)))
-        self.assertEqual(1, len(results))
-
-        relayed = []
-        worker = _attach_worker_authority(state)
-        worker.offer_reliable = lambda relay: (
-            relayed.append(dict(relay)) or True)
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual(2, player.fire_intent_seq)
-        self.assertEqual([2], list(player.pending_fire_intents))
-        self.assertEqual(2, relayed[0]['intent_seq'])
-
-    def test_stale_gun_checkpoint_terminal_allows_the_next_intent(self):
-        state = _state(players=1)
-        player = state.players[1]
-        results = []
-        relayed = []
-        player.offer_reliable = lambda message: (
-            results.append(dict(message)) or True)
-        state.simulation_worker.offer_reliable = lambda message: (
-            relayed.append(dict(message)) or True)
-        self.assertTrue(_update_player_input(state, 1))
-        player.gun_checkpoint_seq = 0
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual('gun_checkpoint_unavailable', results[0]['reason'])
-        self.assertEqual(1, player.fire_intent_seq)
-        self.assertFalse(player.pending_fire_intents)
-
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual(2, player.fire_intent_seq)
-        self.assertEqual([2], list(player.pending_fire_intents))
-        self.assertEqual(2, relayed[0]['intent_seq'])
-
-    def test_pending_capacity_rejection_consumes_only_the_new_intent(self):
-        state = _state(players=1)
-        player = state.players[1]
-        worker = state.simulation_worker
-        results = []
-        relayed = []
-        player.offer_reliable = lambda message: (
-            results.append(dict(message)) or True)
-        worker.offer_reliable = lambda message: (
-            relayed.append(dict(message)) or True)
-        self.assertTrue(_update_player_input(state, 1))
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual([1], list(player.pending_fire_intents))
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual('fire_intent_pending', results[0]['reason'])
-        self.assertEqual([1], list(player.pending_fire_intents))
-        self.assertEqual(2, player.fire_intent_seq)
-
-        self.assertTrue(state.resolve_fire_intent(
-            SIMULATION_WORKER_AUTHORITY_ID, {
-                'type': 'fire_intent_result',
-                'round_id': state.round_id,
-                'authority_epoch': state.authority_epoch,
-                'player_id': 1, 'intent_seq': 1,
-                'accepted': False, 'reason': 'gun_not_ready',
-            }))
-        self.assertFalse(player.pending_fire_intents)
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertEqual([3], list(player.pending_fire_intents))
-        self.assertEqual([1, 3], [relay['intent_seq'] for relay in relayed])
-
-    def test_worker_offer_stall_publishes_terminal_before_round_failure(self):
-        state = _state(players=1)
-        player = state.players[1]
-        worker = state.simulation_worker
-        results = []
-        player.offer_reliable = lambda message: (
-            results.append(dict(message)) or True)
-        worker.offer_reliable = lambda unused_message: False
-        self.assertTrue(_update_player_input(state, 1))
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-
-        self.assertEqual('fire_intent_result', results[0]['type'])
-        self.assertEqual('worker_send_stalled', results[0]['reason'])
-        self.assertEqual(1, player.fire_intent_seq)
-        self.assertEqual((False, 'worker_send_stalled'),
-                         player.fire_intent_results[1])
-        self.assertFalse(player.pending_fire_intents)
-        self.assertEqual(0, player.fire_seq)
-        self.assertIsNone(state.simulation_worker)
-        self.assertIsNotNone(state.battle_result)
 
     def _presented_bot(self, state, bot_id=16, team=2):
         """Publish one canonical Bot the shooter can legally have displayed."""
@@ -2306,178 +2027,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 0, int(state.players[1].pose_time_us) - int(lag_us)),
         }
 
-    def test_player_launch_uses_the_frozen_visible_trigger_clock(self):
-        state = _state()
-        player = state.players[1]
-        state.tick = 450
-        self.assertTrue(_update_player_input(state, 1))
-        trigger_time_ms = state._server_time_ms()
-        # Admission is 133 ms later. A simultaneous catch-up correction moves
-        # the independent motion clock by another 300 ms, but must not change
-        # the trigger already frozen in the round projectile clock.
-        state.tick += 4
-        state.motion_time_offset_us += 300000
-        receipt_tick_ms = state._server_time_ms()
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, trigger_server_time_ms=trigger_time_ms)))
-        relay = player.pending_fire_intents[1]
-        mapped = int(relay['trigger_launch_time_ms'])
-
-        self.assertEqual(trigger_time_ms, mapped)
-        self.assertEqual(receipt_tick_ms - 133, mapped)
-
-        state.tick += 6
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                fire_intent_seq=1, fire_input_seq=relay['input_seq'],
-                shot_seq=relay['shot_seq'],
-                authority_epoch=state.authority_epoch)))
-        record = state.projectiles['1:p:1:1']
-        self.assertEqual(mapped, record['launch_server_time_ms'])
-        self.assertEqual(
-            state._server_time_ms() - 333,
-            record['launch_server_time_ms'])
-
-    def test_trigger_clock_bounds_have_typed_terminal_results(self):
-        state = _state()
-        state.tick += 30
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state,
-            trigger_server_time_ms=state._server_time_ms() - 500)))
-        self.assertEqual(
-            state._server_time_ms() - 500,
-            state.players[1].pending_fire_intents[1][
-                'trigger_launch_time_ms'])
-
-        state = _state()
-        player = state.players[1]
-        state.tick += 30
-        self.assertTrue(_update_player_input(state, 1))
-        delivered = []
-        player.offer_reliable = lambda message: (
-            delivered.append(dict(message)) or True)
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state,
-            trigger_server_time_ms=state._server_time_ms() - 501)))
-        self.assertEqual(
-            (False, 'trigger_clock_stale'), player.fire_intent_results[1])
-        self.assertEqual('trigger_clock_stale', delivered[-1]['reason'])
-        self.assertNotIn(1, player.pending_fire_intents)
-
-        # A small ahead estimate is legal clock quantization, but canonical
-        # projectile time is clamped once to server receipt.
-        state = _state()
-        player = state.players[1]
-        state.tick += 30
-        self.assertTrue(_update_player_input(state, 1))
-        relayed = []
-        state.simulation_worker.offer_reliable = lambda message: (
-            relayed.append(dict(message)) or True)
-        receipt_time_ms = state._server_time_ms()
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, trigger_server_time_ms=receipt_time_ms + 250)))
-        self.assertEqual(
-            receipt_time_ms,
-            int(player.pending_fire_intents[1]['trigger_launch_time_ms']))
-        self.assertEqual(
-            receipt_time_ms, relayed[-1]['trigger_launch_time_ms'])
-        self.assertEqual(relayed[-1], player.pending_fire_intents[1])
-
-        state = _state()
-        player = state.players[1]
-        state.tick += 30
-        self.assertTrue(_update_player_input(state, 1))
-        delivered = []
-        player.offer_reliable = lambda message: (
-            delivered.append(dict(message)) or True)
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state,
-            trigger_server_time_ms=state._server_time_ms() + 251)))
-        self.assertEqual(
-            (False, 'trigger_clock_future'), player.fire_intent_results[1])
-        self.assertEqual('trigger_clock_future', delivered[-1]['reason'])
-        self.assertNotIn(1, player.pending_fire_intents)
-
-    def test_invalid_trigger_clock_is_a_typed_local_failure(self):
-        missing = object()
-        for raw_time in (missing, None, True, 1.0, -1,
-                         MAX_MOTION_TIME_US // 1000 + 1):
-            state = _state()
-            player = state.players[1]
-            self.assertTrue(_update_player_input(state, 1))
-            delivered = []
-            player.offer_reliable = lambda message: (
-                delivered.append(dict(message)) or True)
-            intent = _fire_intent(state, trigger_server_time_ms=raw_time)
-            if raw_time is missing:
-                intent.pop('trigger_server_time_ms')
-
-            self.assertTrue(state.submit_fire_intent(1, intent))
-            self.assertEqual(
-                (False, 'trigger_clock_invalid'),
-                player.fire_intent_results[1])
-            self.assertEqual('trigger_clock_invalid', delivered[-1]['reason'])
-            self.assertNotIn(1, player.pending_fire_intents)
-
-    def test_mapped_launch_time_is_invariant_to_further_delay(self):
-        times = []
-        for extra_ticks in (0, 3, 30):
-            state = _state()
-            player = state.players[1]
-            self.assertTrue(_update_player_input(state, 1))
-            self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-            relay = player.pending_fire_intents[1]
-            state.tick += extra_ticks
-            self.assertTrue(state.launch_projectile(
-                SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                    fire_intent_seq=1, fire_input_seq=relay['input_seq'],
-                    shot_seq=relay['shot_seq'],
-                    authority_epoch=state.authority_epoch)))
-            record = state.projectiles['1:p:1:1']
-            times.append(record['launch_server_time_ms'])
-            # An exact retry after even more delay reuses the same instant.
-            state.tick += 10
-            self.assertTrue(state.launch_projectile(
-                SIMULATION_WORKER_AUTHORITY_ID, _launch(
-                    fire_intent_seq=1, fire_input_seq=relay['input_seq'],
-                    shot_seq=relay['shot_seq'],
-                    authority_epoch=state.authority_epoch)))
-            self.assertEqual(
-                times[-1], state.projectiles['1:p:1:1'][
-                    'launch_server_time_ms'])
-        self.assertEqual(1, len(set(times)))
-
-    def test_player_launch_cannot_override_the_frozen_trigger_clock(self):
-        state = _state()
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        relayed = []
-        state.simulation_worker.offer_reliable = lambda message: (
-            relayed.append(dict(message)) or True)
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        relay = relayed[-1]
-        launch = _launch(
-            authority_epoch=state.authority_epoch,
-            fire_intent_seq=relay['intent_seq'],
-            fire_input_seq=relay['input_seq'],
-            shot_seq=relay['shot_seq'],
-            trigger_launch_time_ms=relay['trigger_launch_time_ms'] + 1)
-
-        self.assertFalse(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, launch))
-        self.assertEqual('shape', state.last_projectile_launch_reject_code)
-        self.assertEqual([relay['intent_seq']],
-                         list(player.pending_fire_intents))
-        self.assertFalse(state.projectiles)
-
-        launch.pop('trigger_launch_time_ms')
-        self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, launch))
-        self.assertEqual(
-            relay['trigger_launch_time_ms'],
-            state.pending_events[-1]['launch_server_time_ms'])
 
     def test_bot_launch_timing_is_unchanged_by_the_player_mapping(self):
         state = _state()
@@ -2491,255 +2040,21 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             state._server_time_ms() * 1000 - 100000)
 
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot')),
             _launch(shooter_id=16, shooter_kind='bot')))
         record = state.projectiles['1:b:16:1']
         self.assertEqual(
             int(round((100000 + state.bot_launch_clock_offset_us) / 1000.0)),
             record['launch_server_time_ms'])
 
-    def test_fire_intent_relays_the_validated_presentation_ledger(self):
-        state = _state()
-        player = state.players[1]
-        bot_id = self._presented_bot(state)
-        self.assertTrue(_update_player_input(state, 1))
-        entry = self._ledger_entry(state, bot_id)
-        delivered = []
-        state.simulation_worker.offer_reliable = lambda message: (
-            delivered.append(dict(message)) or True)
 
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, presentation_ledger=[entry])))
-        self.assertEqual([entry], delivered[-1]['presentation_ledger'])
-        self.assertEqual(
-            [entry], player.pending_fire_intents[1]['presentation_ledger'])
-        # An exact retransmission is idempotent; a conflicting one is not.
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, intent_seq=1, presentation_ledger=[entry])))
-        self.assertEqual(1, len(delivered))
-        self.assertFalse(state.submit_fire_intent(1, _fire_intent(
-            state, intent_seq=1, presentation_ledger=[])))
-        self.assertEqual(1, len(delivered))
-
-    def test_empty_presentation_ledger_is_a_legal_statement(self):
-        state = _state()
-        self._presented_bot(state)
-        self.assertTrue(_update_player_input(state, 1))
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, presentation_ledger=[])))
-        self.assertEqual(
-            [], state.players[1].pending_fire_intents[1][
-                'presentation_ledger'])
-
-    def test_missing_presentation_ledger_is_a_typed_local_failure(self):
-        state = _state()
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        message = _fire_intent(state)
-        message.pop('presentation_ledger')
-        delivered = []
-        player.offer_reliable = lambda result: (
-            delivered.append(dict(result)) or True)
-
-        self.assertTrue(state.submit_fire_intent(1, message))
-        self.assertEqual(1, player.fire_intent_seq)
-        self.assertEqual(
-            (False, 'presentation_ledger_invalid'),
-            player.fire_intent_results[1])
-        self.assertEqual('presentation_ledger_invalid', delivered[-1]['reason'])
-        self.assertEqual({}, dict(player.pending_fire_intents))
-        # The exact malformed retry is idempotent and does not republish its
-        # terminal; the next sequence can still be admitted normally.
-        self.assertTrue(state.submit_fire_intent(1, dict(message)))
-        self.assertEqual(1, len(delivered))
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(state)))
-        self.assertIn(2, player.pending_fire_intents)
-
-    def test_invalid_presentation_evidence_is_a_typed_local_failure(self):
-        bot_id = 16
-        for label, ledger in (
-                ('unknown_bot', None),
-                ('duplicate_bot', None),
-                ('future_revision', None),
-                ('retired_revision', None),
-                ('future_presentation', None),
-                ('stale_presentation', None),
-                ('malformed_entry', [{'bot_id': bot_id}]),
-                ('extra_field', None),
-                ('oversized', None)):
-            state = _state()
-            player = state.players[1]
-            self._presented_bot(state, bot_id)
-            self.assertTrue(_update_player_input(state, 1))
-            entry = self._ledger_entry(state, bot_id)
-            if label == 'unknown_bot':
-                ledger = [dict(entry, bot_id=17)]
-            elif label == 'duplicate_bot':
-                ledger = [dict(entry), dict(entry)]
-            elif label == 'future_revision':
-                ledger = [dict(entry,
-                               bot_state_revision=state.bot_state_revision + 1)]
-            elif label == 'retired_revision':
-                ledger = [dict(
-                    entry,
-                    bot_state_revision=state.bot_state_revision - 256)]
-            elif label == 'future_presentation':
-                ledger = [dict(
-                    entry,
-                    presentation_time_us=int(player.pose_time_us) + 1)]
-            elif label == 'stale_presentation':
-                ledger = [dict(entry, presentation_time_us=max(
-                    0, int(player.pose_time_us) - 2000000))]
-            elif label == 'extra_field':
-                ledger = [dict(entry, presented_pose=[0.0, 0.0, 0.0])]
-            elif label == 'oversized':
-                ledger = [dict(entry, bot_id=index)
-                          for index in range(1, 32)]
-            delivered = []
-            player.offer_reliable = lambda message: (
-                delivered.append(dict(message)) or True)
-
-            self.assertTrue(
-                state.submit_fire_intent(1, _fire_intent(
-                    state, presentation_ledger=ledger)), label)
-            # One bad shot settles as an observable local terminal; it never
-            # reaches the authority and never ends the round.
-            self.assertEqual(
-                (False, 'presentation_ledger_invalid'),
-                player.fire_intent_results[1], label)
-            self.assertEqual(
-                'presentation_ledger_invalid',
-                delivered[-1]['reason'], label)
-            self.assertNotIn(1, player.pending_fire_intents)
-            self.assertIsNone(state.battle_result, label)
-            # The next legal trigger still works.
-            self.assertTrue(_update_player_input(state, 1))
-            self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-                state, intent_seq=2,
-                presentation_ledger=[self._ledger_entry(state, bot_id)])),
-                label)
-
-    def test_bot_revision_window_matches_the_ram_evidence_contract(self):
-        state = _state()
-        bot_id = self._presented_bot(state)
-        self.assertTrue(_update_player_input(state, 1))
-        entry = self._ledger_entry(state, bot_id, revision=45)
-
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, presentation_ledger=[entry])))
-        self.assertEqual(
-            [entry],
-            state.players[1].pending_fire_intents[1]['presentation_ledger'])
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, intent_seq=2,
-            presentation_ledger=[
-                self._ledger_entry(state, bot_id, revision=44)])))
-        self.assertEqual(
-            (False, 'presentation_ledger_invalid'),
-            state.players[1].fire_intent_results[2])
-
-    def test_worker_fire_rejection_is_committed_after_visible_delivery(self):
-        state = _state()
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state)))
-        delivered = []
-        player.offer_reliable = lambda message: (
-            delivered.append(dict(message)) or True)
-        rejection = {
-            'type': 'fire_intent_result', 'round_id': state.round_id,
-            'authority_epoch': state.authority_epoch, 'player_id': 1,
-            'intent_seq': 1, 'accepted': False, 'reason': 'gun_not_ready',
-        }
-
-        self.assertTrue(state.resolve_fire_intent(
-            SIMULATION_WORKER_AUTHORITY_ID, rejection))
-        self.assertEqual([{
-            'type': 'fire_intent_result', 'round_id': state.round_id,
-            'intent_seq': 1, 'accepted': False, 'reason': 'gun_not_ready',
-        }], delivered)
-        self.assertNotIn(1, player.pending_fire_intents)
-        self.assertEqual((False, 'gun_not_ready'),
-                         player.fire_intent_results[1])
-        self.assertTrue(state.resolve_fire_intent(
-            SIMULATION_WORKER_AUTHORITY_ID, dict(rejection)))
-        self.assertEqual(1, len(delivered))
-        self.assertFalse(state.resolve_fire_intent(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            dict(rejection, reason='different')))
-
-    def test_failed_fire_rejection_delivery_disconnects_without_commit(self):
-        state = _state()
-        player = state.players[1]
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state)))
-        player.offer_reliable = lambda unused_message: False
-
-        self.assertFalse(state.resolve_fire_intent(
-            SIMULATION_WORKER_AUTHORITY_ID, {
-                'type': 'fire_intent_result',
-                'round_id': state.round_id,
-                'authority_epoch': state.authority_epoch,
-                'player_id': 1, 'intent_seq': 1,
-                'accepted': False, 'reason': 'gun_not_ready',
-            }))
-        self.assertNotIn(1, state.players)
-        self.assertEqual({}, player.fire_intent_results)
-
-    def test_order_rejected_player_launch_resolves_intent_without_worker_loss(self):
-        state = _state()
-        player = state.players[1]
-        worker = state.simulation_worker
-        player_messages = []
-        worker_messages = []
-        player.offer_reliable = lambda message: (
-            player_messages.append(dict(message)) or True)
-        worker.offer_reliable = lambda message: (
-            worker_messages.append(dict(message)) or True)
-        self.assertTrue(_update_player_input(state, 1))
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state)))
-        relay = worker_messages.pop()
-        launch = _launch()
-        launch.update({
-            'authority_epoch': state.authority_epoch,
-            'shot_seq': relay['shot_seq'],
-            'fire_intent_seq': relay['intent_seq'],
-            'fire_input_seq': relay['input_seq'],
-        })
-        player.alive = False
-        handler = object.__new__(ClientHandler)
-
-        self.assertFalse(handler._dispatch_simulation_worker_message(
-            types.SimpleNamespace(state=state), worker, bot_state_rows.publication(launch)))
-
-        terminal = {
-            'type': 'fire_intent_result', 'round_id': state.round_id,
-            'player_id': 1, 'intent_seq': 1, 'accepted': False,
-            'reason': 'projectile_launch_rejected',
-        }
-        self.assertEqual([terminal], player_messages)
-        self.assertEqual([terminal], worker_messages)
-        self.assertNotIn(1, player.pending_fire_intents)
-        self.assertEqual(
-            (False, 'projectile_launch_rejected'),
-            player.fire_intent_results[1])
-        self.assertFalse(state.projectiles)
-        self.assertIs(state.simulation_worker, worker)
-        self.assertTrue(worker.connected)
-
-    def test_rejected_worker_ricochet_preserves_the_worker_round(self):
+    def test_worker_cannot_retire_player_ricochet_preserves_the_worker_round(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         record = state.projectiles['1:p:1:1']
         worker = state.simulation_worker
         handler = object.__new__(ClientHandler)
-        malformed = _ricochet('1:p:1:1')
+        malformed = _ricochet(state, '1:p:1:1')
         malformed['direct']['damage'] = 1
 
         self.assertFalse(handler._dispatch_simulation_worker_message(
@@ -2748,15 +2063,15 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(worker.connected)
         self.assertEqual(0, record['ricochet_count'])
         self.assertEqual(1000, state.players[2].health)
-        self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
+        self.assertIs(record, state.projectiles['1:p:1:1'])
 
-    def test_rejected_worker_terminal_preserves_the_worker_round(self):
+    def test_worker_cannot_retire_player_terminal_preserves_the_worker_round(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         record = state.projectiles['1:p:1:1']
         worker = state.simulation_worker
         handler = object.__new__(ClientHandler)
-        malformed = _resolve(
+        malformed = _resolve(state,
             '1:p:1:1', direct=_effect(target_id=1))
 
         self.assertFalse(handler._dispatch_simulation_worker_message(
@@ -2766,8 +2081,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(worker.connected)
         self.assertEqual(1000, state.players[2].health)
         self.assertEqual(
-            'direct_self_hit', state.last_projectile_resolve_reject_code)
-        self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
+            'authority', state.last_projectile_resolve_reject_code)
+        self.assertIs(record, state.projectiles['1:p:1:1'])
 
     def test_projectile_commands_after_battle_result_are_late_noops(self):
         state = _state()
@@ -2775,9 +2090,19 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state.battle_result = {'winner': 1, 'reason': 'team_eliminated'}
 
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
                 'type': 'projectile_progress', 'round_id': 1,
-                'authority_epoch': 1, 'cursors': [{
+                'authority_epoch': 1, 'cursors': [{'launch_proof': _launch_proof(state, '1:p:1:1'),
+                    'projectile_id': '1:p:1:1',
+                    'base_checked_ms': 0,
+                    'checked_through_ms': 0,
+                    'checked_distance': 0.0,
+                    'piercing_loss': 0.0,
+                    'penetration_factor': 1.0,
+                    'destructibles': [],
+                }]}), {
+                'type': 'projectile_progress', 'round_id': 1,
+                'authority_epoch': 1, 'cursors': [{'launch_proof': _launch_proof(state, '1:p:1:1'),
                     'projectile_id': '1:p:1:1',
                     'base_checked_ms': 0,
                     'checked_through_ms': 0,
@@ -2787,18 +2112,23 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                     'destructibles': [],
                 }]}))
         self.assertTrue(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'round_id': 1, 'authority_epoch': 1}), {
                 'round_id': 1, 'authority_epoch': 1}))
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'round_id': 1, 'authority_epoch': 1}), {
                 'round_id': 1, 'authority_epoch': 1}))
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'round_id': 1, 'authority_epoch': 0}), {
                 'round_id': 1, 'authority_epoch': 0}))
         self.assertEqual(
             'authority', state.last_projectile_resolve_reject_code)
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'round_id': 1, 'authority_epoch': 1,
+                'impact': float('nan')}), {
                 'round_id': 1, 'authority_epoch': 1,
                 'impact': float('nan')}))
         self.assertEqual('finite', state.last_projectile_resolve_reject_code)
@@ -2950,7 +2280,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             shooter_id=16, shooter_kind='bot', shot_seq=1,
             origin=[20.0, 1.0, 0.0], launch_time_us=200000)
         self.assertFalse(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(dict(launch, authority_epoch=0)),
             dict(launch, authority_epoch=0)))
         self.assertTrue(_launch_authority(state, launch))
         self.assertEqual('bot_shot', state.pending_events[-1]['kind'])
@@ -2964,7 +2294,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             state._projectile_snapshot()[0]['range_origin'])
         self.assertTrue(_launch_authority(state, dict(launch)))
         self.assertFalse(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(dict(launch, gravity=9.9)),
             dict(launch, gravity=9.9)))
 
         next_publication = dict(publication, fire_seq=2)
@@ -3100,7 +2430,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         projectile_id = '1:p:1:1'
-        cursor = {
+        cursor = {'launch_proof': _launch_proof(state, projectile_id),
             'projectile_id': projectile_id, 'base_checked_ms': 0,
             'checked_through_ms': 200, 'checked_distance': 20.0,
             'piercing_loss': 3.0, 'penetration_factor': 1.0,
@@ -3111,10 +2441,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'authority_epoch': 1, 'cursors': [cursor],
         }
         self.assertFalse(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(dict(message, authority_epoch=0)),
             dict(message, authority_epoch=0)))
-        self.assertTrue(state.progress_projectiles(SIMULATION_WORKER_AUTHORITY_ID, message))
-        self.assertTrue(state.progress_projectiles(SIMULATION_WORKER_AUTHORITY_ID, dict(message)))
+        self.assertTrue(state.progress_projectiles(_projectile_owner(message), message))
+        self.assertTrue(state.progress_projectiles(_projectile_owner(dict(message)), dict(message)))
         record = state.projectiles[projectile_id]
         self.assertEqual(200, record['checked_through_ms'])
         self.assertEqual(20.0, record['checked_distance'])
@@ -3124,19 +2454,22 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             cursor, checked_through_ms=201,
             checked_distance=19.0, piercing_loss=2.0)
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(dict(message, cursors=[stale])),
             dict(message, cursors=[stale])))
         self.assertEqual(201, record['checked_through_ms'])
         self.assertEqual(20.0, record['checked_distance'])
         self.assertEqual(3.0, record['piercing_loss'])
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, dict(message, cursors=[dict(
+            _projectile_owner(dict(message, cursors=[dict(
+                cursor, base_checked_ms=202, checked_through_ms=202)])), dict(message, cursors=[dict(
                 cursor, base_checked_ms=202, checked_through_ms=202)])))
         self.assertEqual(202, record['checked_through_ms'])
         self.assertEqual(20.0, record['checked_distance'])
         self.assertEqual(3.0, record['piercing_loss'])
         self.assertFalse(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, dict(message, cursors=[dict(
+            _projectile_owner(dict(message, cursors=[dict(
+                cursor, base_checked_ms=202, checked_through_ms=202,
+                penetration_factor=0.999999)])), dict(message, cursors=[dict(
                 cursor, base_checked_ms=202, checked_through_ms=202,
                 penetration_factor=0.999999)])))
 
@@ -3144,29 +2477,34 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state(players=3)
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(_launch_authority(
-            state, _launch(shooter_id=2, shot_seq=1)))
-        first = {
+            state, _launch(shooter_id=1, shot_seq=2)))
+        first = {'launch_proof': _launch_proof(state, '1:p:1:1'),
             'projectile_id': '1:p:1:1', 'base_checked_ms': 0,
             'checked_through_ms': 200, 'checked_distance': 20.0,
             'piercing_loss': 3.0, 'penetration_factor': 1.0,
             'destructibles': [],
         }
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'type': 'projectile_progress', 'round_id': 1,
+                'authority_epoch': 1, 'cursors': [first]}), {
                 'type': 'projectile_progress', 'round_id': 1,
                 'authority_epoch': 1, 'cursors': [first]}))
         stale_with_receipt = dict(
             first, checked_through_ms=150, checked_distance=15.0,
             piercing_loss=1.0, destructibles=[_destructible()])
-        active = {
-            'projectile_id': '1:p:2:1', 'base_checked_ms': 0,
+        active = {'launch_proof': _launch_proof(state, '1:p:1:2'),
+            'projectile_id': '1:p:1:2', 'base_checked_ms': 0,
             'checked_through_ms': 600, 'checked_distance': 60.0,
             'piercing_loss': 4.0, 'penetration_factor': 1.0,
             'destructibles': [],
         }
 
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'type': 'projectile_progress', 'round_id': 1,
+                'authority_epoch': 1,
+                'cursors': [stale_with_receipt, active]}), {
                 'type': 'projectile_progress', 'round_id': 1,
                 'authority_epoch': 1,
                 'cursors': [stale_with_receipt, active]}))
@@ -3175,7 +2513,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertEqual(200, first_record['checked_through_ms'])
         self.assertEqual(20.0, first_record['checked_distance'])
         self.assertEqual(3.0, first_record['piercing_loss'])
-        active_record = state.projectiles['1:p:2:1']
+        active_record = state.projectiles['1:p:1:2']
         self.assertEqual(600, active_record['checked_through_ms'])
         self.assertEqual(60.0, active_record['checked_distance'])
         self.assertEqual(4.0, active_record['piercing_loss'])
@@ -3185,24 +2523,29 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state(players=3)
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(_launch_authority(
-            state, _launch(shooter_id=2, shot_seq=1)))
-        retired = {
+            state, _launch(shooter_id=1, shot_seq=2)))
+        retired = {'launch_proof': _launch_proof(state, '1:p:1:1'),
             'projectile_id': '1:p:1:1', 'base_checked_ms': 0,
             'checked_through_ms': 100, 'checked_distance': 10.0,
             'piercing_loss': 1.0, 'penetration_factor': 1.0,
             'destructibles': [],
         }
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'type': 'projectile_progress', 'round_id': 1,
+                'authority_epoch': 1, 'cursors': [retired]}), {
                 'type': 'projectile_progress', 'round_id': 1,
                 'authority_epoch': 1, 'cursors': [retired]}))
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, _resolve(
+            _projectile_owner(_resolve(state,
+                '1:p:1:1', base_checked_ms=100,
+                resolved_time_ms=100, checked_distance=10.0,
+                piercing_loss=1.0)), _resolve(state,
                 '1:p:1:1', base_checked_ms=100,
                 resolved_time_ms=100, checked_distance=10.0,
                 piercing_loss=1.0)))
-        active = {
-            'projectile_id': '1:p:2:1', 'base_checked_ms': 0,
+        active = {'launch_proof': _launch_proof(state, '1:p:1:2'),
+            'projectile_id': '1:p:1:2', 'base_checked_ms': 0,
             'checked_through_ms': 120, 'checked_distance': 12.0,
             'piercing_loss': 0.0, 'penetration_factor': 1.0,
             'destructibles': [],
@@ -3213,17 +2556,19 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             penetration_factor=999.0)
 
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, {
+            _projectile_owner({
+                'type': 'projectile_progress', 'round_id': 1,
+                'authority_epoch': 1, 'cursors': [late, active]}), {
                 'type': 'projectile_progress', 'round_id': 1,
                 'authority_epoch': 1, 'cursors': [late, active]}))
 
         self.assertEqual(
-            120, state.projectiles['1:p:2:1']['checked_through_ms'])
+            120, state.projectiles['1:p:1:2']['checked_through_ms'])
 
     def test_progress_destructibles_are_atomic_and_idempotent(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
-        cursor = {
+        cursor = {'launch_proof': _launch_proof(state, '1:p:1:1'),
             'projectile_id': '1:p:1:1', 'base_checked_ms': 0,
             'checked_through_ms': 100, 'checked_distance': 10.0,
             'piercing_loss': 1.0, 'penetration_factor': 1.0,
@@ -3236,20 +2581,20 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         invalid = dict(message, cursors=[dict(
             cursor, destructibles=[_destructible(is_shot=False)])])
         before_revision = state.projectile_revision
-        self.assertFalse(state.progress_projectiles(SIMULATION_WORKER_AUTHORITY_ID, invalid))
+        self.assertFalse(state.progress_projectiles(_projectile_owner(invalid), invalid))
         self.assertEqual(0,
                          state.projectiles['1:p:1:1']['checked_through_ms'])
         self.assertEqual(before_revision, state.projectile_revision)
         self.assertEqual(0, state.destructible_revision)
         self.assertFalse(state.destructibles)
 
-        self.assertTrue(state.progress_projectiles(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertTrue(state.progress_projectiles(_projectile_owner(message), message))
         self.assertEqual(100,
                          state.projectiles['1:p:1:1']['checked_through_ms'])
         self.assertEqual(1, state.destructible_revision)
         self.assertEqual(1, len(state.destructibles))
         events = len(state.pending_events)
-        self.assertTrue(state.progress_projectiles(SIMULATION_WORKER_AUTHORITY_ID, dict(message)))
+        self.assertTrue(state.progress_projectiles(_projectile_owner(dict(message)), dict(message)))
         self.assertEqual(1, state.destructible_revision)
         self.assertEqual(events, len(state.pending_events))
 
@@ -3261,13 +2606,13 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         original_origin = list(record['origin'])
         original_velocity = list(record['velocity'])
         original_launch_time = record['launch_server_time_ms']
-        request = _ricochet(
+        request = _ricochet(state,
             '1:p:1:1', destructibles=[_destructible()])
         request['direct']['damage_sticker'] = 12345678901234567890
         revision = state.projectile_revision
 
         self.assertTrue(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, request))
+            _projectile_owner(request), request))
 
         self.assertIn('1:p:1:1', state.projectiles)
         self.assertEqual(original_origin, record['origin'])
@@ -3311,12 +2656,12 @@ class ServerProjectileLedgerTests(unittest.TestCase):
 
         event_count = len(state.pending_events)
         self.assertTrue(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, dict(request)))
+            _projectile_owner(dict(request)), dict(request)))
         self.assertEqual(event_count, len(state.pending_events))
         self.assertEqual(revision + 1, state.projectile_revision)
         self.assertEqual(1, state.destructible_revision)
         self.assertFalse(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(dict(request, checked_distance=10.000001)),
             dict(request, checked_distance=10.000001)))
 
         second = dict(
@@ -3324,7 +2669,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             checked_distance=11.0, impact=[11.0, 1.0, 0.0],
             segment_origin=[11.0, 1.0, 0.0])
         self.assertFalse(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, second))
+            _projectile_owner(second), second))
         self.assertEqual(1, record['ricochet_count'])
 
     def test_worker_potential_becomes_the_victim_blocked_damage_ledger(self):
@@ -3337,8 +2682,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 health = victim.health
 
                 self.assertTrue(state.resolve_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID,
-                    _resolve('1:p:1:1', direct=_effect(
+                    _projectile_owner(_resolve(state, '1:p:1:1', direct=_effect(
+                        damage=damage, shot_result=shot_result,
+                        potential_damage=390))),
+                    _resolve(state, '1:p:1:1', direct=_effect(
                         damage=damage, shot_result=shot_result,
                         potential_damage=390))))
 
@@ -3377,8 +2724,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 self.assertTrue(_launch_authority(state, _launch()))
 
                 self.assertTrue(state.resolve_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID,
-                    _resolve('1:p:1:1', direct=_effect(
+                    _projectile_owner(_resolve(state, '1:p:1:1', direct=_effect(
+                        damage=damage, shot_result=shot_result,
+                        potential_damage=390, high_explosive=True))),
+                    _resolve(state, '1:p:1:1', direct=_effect(
                         damage=damage, shot_result=shot_result,
                         potential_damage=390, high_explosive=True))))
 
@@ -3401,8 +2750,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         victim = state.players[2]
 
         self.assertTrue(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _ricochet('1:p:1:1', direct=_effect(
+            _projectile_owner(_ricochet(state, '1:p:1:1', direct=_effect(
+                damage=0, shot_result=0, potential_damage=420))),
+            _ricochet(state, '1:p:1:1', direct=_effect(
                 damage=0, shot_result=0, potential_damage=420))))
 
         # A bounce is the archetypal blocked hit: the shell's whole
@@ -3424,13 +2774,20 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _ricochet('1:p:1:1', direct=_effect(
+            _projectile_owner(_ricochet(state, '1:p:1:1', direct=_effect(
+                damage=0, shot_result=0, potential_damage=420))),
+            _ricochet(state, '1:p:1:1', direct=_effect(
                 damage=0, shot_result=0, potential_damage=420))))
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve(
+            _projectile_owner(_resolve(state,
+                '1:p:1:1', base_checked_ms=100,
+                resolved_time_ms=150, checked_distance=20.0,
+                impact=[20.0, 1.0, 0.0],
+                direct=_effect(
+                    damage=0, shot_result=1, x=20.0,
+                    potential_damage=420))),
+            _resolve(state,
                 '1:p:1:1', base_checked_ms=100,
                 resolved_time_ms=150, checked_distance=20.0,
                 impact=[20.0, 1.0, 0.0],
@@ -3462,8 +2819,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                     direct['structural_armor_hit'] = structural
 
                 self.assertTrue(state.ricochet_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID,
-                    _ricochet('1:p:1:1', direct=direct)))
+                    _projectile_owner(_ricochet(state, '1:p:1:1', direct=direct)),
+                    _ricochet(state, '1:p:1:1', direct=direct)))
 
                 row = state._statistics_row('player', 2)
                 self.assertEqual(1, row['deflected_hits_received'])
@@ -3479,8 +2836,13 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             is_he=True, splash_radius=20.0)))
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1',
+            _projectile_owner(_resolve(state, '1:p:1:1',
+                     direct=_effect(damage=0, shot_result=1,
+                                    potential_damage=390),
+                     splash=[_effect(
+                         target_id=4, damage=0, shot_result=1,
+                         target_pose=(30.0, 1.0, 0.0))])),
+            _resolve(state, '1:p:1:1',
                      direct=_effect(damage=0, shot_result=1,
                                     potential_damage=390),
                      splash=[_effect(
@@ -3509,8 +2871,11 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         record = state.projectiles['1:p:1:1']
 
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', direct=None, splash=[_effect(
+            _projectile_owner(_resolve(state, '1:p:1:1', direct=None, splash=[_effect(
+                target_id=3, damage=0, shot_result=1,
+                potential_damage=390,
+                target_pose=(30.0, 1.0, 0.0))])),
+            _resolve(state, '1:p:1:1', direct=None, splash=[_effect(
                 target_id=3, damage=0, shot_result=1,
                 potential_damage=390,
                 target_pose=(30.0, 1.0, 0.0))])))
@@ -3553,8 +2918,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 record = state.projectiles['1:p:1:1']
                 revision = state.projectile_revision
                 self.assertFalse(state.ricochet_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID,
-                    _ricochet('1:p:1:1', **changes)))
+                    _projectile_owner(_ricochet(state, '1:p:1:1', **changes)),
+                    _ricochet(state, '1:p:1:1', **changes)))
                 # The malformed ricochet still commits nothing: no segment,
                 # no cursor motion and no damage. The shot it named cannot
                 # stay live either, so it retires as an expired terminal.
@@ -3575,15 +2940,15 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 state = _state()
                 self.assertTrue(_launch_authority(state, _launch()))
                 self.assertTrue(state.ricochet_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID,
-                    _ricochet('1:p:1:1', **changes)))
+                    _projectile_owner(_ricochet(state, '1:p:1:1', **changes)),
+                    _ricochet(state, '1:p:1:1', **changes)))
 
     def test_ricochet_accepts_a_base_behind_the_canonical_cursor(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _progress('1:p:1:1', 50, 5.0)))
+            _projectile_owner(_progress(state, '1:p:1:1', 50, 5.0)),
+            _progress(state, '1:p:1:1', 50, 5.0)))
         record = state.projectiles['1:p:1:1']
         self.assertEqual(50, record['checked_through_ms'])
 
@@ -3591,8 +2956,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         # progress cursor. Its cursors converge by monotonic frontier, so
         # the older base is a delayed message, not a conflicting claim.
         self.assertTrue(state.ricochet_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _ricochet('1:p:1:1', base_checked_ms=0)))
+            _projectile_owner(_ricochet(state, '1:p:1:1', base_checked_ms=0)),
+            _ricochet(state, '1:p:1:1', base_checked_ms=0)))
 
         self.assertEqual(1, record['ricochet_count'])
         self.assertEqual(100, record['checked_through_ms'])
@@ -3620,7 +2985,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 launch['source_shot']['shell']['kind'] = shell_kind
                 self.assertTrue(_launch_authority(state, launch))
                 self.assertTrue(state.ricochet_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID, _ricochet(
+                    _projectile_owner(_ricochet(state,
+                        '1:p:1:1',
+                        base_penetration_multiplier=multiplier)), _ricochet(state,
                         '1:p:1:1',
                         base_penetration_multiplier=multiplier)))
                 self.assertEqual(1, state.projectiles[
@@ -3631,14 +2998,14 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(_launch_authority(
             state, _launch(shooter_id=2, shot_seq=1)))
-        first = {
+        first = {'launch_proof': _launch_proof(state, '1:p:1:1'),
             'projectile_id': '1:p:1:1', 'base_checked_ms': 0,
             'checked_through_ms': 1, 'checked_distance': 1.0,
             'piercing_loss': 0.0, 'penetration_factor': 1.0,
             'destructibles': [_destructible(index, 1)
                               for index in range(33)],
         }
-        second = {
+        second = {'launch_proof': _launch_proof(state, '1:p:2:1'),
             'projectile_id': '1:p:2:1', 'base_checked_ms': 0,
             'checked_through_ms': 1, 'checked_distance': 1.0,
             'piercing_loss': 0.0, 'penetration_factor': 1.0,
@@ -3649,7 +3016,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             'type': 'projectile_progress', 'round_id': 1,
             'authority_epoch': 1, 'cursors': [first, second],
         }
-        self.assertFalse(state.progress_projectiles(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertFalse(state.progress_projectiles(_projectile_owner(message), message))
         self.assertEqual(0, state.destructible_revision)
         self.assertEqual(0,
                          state.projectiles['1:p:1:1']['checked_through_ms'])
@@ -3676,7 +3043,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
     def test_terminal_round_progress_validates_envelope_before_noop(self):
         state = _state()
         state.battle_result = {'winner': 2}
-        cursor = {
+        cursor = {'launch_proof': _launch_proof(state, '1:p:1:1'),
             'projectile_id': '1:p:1:1',
             # Terminal state makes these finite cursor values obsolete.
             'base_checked_ms': -100,
@@ -3694,7 +3061,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         }
 
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID, message))
+            _projectile_owner(message), message))
         invalid_messages = (
             dict(message, round_id=state.round_id + 1),
             dict(message, authority_epoch=state.authority_epoch + 1),
@@ -3714,7 +3081,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         for invalid in invalid_messages:
             with self.subTest(invalid=invalid):
                 self.assertFalse(state.progress_projectiles(
-                    SIMULATION_WORKER_AUTHORITY_ID, invalid))
+                    _projectile_owner(invalid), invalid))
 
     def test_prebattle_destructible_is_not_folded_as_terminal_noop(self):
         for condition in ('loading', 'countdown'):
@@ -3739,12 +3106,12 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         record = state.projectiles['1:p:1:1']
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', destructibles=[_destructible()])
         invalid = dict(message, destructibles=[_destructible(
             destructible_kind='unknown')])
         before_revision = state.projectile_revision
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, invalid))
+        self.assertFalse(state.resolve_projectile(_projectile_owner(invalid), invalid))
         # The invalid destructible batch commits neither damage nor world
         # state; only the unresolvable shot itself is retired.
         self.assertEqual(1000, state.players[2].health)
@@ -3755,12 +3122,12 @@ class ServerProjectileLedgerTests(unittest.TestCase):
 
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(message), message))
         self.assertEqual(900, state.players[2].health)
         self.assertEqual(1, state.destructible_revision)
         self.assertEqual(1, len(state.destructibles))
         events = len(state.pending_events)
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, dict(message)))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(dict(message)), dict(message)))
         self.assertEqual(1, state.destructible_revision)
         self.assertEqual(events, len(state.pending_events))
 
@@ -3768,16 +3135,17 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _progress('1:p:1:1', 200, 20.0)))
+            _projectile_owner(_progress(state, '1:p:1:1', 200, 20.0)),
+            _progress(state, '1:p:1:1', 200, 20.0)))
         self.assertEqual(
             200, state.projectiles['1:p:1:1']['checked_through_ms'])
 
         # Refusing the older base stranded the shot: nothing else retires a
         # worker-owned projectile, so the tracer died with no feedback.
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', base_checked_ms=0, resolved_time_ms=250,
+            _projectile_owner(_resolve(state, '1:p:1:1', base_checked_ms=0, resolved_time_ms=250,
+                     checked_distance=25.0)),
+            _resolve(state, '1:p:1:1', base_checked_ms=0, resolved_time_ms=250,
                      checked_distance=25.0)))
 
         self.assertEqual(900, state.players[2].health)
@@ -3799,8 +3167,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         # A base ahead of the canonical cursor describes progress the
         # server never accepted, so the payload stays refused.
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', base_checked_ms=1, resolved_time_ms=1)))
+            _projectile_owner(_resolve(state, '1:p:1:1', base_checked_ms=1, resolved_time_ms=1)),
+            _resolve(state, '1:p:1:1', base_checked_ms=1, resolved_time_ms=1)))
 
         self.assertEqual(
             'cursor_compare_and_swap_failed',
@@ -3813,15 +3181,16 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         self.assertTrue(state.progress_projectiles(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _progress('1:p:1:1', 200, 20.0)))
+            _projectile_owner(_progress(state, '1:p:1:1', 200, 20.0)),
+            _progress(state, '1:p:1:1', 200, 20.0)))
         record = state.projectiles['1:p:1:1']
 
         # Tolerating an older base must not lower the resolution floor: the
         # canonical cursor, not the echoed base, bounds the resolved time.
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', base_checked_ms=0, resolved_time_ms=100,
+            _projectile_owner(_resolve(state, '1:p:1:1', base_checked_ms=0, resolved_time_ms=100,
+                     checked_distance=25.0)),
+            _resolve(state, '1:p:1:1', base_checked_ms=0, resolved_time_ms=100,
                      checked_distance=25.0)))
 
         self.assertEqual(
@@ -3850,7 +3219,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 state._server_time_ms() * 1000 - 100000,
         }
         self.assertTrue(state.launch_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(_launch(shooter_id=16, shooter_kind='bot', shot_seq=1)),
             _launch(shooter_id=16, shooter_kind='bot', shot_seq=1)))
 
         state.remove_player(1)
@@ -3864,20 +3233,20 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertIn('checked_distance', snapshot[0])
         self.assertIn('piercing_loss', snapshot[0])
 
-        miss = _resolve(
+        miss = _resolve(state,
             '1:b:16:1', epoch=1, outcome='miss', impact=None,
             direct=None, splash=[], checked_distance=5.0)
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, miss))
+            _projectile_owner(miss), miss))
 
     def test_resolve_is_atomic_idempotent_and_preserves_hit_contract(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         sticker = (1 << 64) - 1
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', direct=_effect(damage_sticker=sticker))
 
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(message), message))
         self.assertEqual(900, state.players[2].health)
         self.assertNotIn('1:p:1:1', state.projectiles)
         self.assertEqual('impact',
@@ -3902,7 +3271,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             outgoing['mission_events'])
 
         event_count = len(state.pending_events)
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, dict(message)))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(dict(message)), dict(message)))
         self.assertEqual(900, state.players[2].health)
         self.assertEqual(event_count, len(state.pending_events))
         self.assertEqual(100, outgoing['damage'])
@@ -3910,7 +3279,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             [['damage', 0, 100, False, 10.0, True, None]],
             outgoing['mission_events'])
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
+            _projectile_owner(dict(message, checked_distance=11.0)),
             dict(message, checked_distance=11.0)))
 
         for invalid in (True, 1.0, -1, 1 << 64):
@@ -3918,15 +3287,18 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 other = _state()
                 self.assertTrue(_launch_authority(other, _launch()))
                 self.assertFalse(other.resolve_projectile(
-                    SIMULATION_WORKER_AUTHORITY_ID,
-                    _resolve('1:p:1:1', direct=_effect(
+                    _projectile_owner(_resolve(state, '1:p:1:1', direct=_effect(
+                        damage_sticker=invalid))),
+                    _resolve(state, '1:p:1:1', direct=_effect(
                         damage_sticker=invalid))))
 
         splash_state = _state()
         self.assertTrue(_launch_authority(splash_state, _launch()))
         self.assertFalse(splash_state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', direct=None, splash=[_effect(
+            _projectile_owner(_resolve(state, '1:p:1:1', direct=None, splash=[_effect(
+                target_kind='bot', target_id=16,
+                target_pose=(10.0, 1.0, 0.0), damage_sticker=1)])),
+            _resolve(state, '1:p:1:1', direct=None, splash=[_effect(
                 target_kind='bot', target_id=16,
                 target_pose=(10.0, 1.0, 0.0), damage_sticker=1)])))
 
@@ -3935,12 +3307,12 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_launch_authority(state, _launch()))
         now = state._server_time_ms()
         stun_end = now + 1500
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', direct=_effect(
                 stun_end_server_time_ms=stun_end))
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, message))
+            _projectile_owner(message), message))
 
         target = state.players[2]
         self.assertEqual(stun_end, target.stun_end_server_time_ms)
@@ -3978,7 +3350,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state(players=3)
         self.assertTrue(_launch_authority(state, _launch(
             is_he=True, splash_radius=20.0)))
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1',
             direct=_effect(stun_end_server_time_ms=101),
             splash=[_effect(
@@ -3989,25 +3361,24 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         with mock.patch.object(
                 state, '_server_time_ms', side_effect=[100]) as clock:
             self.assertTrue(state.resolve_projectile(
-                SIMULATION_WORKER_AUTHORITY_ID, message))
+                _projectile_owner(message), message))
 
         self.assertEqual(1, clock.call_count)
         self.assertEqual(101, state.players[2].stun_end_server_time_ms)
         self.assertEqual(101, state.players[3].stun_end_server_time_ms)
 
-    def test_visible_projectile_authority_cannot_supply_stun_state(self):
+    def test_other_player_cannot_supply_stun_for_an_owned_projectile(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
         record = state.projectiles['1:p:1:1']
-        state.bot_authority_id = 1
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', direct=_effect(
                 stun_end_server_time_ms=state._server_time_ms() + 1000))
 
-        self.assertFalse(state.resolve_projectile(1, message))
+        self.assertFalse(state.resolve_projectile(2, message))
         self.assertEqual(1000, state.players[2].health)
         self.assertEqual(0, state.players[2].stun_end_server_time_ms)
-        self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
+        self.assertIs(record, state.projectiles['1:p:1:1'])
 
     def test_resolve_cannot_lower_the_launch_penetration_roll(self):
         state = _state()
@@ -4015,8 +3386,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         record = state.projectiles['1:p:1:1']
 
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', penetration_factor=0.75)))
+            _projectile_owner(_resolve(state, '1:p:1:1', penetration_factor=0.75)),
+            _resolve(state, '1:p:1:1', penetration_factor=0.75)))
 
         self.assertEqual(1.0, record['penetration_factor'])
         self.assertEqual(1000, state.players[2].health)
@@ -4025,10 +3396,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
     def test_wreck_terminal_can_have_no_damage_but_still_hit_a_vehicle(self):
         state = _state()
         self.assertTrue(_launch_authority(state, _launch()))
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', direct=None, hit_vehicle=True)
 
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(message), message))
 
         event = next(
             value for value in state.pending_events
@@ -4041,11 +3412,11 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state.players[2].health = 0
         state.players[2].alive = False
         self.assertTrue(_launch_authority(state, _launch()))
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', direct=None, hit_vehicle=True,
             wreck_hit={'target_kind': 'player', 'target_id': 2})
 
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(message), message))
 
         events = [event for event in state.pending_events
                   if event.get('projectile_id') == '1:p:1:1']
@@ -4061,20 +3432,29 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_launch_authority(state, _launch()))
         wreck_hit = {'target_kind': 'player', 'target_id': 2}
 
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, _resolve(
+        self.assertFalse(state.resolve_projectile(_projectile_owner(_resolve(state,
+            '1:p:1:1', direct=None, hit_vehicle=True,
+            wreck_hit=wreck_hit)), _resolve(state,
             '1:p:1:1', direct=None, hit_vehicle=True,
             wreck_hit=wreck_hit)))
         state.players[2].health = 0
         state.players[2].alive = False
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, _resolve(
+        self.assertFalse(state.resolve_projectile(_projectile_owner(_resolve(state,
+            '1:p:1:1', hit_vehicle=True, wreck_hit=wreck_hit)), _resolve(state,
             '1:p:1:1', hit_vehicle=True, wreck_hit=wreck_hit)))
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, _resolve(
+        self.assertFalse(state.resolve_projectile(_projectile_owner(_resolve(state,
+            '1:p:1:1', direct=None, hit_vehicle=True, wreck_hit=None)), _resolve(state,
             '1:p:1:1', direct=None, hit_vehicle=True, wreck_hit=None)))
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, _resolve(
+        self.assertFalse(state.resolve_projectile(_projectile_owner(_resolve(state,
+            '1:p:1:1', direct=None, hit_vehicle=True,
+            wreck_hit={'target_kind': 'player', 'target_id': 99})), _resolve(state,
             '1:p:1:1', direct=None, hit_vehicle=True,
             wreck_hit={'target_kind': 'player', 'target_id': 99})))
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, _resolve(
-            '1:p:1:1', direct=None, hit_vehicle=True,
+        self.assertTrue(_launch_authority(state, _launch(shot_seq=2)))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(_resolve(state,
+            '1:p:1:2', direct=None, hit_vehicle=True,
+            wreck_hit=wreck_hit)), _resolve(state,
+            '1:p:1:2', direct=None, hit_vehicle=True,
             wreck_hit=wreck_hit)))
 
     def test_hit_event_reports_only_damage_the_target_had_left(self):
@@ -4083,8 +3463,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_launch_authority(state, _launch()))
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', direct=_effect(damage=400))))
+            _projectile_owner(_resolve(state, '1:p:1:1', direct=_effect(damage=400))),
+            _resolve(state, '1:p:1:1', direct=_effect(damage=400))))
 
         event = next(
             value for value in state.pending_events
@@ -4103,7 +3483,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             is_he=True, splash_radius=15.0,
             penetration_factor=0.0)
         self.assertTrue(_launch_authority(state, launch))
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', penetration_factor=0.0,
             direct=_effect(target_id=2, damage=50),
             splash=[_effect(
@@ -4111,7 +3491,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 target_pose=(10.0, 1.0, 0.0))])
         record = state.projectiles['1:p:1:1']
         before = [state.players[index].health for index in (2, 3)]
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertFalse(state.resolve_projectile(_projectile_owner(message), message))
         self.assertEqual(before,
                          [state.players[index].health for index in (2, 3)])
         self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
@@ -4122,7 +3502,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         message['splash'] = [_effect(
             target_id=3, damage=40, x=10.0,
             target_pose=(20.0, 1.0, 0.0))]
-        self.assertTrue(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertTrue(state.resolve_projectile(_projectile_owner(message), message))
         self.assertEqual([950, 960],
                          [state.players[index].health for index in (2, 3)])
 
@@ -4131,7 +3511,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state.players[3].x = 12.0
         self.assertTrue(_launch_authority(state, _launch(
             is_he=True, splash_radius=15.0, penetration_factor=0.0)))
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', penetration_factor=0.0,
             direct=_effect(target_id=2, damage=50),
             splash=[_effect(
@@ -4142,7 +3522,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                         target_pose=(12.0, 1.0, 0.0))])
         record = state.projectiles['1:p:1:1']
 
-        self.assertFalse(state.resolve_projectile(SIMULATION_WORKER_AUTHORITY_ID, message))
+        self.assertFalse(state.resolve_projectile(_projectile_owner(message), message))
         self.assertEqual(1000, state.players[2].health)
         self.assertEqual(1000, state.players[3].health)
         self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
@@ -4152,7 +3532,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertTrue(_launch_authority(state, _launch(
             is_he=True, splash_radius=15.0, penetration_factor=0.0)))
         state.players[3].x = 100.0
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', penetration_factor=0.0,
             direct=_effect(target_id=2, damage=50),
             splash=[_effect(
@@ -4160,7 +3540,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 target_pose=(20.0, 1.0, 0.0))])
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, message))
+            _projectile_owner(message), message))
         self.assertEqual([950, 960],
                          [state.players[index].health for index in (2, 3)])
 
@@ -4168,7 +3548,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state(players=3)
         self.assertTrue(_launch_authority(state, _launch(
             is_he=True, splash_radius=15.0, penetration_factor=0.0)))
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', penetration_factor=0.0,
             direct=_effect(target_id=2, damage=50),
             splash=[_effect(
@@ -4176,7 +3556,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 target_pose=(30.1, 1.0, 0.0))])
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, message))
+            _projectile_owner(message), message))
         self.assertEqual([950, 960],
                          [state.players[index].health for index in (2, 3)])
         self.assertNotIn('1:p:1:1', state.projectiles)
@@ -4185,12 +3565,12 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state = _state(players=2)
         self.assertTrue(_launch_authority(state, _launch()))
         record = state.projectiles['1:p:1:1']
-        message = _resolve(
+        message = _resolve(state,
             '1:p:1:1', direct=_effect(
                 target_id=2, target_pose=(10.0, 1.0, 0.0)))
 
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID, message))
+            _projectile_owner(message), message))
         self.assertEqual(1000, state.players[2].health)
         self._assert_rejected_terminal_retired(state, '1:p:1:1', record)
 
@@ -4206,6 +3586,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state.simulation_worker.connected = False
         state.simulation_worker = None
         state.bot_authority_id = None
+        state.tick += int(TICK_HZ)
         self.assertEqual(1, state._expire_projectiles())
         self.assertNotIn('1:p:1:1', state.projectiles)
         self.assertEqual('expired',
@@ -4223,47 +3604,55 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         self.assertFalse(state.projectile_tombstones)
         self.assertEqual(0, state.projectile_revision)
 
-    def test_player_disconnect_and_leave_do_not_cancel_fired_projectile(self):
-        disconnected = _state()
-        self.assertTrue(_launch_authority(disconnected, _launch(
-            shooter_id=2, shot_seq=1)))
-        disconnected.remove_player(2)
-        self.assertIn('1:p:2:1', disconnected.projectiles)
-        self.assertTrue(disconnected.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:2:1', direct=None, outcome='miss',
-                        impact=None, checked_distance=1.0)))
+    def test_connected_worker_does_not_disable_failed_player_shot_expiry(self):
+        state = _state(players=3)
+        self.assertTrue(_launch_authority(state, _launch(max_time_ms=100)))
+        self.assertTrue(_launch_authority(state, _launch(shooter_id=2)))
+        launch_time = state.projectiles['1:p:1:1']['launch_server_time_ms']
+        state.bot_states[16] = {
+            'id': 16, 'team': 2, 'alive': True, 'fire_seq': 1,
+            'shell_index': 0, 'health': 1000, 'max_health': 1000,
+            'vehicle': 'ussr:R11_MS-1', 'x': 20.0, 'y': 0.0, 'z': 0.0,
+        }
+        state.bot_pending_projectile_launches.add((16, 1))
+        self.assertTrue(_launch_authority(state, _launch(
+            shooter_id=16, shooter_kind='bot', max_time_ms=100)))
+        terminal = _resolve(state, '1:p:1:1')
+        bad = copy.deepcopy(terminal)
+        bad['launch_proof']['origin'][0] += 1.0
+        self.assertFalse(state.resolve_projectile(1, bad))
+        deadline = launch_time + 100 + lan_server_module.PLAYER_TRIGGER_MAX_LAG_MS
+        state._server_time_ms = lambda: deadline - 1
+        self.assertEqual(0, state._expire_projectiles())
 
-        left = _state()
-        self.assertTrue(_launch_authority(left, _launch(
-            shooter_id=2, shot_seq=1)))
-        self.assertTrue(left.leave_battle(2, {
-            'round_id': left.round_id}))
-        self.assertIn('1:p:2:1', left.projectiles)
-        self.assertTrue(left.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:2:1', direct=None, outcome='miss',
-                        impact=None, checked_distance=1.0)))
+        state._server_time_ms = lambda: deadline
+        self.assertEqual(1, state._expire_projectiles())
+        self.assertTrue(state.simulation_worker.connected)
+        self.assertEqual({'1:p:2:1', '1:b:16:1'}, set(state.projectiles))
+        self.assertEqual(1000, state.players[2].health)
+        self.assertEqual('expired', state.pending_events[-1]['outcome'])
+        self.assertEqual('1:p:1:1', state.pending_events[-1]['projectile_id'])
+        self.assertEqual(0, state._expire_projectiles())
+        self.assertFalse(state.resolve_projectile(1, terminal))
+        self.assertEqual(1000, state.players[2].health)
 
-    def test_disconnected_shooter_projectile_still_applies_damage(self):
-        state = _state()
-        _attach_worker_authority(state)
-        self.assertTrue(_launch_authority(state, _launch()))
+    def test_player_departure_cancels_only_its_own_projectiles(self):
+        for leave in (False, True):
+            with self.subTest(leave=leave):
+                state = _state(players=3)
+                self.assertTrue(_launch_authority(state, _launch()))
+                self.assertTrue(_launch_authority(state, _launch(shooter_id=2)))
+                if leave:
+                    self.assertTrue(state.leave_battle(
+                        1, {'round_id': 1, 'voluntary': False}))
+                else:
+                    state.remove_player(1)
+                self.assertNotIn('1:p:1:1', state.projectiles)
+                self.assertIn('1:p:2:1', state.projectiles)
+                self.assertEqual('expired',
+                    state.projectile_tombstones['1:p:1:1']['outcome'])
+                self.assertEqual(1000, state.players[2].health)
 
-        state.remove_player(1)
-
-        self.assertEqual(
-            SIMULATION_WORKER_AUTHORITY_ID, state.bot_authority_id)
-        self.assertEqual(1, state.authority_epoch)
-        self.assertIn('1:p:1:1', state.projectiles)
-        self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', epoch=1)))
-        self.assertEqual(900, state.players[2].health)
-        events = [event for event in state.pending_events
-                  if event.get('projectile_id') == '1:p:1:1']
-        self.assertEqual(['shot', 'projectile_impact', 'hit'],
-                         [event['kind'] for event in events])
 
     def test_terminal_noops_a_frozen_target_who_disconnected(self):
         state = _state()
@@ -4275,8 +3664,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         before_events = len(state.pending_events)
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', direct=_effect(target_id=2))))
+            _projectile_owner(_resolve(state, '1:p:1:1', direct=_effect(target_id=2))),
+            _resolve(state, '1:p:1:1', direct=_effect(target_id=2))))
 
         self.assertNotIn('1:p:1:1', state.projectiles)
         self.assertEqual(
@@ -4296,8 +3685,8 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         record = state.projectiles['1:p:1:1']
 
         self.assertFalse(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', direct=_effect(target_id=99))))
+            _projectile_owner(_resolve(state, '1:p:1:1', direct=_effect(target_id=99))),
+            _resolve(state, '1:p:1:1', direct=_effect(target_id=99))))
 
         # An unknown target is still refused, but the shot that named it
         # retires instead of leaking into the ledger forever.
@@ -4315,8 +3704,10 @@ class ServerProjectileLedgerTests(unittest.TestCase):
         state.remove_player(2)
 
         self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve(
+            _projectile_owner(_resolve(state,
+                '1:p:1:1', direct=None, hit_vehicle=True,
+                wreck_hit={'target_kind': 'player', 'target_id': 2})),
+            _resolve(state,
                 '1:p:1:1', direct=None, hit_vehicle=True,
                 wreck_hit={'target_kind': 'player', 'target_id': 2})))
 
@@ -4326,79 +3717,6 @@ class ServerProjectileLedgerTests(unittest.TestCase):
             if event.get('kind') == 'projectile_impact')
         self.assertNotIn('wreck_hit', impact)
 
-    def test_disconnected_shooter_projectile_keeps_stun_attribution(self):
-        state = _state()
-        for player in state.players.values():
-            player.account_key = 'player-%d' % player.player_id
-        state._freeze_round_participants(list(state.players.values()))
-        self.assertTrue(_launch_authority(state, _launch()))
-        stun_end = state._server_time_ms() + 1500
-
-        state.remove_player(1)
-
-        self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve(
-                '1:p:1:1', direct=_effect(
-                    stun_end_server_time_ms=stun_end))))
-        target = state.players[2]
-        self.assertEqual(stun_end, target.stun_end_server_time_ms)
-        self.assertEqual(
-            ('player', 1),
-            (target.stun_attacker_kind, target.stun_attacker_id))
-
-    def test_disconnected_shooter_enemy_frag_uses_frozen_launch_identity(self):
-        state = _state()
-        for player in state.players.values():
-            player.account_key = 'player-%d' % player.player_id
-        state._freeze_round_participants(list(state.players.values()))
-        self.assertTrue(_launch_authority(state, _launch()))
-
-        state.remove_player(1)
-
-        self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve('1:p:1:1', direct=_effect(damage=1000))))
-        attacker = state.vehicle_statistics[('player', 1)]
-        target = state.vehicle_statistics[('player', 2)]
-        self.assertEqual(1, attacker['team'])
-        self.assertEqual(1000, attacker['damage_dealt'])
-        self.assertEqual(1, attacker['kills'])
-        self.assertEqual(1000, target['damage_received'])
-        self.assertEqual(1, state.round_participants['player-1']['frags'])
-        self.assertFalse(
-            state.round_participants['player-1']['team_killer'])
-        statistics = [event for event in state.pending_events
-                      if event.get('kind') == 'vehicle_statistics']
-        self.assertEqual(1, statistics[-1]['frags'])
-
-    def test_disconnected_shooter_friendly_frag_keeps_enemy_stats_zero(self):
-        state = _state(players=3)
-        for player in state.players.values():
-            player.account_key = 'player-%d' % player.player_id
-        state._freeze_round_participants(list(state.players.values()))
-        self.assertTrue(_launch_authority(state, _launch()))
-
-        state.remove_player(1)
-
-        self.assertTrue(state.resolve_projectile(
-            SIMULATION_WORKER_AUTHORITY_ID,
-            _resolve(
-                '1:p:1:1', impact=[20.0, 1.0, 0.0],
-                checked_distance=20.0,
-                direct=_effect(target_id=3, damage=1000, x=20.0))))
-        attacker = state.vehicle_statistics[('player', 1)]
-        target = state.vehicle_statistics[('player', 3)]
-        self.assertEqual(1, attacker['team'])
-        self.assertEqual(0, attacker['damage_dealt'])
-        self.assertEqual(0, attacker['kills'])
-        self.assertEqual(1000, target['damage_received'])
-        self.assertEqual(-1, state.round_participants['player-1']['frags'])
-        self.assertTrue(state.round_participants['player-1']['team_killer'])
-        statistics = [event for event in state.pending_events
-                      if event.get('kind') == 'vehicle_statistics']
-        self.assertEqual(-1, statistics[-1]['frags'])
-        self.assertTrue(statistics[-1]['team_killer'])
 
     def test_retired_combat_report_handlers_are_removed(self):
         retired_types = (
@@ -4449,9 +3767,9 @@ class ServerProjectileLedgerTests(unittest.TestCase):
 
     def test_capability_and_active_snapshot_wire_bound(self):
         self.assertEqual('projectile_ledger_v2', PROJECTILE_CAPABILITY)
-        self.assertEqual('player_fire_intent_v6',
-                         PLAYER_FIRE_INTENT_CAPABILITY)
-        self.assertIn(PLAYER_FIRE_INTENT_CAPABILITY, SERVER_CAPABILITIES)
+        self.assertEqual('player_projectile_owner_v1',
+                         PLAYER_PROJECTILE_OWNER_CAPABILITY)
+        self.assertIn(PLAYER_PROJECTILE_OWNER_CAPABILITY, SERVER_CAPABILITIES)
         self.assertNotIn('player_fire_intent_v5', SERVER_CAPABILITIES)
         self.assertEqual('ricochet_continuation_v1',
                          RICOCHET_CONTINUATION_CAPABILITY)
@@ -4480,7 +3798,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 HUMAN_RAM_TIMELINE_CAPABILITY,
                 RAM_CONTACT_LEDGER_CAPABILITY,
-                PLAYER_FIRE_INTENT_CAPABILITY,
+                PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 PLAYER_ENVIRONMENT_CAPABILITY,
                 EFFECTIVE_PARAMS_CAPABILITY],
             'max_health': 1000,
@@ -4495,7 +3813,7 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                 DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 HUMAN_RAM_TIMELINE_CAPABILITY,
                 RAM_CONTACT_LEDGER_CAPABILITY,
-                PLAYER_FIRE_INTENT_CAPABILITY,
+                PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 PLAYER_ENVIRONMENT_CAPABILITY,
                 EFFECTIVE_PARAMS_CAPABILITY,
                 RICOCHET_CONTINUATION_CAPABILITY],
@@ -4639,6 +3957,284 @@ class ServerProjectileLedgerTests(unittest.TestCase):
                                 for event in events))
         self.assertEqual(1, sum(event.get('source') == 'player_left'
                                 for event in events))
+
+class PlayerProjectileOwnerSocketTests(unittest.TestCase):
+    """Exercise the actual sender FIFO, JSON handler and tick publication."""
+
+    def setUp(self):
+        from test_port_0922_simulation_worker import (
+            _Peer, _worker_hello, _player_hello, _manifest, _human_profiles)
+        from gui.mods.offline_lan_0922.lan_client import LANClient
+        from gui.mods.offline_lan_0922.authority_worker import AuthorityWorkerLANClient
+
+        self.state = BattleState(
+            map_name='01_karelia', max_players=2, team_size=2)
+        self.server = lan_server_module.ThreadedTCPServer(
+            ('127.0.0.1', 0), ClientHandler)
+        self.server.game_server = types.SimpleNamespace(state=self.state)
+        self.peers = []
+        self.clients = []
+        self.barrier_seq = 0
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.daemon = True
+        self.thread.start()
+        self.addCleanup(self._close)
+
+        def connect(hello):
+            peer = _Peer(self.server.server_address)
+            self.peers.append(peer)
+            peer.send(hello)
+            return peer, peer.receive_until('welcome')
+
+        self.worker_peer, worker_welcome = connect(_worker_hello())
+        self.player_peers = []
+        welcomes = []
+        for team in (1, 2):
+            hello = dict(_player_hello('Human%d' % team), requested_team=team)
+            peer, welcome = connect(hello)
+            self.player_peers.append(peer)
+            welcomes.append(welcome)
+        self.player_peers[0].send({
+            'type': 'start_battle', 'round_id': self.state.round_id})
+        for peer in self.player_peers:
+            peer.receive_until('battle_start')
+        worker_start = self.worker_peer.receive_until('battle_start')
+        self.manifest = _manifest(bot_state_rows.bots(worker_start))
+        self.worker_peer.send({
+            'type': 'bot_manifest', 'round_id': self.state.round_id,
+            'bots': self.manifest,
+            'player_collision_profiles': _human_profiles(worker_start['players'])})
+        self._barrier(self.worker_peer)
+        self.assertEqual(SIMULATION_WORKER_AUTHORITY_ID,
+                         self.state.bot_manifest_authority_id)
+        for peer in self.player_peers + [self.worker_peer]:
+            peer.send({'type': 'battle_ready', 'round_id': self.state.round_id})
+            self._barrier(peer)
+        self.assertEqual('battle', self.state.phase)
+        self.state.tick_once(1.0 / TICK_HZ)
+        for peer in self.peers:
+            peer.receive_until('battle_live')
+        with self.state.lock:
+            self.state.tick = int(round(PREBATTLE_SECONDS * TICK_HZ))
+
+        self.player_clients = []
+        for peer, welcome in zip(self.player_peers, welcomes):
+            client = LANClient(
+                '127.0.0.1', self.server.server_address[1], 'Human',
+                'ussr:R11_MS-1', max_health=90,
+                effective_params=effective_params())
+            self._attach_sender(client, peer, welcome['player_id'], welcome)
+            self.player_clients.append(client)
+        self.worker_client = AuthorityWorkerLANClient(
+            '127.0.0.1', self.server.server_address[1])
+        self._attach_sender(self.worker_client, self.worker_peer,
+                            SIMULATION_WORKER_AUTHORITY_ID, worker_welcome)
+
+    def _close(self):
+        for client in self.clients:
+            with client._outbound_lock:
+                client.running = False
+                client.connected = False
+                client._outbound_accepting = False
+            client._outbound_event.set()
+        for client in self.clients:
+            sender = client._sender_thread
+            if sender is not None:
+                sender.join(2.0)
+                self.assertFalse(sender.is_alive())
+        for peer in self.peers:
+            peer.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(2.0)
+
+    def _attach_sender(self, client, peer, player_id, welcome):
+        client.ready = client.running = client.connected = True
+        client.phase = 'battle'
+        client.round_id = self.state.round_id
+        client.player_id = player_id
+        client.authority_epoch = self.state.authority_epoch
+        client.bot_authority_id = SIMULATION_WORKER_AUTHORITY_ID
+        client.capabilities = list(welcome['capabilities'])
+        client.server_capabilities = list(welcome['capabilities'])
+        client.sock = peer.socket
+        client._outbound_accepting = True
+        client._transport_generation = 1
+        client._sender_thread = threading.Thread(
+            target=client._sender_worker, args=(peer.socket, 1))
+        client._sender_thread.daemon = True
+        self.clients.append(client)
+        client._sender_thread.start()
+
+    def _barrier(self, peer, client=None):
+        self.barrier_seq += 1
+        message = {'type': 'ping', 'seq': self.barrier_seq}
+        if client is None:
+            peer.send(message)
+        else:
+            self.assertTrue(client._send(message))
+        self.assertEqual(self.barrier_seq, peer.receive_until('pong')['seq'])
+
+    def _queue_player_launch(self, client, shot_seq, max_time_ms=10000):
+        player = self.state.players[client.player_id]
+        position = [player.x, player.y, player.z]
+        self.assertTrue(client.send_input(
+            0.0, 0.0, position=position, yaw=player.yaw,
+            pitch=player.pitch, roll=player.roll, speed=0.0,
+            fire_seq=player.fire_seq, shell_index=0, next_shell_index=0,
+            shell_change_pending=False,
+            pose_time_us=self.state._logical_motion_time_us(),
+            gun_checkpoint=_gun_checkpoint()))
+        launch = _launch(
+            shooter_id=client.player_id, shot_seq=shot_seq,
+            round_id=self.state.round_id, authority_epoch=self.state.authority_epoch,
+            origin=[player.x, player.y + 1.0, player.z],
+            range_origin=position, max_time_ms=max_time_ms,
+            launch_server_time_ms=self.state._server_time_ms(),
+            fire_intent_seq=shot_seq, fire_input_seq=client._input_seq,
+            burst_group_seq=shot_seq, burst_index=0, burst_count=1)
+        arguments = dict(launch)
+        arguments.pop('type')
+        arguments.pop('round_id')
+        self.assertEqual(shot_seq, client.send_projectile_launch(**arguments))
+        # Build the proof from the frozen local launch, before any server echo.
+        local = dict(launch, source_vehicle=client.vehicle,
+                     projectile_id='%d:p:%d:%d' % (
+                         client.round_id, client.player_id, shot_seq))
+        proof = dict((key, copy.deepcopy(local[key])) for key in
+                     lan_server_module.PROJECTILE_LAUNCH_PROOF_FIELDS)
+        for key in ('origin', 'velocity', 'range_origin'):
+            proof[key] = tuple(proof[key])
+        return launch, proof
+
+    def test_player_and_bot_owners_complete_over_fifo_and_tick_expiry(self):
+        from test_port_0922_simulation_worker import _bot_publication
+
+        client, other = self.player_clients
+        peer, other_peer = self.player_peers
+        target = self.state.players[other.player_id]
+        starting_health = target.health
+        launch, proof = self._queue_player_launch(client, 1)
+        projectile_id = proof['projectile_id']
+        self.assertTrue(client.send_projectile_progress(
+            self.state.authority_epoch, [{
+                'projectile_id': projectile_id, 'base_checked_ms': 0,
+                'checked_through_ms': 50, 'checked_distance': 5.0,
+                'piercing_loss': 0.0, 'penetration_factor': 1.0,
+                'destructibles': [], 'launch_proof': proof}]))
+        impact = list(launch['origin'])
+        impact[0] += 10.0
+        terminal = {
+            'authority_epoch': self.state.authority_epoch,
+            'projectile_id': projectile_id, 'base_checked_ms': 50,
+            'outcome': 'impact', 'resolved_time_ms': 100,
+            'checked_distance': 10.0, 'impact': impact,
+            'direct': _effect(target_id=other.player_id, damage=10,
+                              x=impact[0], y=impact[1], z=impact[2]),
+            'splash': [], 'launch_proof': proof,
+        }
+        self.assertTrue(client.send_projectile_resolve(**terminal))
+        self.assertTrue(client.send_projectile_resolve(**terminal))
+        self._barrier(peer, client)
+        self.assertNotIn(projectile_id, self.state.projectiles)
+        self.assertEqual(starting_health - 10, target.health)
+        self.assertEqual(1, self.state._statistics_row(
+            'player', client.player_id)['shots_fired'])
+        self.state.tick_once(1.0 / TICK_HZ)
+        events = peer.receive_until('events')['events']
+        self.assertEqual(['shot', 'projectile_impact', 'hit'], [
+            event['kind'] for event in events
+            if event.get('projectile_id') == projectile_id])
+        snapshot = peer.receive_until('snapshot')
+        self.assertEqual(starting_health - 10, next(
+            row['health'] for row in snapshot['players']
+            if row['id'] == other.player_id))
+
+        # The worker still supplies the Bot fire edge and owns its projectile.
+        rows = _bot_publication(self.manifest)
+        worker = self.worker_client
+        for sample, fire_seq in ((100000, 0), (200000, 1)):
+            rows[0]['fire_seq'] = fire_seq
+            self.assertTrue(worker._send(bot_state_rows.publication({
+                'type': 'bot_state', 'round_id': self.state.round_id,
+                'sample_time_us': sample,
+                'source_batch_horizon_us': 200000, 'bots': rows})))
+            self._barrier(self.worker_peer, worker)
+        bot = rows[0]
+        bot_launch = _launch(
+            shooter_kind='bot', shooter_id=bot['id'],
+            round_id=self.state.round_id, authority_epoch=self.state.authority_epoch,
+            origin=[bot['x'], bot['y'] + 1.0, bot['z']],
+            max_time_ms=1000, launch_time_us=200000,
+            launch_pose=[bot['x'], bot['y'], bot['z'], bot['yaw'], 0.0, 0.0])
+        arguments = dict(bot_launch)
+        arguments.pop('type')
+        arguments.pop('round_id')
+        self.assertEqual(1, worker.send_projectile_launch(**arguments))
+        self._barrier(self.worker_peer, worker)
+        bot_id = '%d:b:%d:1' % (self.state.round_id, bot['id'])
+        self.assertIn(bot_id, self.state.projectiles)
+
+        own_launch, own_proof = self._queue_player_launch(client, 2, 1000)
+        other_launch, other_proof = self._queue_player_launch(other, 1)
+        self._barrier(other_peer, other)
+        self._barrier(peer, client)
+        # Bypass only the local ownership guard to exercise hostile wire input.
+        self.assertTrue(client._send(dict(bot_launch)))
+        self.assertTrue(client._send(dict(other_launch, shot_seq=2,
+                                         burst_group_seq=2, fire_intent_seq=2)))
+        for foreign_id, foreign_proof in ((bot_id, None), (
+                other_proof['projectile_id'], other_proof)):
+            forged = {
+                'type': 'projectile_resolve', 'round_id': self.state.round_id,
+                'authority_epoch': self.state.authority_epoch,
+                'projectile_id': foreign_id, 'base_checked_ms': 0,
+                'outcome': 'miss', 'resolved_time_ms': 100,
+                'checked_distance': 10.0, 'piercing_loss': 0.0,
+                'penetration_factor': 1.0, 'impact': None, 'direct': None,
+                'splash': [], 'destructibles': [],
+            }
+            if foreign_proof is not None:
+                forged['launch_proof'] = foreign_proof
+            self.assertTrue(client._send(forged))
+        self._barrier(peer, client)
+        self.assertEqual(1, target.fire_seq)
+        self.assertIn(bot_id, self.state.projectiles)
+        self.assertIn(other_proof['projectile_id'], self.state.projectiles)
+        self.assertEqual(starting_health - 10, target.health)
+        self.assertTrue(all(player.connected for player in self.state.players.values()))
+        self.assertIsNone(self.state.battle_result)
+
+        # The real tick expires only the overdue human shot while the worker
+        # remains connected. Bot lifetime stays with its native owner.
+        expires_ms = (own_launch['launch_server_time_ms'] +
+                      own_launch['max_time_ms'] + lan_server_module.PLAYER_TRIGGER_MAX_LAG_MS)
+        with self.state.lock:
+            self.state.tick = int(math.ceil(expires_ms * TICK_HZ / 1000.0)) - 1
+        self.state.tick_once(1.0 / TICK_HZ)
+        events = peer.receive_until('events')['events']
+        expired = [event for event in events
+                   if event.get('projectile_id') == own_proof['projectile_id']
+                   and event['kind'] == 'projectile_impact']
+        self.assertEqual(['expired'], [event['outcome'] for event in expired])
+        snapshot = peer.receive_until('snapshot')
+        active = {row['projectile_id'] for row in snapshot['projectiles']}
+        self.assertNotIn(own_proof['projectile_id'], active)
+        self.assertIn(other_proof['projectile_id'], active)
+        self.assertIn(bot_id, active)
+        self.assertTrue(worker.send_projectile_resolve(
+            self.state.authority_epoch, bot_id, 0, 'miss', 1000, None, None, [],
+            checked_distance=100.0))
+        self._barrier(self.worker_peer, worker)
+        self.assertNotIn(bot_id, self.state.projectiles)
+        self.assertEqual('miss', self.state.projectile_tombstones[bot_id]['outcome'])
+        self._queue_player_launch(client, 3)
+        self._barrier(peer, client)
+        self.assertIn('%d:p:%d:3' % (client.round_id, client.player_id),
+                      self.state.projectiles)
+        self.assertEqual('battle', self.state.phase)
+        self.assertIsNone(self.state.battle_result)
+
 
 if __name__ == '__main__':
     unittest.main()

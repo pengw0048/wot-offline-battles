@@ -16,7 +16,6 @@ from gui.mods.offline_lan_0922.artillery_controller import ArtilleryController
 from gui.mods.offline_lan_0922.authority_worker import AuthorityWorkerLANClient
 from gui.mods.offline_lan_0922.lan_client import LANClient
 from lan_battle_server import BattleState, PREBATTLE_SECONDS, TICK_HZ
-from lan_battle_server import SIMULATION_WORKER_AUTHORITY_ID as WORKER
 import test_port_0922_bot_runtime as bot_fixture
 import test_port_0922_server_projectiles as shot_fixture
 from test_port_0922_postbattle import _receipt, _packed_vehicle
@@ -47,12 +46,12 @@ class ResultAndTimingTests(unittest.TestCase):
             state, shot_fixture._launch(
                 is_he=True, splash_radius=20.0, penetration_factor=0.0)))
         message = shot_fixture._resolve(
-            '1:p:1:1', penetration_factor=0.0,
+            state, '1:p:1:1', penetration_factor=0.0,
             direct=shot_fixture._effect(damage=50, shot_result=1),
             splash=[shot_fixture._effect(
                 target_id=4, damage=40, x=10.0,
                 target_pose=(30.0, 1.0, 0.0))])
-        self.assertTrue(state.resolve_projectile(WORKER, message))
+        self.assertTrue(state.resolve_projectile(1, message))
         self.assertEqual(2, state._statistics_row('player', 1)['explosion_hits'])
         self.assertEqual(90, state._statistics_row('player', 1)['damage_dealt'])
         self.assertEqual(2, state._statistics_row('player', 1)['damaged'])
@@ -60,7 +59,7 @@ class ResultAndTimingTests(unittest.TestCase):
             'player', 2)['explosion_hits_received'])
         self.assertEqual(1, state._statistics_row(
             'player', 4)['explosion_hits_received'])
-        state.resolve_projectile(WORKER, message)
+        state.resolve_projectile(1, message)
         self.assertEqual(2, state._statistics_row('player', 1)['explosion_hits'])
 
     def test_damaged_counts_distinct_enemies_for_any_accepted_damage_cause(self):
@@ -84,7 +83,7 @@ class ResultAndTimingTests(unittest.TestCase):
                 self.assertTrue(shot_fixture._launch_authority(
                     state, shot_fixture._launch(is_he=True, splash_radius=2.0)))
                 self.assertTrue(state.resolve_projectile(
-                    WORKER, shot_fixture._resolve('1:p:1:1',
+                    1, shot_fixture._resolve(state, '1:p:1:1',
                         direct=shot_fixture._effect(damage=damage, shot_result=result))))
                 row = state._statistics_row('player', 2)
                 self.assertEqual(0, row['explosion_hits_received'])
@@ -97,7 +96,7 @@ class ResultAndTimingTests(unittest.TestCase):
         state.tick += int(127 * TICK_HZ)
         self.assertTrue(shot_fixture._launch_authority(state, shot_fixture._launch()))
         self.assertTrue(state.resolve_projectile(
-            WORKER, shot_fixture._resolve('1:p:1:1')))
+            1, shot_fixture._resolve(state, '1:p:1:1')))
         actor = state._statistics_row('player', 1)
         self.assertEqual((1, 40, 1), (
             actor['team_hits'], actor['team_damage'], actor['team_kills']))

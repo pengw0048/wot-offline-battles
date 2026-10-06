@@ -8,6 +8,81 @@ import test_port_0922_bot_runtime as bot_tests
 
 
 class TranslationSweepTests(unittest.TestCase):
+    def test_clear_first_sweep_is_reused_without_another_query(self):
+        moving = _tank(1, 0., 0.)
+        movement = (0., -2.)
+        others = [_tank(2, 0., 8.)]
+        with mock.patch.object(contact, 'translation_fraction',
+                               wraps=contact.translation_fraction) as sweep:
+            expected = contact.slide_translation(moving, movement, others)
+            self.assertEqual(1, sweep.call_count)
+            sweep.reset_mock()
+            fraction = contact.translation_fraction(moving, movement, others)
+            actual = contact.slide_translation(
+                moving, movement, others, first_fraction=fraction)
+            self.assertEqual(1, sweep.call_count)
+        self.assertEqual(1., fraction)
+        self.assertEqual(movement, expected)
+        self.assertEqual(expected, actual)
+
+    def test_zero_first_fraction_still_sweeps_the_projected_tangent(self):
+        for second_obstacle in (False, True):
+            with self.subTest(second_obstacle=second_obstacle):
+                moving = _tank(1, 0., 0.)
+                movement = (.2, 1.)
+                others = [_tank(2, 2.99, 0.)]
+                if second_obstacle:
+                    others.append(_tank(3, 0., 7.2))
+                with mock.patch.object(contact, 'translation_fraction',
+                                       wraps=contact.translation_fraction) as sweep, \
+                        mock.patch.object(contact, '_slide_fraction',
+                                          wraps=contact._slide_fraction) as tangent:
+                    expected = contact.slide_translation(moving, movement, others)
+                    self.assertEqual(1, sweep.call_count)
+                    self.assertEqual(1, tangent.call_count)
+                    sweep.reset_mock()
+                    tangent.reset_mock()
+                    fraction = contact.translation_fraction(moving, movement, others)
+                    self.assertEqual(0., fraction)
+                    sweep.reset_mock()
+                    actual = contact.slide_translation(
+                        moving, movement, others, first_fraction=fraction)
+                    self.assertEqual(0, sweep.call_count)
+                    self.assertEqual(1, tangent.call_count)
+                    self.assertEqual((0., 1.), tangent.call_args.args[1])
+                self.assertEqual(expected, actual)
+                self.assertEqual(0., actual[0])
+                self.assertAlmostEqual(.21 if second_obstacle else 1., actual[1])
+
+    def test_slide_geometry_expires_before_the_next_live_roster(self):
+        moving = _tank(1, 0., 0.)
+        side = _tank(2, 2.99, 0.)
+        ahead = _tank(3, 0., 7.2)
+        movement = (.2, 1.)
+        for ahead_z, ahead_y, expected in ((7.2, 0., .21),
+                                          (30., 0., 1.),
+                                          (7.2, 20., 1.),
+                                          (7.2, 0., .21)):
+            with self.subTest(ahead_z=ahead_z, ahead_y=ahead_y):
+                ahead.update(z=ahead_z, y=ahead_y)
+                accepted = contact.slide_translation(
+                    moving, movement, [side, ahead])
+                self.assertEqual(0., accepted[0])
+                self.assertAlmostEqual(expected, accepted[1])
+
+    def test_slide_far_peers_do_not_hide_a_later_tangent_blocker(self):
+        moving = _tank(1, 0., 0.)
+        side = _tank(2, 3., 0.)
+        ahead = _tank(3, 0., 12.)
+        movement = (8., 8.)
+        far = [_tank(i, 100. + i, -100.) for i in range(4, 31)]
+        for others in ([side] + far + [ahead], [ahead] + far + [side]):
+            fraction = contact.translation_fraction(moving, movement, others)
+            accepted = contact.slide_translation(
+                moving, movement, others, first_fraction=fraction)
+            self.assertAlmostEqual(.01, accepted[0])
+            self.assertAlmostEqual(5.01, accepted[1])
+
     def test_visible_drive_and_residual_push_stop_at_the_actual_remote_hull(self):
         import test_port_0922_battle_runtime as t
         for alive in (True, False):
@@ -91,6 +166,42 @@ class WorkerSolidMotionTests(unittest.TestCase):
                 pitch=0.,roll=0.,push_x=0.,push_z=0.,collision_shape=contact.DEFAULT_SHAPE)
         runtime._clear = lambda *args: True
         return runtime
+
+    def test_drive_sweep_reuse_is_limited_to_each_movement_and_roster(self):
+        runtime = self.prepare()
+        state, peer = runtime.states[11], runtime.states[12]
+        collision = self.module.tank_collision
+        for peer_z, distance, expected in ((8., 20., 1.01),
+                                           (8., -2., -2.),
+                                           (30., 20., 20.)):
+            with self.subTest(peer_z=peer_z, distance=distance):
+                state['z'], peer['z'] = distance, peer_z
+                with mock.patch.object(collision, 'translation_fraction',
+                                       wraps=collision.translation_fraction) as sweep:
+                    runtime._guard_tank_translations(
+                        [], {11: (0., 0., 0.), 12: (0., 0., peer_z)})
+                    self.assertEqual(2, sweep.call_count)
+                self.assertAlmostEqual(expected, state['z'])
+                self.assertEqual(expected != distance, '_contact_drive_sweep' in state)
+                self.assertEqual(peer_z, peer['z'])
+
+    def test_contact_sweep_reuse_is_limited_to_each_movement_and_roster(self):
+        runtime = self.prepare()
+        state, peer = runtime.states[11], runtime.states[12]
+        collision = self.module.tank_collision
+        for peer_z, distance, expected in ((8., 20., 1.01),
+                                           (8., -2., -2.),
+                                           (30., 20., 20.)):
+            with self.subTest(peer_z=peer_z, distance=distance):
+                state['z'], peer['z'] = 0., peer_z
+                with mock.patch.object(collision, 'translation_fraction',
+                                       wraps=collision.translation_fraction) as sweep:
+                    runtime._apply_tank_contact_response(state,
+                        {'delta_velocity': (0., 0.), 'correction': (0., distance)},
+                        .1, advance_push=False, apply_friction=False)
+                    self.assertEqual(1, sweep.call_count)
+                self.assertAlmostEqual(expected, state['z'])
+                self.assertEqual(peer_z, peer['z'])
 
     def test_repeated_wreck_shoves_reconcile_velocity_and_ack_at_original_mass(self):
         import copy

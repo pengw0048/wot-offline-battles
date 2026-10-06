@@ -179,6 +179,80 @@ class LegacyRadioNetworkTests(unittest.TestCase):
         self.assertAlmostEqual(110.0, self.net.actors[self.a][2])
         self.assertEqual(100, self.net.actors[self.c][2])
 
+    def test_shared_neighborhood_receipt_keeps_long_lease_and_first_tied_pose(self):
+        self.net.configure({self.a: (1, (0, 0, 0), 1000),
+                            self.b: (1, (10, 0, 0), 1000)}, 10)
+        self.net.observe(self.a, self.enemy, 10, 15, {'x': 1})
+        self.net.observe(self.b, self.enemy, 10, 10, {'x': 2})
+        first = next(iter(self.net.observations))
+        expected_pose = self.net.observations[first][self.enemy][2]
+        self.assertEqual((15, True, expected_pose),
+                         self.net.contact(self.a, self.enemy, 10))
+        self.assertEqual(self.net.contact(self.a, self.enemy, 10),
+                         self.net.contact(self.b, self.enemy, 10))
+        self.assertEqual(1, len(self.net.receipts[self.enemy]))
+        self.net.observe(self.b, self.enemy, 11, 10, {'x': 3})
+        self.assertEqual((14, True, {'x': 3}),
+                         self.net.contact(self.a, self.enemy, 11))
+
+    def test_same_time_update_refreshes_winning_pose_without_global_invalidation(self):
+        other_enemy = ('bot', 5)
+        self.net.observe(self.b, self.enemy, 10, 10, {'x': 1})
+        self.net.observe(self.b, other_enemy, 10, 10, {'x': 20})
+        self.net.contact(self.a, other_enemy, 10)
+        unrelated = next(iter(self.net.receipts[other_enemy].values()))
+        self.net.contact(self.a, self.enemy, 10)
+        self.net.observe(self.b, self.enemy, 10, 10, {'x': 2})
+        self.assertEqual((10, True, {'x': 2}),
+                         self.net.contact(self.a, self.enemy, 10))
+        self.assertIs(unrelated, next(iter(
+            self.net.receipts[other_enemy].values())))
+
+    def test_delayed_sample_rebuilds_latest_pose_and_freshness(self):
+        self.net.observe(self.a, self.enemy, 10, 10, {'x': 1})
+        self.net.observe(self.b, self.enemy, 10.4, 10, {'x': 2})
+        self.assertEqual((20.4 - 10.4, True, {'x': 2}),
+                         self.net.contact(self.a, self.enemy, 10.4))
+        self.net.observe(self.b, self.enemy, 9, 10, {'x': 3})
+        self.assertEqual((20.4 - 10.4, True, {'x': 1}),
+                         self.net.contact(self.a, self.enemy, 10.4))
+        self.assertEqual((20.4 - 10.6, False, {'x': 1}),
+                         self.net.contact(self.a, self.enemy, 10.6))
+
+    def test_hiding_freshest_observer_retains_other_direct_sample(self):
+        self.net.observe(self.a, self.enemy, 10, 15, {'x': 1})
+        self.net.observe(self.b, self.enemy, 10.2, 10, {'x': 2})
+        self.net.contact(self.a, self.enemy, 10.4)
+        self.net.hidden(self.b, self.enemy)
+        self.assertEqual((14.6, True, {'x': 2}),
+                         self.net.contact(self.a, self.enemy, 10.4))
+        receipt = next(iter(self.net.receipts[self.enemy].values()))
+        self.net.hidden(self.b, self.enemy)
+        self.assertIs(receipt, next(iter(self.net.receipts[self.enemy].values())))
+        self.net.hidden(self.a, self.enemy)
+        self.assertEqual((14.6, False, {'x': 2}),
+                         self.net.contact(self.a, self.enemy, 10.4))
+
+    def test_expired_lease_does_not_supply_pose_or_freshness(self):
+        self.net.observe(self.a, self.enemy, 10, 15, {'x': 1})
+        self.net.observe(self.b, self.enemy, 11, 0.1, {'x': 2})
+        self.assertEqual((13.8, False, {'x': 1}),
+                         self.net.contact(self.a, self.enemy, 11.2))
+        self.assertEqual((0.0, False, None),
+                         self.net.contact(self.a, self.enemy, 25))
+
+    def test_new_observer_recomputes_equal_time_dictionary_winner(self):
+        actors = dict((('bot', index), (1, (index, 0, 0), 1000))
+                      for index in range(1, 40))
+        self.net.configure(actors, 10)
+        recipient = ('bot', 1)
+        for observer in actors:
+            self.net.observe(observer, self.enemy, 10, 10,
+                             {'x': observer[1]})
+            winner = next(iter(self.net.observations))
+            self.assertEqual((10, True, {'x': winner[1]}),
+                             self.net.contact(recipient, self.enemy, 10))
+
 
 class ClientRadioPresentationTests(unittest.TestCase):
     def battle(self):

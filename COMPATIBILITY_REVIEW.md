@@ -1884,6 +1884,109 @@ repeat installation and injected protection/cache failures. The native harness
 and package checks do not substitute for repeated battle-to-hangar acceptance
 on the exact Windows game client.
 
+### Direct native collision geometry
+
+`offline_math_batch_native.pyd` implements complete translation, sliding and
+rotation sweeps. Its three synchronous methods read the caller's existing
+dict/list/tuple objects under the GIL and return ordinary floats or tuples.
+The C++ geometry core owns only copied scalar values; BigWorld queries,
+simulation ordering and authoritative state remain with their existing owners.
+There is no serialized body packet, shared mutable body cache or background
+callback. Clear and zero-motion operations retain the Python fast return.
+
+The `contact_roster` method handles the entire frozen roster in one synchronous
+call: four ordered normal/contact passes, post-contact velocities, traverse
+torque, spatial candidates and first-impact ram geometry. Physics retains actor
+ID order; ram candidates retain the caller's owner and spatial-bucket order.
+The main thread still performs armor probes, admits damage episodes only after
+nonzero damage, and applies motion through the existing world gates. Human ram
+receipts keep their separate authoritative settlement path. A contact batch
+does not introduce a delayed physics step or invoke an engine callback.
+
+The synchronous `world_run` method moves the complete horizontal world law
+into C++: posed/perimeter lanes, support profiles, terrain recognition and
+ordered contact resolution. Its Python dispatcher retains live descriptors,
+Math vectors, collision filters, original engine hits, recasts and destruction
+effects on the invoking main thread. Independent ray frontiers contain at most
+seven queries; destructive resolution remains ordered and cannot be replayed.
+Unsupported input may use the Python law only before the first dispatcher call.
+The bridge preserves callback exceptions and rejects invalid responses without
+repeating engine effects. The public motion check contains such failures as a
+hard result for that operation, records a failure counter/diagnostic and leaves
+the backend available for subsequent actors. Already committed destruction is
+retained; the failure does not replay the law or terminate the battle.
+
+The embedded interpreter does not export its C API. The bridge binds the
+reviewed #1513 `Py_InitModule4`, `PyDict_GetItem`, `PyString_FromString`,
+`PyFloat_FromDouble`, `PyTuple_New`, `PyInt_FromLong` and `PyObject_Call` entry points after one load-time check
+of the executable and required object layouts. Exact built-in containers and
+numeric objects can be read without invoking conversion or equality callbacks.
+Borrowed object storage is consumed before allocating results; a new private
+tuple takes ownership of its two new float references. Unsupported existing
+representations use the Python operation locally.
+
+The exact executable's `PyObject_Call` at RVA `0x00bca730` accepts three cdecl
+arguments (callable, tuple, nullable kwargs). Reviewed Python and engine callers
+retain/decrement the argument tuple themselves and consume the returned owned
+reference. The implementation forwards to `tp_call` under the existing thread's
+recursion guard and preserves a NULL result's Python exception. The bridge
+checks its entry signature, holds arguments across reentry and uses this API
+only from the synchronous world dispatcher, never from a background job.
+
+Host conformance covers physical outcomes, unchanged inputs, live-pose reuse,
+ordered armor/damage settlement, world query/effect order, exception non-replay
+and reference ownership. Ordinary floating-point rounding differences
+are permitted; bit identity across CRT implementations is not required. These
+checks and complete-caller timing do not establish Windows frame pacing or
+embedded-process lifetime safety; those require the installed #1513 test build.
+
+### Background navigation and spotting
+
+The same x86 extension runs complete baked A* searches, path smoothing and
+spotting geometry/foliage computation on two shared C++ threads. Each map is
+copied into owned native storage once. Job submission copies plain numeric
+inputs; background tasks never retain a Python object, acquire the GIL or call
+BigWorld. Navigation and spotting contexts belong to the current map/round;
+replacement, cancellation and teardown invalidate pending results and queries.
+Closing a context never waits for worker completion. The process-wide executor
+and service owners deliberately have no DLL-unload destructors, avoiding a
+thread join under the Windows loader lock. The existing launcher architecture
+and the game's 32-bit process boundary are unchanged.
+
+Baked navigation first searches a candidate route, then requests a batch of
+live native corridor proofs for its reviewed edges and prospective shortcuts.
+A denied edge is retained as a local proof and the candidate is searched
+again. No unproved route reaches the driver. This uses extra inexpensive
+background searches when obstacles reject a candidate, while avoiding one
+render-frame round trip per A* expansion. The main thread services queries
+fairly within its existing search budget and rejects newly obstructed wreck
+paths before publication. Non-baked engine-free callers keep their existing
+resumable Python search seam.
+
+Spotting projects the exact descriptor-local checkpoints and evaluates all
+foliage volumes for an admitted observer/target pair in the background. Static
+foliage is shared; fallen-tree changes produce coherent revision snapshots.
+The main thread retains the existing ordered sight queries, broken-surface
+filter and contact reports, including the first clear zero-cover early exit.
+A small native reduction completes camouflage and detection after those rays.
+Preparation and sight-query consumption have separate bounded cohorts, so
+submitting a CPU job does not also consume a later engine-query slot. Pending
+jobs retain their fair queue position; a worker that has not finished never
+makes the frame wait or spends an unused native-query credit.
+Results retain their sample time for cache and spotting-memory leases. Actor,
+descriptor, firing/camouflage state or foliage changes reject obsolete jobs.
+The maximum observation age is the existing 0.75-second shot-camouflage window;
+using the shorter 6 Hz cache interval here would starve observations whenever
+one loaded worker callback exceeds that interval. This is explicitly delayed
+spotting, not an assertion of synchronous observation timing.
+
+`tools/check_native_workers.py` exercises the actual Python 2 bridge, background
+progress while Python holds the GIL, immutable inputs, batched query proofs,
+late cancellation/answers, map replacement and ordered spotting reduction.
+Pure-data regressions also cover the Python owners' pending/result lifecycle.
+These prove the computation and ownership contracts; exact Windows callback
+latency, frame pacing and gameplay acceptance remain separate evidence.
+
 ## First-chance exception trail
 
 #1513 installs its own `__try/__except` around the whole main loop at
@@ -2065,19 +2168,14 @@ consumer loses anything by moving with it.
 
 Ammunition belongs to whoever owns the gun, so Fadin's medal takes the shell
 total from the producer rather than inferring it. The visible client puts
-`shells_before_shot` on its fire intent, read before the local gun debits the
-round; the worker puts the same field on a Bot launch, computed from the
+`shells_before_shot` on its owned projectile launch, read before the local gun
+debits the round; the worker puts the same field on a Bot launch, computed from the
 inventory it has just debited. The server freezes the flag on the projectile
 and awards the medal only when that shot also left no living enemy.
 
-That one optional field crosses four exact contracts on its way, and each had
-to be widened for it: the fire-intent key set in `submit_fire_intent`, the
-`launch_projectile` allowlist, the worker's `on_fire_intent` relay check, and
-`_local_launch_record`, the projection that decides which Bot fields reach the
-launch publisher at all. The first three reject an unknown field outright; the
-fourth drops it silently, which would have left Bots unable to earn the medal
-with nothing to show for it. Each of the three rejecting validators has a test
-that an unknown field is still refused.
+The launch publisher and `launch_projectile` allowlist carry that optional
+field for both owners. `_local_launch_record` preserves it when projecting a
+Bot round to the publisher. Unknown launch fields remain rejected.
 
 Battle-hero medals go to one actor per battle, ordered by the medal's own
 metric and broken by earned experience, which is Wargaming's documented
@@ -2937,30 +3035,34 @@ the authority manifest arrived.
 
 The exact relative-aim call treats the point as relative coordinates. Stopping
 gun tracking reconstructs world aim from the current hull yaw. A local shot
-freezes the public `gunRotator.getCurShotPosition()` ray in its fire intent;
-the hidden worker performs map/vehicle collision and armour checks and reports
-the proposed result to the server. The echoed shot event calls
-`Vehicle.showShooting()` with the
-descriptor's positive `gun.burst[0]` and the authoritative flag. Exact #1513
-then cancels the local Avatar's shot-wait callback; zero is not a single-shot
-sentinel and leaves the native firing extra unbounded. Remote events use the
-same finite presentation without claiming prediction.
+freezes the public `gunRotator.getCurShotPosition()` ray, native dispersion and
+mounted shell once, then starts flight and collision on the firing client.
+The local gun consumes ammunition and starts reload when the ordered launch
+enters its transport queue. `Vehicle.showShooting()` runs on the next local
+callback, after the triggering `PlayerAvatar.shoot` has installed its wait
+token. It receives the descriptor's positive burst count and the authoritative
+flag; zero is not a single-shot sentinel and leaves the native firing extra
+unbounded. Canonical echoes never debit ammunition or play the muzzle twice.
+Remote events use the same finite presentation. Only the LAN server applies
+the resulting damage and destruction to shared state.
 
-Canonical shell visuals use the stock #1513 `ProjectileMover` after the worker's
-launch is admitted. `PlayerAvatar.__startWaitingForShot` still owns the stock
-120--200 ms predicted-muzzle timeout; a tracer starts only from the canonical
-launch or an active snapshot, with the admitted muzzle/velocity and the current
+Shell visuals use the stock #1513 `ProjectileMover`: an owned player launch
+starts locally, while remote launches arrive through the canonical ledger. `PlayerAvatar.__startWaitingForShot` still owns the stock
+120--200 ms predicted-muzzle timeout; a tracer uses the owned local launch, a
+canonical remote launch or an active snapshot, with its frozen muzzle/velocity
+and the current
 on-screen `HP_gunFire` as stock's separate, 20 m-guarded visual start. A late
 first snapshot seeds the checked trajectory pose. Once started, the stock
 `PyBallisticsSimulator` motor owns cosmetic flight: progress snapshots neither
-clamp nor rewrite it, and no Python Servo competes for its pose. The worker
-continues to own every collision, damage, ricochet and terminal verdict.
+clamp nor rewrite it, and no Python Servo competes for its pose. Each shot owner
+computes collision, damage, ricochet and terminal proposals; the LAN server
+commits their shared outcomes.
 
 The presenter binds the mover to the loaded space before `add`, reserves its
 logical shot identity before native creation can re-enter, and deduplicates that
-identity even if the native motor expires before the worker result. Canonical
+identity even if the native motor expires before the canonical result. Managed
 rows disable stock `fireMissedTrigger`; their `__notifyProjectileHit` path is
-scoped out so only the worker terminal emits the existing input/flock/missed
+scoped out so only the admitted terminal emits the existing input/flock/missed
 feedback once. Terminal events call stock `hide` or `explode`, while a ricochet
 retires the old native id and starts a new one with stock `hold`. `hide` owns its
 negative-id row and particle tail; capacity counts both active and tail rows
@@ -2971,7 +3073,7 @@ that owner and stops further cosmetic admission. The ABI/lifecycle audits pin
 the relevant calls and private-row consumers. Exact Windows acceptance must
 still establish native rendering, collision appearance, tail lifetime, late
 terminal correction and frame pacing; local tests only establish the adapter's
-ownership and worker-authority boundaries.
+presentation and per-shot ownership boundaries.
 
 A hit vehicle also receives retail's hull shot impulse. Exact #1513
 `Vehicle.showDamageFromShot` builds the first decoded hit point's world-space
@@ -3477,15 +3579,15 @@ Ordered player input separates three concepts so one recoverable rejected
 frame cannot poison the rest of the round. The processed frontier is the
 contiguous sequence that reached an idempotent terminal decision, applied or
 not. The last applied input is the frame whose controls, pose, shell
-selection and gun checkpoint were committed, and it remains what a fire
-intent, pose sample, contact receipt and landing observation bind to. A
+selection and gun checkpoint were committed, and it remains what an owned
+launch, pose sample, contact receipt and landing observation bind to. A
 per-sequence record keeps a bounded fingerprint plus the typed outcome, so an
 exact retry folds, a changed payload at the same sequence conflicts, a future
 gap consumes nothing, and an evicted sequence can never become new state. A
 recoverable validation failure records a rejected decision and advances only
 the processed frontier: no field is applied and no gun checkpoint is
-installed, so a fire intent bound to that sequence receives one typed
-terminal rejection rather than firing from stale muzzle state. A message that
+installed, so an owned launch bound to that sequence receives one typed
+terminal rejection rather than being admitted against stale input. A message that
 does not identify the current player, round or an exact sequence consumes no
 frontier at all. Both frontiers retire together on a round transition, and
 the snapshot publishes them so a reconnecting client resumes at the next
@@ -3493,78 +3595,42 @@ eligible sequence. The shipping client canonicalizes the same envelope before
 queueing a frame, normalizing periodic yaw instead of clipping it, so normal
 #1513 values never produce an avoidable rejection.
 
-A human trigger is a space-time claim, so the fire intent carries both halves
-of it. `player_fire_intent_v6` carries a bounded presentation ledger in the
-intent: one `(bot_id, bot_state_revision, presentation_time_us)` entry per
-timed Bot record the shooter was displaying, taken from the same
-`SnapshotSync` confirmed-only cursor that positioned the rendered hull. The
-ledger carries no pose and no verdict. Spotting is not its filter:
-`SnapshotSync` positions every timed Bot whether or not it is rendered, so an
-unspotted Bot sits at the same delayed pose as a visible one and is listed,
-which is what keeps first-hit ordering along the trajectory coherent.
-"Unpresented" therefore means a record with no timed cursor at all - a first
-sample, a late join, a teleport reset, or a Bot whose retained wire samples no
-longer bracket its cursor. The server validates every entry
-against the canonical Bot lineup, the same 255-revision window the RAM
-receipt path uses, its own `bot_state_time_us`, and the shooter's trigger
-time; a record whose cursor is further behind than the wire bound is omitted
-by the client so the condition stays local to that vehicle. The hidden worker
-then rebuilds each named record's timeline from its own retained collision
-history and shifts that candidate - and only that candidate - by its own
-`pose_time_us - presentation_time_us` lag for the whole flight. An
-unpresented Bot, a remote human, which does not use the timed Bot buffer at
-all, and every Bot-fired shot keep the authoritative timeline. When the
-retained history cannot cover a compensated sample the projectile takes an
-explicit local terminal failure recording
-`historic_pose_unavailable`; it never substitutes a current pose. A trigger
-inside the first frames of a round can ask for a sample older than the worker
-has ever recorded; that rewind is clamped to the retained history and marked
-`presentation_history_clamped` rather than failing an otherwise legal shot,
-which can never move a candidate forward of its authoritative pose.
+`player_projectile_owner_v1` assigns each human projectile to its firing
+visible client and each Bot projectile to the mandatory native worker. The
+human owner freezes the mounted shell, source vehicle, muzzle, scattered
+velocity, penetration roll, range origin, burst identity, input sequence and
+estimated server launch time once. It preinstalls the local manager entry
+before publishing the launch and advances from the actual local trigger
+clock. Target history is sampled from the already displayed native poses;
+there is no second worker rewind or presentation ledger. Idle visible clients
+do not build projectile target history, and visible clients never simulate
+Bot shots or another player's shots.
 
-The launch instant is frozen directly in the round-local server tick domain.
-At the trigger edge the visible client estimates that tick from its latest
-server-clock anchor and sends `trigger_server_time_ms` beside the frozen
-muzzle and presentation ledger. The server accepts an exact integer no more
-than 500 ms behind receipt and no more than 250 ms ahead. An older claim gets
-the typed terminal `trigger_clock_stale`, a claim beyond the future tolerance
-gets `trigger_clock_future`, and a missing or malformed claim gets
-`trigger_clock_invalid`. The positive tolerance covers clock and RTT
-quantization only: the canonical launch instant is `min(trigger, receipt)`,
-so an admitted projectile never starts in the server's future. That same
-server-validated instant is frozen in both the worker relay and the pending
-intent. The worker can therefore start the admitted trajectory before its
-canonical echo without letting transport delay, worker mailbox delay,
-scheduling delay, motion-clock catch-up or an exact retry reinterpret it; the
-authority catches up from it the way a Bot launch already catches up from
-`bot_launch_clock_offset_us`. Bot launch timing is unchanged.
+The LAN server checks owner, round, increasing shot sequence and the accepted
+input, then records the launch. Human progress, ricochet and terminal proposals
+carry the immutable launch proof, rounded by the shared six-decimal
+integer-rational half-even rule. A conflicting proof or another player's
+message has no health, critical-state or destruction effects. Human progress
+uses the last successfully queued cursor as its next base; reliable FIFO
+preserves launch, progress, ricochet and terminal order without an echo wait.
+A ricochet starts its second local segment as soon as its frozen transition
+has been queued. Bot progress retains its existing acknowledgement path.
 
-The worker resolves admitted human fire at the tail of the current LAN poll,
-after every snapshot and event in that receive batch is coherent, and retains
-the ordinary frame path for native-entity readiness retries. After publishing
-the launch it installs the same deterministic projectile identity and
-six-decimal wire fields locally. The six-decimal operation is an explicit
-integer-rational half-even rule because Python 2.7 and Python 3 builtin
-`round` disagree at exact half values. A matching canonical echo is therefore
-idempotent; a changed echo atomically replaces the provisional manager state,
-and a rejection rolls it back without weakening the ordinary duplicate fence.
-An older snapshot cannot retire a provisional launch or its terminal proposal
-before either outcome arrives. Bot launches remain canonical-echo gated:
-their server launch instant depends on the private admission-time
-`bot_launch_clock_offset_us`, so guessing it in the worker would break exact
-echo identity. This preserves the existing Bot timing path while testing it
-alongside the new human path.
+A matching launch echo confirms metadata without replacing the local manager
+or changing gun state. Stale first-segment echoes cannot rewind a local
+ricochet; malformed or conflicting own-shot snapshots are contained to that
+projectile. Each accepted launch ends with a canonical terminal or an explicit
+local rejection. Delayed rejection retires that projectile while preserving
+the already fired round's ammunition and reload. Disconnect or leave expires
+only that player's outstanding ledger entries; no worker or peer takes them
+over. Destructible results are computed by the shot owner, and the server
+deduplicates their native identities together with terminal damage before
+broadcasting shared results.
 
-The fire-intent envelope remains exact and closed. Once the current player,
-round, `fire_intent` type and exact next `intent_seq` can be identified safely,
-a malformed payload is consumed as one recorded terminal result:
-`fire_intent_wire_shape` for missing base fields or any unexpected field and
-`fire_intent_field_invalid` for invalid core field values. Missing or malformed
-ledger and trigger-clock fields keep their feature-specific typed results.
-Exact retries fold to that result, changed same-sequence payloads conflict, and
-the next intent can proceed. Messages that cannot establish the current
-identity, round, type or exact sequence still consume nothing. Extra fields
-remain rejected rather than extending the protocol.
+These owner, FIFO, duplicate, rejection, displayed-pose and burst contracts are
+covered by local runtime and protocol tests. They do not establish #1513
+Windows frame pacing, firing feel, native memory safety or two-client LAN
+acceptance; those require the exact client with this payload.
 
 `PlayerAvatar.showOwnVehicleHitDirection(hitDirYaw, attackerID, damage, crits,
 isBlocked, isShellHE, damagedID)` is the only producer of the damage
@@ -3671,10 +3737,11 @@ presentation timing.
 
 ## Hidden-worker authority
 
-Every 0.9.22 LAN room has one mandatory, room-owned hidden native worker. The
-only simulation path is visible client -> LAN server -> hidden worker -> LAN
-server -> replicas. Visible clients submit player input and fire intent, and
-render server-admitted snapshots; they never become bot or projectile authority.
+Every 0.9.22 LAN room has one mandatory, room-owned hidden native worker.
+The worker owns Bot motion and Bot projectiles. Each visible player owns the
+projectiles they fire, including native collision and destructible proposals.
+The LAN server validates ownership and frozen launch identity, commits shared
+outcomes once, and broadcasts them to every replica.
 
 The launcher starts the server first, then the hidden worker, and advertises the
 room only after both are ready. A missing worker refuses battle start. A worker
@@ -3682,8 +3749,8 @@ loss ends the active round as a technical failure without battle receipts and
 leaves the room unavailable until the owner stops and starts a new room. The
 server retains shared roster, timing, hit, receipt and result-ledger admission.
 
-Native BigWorld worker code owns bot movement, map collision, projectile
-progress, water sensing and native critical-state proposals. The server keeps the
+Native BigWorld worker code owns Bot movement, map collision, Bot projectile
+progress, water sensing and Bot native critical-state proposals. The server keeps the
 ten-second drowning timer, then validates and commits the worker proposal; it
 does not reconstruct vehicle descriptors, map collision, destructible identities
 or a BigWorld-equivalent simulation.
@@ -3889,11 +3956,10 @@ The source audit deliberately keeps the following differences visible:
   `personal`/`players`/`vehicles` battle-result record;
 - the post-0.8.3 follow-up wires stun generation, penalties and the existing
   medical-kit loop, subject to the retail-parity boundaries documented above.
-  Bot movement and
-  both Bot and human projectile trajectories run in the mandatory hidden
-  native worker, while the LAN server admits their ordered results and shared
-  ledgers. Each human client still originates its own input, pose and gun-state
-  checkpoint. This is a trusted-LAN architecture, not an anti-cheat design or
+  Bot movement and Bot projectile trajectories run in the mandatory hidden
+  native worker. Each human client originates its own input, pose and gun-state
+  checkpoint, and simulates its own projectile trajectories; the LAN server
+  admits both owners' ordered results and shared ledgers. This is a trusted-LAN architecture, not an anti-cheat design or
   a claim that every calculation runs inside the Python server.
 
 The local player path does include server-relayed critical state, fire,
@@ -5622,51 +5688,29 @@ Collision sweeps cover the curved root path, including trees, catalog/native
 obstacles, vehicles and detached turrets. This does not claim to complete the
 separate moving handbrake-drift simulation.
 
-#### Stock server-reticle selection and authoritative feedback
+#### Local projectile ownership and the stock aim setting
 
-The server reticle predates 9.22: official release notes list it in
-[6.4](https://worldoftanks.com/en/content/docs/release_notes/update-6-4-list-of-changes/)
-and add the settings control in
-[7.4](https://worldoftanks.com/en/content/docs/release_notes/update-74-release-notes/).
-The existing stock `useServerAim` setting and persistence are retained. The
-release client's single-marker selection is respected: enabled selects the
-server result, disabled selects the stock local client marker.
+With player-owned projectiles, the native local marker is the trajectory
+source whether the stored `useServerAim` preference is enabled or disabled.
+The exact #1513 `VehicleGunRotator.start` and `applySettings` both write the
+`showServerMarker` property. During an offline battle the compatibility layer
+passes `False` to that property's original setter and returns client-only
+selection from `gun_marker_ctrl.useClientGunMarker/useServerGunMarker`.
+The stock arena-start handler reads both helpers; its later visibility writes
+must agree with the rotator, including when the property was already false.
+Teardown restores the original property and helpers without writing settings
+persistence. The setter keeps
+the audited `enableServerAim` and `AvatarInputHandler.showGunMarker2(False)`
+lifecycle; the latter selects the client marker in the release single-marker
+mode. Target lock still owns `clientMode`.
 
-The previous local shot-vector echo no longer masquerades as server feedback.
-An ordered input freezes the native stabilized pose, turret/gun angles and
-dispersion. The authority worker calculates shot geometry using the installed
-descriptor and the reviewed `shot_geometry` contract, then returns an
-input-sequenced result through the existing server snapshot. Trigger-time
-geometry uses the same frozen input; a later replica pose cannot redirect an
-already admitted shot. Native gun laying and dispersion remain input evidence,
-not an invented worker-side aiming model. The marker receives shot velocity
-(unit direction times the frozen loaded shell speed), as the native contract
-requires.
-
-The #1513 `setShotPosition` consumer is not a read-only renderer: it writes
-reply dispersion into element zero of `_VehicleGunRotator__dispersionAngles`,
-the same mutable two-element list behind the read-only `dispersionAngle`
-property. Server-marker publication therefore saves that element and restores
-it in `finally` after the synchronous native display call, including display
-failure. Only the captured list is restored; a replacement native list or gun
-rotator installed by a synchronous refresh is not overwritten. The reply still
-reaches the marker, while the next input checkpoint and immediate fire intent
-retain current native convergence/bloom. No property setter, extra aiming
-formula, timer or global class patch is introduced. The regression fake models
-the audited read-only property and in-place write instead of only recording
-callback arguments; tests include both switch states and both native client
-modes, exception containment, repeated feedback and native-owner replacement.
-
-Round, authority epoch, input sequence and bounded age checks reject stale
-feedback. Missing feedback does not generate a local substitute server marker.
-Old inputs without the new checkpoint remain compatible but cannot publish
-server markers. Switching the display setting does not change reload, ammo,
-launch barriers or idempotent projectile admission. This makes the display
-reflect the authority's accepted input; it does not reduce network latency.
-
-These changes still require native Windows #1513 acceptance for vehicle feel,
-hydraulic poses and reticle presentation. Pure-data regressions and packaging
-checks do not substitute for that gameplay test.
+The worker no longer computes player gun markers. Inputs no longer publish
+marker-only stabilised-pose checkpoints, and snapshots carry no delayed marker
+reply. Firing still freezes the current native barrel ray and dispersion once,
+including the native hydraulic pose supplied by the rotator. No worker reply
+writes the mutable dispersion list or competes with native convergence.
+Source/contract tests cover startup, settings changes, restart and restoration;
+actual Windows marker presentation remains an exact-client acceptance boundary.
 
 
 ### September 21 Airfield Bot approach: cold props and roof support
@@ -6424,17 +6468,16 @@ floor, and consumes the actual airborne wall witness for impact HP before
 alternative-direction probes replace it. This changes no ram coefficient,
 mass transfer formula or fall-damage coefficient.
 
-One human trigger now schedules the loaded descriptor burst through the
-existing worker fire-intent channel. Every physical round still needs its
-own canonical acknowledgement before consuming ammunition. The next round
-uses the current native gun ray; duplicate clicks cannot start overlapping
-groups. Partial clips, late acknowledgements, gun destruction, queued reloads
-and round generation changes are covered. Exact `Vehicle.showShooting`
-requires the Avatar's initial shot-wait token. The first acknowledgement
-starts one native effect group for the full burst; later acknowledgements do
-not replay that group. Cancellation stops its remaining effects. Existing
-`ShowShooting.__doShot` owns the native afterShotInBurst/afterShot transition.
-Physical projectiles remain owned by the hidden worker.
+One human trigger schedules the loaded descriptor burst on the firing client.
+Each physical round freezes the current native gun ray, publishes its own
+ordered launch and immediately consumes ammunition. Duplicate clicks cannot
+start overlapping groups. Partial clips, gun destruction, queued reloads and
+round generation changes retain their local gun owner. Exact
+`Vehicle.showShooting` requires the Avatar's initial shot-wait token, so the
+first local callback starts one native effect group after the mailbox returns;
+later rounds do not replay that group. Cancellation stops remaining effects.
+Existing `ShowShooting.__doShot` owns the native afterShotInBurst/afterShot
+transition. The worker simulates only Bot projectiles.
 
 Capture staging incorrectly required proximity to the penultimate waypoint
 even after the route cursor passed it. Losing enemy contact then left a Bot
@@ -7890,3 +7933,177 @@ exercises normal install, forced reinstall and startup repair against default
 and named external slots, including legacy state and rotated backups. The
 746 launcher tests pass (14 platform/environment skips). Product reset stays
 behind its separate confirmation and is not invoked by installation or repair.
+
+## Persistent hidden-worker simulation state
+
+The existing x86 extension now owns one simulation context per round and
+native-authority generation. Control, perception, radio, driving, physical
+motion, navigation state, gun/reload/ammunition and burst clocks retain typed
+values in that context. BigWorld queries, native effects, damage publication
+and projectile admission remain synchronous engine-thread frontiers. The
+hidden worker remains the sole Bot simulation owner; this native migration adds
+no process or wire format.
+Actor order, accepted-shot records and one-shot effects cross explicit commit
+boundaries. Partial construction, authority transfer and repeated close retire
+the old context and detach its Python views before reuse. A motion query failure
+is local to its actor and does not replay an already committed destruction.
+
+The bridge uses exact numeric double payloads for the 34-bit state-presence
+mask and microsecond timestamps, with integer/range validation before typed
+storage. Win32 CPython 2.7 PyInt is signed 32-bit; using it here would reject
+spawn-state masks and clocks past 2147 seconds. Python restores integer values
+at the receiving boundary. Actor identities and handles retain their strict
+integer guards. Regression checks require float payloads explicitly so an
+LP64 development interpreter cannot hide this Win32 failure.
+
+The driver's stopping-distance input also preserves positive infinity from the
+coast integrator when a grade prevents a finite stop. The original braking law
+consumes that value as an unbounded distance; it is not replaced with a made-up
+finite limit. NaN, negative infinity and nonfinite poses, peer geometry or other
+driver scalars remain rejected before persistent state or engine queries change.
+
+The five native simulation checkers exercise the real CPython 2.7 bridge,
+ordered analytic engine frontiers, persistent state, effect receipts and
+lifecycle rejection. An integrated 29-Bot caller comparison also preserves
+state, outgoing messages, ordered engine queries and projectile terminal
+results, including authority loss/recovery and duplicate manifests. This
+fixture uses synthetic descriptors and engine responses; it does not prove
+human-fire parity, retail physics, native memory safety or Windows frame pacing.
+The current physical migration covers the enabled rigid-support path; the
+existing disabled detailed-suspension path remains outside this acceptance.
+
+Initial paired host trials regressed after moving the state; removing redundant
+full-state reads and batching radio summaries recovered that overhead. Later
+alternating trials show only a modest total improvement. No Windows frame-time
+or sub-50-ms result is claimed. The near-target driver also stops powering a
+turn whose measured speed and descriptor turn limit cannot intersect the
+existing arrival circle, then resumes when the forward path can reach it;
+closed-loop tests retain the original arrival radius and vehicle parameters.
+
+### Native query ownership
+
+The motion bridge retains ordered ray iteration, candidate filtering, departing
+contact checks and bounded soft-static recasts inside one synchronous C++ call.
+Its capabilities still invoke the existing #1513 Math operations and BigWorld
+query on the engine thread. Raw hit objects remain strongly owned until their
+original effect boundary; no Python object enters the background pool. Owner,
+round, space and thread guards fence engine reentry. Live destruction evidence
+is read when each query runs, so an earlier committed break affects later rays.
+
+The visibility service also owns pair jobs and prepared rays through reduction.
+Actor snapshots distinguish current observer poses from each target's ordered
+motion phase. Identity replacement, target death, fire, detection parameters,
+foliage changes and the existing age limits retain their invalidation behavior.
+A dead human with Last Effort can remain an observer without becoming a target.
+The synchronous engine stage preserves the six-point ray order, Math-based end
+tolerance and destruction reports. Queue counters belong to the native jobs;
+the former Python callback duration is no longer a measure of this stage.
+
+Control spotting consumes a detection result, so its frontier can skip a
+checkpoint whose foliage would prevent detection even with a clear ray, and
+finish after the first eligible clear checkpoint. It retains the original
+checkpoint order and detection law. This completion never supplies partial LOS
+or minimum-foliage geometry to another consumer; generic visibility callers
+still request the full result. Cancellation, actor replacement and engine
+reentry must retire only the original job. Pair-level foliage/filter updates
+still run, and omitted rays carry no destruction or message commit.
+
+An admitted sight job can become obsolete before a later planning decision:
+the target fires again, its detection profile or relevant foliage changes, or
+the existing age limit expires. Control detection cancels that receipt and
+prepares current numeric geometry synchronously before using the original
+world-query path. The fresh receipt has its own job identity and current sample
+time; the old age, fire and ownership guards are not relaxed. Initial requests
+and actor replacements still prepare asynchronously. Only an allocated world
+query slot can consume rays: preparation slots remain pending even when an old
+ready receipt survived a range or control-state transition. This prevents both
+repeated cancellation without progress and spending the preparation budget on
+world queries. Foreground preparation is not reported as background worker time.
+
+Pure baked-boundary and fatal-hazard guards read the installed native grid and
+current hull descriptor directly. Physical guards retain the source cell size,
+including sub-metre cells, and Python 2 half-cell rounding independently of
+the planner's grid clamping. Missing physical grid metadata retains the
+existing Python frontier. World sweeps and their collision witnesses are
+unchanged. Artillery polling similarly checks an existing queued result before
+building another unused candidate path; accepted launch parameters and fresh
+target lead retain their original owners.
+
+The destructible sensor retains streamed native identities and effect commits,
+while a persistent numeric index owns body, tree and catalog candidate geometry.
+Registry removal, isolation, falling poses and proved chunk-layout changes
+update that index before reuse. Cold Bot control projections are reused only
+while their descriptor, spotting profile, crew inputs and critical payload are
+unchanged. These changes preserve the existing cadence and collision checks;
+a subsequent Lakeville capture still spent most control time in Python/engine
+callbacks and outside native scopes. Moving the loops alone did not produce a
+material whole-update improvement or meet the 50 ms target. The exact-client
+capture, rather than native code coverage, remains the performance criterion.
+
+### Human-aware planning cadence
+
+The hidden worker has no presentation camera. Its Bot decision and perception
+schedule now uses the nearest participating human on either team, with the
+existing 150/350-metre thresholds and 0.15/0.30/0.60-second decision intervals.
+Physical integration, support sampling, existing motion commands and accepted
+burst clocks continue independently. The first decision retains its original
+short stagger. Approaching humans shorten an existing command lease before
+the visibility cohort is chosen; moving farther away never extends that lease.
+This intentionally reduces distant AI and spotting responsiveness, rather than
+claiming identical tactical outcomes at a lower cost.
+
+The full worker snapshot supplies the roster, including unknown and dead human
+participants. Only the exact hidden-worker carrier identity is excluded before
+human validation. Missing poses, spectator/dead participants, unavailable input
+progress and stream stalls keep all Bots at the original planning cadence.
+Each human must first advance an input sequence in the current round, authority
+epoch and runtime generation. The existing stream-stall interval bounds locally
+observed progress; public poses do not provide source timestamps. Invalidated
+observers and teardown also shorten outstanding far leases.
+
+Regression coverage exercises the actual worker projection and LAN snapshot
+handler through the battle frame, both teams, distance crossings, stale input,
+round changes and accepted bursts. Separate x86 Windows host experiments use
+analytic engine responses and synthetic descriptors, including canonical damage
+application to prevent dead Bots from returning during native-state mirroring.
+They measure the complete Bot caller, including observer preparation, and check
+continued motion and terminal shots. They do not establish BigWorld frame rate,
+retail spotting feel or native gameplay acceptance.
+
+### Native boundary diagnostics
+
+Normal startup retains frame-level PERF statistics and does not attach the
+fine combat observer. Frame intervals, whole-callback and Bot-update durations,
+and main-thread CPU time remain available. Detailed Python scopes have
+measurable observer cost: selected Lakeville slices were slower than unselected
+slices, and a same-workload host profile attributed a substantial increase to
+the observer's start/stop and aggregation helpers. Neither comparison gives an
+exact Windows overhead correction. Fine captures must be explicitly attached
+for a diagnostic experiment, and their timings are not an uninstrumented
+performance baseline.
+
+When attached, selected combat-control callbacks carry a native timing ledger.
+It starts after the existing rotating detail sampler selects a control callback
+and ends after navigation-frame cleanup. Native entry rows separate input
+parsing, core body work and output packing; callback rows separate Python/engine
+work from nested native reentry. Only entry parse/body-self/pack and callback
+self are disjoint within this ledger. Inclusive columns explain nesting and
+must not be added to those costs or to the surrounding Python stage tree.
+Native body time still includes C++ allocation and is not automatically
+parallelizable computation. Internal `stage.` rows distinguish pure substeps
+from actual Python-to-native entries.
+
+Python stages separately measure motion/weapon mirrors, control configuration,
+target projection and navigation-receipt copying. Fixed counters record cache
+expiry lateness, output rows and configuration reuse. Frozen-roster sweeps and
+contact pair construction/solving have independent native stages. Contact
+component counts derive from the already-built pair set only during capture;
+they describe that solver stage, not independence of an entire vehicle tick.
+Inactive native scopes do not read a clock or construct a component graph.
+
+The bounded native observer owns no gameplay state or Python/engine references.
+Ending a sample during callback reentry cancels the incomplete ledger rather
+than retaining stack pointers. Periodic `combat_checkpoint` records preserve
+completed samples when the worker exits before the capture deadline. These are
+cumulative: use the latest checkpoint or final summary for a capture, never
+sum both. A diagnostic failure does not replay or reject simulation work.

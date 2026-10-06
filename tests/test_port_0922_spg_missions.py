@@ -29,8 +29,10 @@ class SPGMissionTests(unittest.TestCase):
 
     def shot(self, targets=(2,), damage=1, duration=16750, shooter=1,
              replay=False):
-        launch = projectiles._launch(shooter_id=shooter, is_he=True,
-                                     splash_radius=100.0)
+        launch = projectiles._launch(
+            shooter_id=shooter,
+            shot_seq=self.state.players[shooter].fire_seq + 1,
+            is_he=True, splash_radius=100.0)
         self.assertTrue(projectiles._launch_authority(self.state, launch))
         effects = []
         for index, target in enumerate(targets):
@@ -44,14 +46,14 @@ class SPGMissionTests(unittest.TestCase):
             self.assertIsNotNone(results.lan_client_module._strict_projectile_effect(effect))
             effects.append(effect)
         terminal = projectiles._resolve(
-            '1:p:%d:%d' % (shooter, launch['shot_seq']),
+            self.state, '1:p:%d:%d' % (shooter, launch['shot_seq']),
             direct=effects[0], splash=effects[1:])
         self.assertTrue(self.state.resolve_projectile(
-            projectiles.SIMULATION_WORKER_AUTHORITY_ID, terminal))
+            shooter, terminal))
         if replay:
             before = copy.deepcopy(self.state.vehicle_statistics)
             self.assertTrue(self.state.resolve_projectile(
-                projectiles.SIMULATION_WORKER_AUTHORITY_ID, terminal))
+                shooter, terminal))
             self.assertEqual(before, self.state.vehicle_statistics)
         return terminal
 

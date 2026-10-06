@@ -22,7 +22,7 @@ from lan_battle_server import (  # noqa: E402
     HUMAN_RAM_TIMELINE_CAPABILITY,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY, MAX_LINE_BYTES, Player,
     PREBATTLE_SECONDS,
-    PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+    PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
     RAM_CONTACT_LEDGER_CAPABILITY,
     RICOCHET_CONTINUATION_CAPABILITY,
@@ -116,7 +116,7 @@ def _worker_hello():
             PROJECTILE_CAPABILITY, DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
             SIMULATION_WORKER_CAPABILITY,
             HUMAN_RAM_TIMELINE_CAPABILITY, RAM_CONTACT_LEDGER_CAPABILITY,
-            PLAYER_FIRE_INTENT_CAPABILITY,
+            PLAYER_PROJECTILE_OWNER_CAPABILITY,
             PLAYER_ENVIRONMENT_CAPABILITY,
             EFFECTIVE_PARAMS_CAPABILITY,
             RICOCHET_CONTINUATION_CAPABILITY],
@@ -131,7 +131,7 @@ def _player_hello(name='Human'):
         'capabilities': [
             PROJECTILE_CAPABILITY, DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
             HUMAN_RAM_TIMELINE_CAPABILITY, RAM_CONTACT_LEDGER_CAPABILITY,
-            PLAYER_FIRE_INTENT_CAPABILITY,
+            PLAYER_PROJECTILE_OWNER_CAPABILITY,
             PLAYER_ENVIRONMENT_CAPABILITY,
             EFFECTIVE_PARAMS_CAPABILITY,
             RICOCHET_CONTINUATION_CAPABILITY],
@@ -1882,8 +1882,14 @@ class SimulationWorkerSocketTests(unittest.TestCase):
         self.assertFalse(self.state._projectile_authority_matches(
             SIMULATION_WORKER_AUTHORITY_ID,
             {'authority_epoch': old_epoch}))
-        self.assertFalse(self.state._projectile_authority_matches(
+        # Human identity remains its own projectile publisher; losing the
+        # worker never transfers Bot projectiles to that visible client.
+        self.assertTrue(self.state._projectile_authority_matches(
             1, {'authority_epoch': self.state.authority_epoch}))
+        self.assertTrue(self.state._projectile_sender_owns(
+            1, '%d:p:1:1' % self.state.round_id))
+        self.assertFalse(self.state._projectile_sender_owns(
+            1, '%d:b:%d:1' % (self.state.round_id, manifest[0]['id'])))
 
         replacement = self._connect()
         replacement.send(_worker_hello())
