@@ -107,27 +107,226 @@ class LanClientQueueTests(unittest.TestCase):
                         client._queue_message(restored, generation)
                 finally:
                     lan_client_module.MAX_PENDING_MESSAGES = old_limit
-                self.assertEqual([messages[-1]], client._pending)
+                self.assertEqual(1, len(client._pending))
+                self.assertNotIn('bots', client._pending[0])
                 seen = []
                 client._handle_message = seen.append
                 client.connected = False
-                client._poll()
+                with mock.patch.object(
+                        snapshot_delta, 'materialize',
+                        wraps=snapshot_delta.materialize) as materialize:
+                    client._poll()
+                self.assertEqual(1, materialize.call_count)
                 self.assertEqual([messages[-1]], seen)
                 self.assertEqual(80, seen[0]['bots'][0]['health'])
                 self.assertEqual(50, seen[0]['bots'][0]['critical']['devices'][0]['hp'])
+
+    def queue_wire_messages(self, client, messages):
+        baseline = None
+        for sequence, message in enumerate(messages, 1):
+            if message.get('type') == 'snapshot':
+                wire, baseline = snapshot_delta.encode(message, baseline, sequence)
+            else:
+                wire = message
+            pending = client._decode_received_snapshot(
+                wire, client._transport_generation)
+            client._queue_message(pending, client._transport_generation)
+
+    def test_pending_actor_versions_survive_every_poll_dispatch_barrier(self):
+        frames, unused = self._snapshot_delta_chain()
+        first, second = frames[:2]
+        manifest = dict(first, bot_manifest=[{'id': 11}])
+        turret = dict(first, detached_turrets=[{'id': 11, 'yaw': 0.5}])
+        event = {'type': 'events', 'round_id': 7, 'server_tick': 1, 'events': []}
+        roster = {'type': 'roster', 'round_id': 8}
+        next_round = dict(second, round_id=8)
+        cases = (
+            ([first, second], [second]),
+            ([manifest, second], [manifest, second]),
+            ([turret, second], [turret, second]),
+            ([first, event, second], [event, first, second]),
+            ([first, roster, next_round], [first, roster, next_round]),
+        )
+        for worker in (False, True):
+            for incoming, expected in cases:
+                with self.subTest(worker=worker, expected=expected):
+                    client = self.activate(worker=worker)
+                    client.connected = False
+                    self.queue_wire_messages(client, incoming)
+                    seen = []
+
+                    def handle(message):
+                        # No private key/holder may reach either virtual handler.
+                        json.dumps(message)
+                        seen.append(message)
+
+                    client._handle_message = handle
+                    client._poll()
+                    self.assertEqual(expected, seen)
+
+    def test_pending_sparse_orders_survive_queue_pressure_and_shallow_merge(self):
+        client = self.activate()
+        client.connected = False
+        first = self.order_snapshot(1, bot_orders=[{'id': 11, 'route_index': 3}])
+        second = self.order_snapshot(2, bots=[{'id': 11, 'x': 20.0}])
+        with mock.patch.object(lan_client_module, 'MAX_PENDING_MESSAGES', 1):
+            self.queue_wire_messages(client, [first, second])
+        self.assertEqual(1, len(client._pending))
+        self.assertNotIn('bots', client._pending[0])
+        seen = []
+        client._handle_message = seen.append
+        with mock.patch.object(snapshot_delta, 'materialize',
+                               wraps=snapshot_delta.materialize) as materialize:
+            client._poll()
+        self.assertEqual(1, materialize.call_count)
+        self.assertEqual([dict(second, bot_orders=first['bot_orders'])], seen)
+
+    def test_materialization_failure_is_local_and_keeps_baseline_and_polling(self):
+        client = self.activate()
+        client.connected = False
+        client.phase = 'battle'
+        first = self.order_snapshot(1, bot_manifest=[])
+        second = self.order_snapshot(2)
+        event = {'type': 'events', 'round_id': 7, 'server_tick': 2, 'events': []}
+        self.queue_wire_messages(client, [first, second, event])
+        baseline = client._snapshot_wire_baseline
+        original = snapshot_delta.materialize
+
+        def fail_first(message):
+            if message.get('type') == 'snapshot' and message['server_tick'] == 1:
+                raise snapshot_delta.SnapshotDeltaError('injected copy failure')
+            return original(message)
+
+        seen = []
+        client._handle_message = seen.append
+        with mock.patch.object(snapshot_delta, 'materialize', side_effect=fail_first):
+            with mock.patch.object(client, '_schedule_poll') as schedule:
+                client._poll()
+        self.assertEqual([event, second], seen)
+        self.assertIs(baseline, client._snapshot_wire_baseline)
+        self.assertEqual(1, schedule.call_count)
+        self.assertEqual('actor_materialization', client._snapshot_drop_reason)
+        self.assertTrue(client.running)
+        self.assertIsNone(client.last_error)
+
+    def test_dispatch_does_not_hide_runtime_handler_errors(self):
+        client = self.activate()
+        client.connected = False
+        self.queue_wire_messages(client, [self.order_snapshot(1)])
+        client._handle_message = mock.Mock(side_effect=RuntimeError('handler failure'))
+        with self.assertRaisesRegex(RuntimeError, 'handler failure'):
+            client._poll()
+
+    def test_eof_drains_same_generation_manifest_events_and_terminal_messages(self):
+        client = self.activate()
+        client.connected = False
+        first = self.order_snapshot(1, bot_manifest=[])
+        second = self.order_snapshot(2)
+        event = {'type': 'events', 'round_id': 7, 'server_tick': 2, 'events': []}
+        receipt = {'type': 'battle_receipt', 'receipt_id': 'server:7:1'}
+        self.queue_wire_messages(client, [first, second, event, receipt])
+        # The receive thread's normal finally block stops reads, not dispatch.
+        client.running = False
+        self.assertFalse(client._stopping)
+        seen = []
+        client._handle_message = seen.append
+        with mock.patch.object(client, '_schedule_poll') as schedule:
+            client._poll()
+        self.assertEqual([first, event, second, receipt], seen)
+        self.assertEqual(0, schedule.call_count)
+
+    def test_poll_reports_fatal_handler_error_after_same_generation_stop(self):
+        client = self.activate()
+        client.connected = False
+        seen = []
+        client.on_event = lambda kind, message: seen.append((kind, message))
+        self.queue_wire_messages(client, [{'type': 'welcome', 'protocol': -1},
+                                          self.order_snapshot(1)])
+        client._poll()
+        self.assertEqual([('error', {'message': 'protocol mismatch'})], seen)
+        self.assertFalse(client.running)
+        self.assertTrue(client._stopping)
+        self.assertIsNone(client.last_error)
+
+    def test_reentrant_stop_start_drops_old_local_batch_and_preserves_new_poll(self):
+        for events_first in (False, True):
+            with self.subTest(events_first=events_first):
+                client = self.activate()
+                client.connected = False
+                client.round_id = 7
+                client.phase = 'battle'
+                first = self.order_snapshot(1, bot_manifest=[])
+                event = {'type': 'events', 'protocol': 5, 'round_id': 7,
+                         'server_tick': 1, 'events': []}
+                incoming = ([first, event] if events_first else
+                            [first, self.order_snapshot(2)])
+                self.queue_wire_messages(client, incoming)
+                old_generation = client._transport_generation
+                new_message = {'type': 'new_transport_marker'}
+                seen = []
+
+                def restart(kind, message):
+                    seen.append(kind)
+                    client.stop()
+                    client.start()
+                    client._queue_message(new_message, client._transport_generation)
+
+                client.on_event = restart
+                with mock.patch.object(lan_client_module.threading, 'Thread'):
+                    client._poll()
+                self.assertEqual(['events' if events_first else 'snapshot'], seen)
+                self.assertGreater(client._transport_generation, old_generation)
+                self.assertEqual([new_message], client._pending)
+                self.assertIsNotNone(client._poll_callback)
+                self.assertTrue(client.running)
+
+    def test_reentrant_restart_during_materialization_cannot_dispatch_old_state(self):
+        client = self.activate()
+        client.connected = False
+        self.queue_wire_messages(client, [self.order_snapshot(1)])
+        original = snapshot_delta.materialize
+
+        def restart(message):
+            prepared = original(message)
+            client.stop()
+            client.start()
+            return prepared
+
+        client._handle_message = mock.Mock()
+        with mock.patch.object(snapshot_delta, 'materialize', side_effect=restart):
+            with mock.patch.object(lan_client_module.threading, 'Thread'):
+                client._poll()
+        self.assertEqual(0, client._handle_message.call_count)
+        self.assertIsNotNone(client._poll_callback)
+        self.assertTrue(client.running)
+
+    def test_stale_dispatch_skips_materialization_and_runtime_handler(self):
+        client = self.activate()
+        generation = client._transport_generation
+        self.queue_wire_messages(client, [self.order_snapshot(1)])
+        pending = client._pending[0]
+        client._transport_generation += 1
+        client._handle_message = mock.Mock()
+        with mock.patch.object(snapshot_delta, 'materialize') as materialize:
+            self.assertFalse(client._dispatch_message(pending, generation))
+        self.assertEqual(0, materialize.call_count)
+        self.assertEqual(0, client._handle_message.call_count)
 
     def test_wire_baseline_ignores_runtime_mutation_and_business_rejection(self):
         messages, wire = self._snapshot_delta_chain()
         client = self.activate()
         generation = client._transport_generation
-        first = client._decode_received_snapshot(wire[0], generation)
+        first = snapshot_delta.materialize(
+            client._decode_received_snapshot(wire[0], generation))
         client.last_snapshot = first
         first['bots'][0]['critical']['devices'].append({'name': 'local-only'})
-        second = client._decode_received_snapshot(wire[1], generation)
+        second = snapshot_delta.materialize(
+            client._decode_received_snapshot(wire[1], generation))
         self.assertEqual(messages[1], second)
         # A gameplay consumer can retain the prior actor or reject this whole
         # frame without changing which ordered raw patch the socket has read.
-        third = client._decode_received_snapshot(wire[2], generation)
+        third = snapshot_delta.materialize(
+            client._decode_received_snapshot(wire[2], generation))
         self.assertEqual(messages[2], third)
         self.assertEqual(3, client._snapshot_wire_sequence)
         self.assertEqual([], client._outbound_queue)
@@ -153,11 +352,13 @@ class LanClientQueueTests(unittest.TestCase):
                 self.assertTrue(client.connected)
                 self.assertIsNone(client.last_error)
                 full, baseline = snapshot_delta.encode(messages[2], None, 3)
-                self.assertEqual(messages[2], client._decode_received_snapshot(full, generation))
+                self.assertEqual(messages[2], snapshot_delta.materialize(
+                    client._decode_received_snapshot(full, generation)))
                 self.assertFalse(client._snapshot_resync_pending)
                 next_message = dict(messages[2], server_tick=4)
                 next_wire, unused = snapshot_delta.encode(next_message, baseline, 4)
-                self.assertEqual(next_message, client._decode_received_snapshot(next_wire, generation))
+                self.assertEqual(next_message, snapshot_delta.materialize(
+                    client._decode_received_snapshot(next_wire, generation)))
 
     def test_recovery_full_can_replace_a_bad_high_wire_sequence(self):
         messages, wire = self._snapshot_delta_chain()
@@ -173,7 +374,8 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertEqual(100, client._snapshot_wire_sequence)
         self.assertIs(runtime_state, client.last_snapshot)
         full, unused = snapshot_delta.encode(messages[2], None, 3)
-        self.assertEqual(messages[2], client._decode_received_snapshot(full, generation))
+        self.assertEqual(messages[2], snapshot_delta.materialize(
+                    client._decode_received_snapshot(full, generation)))
         self.assertEqual(3, client._snapshot_wire_sequence)
         self.assertFalse(client._snapshot_resync_pending)
 
@@ -198,8 +400,8 @@ class LanClientQueueTests(unittest.TestCase):
         generation = client._transport_generation
         original_decode = snapshot_delta.decode
 
-        def reconnect_during_decode(message, baseline):
-            result = original_decode(message, baseline)
+        def reconnect_during_decode(message, baseline, **options):
+            result = original_decode(message, baseline, **options)
             client._transport_generation += 1
             client._snapshot_wire_baseline = None
             client._snapshot_wire_sequence = None
@@ -225,12 +427,14 @@ class LanClientQueueTests(unittest.TestCase):
                 (4, {'round_id': 8, 'authority_epoch': 3})):
             value = dict(messages[0], **changes)
             full, baseline = snapshot_delta.encode(value, None, sequence)
-            self.assertEqual(value, client._decode_received_snapshot(full, generation))
+            self.assertEqual(value, snapshot_delta.materialize(
+                    client._decode_received_snapshot(full, generation)))
             changed = dict(value, server_tick=5)
             delta, unused = snapshot_delta.encode(changed, baseline, sequence + 1)
-            self.assertEqual(changed, client._decode_received_snapshot(delta, generation))
+            self.assertEqual(changed, snapshot_delta.materialize(
+                    client._decode_received_snapshot(delta, generation)))
 
-    def test_network_worker_queues_reconstructed_snapshots_only(self):
+    def test_network_worker_queues_private_actor_versions_until_dispatch(self):
         messages, wire = self._snapshot_delta_chain()
         payload = b''.join((json.dumps(value) + '\n').encode('utf-8')
                            for value in wire)
@@ -263,6 +467,8 @@ class LanClientQueueTests(unittest.TestCase):
         self.assertEqual(3, len(seen))
         for expected, actual in zip(messages, seen):
             self.assertIn('_client_received_time', actual)
+            self.assertNotIn('bots', actual)
+            actual = snapshot_delta.materialize(actual)
             actual.pop('_client_received_time')
             self.assertEqual(expected, actual)
             self.assertNotIn('snapshot_seq', actual)

@@ -1124,7 +1124,7 @@ class LanProtocolTests(unittest.TestCase):
             received = self.client._decode_received_snapshot(
                 wire, self.client._transport_generation)
             self.assertIsNotNone(received)
-            self.client._handle_message(received)
+            self.client._dispatch_message(received)
             expected_x = 1.0 if sequence == 2 else float(sequence)
             self.assertEqual(expected_x, self.client.last_snapshot['bots'][0]['x'])
             self.assertEqual(float(sequence),

@@ -20,6 +20,7 @@ from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922 import authority_worker as authority_worker_module
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import lan_client as lan_client_module
+from gui.mods.offline_lan_0922 import snapshot_delta
 from gui.mods.offline_lan_0922.account_rpc.state import AccountState
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient, WORKER_BUSY_RETRY_SECONDS, WORKER_DUMMY_Y,
@@ -1040,6 +1041,43 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertIs(
             client._published_player_effective_params[WORKER_AUTHORITY_ID],
             snapshot_dummy['effective_params'])
+        self.assertIsNone(client.last_error)
+
+    def test_poll_materializes_snapshot_before_worker_projects_player_rows(self):
+        events = []
+        world = mock.Mock()
+        world.callback.return_value = 1
+        client = AuthorityWorkerLANClient(
+            '127.0.0.1', 28782, bigworld=world,
+            on_event=lambda kind, message: events.append((kind, message)))
+        client.running = True
+        client.phase = 'battle'
+        client.round_id = 1
+        frame = {
+            'type': 'snapshot', 'protocol': PROTOCOL_VERSION,
+            'round_id': 1, 'map': '01_karelia', 'authority_epoch': 0,
+            'server_tick': 1, 'server_time_ms': 12,
+            'bot_state_revision': 1, 'projectile_revision': 0,
+            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_manifest': [], 'players': [_human()], 'bots': [],
+            'projectiles': [],
+        }
+        wire, unused = snapshot_delta.encode(frame, None, 1)
+        pending = client._decode_received_snapshot(
+            wire, client._transport_generation)
+        self.assertNotIn('players', pending)
+        client._queue_message(pending, client._transport_generation)
+        with mock.patch.object(client, '_project_runtime_message',
+                               wraps=client._project_runtime_message) as project:
+            client._poll()
+        self.assertEqual(1, project.call_count)
+        projected_input = project.call_args[0][0]
+        self.assertEqual([1], [row['id'] for row in projected_input['players']])
+        json.dumps(projected_input)
+        self.assertEqual(['snapshot'], [kind for kind, unused in events])
+        self.assertEqual([1, WORKER_AUTHORITY_ID], [
+            row['id'] for row in client.last_snapshot['players']])
+        self.assertTrue(client.running)
         self.assertIsNone(client.last_error)
 
     def test_worker_full_snapshot_cache_hit_requires_exact_scalar_types(self):

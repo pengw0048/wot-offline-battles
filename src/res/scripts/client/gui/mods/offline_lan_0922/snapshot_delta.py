@@ -20,6 +20,8 @@ _ACTORS = ('players', 'bots')
 _METADATA = ('snapshot_delta', 'snapshot_seq', 'snapshot_base_seq')
 _LINEAGE = ('round_id', 'authority_epoch', 'map', 'bot_authority_id',
             'bot_manifest_revision')
+# Private queue metadata survives dict(message) but cannot originate in JSON.
+_PENDING_ACTORS = object()
 
 
 class SnapshotDeltaError(ValueError):
@@ -49,6 +51,35 @@ class _Baseline(object):
         self.sequence = sequence
         self.lineage = lineage
         self.actors = actors
+
+
+class _PendingActors(object):
+    """Hold one immutable raw actor version until its snapshot is consumed."""
+    __slots__ = ('__actors',)
+
+    def __init__(self, actors):
+        object.__setattr__(self, '_PendingActors__actors',
+                           tuple(actors[name] for name in _ACTORS))
+
+    def __setattr__(self, name, value):
+        raise AttributeError('pending snapshot actors are immutable')
+
+    def detach(self):
+        return dict((name, _clone(values)) for name, values in
+                    zip(_ACTORS, self.__actors))
+
+
+def materialize(message):
+    """Detach selected actors before any runtime or worker consumer sees them."""
+    if not isinstance(message, dict) or _PENDING_ACTORS not in message:
+        return message
+    holder = message[_PENDING_ACTORS]
+    if not isinstance(holder, _PendingActors):
+        raise SnapshotDeltaError('invalid pending snapshot actor holder')
+    result = dict(message)
+    del result[_PENDING_ACTORS]
+    result.update(holder.detach())
+    return result
 
 
 def _integer(value):
@@ -273,8 +304,8 @@ def _apply_rows(patch, previous):
     return rows
 
 
-def decode(wire, baseline):
-    """Rebuild before receive coalescing; never mutate a supplied baseline."""
+def decode(wire, baseline, return_pending_actors=False):
+    """Apply every ordered patch, optionally deferring runtime actor copies."""
     _message(wire)
     baseline = _base(baseline)
     if not any(key in wire for key in _METADATA):
@@ -301,6 +332,11 @@ def decode(wire, baseline):
             raise SnapshotDeltaError('full snapshot has a delta baseline')
         next_baseline = _full(wire, sequence, lineage)
     full = _other_fields(wire)
-    for name in _ACTORS:
-        full[name] = _clone(next_baseline.actors[name])
+    if return_pending_actors:
+        # Baseline rows are immutable by ownership: later patches replace
+        # changed rows/fields. Queue coalescing reads only message metadata.
+        full[_PENDING_ACTORS] = _PendingActors(next_baseline.actors)
+    else:
+        for name in _ACTORS:
+            full[name] = _clone(next_baseline.actors[name])
     return full, next_baseline

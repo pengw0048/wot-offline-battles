@@ -224,6 +224,61 @@ class SnapshotDeltaTests(unittest.TestCase):
         restored, unused = codec.decode(delta, receiver)
         self.assertEqual(original, restored)
 
+    def test_pending_versions_survive_later_patches_full_reset_and_shallow_copy(self):
+        frames = [snapshot(), snapshot(server_tick=5), snapshot(round_id=2)]
+        frames[1]['players'][0]['state'] = {'health': 0}
+        frames[1]['bots'][0].pop('x')
+        frames[1]['bots'][0]['ammo'] = []
+        frames[1]['bots'].append({'id': 9, 'critical': None})
+        frames[2]['players'] = []
+        sender = receiver = None
+        pending = []
+        for sequence, frame in enumerate(frames, 1):
+            wire, sender = codec.encode(frame, sender, sequence)
+            held, receiver = codec.decode(
+                transmit(wire), receiver, return_pending_actors=True)
+            self.assertNotIn('players', held)
+            self.assertNotIn('bots', held)
+            pending.append(held)
+        for expected, held in zip(frames, pending):
+            # Sparse-order carry-forward copies only the metadata dictionary.
+            restored = codec.materialize(dict(held))
+            self.assertEqual(expected, restored)
+            self.assertEqual(expected, transmit(restored))
+            self.assertIs(restored, codec.materialize(restored))
+
+    def test_pending_actor_copies_isolate_wire_and_runtime_mutation(self):
+        first = snapshot()
+        first['bots'][0]['equipment_states'][0]['equipment'] = {
+            'name': 'repair', 'tags': ['equipment']}
+        expected = copy.deepcopy(first)
+        wire, sender = codec.encode(first, None, 1)
+        pending, receiver = codec.decode(wire, None, return_pending_actors=True)
+        first['players'][0]['state'].clear()
+        wire['bots'][0]['equipment_states'][0]['equipment']['tags'].append('wire')
+        holder = pending[codec._PENDING_ACTORS]
+        with self.assertRaises(AttributeError):
+            holder._PendingActors__actors = ()
+        consumed = codec.materialize(pending)
+        second_copy = codec.materialize(pending)
+        consumed['players'][0]['state']['damaged'].append('engine')
+        consumed['bots'][0]['equipment_states'][0]['equipment']['tags'].append('local')
+        consumed['bots'][0]['ammo'].append(999)
+        self.assertEqual(expected, second_copy)
+        self.assertEqual(expected, codec.materialize(pending))
+        next_frame = copy.deepcopy(expected)
+        next_frame['players'][0]['x'] = -7.5
+        delta, unused = codec.encode(next_frame, sender, 2)
+        broken = dict(delta, bots={'remove': [999]})
+        with self.assertRaises(codec.SnapshotDeltaError):
+            codec.decode(broken, receiver, return_pending_actors=True)
+        self.assertEqual(expected, codec.materialize(pending))
+        next_pending, unused = codec.decode(
+            delta, receiver, return_pending_actors=True)
+        delta['players']['update'][0]['set']['x'] = -100.0
+        self.assertEqual(next_frame, codec.materialize(next_pending))
+        self.assertEqual(expected, codec.materialize(pending))
+
     def test_plain_complete_snapshot_clears_transport_baseline(self):
         original = snapshot()
         wire, sender = codec.encode(original, None, 1)
@@ -233,6 +288,11 @@ class SnapshotDeltaTests(unittest.TestCase):
         self.assertIsNone(next_baseline)
         restored['players'][0]['state']['health'] = 0
         self.assertEqual(100, original['players'][0]['state']['health'])
+        pending, next_baseline = codec.decode(
+            original, receiver, return_pending_actors=True)
+        self.assertEqual(original, pending)
+        self.assertIsNone(next_baseline)
+        self.assertIs(pending, codec.materialize(pending))
         for metadata in ({'snapshot_seq': 2}, {'snapshot_delta': False},
                          {'snapshot_base_seq': 1}):
             with self.assertRaises(codec.SnapshotDeltaError):
@@ -304,12 +364,16 @@ class SnapshotDeltaTests(unittest.TestCase):
             'codec = imp.load_source("snapshot_delta_shared", %r)\n'
             'frames = json.loads(sys.stdin.read())\n'
             'sender = receiver = None\n'
+            'pending_receiver = None\n'
+            'pending = []\n'
             'results = []\n'
             'for sequence, frame in enumerate(frames, 1):\n'
             '    wire, sender = codec.encode(frame, sender, sequence)\n'
             '    full, receiver = codec.decode(json.loads(json.dumps(wire)), receiver)\n'
+            '    held, pending_receiver = codec.decode(wire, pending_receiver, return_pending_actors=True)\n'
+            '    pending.append(held)\n'
             '    results.append([wire, full])\n'
-            'json.dump(results, sys.stdout)\n'
+            'json.dump([results, [codec.materialize(value) for value in pending]], sys.stdout)\n'
         ) % str(CODEC_PATH)
         try:
             child = subprocess.Popen(
@@ -325,7 +389,7 @@ class SnapshotDeltaTests(unittest.TestCase):
             full, receiver = codec.decode(transmit(wire), receiver)
             self.assertEqual(frame, full)
             expected.append([wire, full])
-        self.assertEqual(expected, json.loads(stdout.decode('utf-8')))
+        self.assertEqual([expected, frames], json.loads(stdout.decode('utf-8')))
 
 
 if __name__ == '__main__':

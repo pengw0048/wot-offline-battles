@@ -3512,12 +3512,13 @@ class LANClient(object):
                     self._snapshot_resync_pending = True
 
     def _decode_received_snapshot(self, message, generation):
-        """Rebuild raw actor state before any main-thread queue coalescing.
+        """Advance raw actor state before any main-thread queue coalescing.
 
         The wire baseline is independent of ``last_snapshot``: gameplay
         admission may retain an invalid actor, and runtime consumers may
         enrich or mutate their own rows. Neither operation may change the
-        ordered transport's next patch base.
+        ordered transport's next patch base. Only snapshots selected for
+        dispatch need mutable actor copies; the queue holds private versions.
         """
         if not isinstance(message, dict) or message.get('type') != 'snapshot':
             return message
@@ -3527,7 +3528,8 @@ class LANClient(object):
                 return None
             baseline = self._snapshot_wire_baseline
         try:
-            restored, next_baseline = snapshot_delta.decode(message, baseline)
+            restored, next_baseline = snapshot_delta.decode(
+                message, baseline, return_pending_actors=True)
         except snapshot_delta.SnapshotDeltaError:
             with self._outbound_lock:
                 if (generation != self._transport_generation or
@@ -4056,13 +4058,37 @@ class LANClient(object):
         self._poll_callback = self.bigworld.callback(
             POLL_INTERVAL, self._poll)
 
-    def _poll(self):
-        self._poll_callback = None
-        messages = []
-        with self._pending_lock:
-            if self._pending:
-                messages = self._pending
-                self._pending = []
+    def _dispatch_message(self, message, generation=None):
+        # Worker overrides inspect players before calling the base handler.
+        # Detach here, after coalescing and before that virtual dispatch.
+        # An ordinary EOF stops reads but must still drain accepted messages;
+        # only an explicit stop or a new transport invalidates this batch.
+        if (generation is not None and
+                (generation != self._transport_generation or
+                 self._stopping)):
+            return False
+        try:
+            prepared = snapshot_delta.materialize(message)
+        except snapshot_delta.SnapshotDeltaError:
+            if (generation is not None and
+                    (generation != self._transport_generation or
+                     self._stopping)):
+                return False
+            self._snapshot_drop_streak += 1
+            self._snapshot_drop_reason = 'actor_materialization'
+            self._ignore_runtime_payload(
+                'snapshot', self._snapshot_drop_reason, message)
+            return True
+        if (generation is not None and
+                (generation != self._transport_generation or
+                 self._stopping)):
+            return False
+        self._handle_message(prepared)
+        return (generation is None or
+                (generation == self._transport_generation and
+                 not self._stopping))
+
+    def _dispatch_pending_messages(self, messages, generation):
         latest_snapshot = None
         for message in messages:
             if message.get('type') == 'snapshot':
@@ -4077,10 +4103,9 @@ class LANClient(object):
                     # space loading several server ticks can accumulate in one
                     # poll; consuming only the last lean snapshot would leave
                     # this replica with no manifest to inherit.
-                    self._handle_message(latest_snapshot)
+                    if not self._dispatch_message(latest_snapshot, generation):
+                        return
                     latest_snapshot = None
-                    if not self.running:
-                        break
                 # The server omits orders after their socket write succeeds.
                 # A later lean frame therefore supersedes motion, but cannot
                 # supersede an order section still waiting for this poll.
@@ -4094,19 +4119,36 @@ class LANClient(object):
                   latest_snapshot.get('server_tick')):
                 # Preserve event-before-state semantics even if a fixture or
                 # an older relay batches one tick in the opposite order.
-                self._handle_message(message)
-                self._handle_message(latest_snapshot)
+                if not self._dispatch_message(message, generation):
+                    return
+                if not self._dispatch_message(latest_snapshot, generation):
+                    return
                 latest_snapshot = None
             else:
                 # A roster/battle_start is a state-transition barrier.  Flush
                 # the newest preceding snapshot before it so a terminal round
                 # cannot be replayed after the waiting-room reset.
                 if latest_snapshot is not None:
-                    self._handle_message(latest_snapshot)
+                    if not self._dispatch_message(latest_snapshot, generation):
+                        return
                     latest_snapshot = None
-                self._handle_message(message)
+                if not self._dispatch_message(message, generation):
+                    return
         if latest_snapshot is not None:
-            self._handle_message(latest_snapshot)
+            if not self._dispatch_message(latest_snapshot, generation):
+                return
+
+    def _poll(self):
+        generation = self._transport_generation
+        self._poll_callback = None
+        messages = []
+        with self._pending_lock:
+            if self._pending:
+                messages = self._pending
+                self._pending = []
+        self._dispatch_pending_messages(messages, generation)
+        if generation != self._transport_generation:
+            return
         now = _monotonic_time()
         self._report_snapshot_stall(now)
         if self.connected and now - self._last_ping >= PING_INTERVAL:
