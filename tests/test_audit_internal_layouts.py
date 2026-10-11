@@ -21,6 +21,24 @@ def _string(value):
 
 
 class InternalLayoutAuditTests(unittest.TestCase):
+    def test_loaded_native_bounds_replace_an_incomplete_cached_layout(self):
+        layouts=audit.internal_hit_layouts
+        vehicle='ussr:R54_KV-5'
+        record=audit.internal_layout_console.CONSOLE_LAYOUTS_0922[
+            layouts._profile_key(vehicle)]
+        descriptor=audit.descriptor_snapshot(vehicle,record)
+        layouts._LAYOUT_CACHE.clear()
+        incomplete=layouts.build_layout(descriptor,False)
+        self.assertFalse(incomplete['valid'])
+        self.assertIn('geometry_source_missing:gun',incomplete['errors'])
+        # The same descriptor/IDs finish loading. No reinstallation or new
+        # battle is required to restore the internal targets.
+        descriptor.gun.hitTester.bbox=((-0.2,-0.2,-1.),(.2,.2,2.))
+        loaded=layouts.build_layout(descriptor,False)
+        self.assertTrue(loaded['valid'],loaded['errors'])
+        self.assertIn('ammoBay',{target['entity'] for target in loaded['targets']})
+        self.assertIs(loaded,layouts.build_layout(descriptor,False))
+
     def test_mesh_inventory_verifies_topology_and_reports_source(self):
         result = audit.geometry_inventory('ussr:R45_IS-7', verify=True)
         self.assertEqual('decoded_console_mesh', result['provenance'])

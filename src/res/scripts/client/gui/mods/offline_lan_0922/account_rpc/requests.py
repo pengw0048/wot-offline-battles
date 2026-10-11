@@ -34,6 +34,8 @@ class Result(object):
 # extras into one flag word before sending them.
 BUY_VEHICLE_FLAG_CREW = 1
 BUY_VEHICLE_FLAG_SHELLS = 16
+BARRACKS_SYNC_DIAGNOSTIC_LIMIT = 4
+_BARRACKS_SYNC_DIAGNOSTIC_KEY = '_offline_barracks_sync_diagnostics'
 
 
 def _int(value, default=0):
@@ -52,7 +54,8 @@ def _garage(context):
     return state
 
 
-def _fitting(context, mutate, extension=None):
+def _fitting(context, mutate, extension=None, extra_diff=None,
+             require_persistence=False):
     """Apply one fitting mutation and push the resulting inventory diff.
 
     #1513 refreshes the garage from ``PlayerAccount.update``, which unpickles
@@ -64,7 +67,11 @@ def _fitting(context, mutate, extension=None):
     """
     started = _clock()
     state = _garage(context)
-    previous_stats = data.stats(state.snapshot())['stats']
+    from gui.mods.offline_lan_0922 import offline_services
+    previous_recovery = offline_services.vehicle_recovery_buffer(state.snapshot())
+    postbattle = context.get('postbattle_store')
+    progress = postbattle.progress() if postbattle is not None else None
+    previous_stats = data.stats(state.snapshot(), progress)['stats']
     state.touched_vehicles()
     state.touched_items()
     try:
@@ -78,14 +85,20 @@ def _fitting(context, mutate, extension=None):
     # Capture this command's result before deferred publication. Another
     # command may mutate the garage before publish runs; its new unlocks and
     # elite vehicles must belong only to its own notification delta.
-    current_stats = data.stats(state.snapshot())['stats']
+    current_stats = data.stats(state.snapshot(), progress)['stats']
+    current_recovery = offline_services.vehicle_recovery_buffer(state.snapshot())
+    recovery_diff = dict((cd, current_recovery.get(cd)) for cd in
+                         set(previous_recovery) | set(current_recovery)
+                         if previous_recovery.get(cd) != current_recovery.get(cd))
     mutated = _clock()
     store = context.get('garage_store')
     if store is not None:
         # A fitting happens at click speed, so saving on each accepted change
         # costs nothing and a hard client kill cannot lose an applied change.
         store.mark_dirty()
-        store.flush(state.snapshot())
+        saved_ok = store.flush(state.snapshot())
+        if require_persistence and not saved_ok:
+            raise garage.GarageError('The transaction could not be saved.')
     saved = _clock()
     push = context.get('push_update')
     if not callable(push):
@@ -105,8 +118,8 @@ def _fitting(context, mutate, extension=None):
         # StatsRequester merges these fields before the command callback.
         # Publish the ledger with the inventory for every paid garage action.
         changed_stats = dict((name, current_stats[name]) for name in (
-            'credits', 'gold', 'freeXP', 'slots', 'berths', 'vehicleSellsLeft',
-            'vehTypeXP', 'unlocks', 'eliteVehicles')
+            'credits', 'gold', 'crystal', 'freeXP', 'slots', 'berths', 'vehicleSellsLeft',
+            'vehTypeXP', 'unlocks', 'eliteVehicles', 'dossier')
             if current_stats[name] != previous_stats[name])
         # #1513 merges these growing sets and treats each incremental entry
         # as a new unlock/elite notification. Repeating the full set floods
@@ -119,12 +132,19 @@ def _fitting(context, mutate, extension=None):
                     changed_stats[name] = added
         if changed_stats:
             diff['stats'] = changed_stats
+        if callable(extra_diff):
+            additional = extra_diff(state.snapshot(), outcome)
+            if isinstance(additional, dict):
+                diff.update(additional)
         if moved_recycled:
             # PlayerAccount._update hands every diff to the recycle bin, so
             # who was dismissed and who was hired back travel with the same
             # push that moved them out of the barracks.
             diff['recycleBin'] = data.recycle_bin_diff(
                 state.snapshot(), moved_recycled)
+        if recovery_diff:
+            diff.setdefault('recycleBin', {})['vehicles'] = {
+                'buffer': recovery_diff}
         built = _clock()
         completed = [False]
 
@@ -314,7 +334,7 @@ def _change_tankman_role(context, args):
     if len(args) < 4:
         return Result(commands.RES_FAILURE, 'INVALID_CREW_REQUEST')
     return _fitting(context, lambda state: state.change_tankman_role(
-        args[1], args[2], args[3]))
+        args[1], args[2], args[3]), extension=lambda outcome: outcome)
 
 
 def _change_tankman_passport(context, args):
@@ -394,6 +414,16 @@ def _unlock(context, args):
         context, lambda state: state.unlock(args[0], args[1]))
 
 
+def _durable_vehicle_fitting(context, mutate):
+    """Keep vehicle ownership, wallet and recovery entitlement atomic."""
+    state = _garage(context)
+    try:
+        with state._transaction():
+            return _fitting(context, mutate, require_persistence=True)
+    except garage.GarageError as error:
+        return Result(commands.RES_FAILURE, str(error))
+
+
 def _buy_vehicle(context, args):
     # Shop.buyVehicle -> _doCmdIntArr(CMD_BUY_VEHICLE,
     # [cacheRev, typeCompDescr, flags, tmanCostTypeIdx, rentPeriod]).
@@ -403,7 +433,7 @@ def _buy_vehicle(context, args):
     flags = _int(values[2])
     rent_period = values[4] if len(values) > 4 else -1
     tman_cost_type_index = values[3] if len(values) > 3 else 0
-    return _fitting(context, lambda state: state.buy_vehicle(
+    return _durable_vehicle_fitting(context, lambda state: state.buy_vehicle(
         values[1],
         buy_shells=bool(flags & BUY_VEHICLE_FLAG_SHELLS),
         recruit_crew=bool(flags & BUY_VEHICLE_FLAG_CREW),
@@ -430,7 +460,7 @@ def _sell_vehicle(context, args):
     if from_inventory_count < 0 or len(values) < end:
         return Result(commands.RES_FAILURE, 'INVALID_SALE_REQUEST')
     items_from_inventory = [_int(value) for value in values[tail + 1:end]]
-    return _fitting(context, lambda state: state.sell_vehicle(
+    return _durable_vehicle_fitting(context, lambda state: state.sell_vehicle(
         values[1], dismiss_crew=bool(_int(values[2])),
         items_from_vehicle=items_from_vehicle,
         items_from_inventory=items_from_inventory))
@@ -471,6 +501,69 @@ def _buy_slot(context, args):
 def _buy_berths(context, args):
     # Stats.buyBerths -> _doCmdInt3(CMD_BUY_BERTHS, shopRev, 0, 0).
     return _fitting(context, lambda state: state.buy_berths())
+
+
+def _buy_premium(context, args):
+    # Stats.upgradeToPremium -> _doCmdInt3(CMD_PREMIUM, shopRev, days,
+    # arenaUniqueID). The last value only attributes a battle purchase.
+    if len(args) < 2:
+        return Result(commands.RES_FAILURE, 'INVALID_PREMIUM_REQUEST')
+    return _fitting(
+        context, lambda state: state.buy_premium(args[1]),
+        extra_diff=lambda snapshot, unused_outcome: {
+            'account': data.stats(snapshot)['account'],
+        })
+
+
+def _select_personal_missions(context, args):
+    # Account.selectPersonalMissions -> intArr [branch, *missionIDs]. An empty
+    # tail is the stock "stop all missions in this branch" operation.
+    values = list(args[0] if args else ())
+    if not values:
+        return Result(commands.RES_FAILURE, 'INVALID_PERSONAL_MISSION_REQUEST')
+    return _fitting(
+        context,
+        lambda state: state.select_personal_missions(values[0], values[1:]),
+        extra_diff=lambda snapshot, unused_outcome: {
+            'potapovQuests': data.personal_missions(snapshot),
+        })
+
+
+def _personal_mission_diff(snapshot, unused_outcome):
+    return {'potapovQuests': data.personal_missions(snapshot),
+            'tokens': data.personal_mission_tokens(snapshot),
+            'account': data.stats(snapshot)['account']}
+
+
+def _personal_mission_transaction(context, mutate):
+    state = _garage(context)
+    try:
+        with state._transaction():
+            return _fitting(context, mutate,
+                            extra_diff=_personal_mission_diff,
+                            require_persistence=True)
+    except garage.GarageError as error:
+        return Result(commands.RES_FAILURE, str(error))
+
+
+def _pawn_personal_mission(context, args):
+    # Account.pawnFreeAwardList -> intArr [EVENT_TYPE, questID].
+    if (len(args) != 1 or not isinstance(args[0], (list, tuple)) or
+            len(args[0]) != 2):
+        return Result(commands.RES_FAILURE, 'INVALID_PERSONAL_MISSION_REQUEST')
+    values = args[0]
+    return _personal_mission_transaction(context, lambda state:
+        state.pawn_personal_mission(values[0], values[1]))
+
+
+def _get_personal_mission_reward(context, args):
+    # Account.getPersonalMissionReward -> branch, questID, needTankman,
+    # chosen nation, chosen vehicle's in-nation ID, chosen role ID.
+    if (len(args) != 1 or not isinstance(args[0], (list, tuple)) or
+            len(args[0]) != 6):
+        return Result(commands.RES_FAILURE, 'INVALID_PERSONAL_MISSION_REQUEST')
+    return _personal_mission_transaction(context, lambda state:
+        state.claim_personal_mission_reward(*args[0]))
 
 
 def _vehicle_settings(context, args):
@@ -523,9 +616,92 @@ def _sync_data(context, args):
         account_state.snapshot() if account_state is not None else {})
     postbattle = context.get('postbattle_store')
     progress = postbattle.progress() if postbattle is not None else None
-    return Result(commands.RES_SUCCESS, '', ext=data.sync_data(
-        revision, context.get('selected_vehicle'), int_user_settings,
-        progress))
+    selected_vehicle = context.get('selected_vehicle')
+    payload = data.sync_data(
+        revision, selected_vehicle, int_user_settings,
+        progress)
+    _report_barracks_sync(selected_vehicle, payload, context)
+    return Result(commands.RES_SUCCESS, '', ext=payload)
+
+
+def _report_barracks_sync(selected_vehicle, payload, context=None):
+    """Write one anonymous producer summary for a complete account sync.
+
+    A screenshot can show that Barracks rendered no rows, but the error
+    report previously could not distinguish an empty producer from a saved
+    client filter.  Keep this diagnostic on the producer side: it records
+    only bounded counts, never crew ids, names or compact descriptors, and a
+    broken logger must not change the sync response.
+    """
+    try:
+        snapshot = (selected_vehicle
+                    if isinstance(selected_vehicle, dict) else {})
+        records = data._vehicle_records(snapshot)
+        seated = sum(
+            len(record.get('tankmen') or {})
+            for record in records
+            if isinstance(record.get('tankmen') or {}, dict))
+        barracks = snapshot.get('barracksTankmen') or {}
+        if not isinstance(barracks, dict):
+            barracks = {}
+
+        inventory = (payload.get('inventory') or {}).get(
+            data.TANKMAN_ITEM_TYPE) or {}
+        compact_descrs = inventory.get('compDescr') or {}
+        vehicle_refs = inventory.get('vehicle') or {}
+        if not isinstance(compact_descrs, dict):
+            compact_descrs = {}
+        if not isinstance(vehicle_refs, dict):
+            vehicle_refs = {}
+        compact_keys = set(compact_descrs)
+        vehicle_keys = set(vehicle_refs)
+        positive = 0
+        nonpositive = 0
+        for value in vehicle_refs.values():
+            try:
+                if int(value) > 0:
+                    positive += 1
+                else:
+                    nonpositive += 1
+            except (TypeError, ValueError, OverflowError):
+                nonpositive += 1
+        berths = _int((payload.get('stats') or {}).get('berths', 0))
+        summary = (
+            seated, len(barracks), len(compact_descrs), len(vehicle_refs),
+            positive, nonpositive, len(compact_keys - vehicle_keys),
+            len(vehicle_keys - compact_keys), berths)
+        if isinstance(context, dict):
+            diagnostic = context.get(_BARRACKS_SYNC_DIAGNOSTIC_KEY)
+            if not isinstance(diagnostic, dict):
+                diagnostic = {'signatures': set(), 'limit_reported': False}
+                context[_BARRACKS_SYNC_DIAGNOSTIC_KEY] = diagnostic
+            signatures = diagnostic.get('signatures')
+            if not isinstance(signatures, set):
+                signatures = set()
+                diagnostic['signatures'] = signatures
+            if summary in signatures:
+                return False
+            if len(signatures) >= BARRACKS_SYNC_DIAGNOSTIC_LIMIT:
+                if diagnostic.get('limit_reported'):
+                    return False
+                diagnostic['limit_reported'] = True
+                sys.stdout.write(
+                    '[Offline LAN 0.9.22] BARRACKS_SYNC v=1 '
+                    'detail_limit=%d reached\n' %
+                    BARRACKS_SYNC_DIAGNOSTIC_LIMIT)
+                return False
+            signatures.add(summary)
+        sys.stdout.write(
+            '[Offline LAN 0.9.22] BARRACKS_SYNC v=1 '
+            'snapshot_seated=%d snapshot_barracks=%d '
+            'wire_compDescr=%d wire_vehicle=%d wire_positive=%d '
+            'wire_nonpositive=%d missing_vehicle_ref=%d '
+            'extra_vehicle_ref=%d berths=%d\n' % (
+                summary[0], summary[1], summary[2], summary[3], summary[4],
+                summary[5], summary[6], summary[7], summary[8]))
+        return True
+    except Exception:
+        return False
 
 
 def _server_stats(context, args):
@@ -670,7 +846,26 @@ def _del_int_user_settings(context, args):
     return Result(commands.RES_SUCCESS)
 
 
+def _offline_service(context, args):
+    import json
+    from gui.mods.offline_lan_0922 import offline_services
+    try:
+        value = json.loads(args[0])
+        action, key = value['action'], value['key']
+    except (IndexError, KeyError, TypeError, ValueError):
+        return Result(commands.RES_FAILURE, 'INVALID_OFFLINE_SERVICE')
+    state = _garage(context)
+    try:
+        with state._transaction():
+            return _fitting(context, lambda owner: offline_services.transact(
+                owner, action, key), extra_diff=offline_services.service_diff,
+                require_persistence=True)
+    except garage.GarageError as error:
+        return Result(commands.RES_FAILURE, str(error))
+
+
 HANDLERS = {
+    commands.CMD_OFFLINE_SERVICE: _offline_service,
     commands.CMD_SYNC_DATA: _sync_data,
     commands.CMD_EQUIP: _equip_component,
     commands.CMD_EQUIP_OPTDEV: _equip_optional_device,
@@ -695,6 +890,7 @@ HANDLERS = {
     commands.CMD_UNLOCK: _unlock,
     commands.CMD_EXCHANGE: _exchange,
     commands.CMD_FREE_XP_CONV: _convert_free_xp,
+    commands.CMD_PREMIUM: _buy_premium,
     commands.CMD_BUY_SLOT: _buy_slot,
     commands.CMD_BUY_BERTHS: _buy_berths,
     commands.CMD_BUY_VEHICLE: _buy_vehicle,
@@ -712,6 +908,9 @@ HANDLERS = {
     commands.CMD_ENQUEUE_RANDOM: _enqueue_random,
     commands.CMD_DEQUEUE_RANDOM: _dequeue_random,
     commands.CMD_SET_LANGUAGE: _set_language,
+    commands.CMD_SELECT_POTAPOV_QUESTS: _select_personal_missions,
+    commands.CMD_GET_POTAPOV_QUEST_REWARD: _get_personal_mission_reward,
+    commands.CMD_PAWN_FREE_AWARD_LIST: _pawn_personal_mission,
     commands.CMD_COMPLETE_TUTORIAL: lambda context, args: Result(commands.RES_SUCCESS),
     commands.CMD_REQ_BATTLE_RESULTS: _request_battle_results,
     commands.CMD_BATTLE_RESULTS_RECEIVED: _battle_results_received,

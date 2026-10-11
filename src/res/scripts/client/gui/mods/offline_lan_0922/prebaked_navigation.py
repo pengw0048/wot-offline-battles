@@ -56,6 +56,13 @@ def load_graph(map_name, base_dir=None):
 	finally:
 		handle.close()
 	graph = _validate(graph, short_name)
+	if (base_dir is None and short_name in (
+			'63_tundra', '44_north_america') and
+			'objective_base_radii' not in graph):
+		from gui.mods.offline_lan_0922 import capture_circles
+		game_root = os.path.abspath(os.path.join(mod_dir(), '..', '..', '..'))
+		graph['objective_base_radii'] = capture_circles.installed_radii(
+			game_root, short_name, graph['objective_bases'])
 	return _pack_cell_arrays(graph)
 
 

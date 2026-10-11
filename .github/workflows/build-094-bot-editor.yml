@@ -1,0 +1,244 @@
+name: Build launcher Bot tactics editor Windows test
+on:
+  push:
+    branches: [fix/094-launcher-bot-editor-20260924]
+    paths: [.github/workflows/build-094-bot-editor.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: launcher-bot-editor-20260924
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/094-launcher-bot-editor-20260924'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tests:server:tools
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify implemented source and correct only build-host metadata loading
+        shell: python
+        run: |
+          import hashlib, pathlib, subprocess
+          base='3d969bb0d37e78b9ffe111a0172777c6743635a7'
+          subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
+          path=pathlib.Path('tools/bot_editor_build.py')
+          text=path.read_text()
+          digest=hashlib.sha256(path.read_bytes()).hexdigest()
+          expected='01f1802b871487b9baa085044f5be62e99b27b1d137448e96ac1fc5250e2985b'
+          if digest != expected:
+              assert digest=='f993bb80456188594907601b61085acb2df11cea53e07a822f88c341aa2b995b'
+              old="    sys.path.insert(0,os.path.join(ROOT,'src/res/scripts/client'))\n    from gui.mods.offline_lan_0922 import bot_editor_maps\n    assert len(bot_editor_maps.MAPS) == 41\n    for name, row in bot_editor_maps.MAPS.items():\n"
+              new="    # Python 2.7 build hosts do not provide retail gui/mods packages.\n    metadata = {}\n    eval(compile(common.read(os.path.join(ROOT, PREFIX + 'bot_editor_maps.py')),\n                 'bot_editor_maps.py', 'exec'), metadata)\n    assert len(metadata['MAPS']) == 41\n    for name, row in metadata['MAPS'].items():\n"
+              assert text.count(old)==1
+              path.write_text(text.replace(old,new))
+          assert hashlib.sha256(path.read_bytes()).hexdigest()==expected
+          pathlib.Path('build-evidence').mkdir(exist_ok=True)
+          subprocess.run(['python','tools/bot_editor_build.py','verify'],check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+      - name: Verify actual profile consumers and retained game mechanics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest test_port_0922_bot_tactics_editor test_port_0922_spg_initial_positions test_port_0922_spg_tracking test_port_0922_ram_contact_followup test_port_0922_bot_gunnery -v 2>&1 | tee build-evidence/editor-runtime-tests.log
+          python tools/test_094_repairs.py 2>&1 | tee build-evidence/retained-mechanics.log
+          python tools/test_bot080_radio_contract.py 2>&1 | tee build-evidence/radio-contract.log
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/startup-contract.log
+      - name: Commit verified build helper only
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add tools/bot_editor_build.py
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'Verify editor map data independently of retail namespace [skip ci]'
+            git push origin HEAD:refs/heads/fix/094-launcher-bot-editor-20260924
+          fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > build-evidence/source-sha.txt
+          git diff 5fda392c88c0987ed110a097e3c668d0be011fa2 -- > build-evidence/final-source.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot-editor-source-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot-editor-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot-editor-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and compare actual Python 2.7 client bytecode
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/bot_editor_build.py verify
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-v094-bot-editor-${{ github.run_id }}-${{ github.run_attempt }}" python:2.7.18 sh -c 'python build_wotmod.py && python tools/bot_editor_build.py bytecode && python tools/test_bot080_radio_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod' 2>&1 | tee build-evidence/compiled-tests.log
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot-editor-compiled-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot-editor-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-package:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-v094-bot-editor-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r launcher/requirements-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot-editor-client-${{ github.run_id }}
+          path: dist
+      - name: Test launcher and actual Tk editor callbacks, then build
+        shell: pwsh
+        run: |
+          python tools/bot_editor_build.py verify
+          if ($LASTEXITCODE -ne 0) { throw 'Source verification failed' }
+          New-Item -ItemType Directory -Force build-evidence | Out-Null
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py' -v 2>&1 | Tee-Object ../build-evidence/launcher-core-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher core tests failed' }
+          python -m unittest discover -s tests -p 'test_launcher_window.py' -v 2>&1 | Tee-Object ../build-evidence/launcher-window-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher window tests failed' }
+          python -m unittest discover -s tests -p 'test_bot_tactics_ui.py' -v 2>&1 | Tee-Object ../build-evidence/editor-gui-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Actual editor callbacks failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed' }
+      - name: Verify exact installed payload and licenses
+        run: python tools/bot_editor_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check both executable versions
+        shell: pwsh
+        run: |
+          foreach ($exe in @('launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe','dist/server/WoT-0.9.22-LAN-Server.exe')) {
+            $v=(Get-Item $exe).VersionInfo
+            if ($v.FileVersion -ne '0.9.4' -or $v.ProductVersion -ne '0.9.4') { throw "Incorrect version: $exe" }
+          }
+      - name: Exercise the actual packaged editor and runtime plan reader
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $report=Join-Path $PWD 'build-evidence/packaged-editor-smoke.json'
+          $process=Start-Process -FilePath $exe -ArgumentList '--verify-bot-editor',('"'+$report+'"') -PassThru
+          if (-not $process.WaitForExit(120000)) { & taskkill.exe /PID $process.Id /T /F; throw 'Packaged editor timeout' }
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report }
+            throw 'Packaged editor failed'
+          }
+          $result=Get-Content $report -Raw | ConvertFrom-Json
+          if (-not $result.ok -or -not $result.isolated_profile -or $result.map_count -ne 41) { throw 'Invalid editor receipt' }
+          Get-Content $report
+      - name: Start the actual packaged server and verify readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe=@'
+          import os,sys
+          sys.path.insert(0,os.path.join(os.getcwd(),'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22','127.0.0.1',28782,timeout=1.0) else 1)
+          '@
+          $process=Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+            $ready=$false; $deadline=(Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { throw 'Server exited before readiness' }
+              $probe | python -
+              if ($LASTEXITCODE -eq 0) { $ready=$true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw 'Server readiness failed' }
+          } finally {
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+            $global:LASTEXITCODE=0
+          }
+          python -c "import json;from pathlib import Path;Path('build-evidence/server-readiness.json').write_text(json.dumps({'ready':True,'native_game_tested':False,'port':28782}))"
+          if ($LASTEXITCODE -ne 0) { throw 'Readiness receipt failed' }
+      - name: Package complete clean Windows test ZIP
+        run: python tools/bot_editor_build.py package launcher/dist/wot-0.9.22-offline-battles
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot-editor-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-094-bot-editor-${{ github.run_id }}-Windows
+          path: |
+            wot-0.9.22-offline-battles-0.9.4-bot-editor-test-20260924-Windows-x64.zip
+            wot-0.9.22-offline-battles-0.9.4-bot-editor-test-20260924-Windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

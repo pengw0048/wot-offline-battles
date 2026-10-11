@@ -130,6 +130,33 @@ class CrashTextTest(unittest.TestCase):
         self.assertIsNone(
             report_environment.crash_text(self._dump(b"\0" + template + b"\0")))
 
+    def test_native_ownership_assertion_keeps_its_buildagent_source_path(self):
+        # Shape of the real #1513 abort in report 83fea4595275. A source
+        # location is evidence, even though printf templates also contain it.
+        banner = (
+            b'Application E:/wot/WorldOfTanks.exe crashed 09.16.2026 at '
+            b'05:14:18\r\nMessage:\r\nMF_ASSERT_DEV FAILED: isOwning() && '
+            b'"This wrapper own nothing"\n'
+            b'D:\\BuildAgent\\work\\wotd_Stable\\wc\\programming\\wot\\lib\\'
+            b'wot_svarog\\py_wrappers\\py_systems.cpp(46)\n'
+            b'Memory status:\r\nSystem: 1161502720/3221225472 '
+            b'[36.06% used]\r\n')
+        payload = b'\0' * 1000 + banner + b'\0' * 1000
+        for cut in range(1000, 1000 + len(banner), 13):
+            scanner = report_environment.CrashTextScanner()
+            scanner.feed(payload[:cut])
+            scanner.feed(payload[cut:])
+            text = scanner.result()
+            self.assertEqual(banner.decode('ascii').strip(), text)
+
+    def test_assertion_printf_template_with_source_path_is_not_an_event(self):
+        template = (
+            b'Application %s crashed %s at %s\nMessage:\n'
+            b'MF_ASSERT_DEV FAILED: %s\n'
+            b'D:\\BuildAgent\\work\\wot_svarog\\py_systems.cpp(%d)\n')
+        self.assertIsNone(report_environment.crash_text(
+            self._dump(b'\0' + template + b'\0')))
+
     def test_a_dump_with_no_banner_reports_nothing(self):
         self.assertIsNone(
             report_environment.crash_text(self._dump(b"\xff" * 200000)))

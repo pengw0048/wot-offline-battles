@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Static collision for server-accepted detached turret poses.
+"""Geometry for accepted worker-owned detached turret poses.
 
 The native turret and gun hit testers remain separate. Their descriptor boxes
-bound vehicle contact and navigation; shells still use the exact hit testers.
+bound compound-body vehicle contact; shells still use the exact hit testers.
 Every query uses the accepted rest pose and server clock, never a local arc.
 """
 
@@ -12,6 +12,7 @@ import math
 from gui.mods.offline_lan_0922 import destructibles_sensor
 from gui.mods.offline_lan_0922 import shot_geometry
 from gui.mods.offline_lan_0922 import turret_detachment
+from gui.mods.offline_lan_0922 import vehicle_physics
 
 
 _ROTATION_SLICE = math.pi / 36.0
@@ -173,13 +174,15 @@ def _moving_components(descriptor):
             ('hull', component_bounds(hull), hull_position))
 
 
-def _component_sweeps(bounds, offset, start, end):
+def _component_sweeps(bounds, offset, start, end, pivot=None):
     """Cover the continuous translated and rotated box without contact rays.
 
     Fixed orientation uses its exact four-generator swept zonotope. For a
     changing Euler pose, a bounded angular slice adds the analytic maximum
     displacement of any descriptor corner from its midpoint orientation.
-    Translation stays exact within each slice. This includes pitch and roll.
+    Translation stays exact within each slice. Track pivots rotate the origin
+    around the stationary belt as well; an analytic radial bound covers that
+    arc rather than replacing it with its endpoint chord.
     """
     start_position, start_attitude = start
     end_position, end_attitude = end
@@ -187,18 +190,32 @@ def _component_sweeps(bounds, offset, start, end):
     deltas = tuple((end_attitude[axis] - start_attitude[axis] + math.pi) %
                    (2.0 * math.pi) - math.pi for axis in range(3))
     rotation = sum(abs(value) for value in deltas)
-    steps = max(1, int(math.ceil(rotation / _ROTATION_SLICE)))
+    pivot_angle = abs(pivot[1]) if pivot is not None else 0.0
+    steps = max(1, int(math.ceil(max(rotation, pivot_angle) / _ROTATION_SLICE)))
     radius = max(math.sqrt(_dot(corner, corner))
                  for corner in _corners(bounds, offset))
     # Every vector differs by at most 2*r*sin(theta/2), with theta bounded
     # by the sum of the three Euler rotations from the slice midpoint.
     padding = 2.0 * radius * math.sin(rotation / (4.0 * steps))
+    if pivot is not None:
+        pivot_position, pivot_delta = pivot
+        radial = _subtract(start_position, pivot_position)
+        arc_end = _add(pivot_position,
+                      shot_geometry.transform_vehicle_vector(radial, pivot_delta))
+        travel = _subtract(end_position, arc_end)
+        radial_length = math.sqrt(radial[0] ** 2 + radial[2] ** 2)
+        padding += 2.0 * radial_length * math.sin(pivot_angle / (4.0 * steps))
     boxes = []
     for index in range(steps):
         middle = (float(index) + 0.5) / steps
         attitude = tuple(start_attitude[axis] + deltas[axis] * middle
                          for axis in range(3))
-        position = _add(start_position, _scale(travel, middle))
+        if pivot is None:
+            position = _add(start_position, _scale(travel, middle))
+        else:
+            position = _add(_add(pivot_position,
+                shot_geometry.transform_vehicle_vector(radial, pivot_delta * middle)),
+                _scale(travel, middle))
         center, axes = _world_box(bounds, offset, position, attitude)
         axes = axes + (_scale(travel, 0.5 / steps),)
         if padding > 0.0:
@@ -242,14 +259,71 @@ def _leaves_overlap(initial, final, sweeps, obstacle):
     if not candidates:
         return False
     initial_gap, normal = max(candidates, key=lambda value: value[0])
-    if _box_gap(final, obstacle, normal) <= initial_gap + _CONTACT_EPSILON:
+    if _box_gap(final, obstacle, normal) > initial_gap + _CONTACT_EPSILON:
+        return all(_box_gap(sweep, obstacle, normal) >=
+                   initial_gap - _CONTACT_EPSILON for sweep in sweeps)
+
+    # A turret can become solid while a hull is already below it. Its
+    # shallowest separating face then points down into the ground. Requiring
+    # improvement on that face alone vetoes every horizontal escape, even a
+    # one-centimetre retreat that never increases penetration.
+    #
+    # Admit tangential escape only from this overhead contact, preserving its
+    # entire vertical support and an outward horizontal face throughout the
+    # sweep. New contacts still block in sweep_blocks, and a turn that deepens
+    # the overhead overlap remains blocked.
+    if (normal[1] >= 0.0 or
+            abs(normal[1]) <= max(abs(normal[0]), abs(normal[2])) or
+            any(_box_gap(sweep, obstacle, normal) <
+                initial_gap - _CONTACT_EPSILON for sweep in sweeps)):
         return False
-    return all(_box_gap(sweep, obstacle, normal) >=
-               initial_gap - _CONTACT_EPSILON for sweep in sweeps)
+    # Suspension and final-pose guards may recheck the unchanged pose after
+    # the horizontal slice. Holding an existing overhead overlap cannot make
+    # it worse; vetoing that no-op would reset the drivetrain before it can
+    # take the next outward step.
+    if final == initial:
+        return True
+    for gap, axis in candidates:
+        if abs(axis[1]) > _CONTACT_EPSILON:
+            continue
+        if (_box_gap(final, obstacle, axis) > gap + _CONTACT_EPSILON and
+                all(_box_gap(sweep, obstacle, axis) >=
+                    gap - _CONTACT_EPSILON for sweep in sweeps)):
+            return True
+    return False
+
+
+def vehicle_support_boxes(descriptor, pose, attached=True):
+    """Use the loaded component boxes in their chassis/body/turret frames."""
+    boxes = []
+    for name, bounds, offset in _moving_components(descriptor):
+        position, attitude = _read_pose(pose.get(name, pose))
+        boxes.append(_world_box(bounds, offset, position, attitude))
+    if attached:
+        position, attitude = _read_pose(pose.get('hull', pose))
+        hull_offset = _xyz(descriptor.chassis.hullPosition)
+        turret_offset = _xyz(descriptor.hull.turretPositions[0])
+        turret_yaw = float(pose.get('aim_yaw', pose['yaw'])) - pose['yaw']
+        turret_angle = (turret_yaw, 0.0, 0.0)
+        turret_mount = _add(hull_offset, turret_offset)
+        gun_angle = (0.0, float(pose.get('gun_pitch', 0.0)), 0.0)
+        for component, offset, local_angle in (
+                (descriptor.turret, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+                (descriptor.gun, _xyz(descriptor.turret.gunPosition), gun_angle)):
+            center, axes = _world_box(component_bounds(component),
+                                      (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), local_angle)
+            center = _add(turret_mount, shot_geometry.transform_vehicle_vector(
+                _add(center, offset), *turret_angle))
+            center = _add(position, shot_geometry.transform_vehicle_vector(center, *attitude))
+            axes = tuple(shot_geometry.transform_vehicle_vector(
+                shot_geometry.transform_vehicle_vector(axis, *turret_angle), *attitude)
+                         for axis in axes)
+            boxes.append((center, axes))
+    return tuple(boxes)
 
 
 class DetachedTurretObstacles(object):
-    """Own immutable, server-accepted landed geometry for one battle round."""
+    """Own the newest server-accepted geometry for one battle round."""
 
     def __init__(self, math_module, log=None):
         self._math = math_module
@@ -260,15 +334,17 @@ class DetachedTurretObstacles(object):
         return len(self._turrets)
 
     def add(self, key, row, descriptor):
-        if key in self._turrets:
+        previous = self._turrets.get(key)
+        if previous is not None and row.get('motion_seq', 0) <= previous['row'].get('motion_seq', 0):
             return False
         flight = row['flight']
-        if not flight.get('landed'):
-            return False
+        if not flight.get('landed') and 'body' not in flight:
+            self._turrets.pop(key, None)
+            return previous is not None
         components = turret_components(descriptor)
         rest = _xyz(flight['rest'])
-        attitude = turret_detachment.rest_attitude(
-            row['attitude'], row['spin'], flight['duration'])
+        attitude = tuple(flight.get('rest_attitude') or turret_detachment.rest_attitude(
+            row['attitude'], row['spin'], flight['duration']))
         radius = max(math.sqrt(_dot(corner, corner))
                      for unused_name, unused_component, offset, bounds in components
                      for corner in _corners(bounds, offset))
@@ -297,7 +373,7 @@ class DetachedTurretObstacles(object):
             'target_bounds': _boxes_world_bounds(boxes),
             'hulls': tuple(hulls),
             'settles_at_ms': (_finite(row['created_time_ms']) +
-                              1000.0 * _finite(flight['duration'])),
+                              (0.0 if 'body' in flight else 1000.0 * _finite(flight['duration']))),
         }
         return True
 
@@ -360,9 +436,30 @@ class DetachedTurretObstacles(object):
         return nearest
 
     def sweep_blocks(self, start_pose, end_pose, descriptor, server_time_ms):
-        ready = tuple(self._ready(server_time_ms))
+        # Dynamic debris is resolved by its impulse owner. Filter it before
+        # constructing vehicle sweeps: planners call this for many headings,
+        # and an ammo-rack explosion must not make every Bot build discarded
+        # rotating hull geometry for the rest of the round.
+        ready = tuple(turret for turret in self._ready(server_time_ms)
+                      if 'body' not in turret['row']['flight'])
         if not ready:
             return False
+        # Use the physical chassis root even when a hydraulic hull supplies
+        # a separate body frame. The endpoint proof excludes ordinary drives
+        # and vehicles whose descriptor permits centre counter-rotation.
+        root_start = _read_pose(start_pose.get('chassis', start_pose))
+        root_end = _read_pose(end_pose.get('chassis', end_pose))
+        pivot_offset = vehicle_physics.track_pivot_from_poses(
+            vehicle_physics.track_pivot_descriptor_params(descriptor), root_start[0],
+            root_start[1][0], root_end[0], root_end[1][0])
+        pivot = None
+        if pivot_offset:
+            pivot_position = _add(root_start[0],
+                shot_geometry.transform_vehicle_vector(
+                    (pivot_offset, 0.0, 0.0), root_start[1][0]))
+            pivot_delta = (root_end[1][0] - root_start[1][0] + math.pi) % (
+                2.0 * math.pi) - math.pi
+            pivot = pivot_position, pivot_delta
         for name, bounds, offset in _moving_components(descriptor):
             # Hydraulic bodies use a different frame from their chassis.
             # Ordinary vehicles keep the shared root pose contract.
@@ -370,10 +467,19 @@ class DetachedTurretObstacles(object):
             end = _read_pose(end_pose.get(name, end_pose))
             initial = _world_box(bounds, offset, *start)
             final = _world_box(bounds, offset, *end)
-            sweeps = _component_sweeps(bounds, offset, start, end)
+            sweeps = _component_sweeps(bounds, offset, start, end, pivot)
             moving_radius = max(math.sqrt(_dot(corner, corner))
                                 for corner in _corners(bounds, offset))
+            if pivot is not None:
+                # The curved origin can leave its endpoint chord by this
+                # exact sagitta; the broad phase must not discard such hits.
+                radial = _subtract(start[0], pivot[0])
+                moving_radius += math.sqrt(radial[0] ** 2 + radial[2] ** 2) * (
+                    1.0 - math.cos(abs(pivot[1]) * 0.5))
             for turret in ready:
+                if (start_pose.get('actor_key') is not None and
+                        turret['row'].get('support_key') == start_pose['actor_key']):
+                    continue
                 if _segment_distance_squared(
                         turret['rest'], start[0], end[0]) > \
                         (turret['radius'] + moving_radius) ** 2:
@@ -390,6 +496,7 @@ class DetachedTurretObstacles(object):
 
     def navigation_hulls(self, server_time_ms):
         return tuple(hull for turret in self._ready(server_time_ms)
+                     if not turret['row'].get('support_key') and 'body' not in turret['row']['flight']
                      for hull in turret['hulls'])
 
     def clear(self):

@@ -100,7 +100,7 @@ FETCHED = %(fetched)r
 
 def fetch_json(url):
     request = urllib.request.Request(url, headers={
-        'User-Agent': 'wot-offline-battles-baker/1.0',
+        'User-Agent': 'wot-0.9.22-offline-battles-baker/1.0',
         'Accept': 'application/json'})
     with urllib.request.urlopen(request, timeout=120) as response:
         return json.loads(response.read().decode('utf8'))
@@ -108,7 +108,7 @@ def fetch_json(url):
 
 def fetch_text(url):
     request = urllib.request.Request(url, headers={
-        'User-Agent': 'wot-offline-battles-baker/1.0'})
+        'User-Agent': 'wot-0.9.22-offline-battles-baker/1.0'})
     with urllib.request.urlopen(request, timeout=180) as response:
         return response.read().decode('utf8', 'replace')
 

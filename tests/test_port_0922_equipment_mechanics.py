@@ -401,6 +401,21 @@ class EquipmentStateTests(unittest.TestCase):
         self.assertAlmostEqual(1.1, factors['turretRotationSpeedFactor'])
         self.assertAlmostEqual(1.5, factors['engineHpLossPerSecond'])
 
+    def test_food_is_a_whole_battle_passive_without_an_activation_transition(self):
+        contract = equipment_mechanics.project_equipment(_equipment(
+            'chocolate', 9, 11009, crewLevelIncrease=10.0,
+            reuseCount=0, cooldownSeconds=0.0))
+        food = equipment_mechanics.EquipmentState(contract)
+        before = food.snapshot(0.0)
+
+        self.assertIsNone(food.activate(10.0))
+
+        self.assertEqual(before, food.snapshot(10.0))
+        self.assertAlmostEqual(
+            10.0,
+            equipment_mechanics.passive_effects(
+                [food])['crewLevelIncrease'])
+
 
 if __name__ == '__main__':
     unittest.main()

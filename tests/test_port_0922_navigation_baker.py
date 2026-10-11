@@ -11,11 +11,16 @@ import math
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / 'tools'
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
+
+from gui.mods.offline_lan_0922 import capture_circles
+from gui.mods.offline_lan_0922 import prebaked_navigation
 
 
 def load_module(name):
@@ -49,6 +54,48 @@ def compiled_space(sections):
 
 
 class CompiledSpace0922Test(unittest.TestCase):
+
+    def test_installed_map_wtcp_supplies_each_team_capture_radius(self):
+        graph = json.loads((ROOT / 'navgraphs/63_tundra.json').read_text())
+        points = []
+        for team, (x, z) in enumerate(graph['objective_bases'], 1):
+            row = bytearray(124)
+            struct.pack_into('<f', row, 48, x)
+            struct.pack_into('<f', row, 56, z)
+            struct.pack_into('<fI', row, 64, 30.0 + team, team)
+            points.append(bytes(row))
+        payload = struct.pack('<II', 124, 2) + b''.join(points)
+        raw_space = compiled_space([('WTCP', 2, payload)])
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / 'res/packages/63_tundra.pkg'
+            package.parent.mkdir(parents=True)
+            with zipfile.ZipFile(package, 'w') as archive:
+                archive.writestr('spaces/63_tundra/space.bin', raw_space)
+            self.assertEqual([31.0, 32.0], capture_circles.installed_radii(
+                temporary, '63_tundra', graph['objective_bases']))
+            config_dir = Path(temporary) / 'mods/configs/offline_lan_0922'
+            nav_dir = config_dir / 'navgraphs'
+            nav_dir.mkdir(parents=True)
+            shutil.copy2(ROOT / 'navgraphs/63_tundra.json', nav_dir)
+            with mock.patch.object(prebaked_navigation, 'mod_dir',
+                                   return_value=str(config_dir)):
+                loaded = prebaked_navigation.load_graph('63_tundra')
+            self.assertEqual([31.0, 32.0], loaded['objective_base_radii'])
+        with self.assertRaisesRegex(ValueError, 'both objectives'):
+            capture_circles.radii_from_space(
+                raw_space, [[500.0, 500.0], graph['objective_bases'][1]])
+
+    def test_authored_mittengard_capture_circles_match_ctf_objectives(self):
+        data = json.loads((ROOT / 'tests/fixtures/thepit_wtcp_circles.json').read_text())
+        graph = json.loads((ROOT / 'navgraphs/100_thepit.json').read_text())
+        points = data['control_points']
+        self.assertEqual([30.0, 30.0], baker.ctf_base_radii(
+            points, graph['objective_bases']))
+        self.assertEqual(graph['objective_base_radii'], baker.ctf_base_radii(
+            list(reversed(points)), graph['objective_bases']))
+        for invalid in (points[:1], points + [dict(points[1], radius=50.0)]):
+            with self.assertRaises(baker.UnsafeBakeInputError):
+                baker.ctf_base_radii(invalid, graph['objective_bases'])
 
     def test_ordinary_routes_use_one_canonical_reversible_polyline(self):
         graph = {'bake': {'soft_route_fallbacks': []}}
@@ -523,6 +570,60 @@ class CompiledSpace0922Test(unittest.TestCase):
                 self.assertNotIn(
                     'fallback', data['spawn_formation_source'].lower())
 
+    def test_murovanka_spawn_formation_clears_every_soft_destructible_obb(self):
+        graph = json.loads(
+            (ROOT / 'navgraphs' / '11_murovanka.json').read_text())
+        catalog = json.loads(
+            (ROOT / 'destructibles' / '11_murovanka.json').read_text())
+        quantization = float(catalog['locator_quantization'])
+        records = []
+        for instance in catalog['instances']:
+            resource = catalog['resources'][instance[12]]
+            if resource['kind'] not in ('falling', 'fragile'):
+                continue
+            values = [float(value) / quantization
+                      for value in instance[:12]]
+            transform = (
+                values[3], values[4], values[5], 0.0,
+                values[6], values[7], values[8], 0.0,
+                values[9], values[10], values[11], 0.0,
+                values[0], values[1], values[2], 1.0,
+            )
+            bounds = resource['boxes'][instance[13]][:6]
+            records.append(baker._soft_destructible_spawn_obb(
+                transform, bounds))
+        legacy = types.SimpleNamespace(
+            VEHICLE_GROUND_CLEARANCE=0.65,
+            VEHICLE_CLEARANCE_HEIGHT=2.4)
+        obstacles = types.SimpleNamespace(
+            raster_size=1.0, cells={}, soft_spawn_obbs=records)
+        validation = graph['validation']
+        half_width = validation['spawn_vehicle_half_width_metres']
+        half_length = validation['spawn_vehicle_half_length_metres']
+
+        # The captured M41 90 birth pose is inside wire (32386, 24).
+        self.assertTrue(baker.spawn_soft_destructible_obb_blocked(
+            obstacles, -26.0, 386.0, 3.829, math.pi,
+            half_width, half_length, legacy))
+        failures = []
+        for team in ('1', '2'):
+            for slot, pose in enumerate(graph['spawn_formations'][team]):
+                if baker.spawn_soft_destructible_obb_blocked(
+                        obstacles, pose[0], pose[2], pose[1], pose[3],
+                        half_width, half_length, legacy):
+                    failures.append((team, slot))
+
+        self.assertEqual([], failures)
+        self.assertEqual(30, sum(
+            len(formation)
+            for formation in graph['spawn_formations'].values()))
+        self.assertIs(
+            True,
+            validation['spawn_soft_destructible_obb_clearance'])
+        self.assertEqual(
+            baker.SPAWN_SOFT_DESTRUCTIBLE_CLEARANCE,
+            validation['spawn_soft_destructible_clearance_metres'])
+
     def test_shipped_manifest_hashes_the_complete_rebaked_batch(self):
         graph_root = ROOT / 'navgraphs'
         manifest = json.loads((graph_root / 'manifest.json').read_text())
@@ -660,97 +761,32 @@ class CompiledSpace0922Test(unittest.TestCase):
             space.CompiledSpace(data).require_safe_navigation_sources()
         self.assertIn('refusing', str(error.exception))
 
-    def test_compiled_soft_destructibles_skip_only_falling_and_fragile(self):
-        transforms = [tuple([float(index)] + [0.0] * 15)
-                      for index in range(4)]
+    def test_soft_spawn_clearance_honours_rotated_half_metre_boundary(self):
+        identity = (1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0)
+        touching = baker._soft_destructible_spawn_obb(
+            identity, (2.5, 0.7, -0.25, 3.5, 2.0, 0.25))
+        inside_clearance = baker._soft_destructible_spawn_obb(
+            identity, (2.49, 0.7, -0.25, 3.5, 2.0, 0.25))
+        legacy = types.SimpleNamespace(
+            VEHICLE_GROUND_CLEARANCE=0.65,
+            VEHICLE_CLEARANCE_HEIGHT=2.4)
 
-        class ModelInstances(object):
-            _data = {'transforms': transforms}
-
-            @staticmethod
-            def model_ids():
-                return iter((0, 1, 2, 3))
-
-        class Strings(object):
-            @staticmethod
-            def get(value):
-                return 'objects/type%d.primitives/indices' % value
-
-        model_data = {
-            'model_info_items': [
-                {'type': 0}, {'type': 1}, {'type': 2}, {'type': 3}],
-            'models_loddings': [{'lod_begin': index}
-                                for index in range(4)],
-            'lod_renders': [
-                {'render_set_begin': index, 'render_set_end': index}
-                for index in range(4)],
-            'renders': [{'prims_name_fnv': index} for index in range(4)],
-        }
-        compiled = types.SimpleNamespace(sections={
-            'BSMI': ModelInstances(),
-            'BSMO': types.SimpleNamespace(_data=model_data),
-            'BWST': Strings(),
-        })
-
-        keys, counts = baker.compiled_soft_destructible_instances(compiled)
-
-        self.assertEqual({
-            ('objects/type1.primitives_processed', transforms[1]),
-            ('objects/type2.primitives_processed', transforms[2]),
-        }, keys)
-        self.assertEqual({
-            'falling': 1,
-            'fragile': 1,
-            'structures_preserved': 1,
-            'primitive_transform_keys': 2,
-        }, counts)
-
-    def test_compiled_local_collision_bounds_preserve_low_obstacle_rule(self):
-        transforms = [tuple([float(index)] + [0.0] * 15)
-                      for index in range(2)]
-
-        class ModelInstances(object):
-            _data = {'transforms': transforms}
-
-            @staticmethod
-            def model_ids():
-                return iter((0, 1))
-
-        class Strings(object):
-            @staticmethod
-            def get(value):
-                return 'objects/type%d.primitives/indices' % value
-
-        model_data = {
-            'models_colliders': [
-                {'collision_bounds_min': (0.0, -0.1, 0.0),
-                 'collision_bounds_max': (2.0, 0.5, 2.0)},
-                {'collision_bounds_min': (0.0, -0.1, 0.0),
-                 'collision_bounds_max': (2.0, 0.56, 2.0)},
-            ],
-            'models_loddings': [{'lod_begin': index}
-                                for index in range(2)],
-            'lod_renders': [
-                {'render_set_begin': index, 'render_set_end': index}
-                for index in range(2)],
-            'renders': [{'prims_name_fnv': index} for index in range(2)],
-        }
-        compiled = types.SimpleNamespace(sections={
-            'BSMI': ModelInstances(),
-            'BSMO': types.SimpleNamespace(_data=model_data),
-            'BWST': Strings(),
-        })
-
-        keys, counts = baker.compiled_local_obstacle_instances(compiled, 0.65)
-
-        self.assertEqual({
-            ('objects/type0.primitives_processed', transforms[0]),
-        }, keys)
-        self.assertEqual({
-            'instances': 1,
-            'primitive_transform_keys': 1,
-            'maximum_local_height': 0.65,
-        }, counts)
+        # At 90 degrees the 2 m half-length lies on X.  Its clearance shell
+        # ends at x=2.5, where exact contact is allowed but 1 cm inside is not.
+        self.assertFalse(baker.spawn_soft_destructible_obb_blocked(
+            types.SimpleNamespace(soft_spawn_obbs=(touching,)),
+            0.0, 0.0, 0.0, math.pi / 2.0, 1.0, 2.0, legacy))
+        self.assertTrue(baker.spawn_soft_destructible_obb_blocked(
+            types.SimpleNamespace(soft_spawn_obbs=(inside_clearance,)),
+            0.0, 0.0, 0.0, math.pi / 2.0, 1.0, 2.0, legacy))
+        # Without the rotation the 1 m half-width lies on X, so the same body
+        # remains a full metre outside the expanded chassis footprint.
+        self.assertFalse(baker.spawn_soft_destructible_obb_blocked(
+            types.SimpleNamespace(soft_spawn_obbs=(inside_clearance,)),
+            0.0, 0.0, 0.0, 0.0, 1.0, 2.0, legacy))
 
     def test_compiled_bridge_keeps_walkable_deck_and_blocks_body(self):
         deck = ((0.0, 2.0, 0.0), (4.0, 2.0, 0.0), (0.0, 2.0, 4.0))

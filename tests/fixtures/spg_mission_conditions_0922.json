@@ -1,0 +1,242 @@
+{
+  "136": {
+    "add": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>5</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>5</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>5</greaterOrEqual></results></and></postBattle>"
+  },
+  "137": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results><vehicleKills><greaterOrEqual>2</greaterOrEqual></vehicleKills></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results></and></postBattle>"
+  },
+  "138": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>4</greaterOrEqual></vehicleStun><win /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>4</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "139": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>50</greaterOrEqual></vehicleStun><win /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>50</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "140": {
+    "add": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1000</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>5</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1000</greaterOrEqual></results></and></postBattle>"
+  },
+  "141": {
+    "add": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>3</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>"
+  },
+  "142": {
+    "add": "<postBattle><and><results><key>stunned</key><greaterOrEqual>3</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunned</key><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>"
+  },
+  "143": {
+    "add": "<postBattle><and><results><key>xp</key><max>5</max></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>5</max></results></and></postBattle>"
+  },
+  "144": {
+    "add": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>5</greaterOrEqual></results><isAlive /><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>5</greaterOrEqual></results></and></postBattle>"
+  },
+  "145": {
+    "add": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>2000</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>2000</greaterOrEqual></results></and></postBattle>"
+  },
+  "146": {
+    "add": "<postBattle><and><multiStunEvent><stunnedByShot>2</stunnedByShot><greaterOrEqual>2</greaterOrEqual></multiStunEvent><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><multiStunEvent><stunnedByShot>2</stunnedByShot><greaterOrEqual>2</greaterOrEqual></multiStunEvent></and></postBattle>"
+  },
+  "147": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>1</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>"
+  },
+  "148": {
+    "add": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>6</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>8</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>6</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>8</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>6</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>8</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>6</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>8</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "149": {
+    "add": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>600</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>600</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>600</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>100</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>600</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "150": {
+    "add": "<postBattle><and><results><key>xp</key><max>3</max></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1500</greaterOrEqual></results><results><key>damageDealt</key><greaterOrEqual>1500</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>3</max></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1500</greaterOrEqual></results></and></postBattle>"
+  },
+  "211": {
+    "add": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>7</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>6</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>7</greaterOrEqual></results></and></postBattle>"
+  },
+  "212": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>150</greaterOrEqual></results><vehicleKills><greaterOrEqual>3</greaterOrEqual></vehicleKills></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>150</greaterOrEqual></results></and></postBattle>"
+  },
+  "213": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>6</greaterOrEqual></vehicleStun><win /><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>6</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "214": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>80</greaterOrEqual></vehicleStun><isAlive /><win /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>80</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "215": {
+    "add": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>2000</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>6</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>2000</greaterOrEqual></results></and></postBattle>"
+  },
+  "216": {
+    "add": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>5</greaterOrEqual></results><win /><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>5</greaterOrEqual></results></and></postBattle>"
+  },
+  "217": {
+    "add": "<postBattle><and><results><key>stunned</key><greaterOrEqual>5</greaterOrEqual></results><win /><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunned</key><greaterOrEqual>5</greaterOrEqual></results></and></postBattle>"
+  },
+  "218": {
+    "add": "<postBattle><and><results><key>xp</key><max>3</max></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>3</max></results></and></postBattle>"
+  },
+  "219": {
+    "add": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>8</greaterOrEqual></results><isAlive><hideInGui /></isAlive><win /><results><key>isNotSpotted</key><equal>1</equal></results></and></postBattle>",
+    "main": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>8</greaterOrEqual></results></and></postBattle>"
+  },
+  "220": {
+    "add": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>3000</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>2</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>3000</greaterOrEqual></results></and></postBattle>"
+  },
+  "221": {
+    "add": "<postBattle><and><multiStunEvent><stunnedByShot>3</stunnedByShot></multiStunEvent><results><key>stunDuration</key><greaterOrEqual>150</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><multiStunEvent><stunnedByShot>3</stunnedByShot></multiStunEvent></and></postBattle>"
+  },
+  "222": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>150</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>2</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>150</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>2</greaterOrEqual></results></and></postBattle>"
+  },
+  "223": {
+    "add": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>8</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>10</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>8</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>10</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>8</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>10</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>8</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>10</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "224": {
+    "add": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>180</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>800</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>180</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>800</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>180</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>800</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>180</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>800</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "225": {
+    "add": "<postBattle><and><results><key>xp</key><max>1</max></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>2500</greaterOrEqual></results><results><key>damageDealt</key><greaterOrEqual>3000</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>1</max></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>2500</greaterOrEqual></results></and></postBattle>"
+  },
+  "286": {
+    "add": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>10</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>8</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>10</greaterOrEqual></results></and></postBattle>"
+  },
+  "287": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>200</greaterOrEqual></results><vehicleKills><greaterOrEqual>4</greaterOrEqual></vehicleKills></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>200</greaterOrEqual></results></and></postBattle>"
+  },
+  "288": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>8</greaterOrEqual></vehicleStun><win /><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>8</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "289": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>120</greaterOrEqual></vehicleStun><isAlive /><win /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>120</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "290": {
+    "add": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>3000</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>8</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>3000</greaterOrEqual></results></and></postBattle>"
+  },
+  "291": {
+    "add": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>6</greaterOrEqual></results><win /><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>6</greaterOrEqual></results></and></postBattle>"
+  },
+  "292": {
+    "add": "<postBattle><and><results><key>stunned</key><greaterOrEqual>6</greaterOrEqual></results><win /><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunned</key><greaterOrEqual>6</greaterOrEqual></results></and></postBattle>"
+  },
+  "293": {
+    "add": "<postBattle><and><results><key>xp</key><max>1</max></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>1</max></results></and></postBattle>"
+  },
+  "294": {
+    "add": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>10</greaterOrEqual></results><isAlive><hideInGui /></isAlive><win /><results><key>isNotSpotted</key><equal>1</equal></results></and></postBattle>",
+    "main": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>10</greaterOrEqual></results></and></postBattle>"
+  },
+  "295": {
+    "add": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>4000</greaterOrEqual></results><win /><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>4000</greaterOrEqual></results></and></postBattle>"
+  },
+  "296": {
+    "add": "<postBattle><and><multiStunEvent><stunnedByShot>3</stunnedByShot><greaterOrEqual>2</greaterOrEqual></multiStunEvent><results><key>stunDuration</key><greaterOrEqual>200</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><multiStunEvent><stunnedByShot>3</stunnedByShot><greaterOrEqual>2</greaterOrEqual></multiStunEvent></and></postBattle>"
+  },
+  "297": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>200</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>3</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>200</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>"
+  },
+  "298": {
+    "add": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>10</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>12</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>10</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>12</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>10</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>12</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>10</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>12</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "299": {
+    "add": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>250</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>1000</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>250</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>1000</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>250</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>1000</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>250</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>1000</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "300": {
+    "add": "<postBattle><and><results><key>xp</key><max>1</max><total /></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>3500</greaterOrEqual></results><results><key>damageDealt</key><greaterOrEqual>4000</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>1</max><total /></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>3500</greaterOrEqual></results></and></postBattle>"
+  },
+  "61": {
+    "add": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>3</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>3</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunNum</key><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>"
+  },
+  "62": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>50</greaterOrEqual></results><vehicleKills><greaterOrEqual>1</greaterOrEqual></vehicleKills></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>50</greaterOrEqual></results></and></postBattle>"
+  },
+  "63": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>2</greaterOrEqual></vehicleStun><win /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><eventCount /><greaterOrEqual>2</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "64": {
+    "add": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>30</greaterOrEqual></vehicleStun><win /></and></postBattle>",
+    "main": "<postBattle><and><vehicleStun><classes>heavyTank AT-SPG</classes><greaterOrEqual>30</greaterOrEqual></vehicleStun></and></postBattle>"
+  },
+  "65": {
+    "add": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>600</greaterOrEqual></results><vehicleDamage><eventCount /><greaterOrEqual>3</greaterOrEqual></vehicleDamage></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>600</greaterOrEqual></results></and></postBattle>"
+  },
+  "66": {
+    "add": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>2</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damagedVehicleCntAssistedStun</key><key>damagedVehicleCntAssistedTrack</key></plus><greaterOrEqual>2</greaterOrEqual></results></and></postBattle>"
+  },
+  "67": {
+    "add": "<postBattle><and><results><key>stunned</key><greaterOrEqual>2</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunned</key><greaterOrEqual>2</greaterOrEqual></results></and></postBattle>"
+  },
+  "68": {
+    "add": "<postBattle><and><results><key>xp</key><max>7</max></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>7</max></results></and></postBattle>"
+  },
+  "69": {
+    "add": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>3</greaterOrEqual></results><isAlive /></and></postBattle>",
+    "main": "<postBattle><and><results><key>critsCount</key><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>"
+  },
+  "70": {
+    "add": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1000</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><results><plus><key>damageDealt</key><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1000</greaterOrEqual></results></and></postBattle>"
+  },
+  "71": {
+    "add": "<postBattle><and><multiStunEvent><stunnedByShot>2</stunnedByShot></multiStunEvent><results><key>stunDuration</key><greaterOrEqual>50</greaterOrEqual></results></and></postBattle>",
+    "main": "<postBattle><and><multiStunEvent><stunnedByShot>2</stunnedByShot></multiStunEvent></and></postBattle>"
+  },
+  "72": {
+    "add": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>50</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>1</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>stunDuration</key><greaterOrEqual>50</greaterOrEqual></results><results><plus><key>killsAssistedStun</key><key>killsAssistedTrack</key></plus><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>"
+  },
+  "73": {
+    "add": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>4</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>6</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>4</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>6</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><vehicleDamage><eventCount /><greaterOrEqual>4</greaterOrEqual></vehicleDamage><results><key>stunNum</key><greaterOrEqual>6</greaterOrEqual></results><unit><unitVehicleDamage><hideInGui /><eventCount /><greaterOrEqual>4</greaterOrEqual></unitVehicleDamage></unit><unit><results><hideInGui /><key>stunNum</key><greaterOrEqual>6</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "74": {
+    "add": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>70</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>400</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>70</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>400</greaterOrEqual></results></unit></or><win /></and></postBattle>",
+    "main": "<postBattle><and><or><results><key>stunDuration</key><greaterOrEqual>70</greaterOrEqual></results><results><key>damageAssistedTrack</key><greaterOrEqual>400</greaterOrEqual></results><unit><results><hideInGui /><key>stunDuration</key><greaterOrEqual>70</greaterOrEqual></results></unit><unit><results><hideInGui /><key>damageAssistedTrack</key><greaterOrEqual>400</greaterOrEqual></results></unit></or></and></postBattle>"
+  },
+  "75": {
+    "add": "<postBattle><and><results><key>xp</key><max>5</max></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1000</greaterOrEqual></results><results><key>damageDealt</key><greaterOrEqual>1000</greaterOrEqual></results><win /></and></postBattle>",
+    "main": "<postBattle><and><results><key>xp</key><max>5</max></results><results><plus><key>damageAssistedStun</key><key>damageAssistedTrack</key></plus><greaterOrEqual>1000</greaterOrEqual></results></and></postBattle>"
+  }
+}

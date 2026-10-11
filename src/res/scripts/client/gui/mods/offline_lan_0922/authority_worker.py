@@ -8,6 +8,7 @@ native battle space.  That synthetic identity is projected into this process'
 BattleRuntime messages and is never sent to the LAN server.
 """
 
+import collections
 import math
 import os
 import sys
@@ -19,12 +20,12 @@ from gui.mods.offline_lan_0922.lan_client import (
     HUMAN_RAM_TIMELINE_CAPABILITY, MAX_MOTION_TIME_US,
     MAX_PROJECTILE_ID, PROTOCOL_VERSION, PROJECTILE_LEDGER_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
-    PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+    PLAYER_ENVIRONMENT_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
     RAM_CONTACT_LEDGER_CAPABILITY, RICOCHET_CONTINUATION_CAPABILITY,
     SIMULATION_WORKER_CAPABILITY,
     WORKER_AUTHORITY_ID, LANClient,
     _canonical_effective_params, _canonical_vehicle_compact_descr,
-    _exact_int, _projectile_int_range, _safe_text,
+    _exact_int, _monotonic_time, _projectile_int_range, _safe_text,
     _strict_capabilities, _strict_mapping_list)
 
 
@@ -185,14 +186,36 @@ class AuthorityWorkerLANClient(LANClient):
         self.spawn = {
             'x': 0.0, 'y': WORKER_DUMMY_Y, 'z': 0.0, 'yaw': 0.0}
         self._worker_avatar = None
-        self.on_batch_drained = None
+        self._frame_intervals = collections.deque()
+        self._frame_seconds = 0.0
+        self._last_frame_stamp = None
+        self._frame_scope = None
 
-    def _poll(self):
-        """Drain one wire batch before running worker-only urgent work."""
-        LANClient._poll(self)
-        callback = self.on_batch_drained
-        if callable(callback):
-            callback(self)
+    def record_frame_interval(self, seconds, now=None):
+        """Measure one hidden render callback, including work between frames."""
+        seconds = float(seconds)
+        if seconds <= 0.0 or math.isnan(seconds) or math.isinf(seconds):
+            return
+        scope = (self.round_id, self.authority_epoch)
+        if scope != self._frame_scope:
+            self._frame_scope = scope
+            self._frame_intervals.clear()
+            self._frame_seconds = 0.0
+        self._frame_intervals.append(seconds)
+        self._frame_seconds += seconds
+        while (len(self._frame_intervals) > 1 and
+               self._frame_seconds - self._frame_intervals[0] >= 1.0):
+            self._frame_seconds -= self._frame_intervals.popleft()
+        self._last_frame_stamp = _monotonic_time() if now is None else float(now)
+
+    def frame_latency_ms(self, now=None):
+        """Return 1000 / hidden FPS; transport RTT is a separate measurement."""
+        if (not self._frame_intervals or
+                self._frame_scope != (self.round_id, self.authority_epoch)):
+            return None
+        now = _monotonic_time() if now is None else float(now)
+        mean = self._frame_seconds / len(self._frame_intervals)
+        return 1000.0 * max(mean, now - self._last_frame_stamp)
 
     def is_bot_authority(self):
         """Only the dedicated worker identity may own bot simulation."""
@@ -322,13 +345,13 @@ class AuthorityWorkerLANClient(LANClient):
                 SIMULATION_WORKER_CAPABILITY not in capabilities or
                 RAM_CONTACT_LEDGER_CAPABILITY not in capabilities or
                 HUMAN_RAM_TIMELINE_CAPABILITY not in capabilities or
-                PLAYER_FIRE_INTENT_CAPABILITY not in capabilities or
+                PLAYER_PROJECTILE_OWNER_CAPABILITY not in capabilities or
                 PLAYER_ENVIRONMENT_CAPABILITY not in capabilities or
                 EFFECTIVE_PARAMS_CAPABILITY not in capabilities or
                 RICOCHET_CONTINUATION_CAPABILITY not in capabilities or
                 RAM_CONTACT_LEDGER_CAPABILITY not in server_capabilities or
                 HUMAN_RAM_TIMELINE_CAPABILITY not in server_capabilities or
-                PLAYER_FIRE_INTENT_CAPABILITY not in
+                PLAYER_PROJECTILE_OWNER_CAPABILITY not in
                 server_capabilities or
                 PLAYER_ENVIRONMENT_CAPABILITY not in
                 server_capabilities or
@@ -592,6 +615,18 @@ class AuthorityWorkerLANClient(LANClient):
         if not isinstance(message, dict):
             return
         kind = message.get('type')
+        if kind == 'worker_ping':
+            # _handle_message is drained by BigWorld's main-thread poll,
+            # after any native simulation work that delayed this callback.
+            player_id = _exact_int(message.get('player_id'))
+            seq = _exact_int(message.get('seq'))
+            if player_id is not None and player_id > 0 and seq is not None and seq > 0:
+                self._send({
+                    'type': 'worker_pong', 'player_id': player_id, 'seq': seq,
+                    'frame_ms': self.frame_latency_ms(),
+                    'round_id': message.get('round_id'),
+                    'authority_epoch': message.get('authority_epoch')})
+            return
         trusted_player_static = None
         if kind == 'welcome':
             self._handle_worker_welcome(message)
@@ -736,7 +771,6 @@ class WorkerSession(object):
         self._probe_sample = None
         self._process_sample_time = None
         self._process_cpu_seconds = None
-        self._urgent_player_fire = False
 
     def _ensure_runtime_boundaries(self):
         if self._bigworld is None:
@@ -776,15 +810,6 @@ class WorkerSession(object):
             self._config.get('port', 28782), on_event=on_event,
             bigworld=self._bigworld)
 
-        def on_batch_drained(source_client):
-            if (not self._stopped and generation == self._generation and
-                    self.client is source_client):
-                try:
-                    self._on_batch_drained()
-                except Exception as error:
-                    self._worker_failure(error)
-
-        client.on_batch_drained = on_batch_drained
         self.client = client
         self.state = 'connecting'
         try:
@@ -1041,7 +1066,6 @@ class WorkerSession(object):
         # a later stop can therefore retry instead of abandoning a live map.
         if self.runtime is runtime:
             self.runtime = None
-        self._urgent_player_fire = False
         self._active_round_id = None
         self._last_progress_frame = 0
         self._next_progress_time = 0.0
@@ -1087,7 +1111,6 @@ class WorkerSession(object):
         if client is not None:
             try:
                 client.on_event = None
-                client.on_batch_drained = None
                 client.stop()
             except Exception as cleanup_error:
                 cleanup_failed = True
@@ -1149,9 +1172,7 @@ class WorkerSession(object):
             else:
                 self.state = 'standby'
         elif kind in ('snapshot', 'events', 'battle_live',
-                      'bot_observation', 'fire_intent',
-                      'player_destructible_contact',
-                      'fire_intent_result'):
+                      'bot_observation', 'player_destructible_contact'):
             if (self.runtime is not None and
                     not self.client.is_bot_authority()):
                 self._retire_or_fail('authority_lost')
@@ -1167,13 +1188,8 @@ class WorkerSession(object):
                 self.runtime.on_events(message)
             elif kind == 'battle_live':
                 self.runtime.on_battle_live(message)
-            elif kind == 'fire_intent':
-                if self.runtime.on_fire_intent(message):
-                    self._urgent_player_fire = True
             elif kind == 'player_destructible_contact':
                 self.runtime.on_player_destructible_contact(message)
-            elif kind == 'fire_intent_result':
-                self.runtime.on_fire_intent_result(message)
             else:
                 self.runtime.on_bot_observation(message)
         elif kind == 'battle_failed':
@@ -1183,24 +1199,6 @@ class WorkerSession(object):
             self._worker_failure(RuntimeError(
                 _transport_failure_text(kind, message)))
         self._write_status()
-
-    def _on_batch_drained(self):
-        """Resolve admitted player fire after this wire batch is coherent."""
-        if not self._urgent_player_fire:
-            return False
-        self._urgent_player_fire = False
-        runtime = self.runtime
-        client = self.client
-        if (runtime is None or client is None or
-                not client.is_bot_authority() or
-                self._active_round_id is None):
-            return False
-        flush = getattr(
-            runtime, 'flush_admitted_player_fire_intents', None)
-        if not callable(flush):
-            raise RuntimeError(
-                'worker player-fire fast path is unavailable')
-        return bool(flush())
 
     def _write_status(self, force=False):
         now = time.time()
@@ -1496,7 +1494,6 @@ class WorkerSession(object):
             if client is not None:
                 try:
                     client.on_event = None
-                    client.on_batch_drained = None
                     client.stop()
                 except Exception as error:
                     if cleanup_error is None:
@@ -1505,7 +1502,6 @@ class WorkerSession(object):
                     if self.client is client:
                         self.client = None
         self._active_round_id = None
-        self._urgent_player_fire = False
         self._pending_start = None
         self._pending_start_deadline = None
         self._last_progress_frame = 0

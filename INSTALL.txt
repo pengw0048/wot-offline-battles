@@ -7,7 +7,7 @@ no payload, installer or runtime for any earlier client line.
 Close the game, then extract the contents of this folder directly into the
 directory that contains WorldOfTanks.exe. It contains:
 
-  mods\0.9.22.0.1\org.peng.offline_lan_0922_<version>.wotmod
+  mods\0.9.22.0.1\org.colorfulmeans.offline_lan_0922_<version>.wotmod
   mods\configs\offline_lan_0922\config.json
   mods\configs\offline_lan_0922\navgraphs\
   mods\configs\offline_lan_0922\foliage\
@@ -17,7 +17,7 @@ directory that contains WorldOfTanks.exe. It contains:
   tools\AUTHORITY_WORKER_PROBE.md
   tools\authority_worker_probe_supervisor.py
 
-Move every older org.peng.offline_lan_0922*.wotmod out of
+Move every older org.colorfulmeans.offline_lan_0922*.wotmod out of
 mods\0.9.22.0.1 before copying this version. Start the LAN server on one PC,
 then edit mods\configs\offline_lan_0922\server_endpoint.json when the server is
 not 127.0.0.1:28782. That user-owned file is never shipped in this package.
@@ -31,15 +31,19 @@ ask for the EULA and display settings again.
 Play
 ----
 
-1. In the launcher, select LAN and click Start LAN room. It starts the LAN
-   server and its one hidden simulation worker; a room never uses a visible
-   player client as a fallback authority. Start the client without logging
-   into an online account. On a fresh profile, accept the stock EULA once.
-2. Fit a tank in the garage and click Battle!. The client joins the LAN room.
+1. On the host PC, select Host a LAN battle in the launcher. Other players
+   select Join a LAN battle and enter the host's address. Click Start game.
+   The host launcher starts the server and its one hidden simulation worker;
+   a room never uses a visible player client as a fallback authority. Start
+   without logging into an online account. On a fresh profile, accept the
+   stock EULA once. Single player creates a separate local room.
+2. Fit a tank in the garage and click Battle! or Create Platoon. Both join
+   the configured LAN room; Create Platoon does not use retail invitations.
    The battle runs the tank the garage fitted, with its modules, health, armour
    and gun.
 3. Every player sees the waiting room, drawn over the stock battle queue
-   screen. The first player is the room host. RANDOM MAP lets the server pick;
+   screen. The first player is the room host. Select the same team to play
+   together. RANDOM MAP lets the server pick;
    MAP opens the client's own map window, where the host picks a standard map
    and a battle time and confirms. The room comes back with that choice, and
    START BATTLE starts it. LEAVE closes the room and returns you to the
@@ -55,16 +59,88 @@ Play
    notification is requested. A player who left after dying receives the same
    durable result on reconnect.
 
-Only standard battles are supported. In this client the internal name of
-standard battle is `ctf`; assault and encounter maps are excluded.
+Standard battles and LAN training rooms use standard maps. In this client the
+internal name of standard battle is `ctf`; assault and encounter maps are
+excluded. Choose Training to open a room without standard matchmaking. The
+host selects the map, teams and duration, optionally enables Bots, then starts.
+Training gives no rewards, medals or mission progress and repairs are free;
+spent ammunition and consumables are still charged normally.
 
 The garage
 ----------
 
-Every vehicle in your client is owned, and every module in its own tech tree is
-unlocked. Each vehicle arrives with its top chassis, turret, gun, engine, radio
-and fuel tank, plus an automatic fire extinguisher, a large first aid kit and a
-large repair kit. Every item costs nothing.
+In a fully unlocked save every vehicle in your client is owned, and every
+module in its own tech tree is unlocked. Each vehicle arrives with its top
+chassis, turret, gun, engine, radio and fuel tank, plus an automatic fire
+extinguisher, a large first aid kit and a large repair kit. A new-account save
+starts with starter vehicles. Purchases use the displayed currency and price.
+
+Armory Special Offers includes the five retired vehicles and compatible
+vehicles from the first official bond shop (2019). The retired prices are
+offline settings: Aufkl. Panther 6000, SU-122-54 12000, Object 430B,
+Object 263B and Waffentrager E 100 15000 bonds each. Every offer includes a
+garage slot and 100% crew. Offers use the native Shop rows and vehicle artwork,
+with bond prices. Owned vehicles follow the available ones and cannot be
+purchased again. The offer filters are separate from the regular Shop filters.
+
+Personal Reserves uses the native inventory, missions and purchase tabs with
+44 historical bonus/duration combinations across four resource types. Active
+reserves appear in the three slots in both the window and account popover.
+Purchases and activation produce system messages.
+Close or Escape returns to the garage. Up to three different types may be
+active together. The Missions tab opens three daily offline goals, randomly
+selected from fixed-reward templates at 00:00 UTC (08:00 Beijing time).
+Reopening or restarting cannot reroll that day's selection or claim it twice.
+An existing fixed set keeps its progress until the next reset. Reserve prices
+and these daily goals are custom offline rules. Completed daily goals appear
+in the lower-left battle-result area, with one combined reward popup per
+battle and a system message. Regular campaign missions now settle supported
+battle conditions and mission rewards separately. The launcher can edit all
+300 completion states, automatically completing required earlier tasks without
+honors. Missing rewards arrive on the next garage load. Female crew rewards
+use the game's own nationality, vehicle and role chooser. Clearing any main
+completion resets its chain's final and all five classes in every later
+operation, withdrawing the corresponding rewards and dependent operation
+rewards. Clearing honors alone changes no other task and withdraws only its
+additional rewards. Campaign badges and their equipped selection are removed
+when their requirements are no longer met. Failed withdrawals leave the old
+progress and property unchanged and report the reason in the editor and system
+messages. Only unexpired mission-earned premium time can be reclaimed.
+
+Reward tanks are withdrawn, returning crew and fitted items to storage. Before
+any tank grant, an already owned vehicle instead receives its full original
+credit value, without the sale discount or custom bond-shop price. Cancellation
+reclaims that recorded compensation rather than the previously owned vehicle.
+This is an explicit offline policy. Successful withdrawal allows a later
+completion to grant the reward again. The original battle TAB shows the active
+personal mission for that vehicle; the battle-result quest area and system
+messages show progress and actual rewards. Launcher changes queue their reward
+and withdrawal messages for the next garage load.
+Orders come from mission honors rewards; the launcher has no order-count input.
+The balance is derived from honored-final claims minus current pledges; old
+manually supplied extras are removed. Four operations can earn 20 orders in
+total. Cancelling and redoing missions or reclaiming pledges cannot exceed
+those earned entitlements.
+
+The badge slot in the account popover opens the native badge page. Acquired
+badges can be selected, and ownership and selection are saved with the account.
+The launcher can edit ownership using the installed client's badge catalogue.
+
+Premium uses the original 360, 180, 30, 7, 3 and 1-day options.
+An active premium account now applies the legacy 50% credit and experience
+bonus to actual battle income, including crew training. Native results show
+the separate standard and premium columns. Each tank's first standard-battle
+victory of the day earns double experience; the reset is 00:00 UTC, and the
+garage's first-win indicators refresh when the account returns to the lobby.
+Each garage vehicle card uses the native x2 badge until that tank wins, then
+shows its ordinary artwork until the next reset. Losses and draws do not
+consume the bonus. The native vehicle tooltip shows the daily multiplier too.
+Premium eligibility is fixed at battle start. These rules apply to newly
+settled battles; previously saved results are not recalculated or paid again.
+Friendly-fire result labels come from the installed client localization;
+credits include penalty and compensation, while XP includes penalty only.
+Voice chat is unavailable offline because the client has no Vivox account
+service; sound settings do not repeatedly try to initialize it.
 
 A complex optional device is destroyed when you take it off, unless you pay
 the removal price -- the same choice the game gives you.
@@ -166,7 +242,7 @@ Troubleshooting
 - No connection: check the server address, the host firewall and that the
   server window is still open.
 - `unsupported compression type`: an older wotmod is still present. Keep only
-  the org.peng.offline_lan_0922 wotmod from this package.
+  the org.colorfulmeans.offline_lan_0922 wotmod from this package.
 - The client keeps its own files. Your saved address, account state, garage and
   configuration survive a reinstall.
 - If a crash leaves this mod stuck at login, close the game, rename

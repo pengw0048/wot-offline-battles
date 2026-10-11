@@ -20,6 +20,7 @@ from gui.mods.offline_lan_0922 import config as port_config
 from gui.mods.offline_lan_0922 import authority_worker as authority_worker_module
 from gui.mods.offline_lan_0922 import equipment_mechanics
 from gui.mods.offline_lan_0922 import lan_client as lan_client_module
+from gui.mods.offline_lan_0922 import snapshot_delta
 from gui.mods.offline_lan_0922.account_rpc.state import AccountState
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient, WORKER_BUSY_RETRY_SECONDS, WORKER_DUMMY_Y,
@@ -854,7 +855,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+                lan_client_module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
             ],
@@ -880,7 +881,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 lan_client_module.DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+                lan_client_module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
                 lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
@@ -918,7 +919,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
                 lan_client_module.HUMAN_RAM_TIMELINE_CAPABILITY,
                 lan_client_module.LEAN_SNAPSHOT_MANIFEST_CAPABILITY,
                 lan_client_module.RAM_CONTACT_LEDGER_CAPABILITY,
-                lan_client_module.PLAYER_FIRE_INTENT_CAPABILITY,
+                lan_client_module.PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 lan_client_module.PLAYER_ENVIRONMENT_CAPABILITY,
                 lan_client_module.EFFECTIVE_PARAMS_CAPABILITY,
                 lan_client_module.RICOCHET_CONTINUATION_CAPABILITY,
@@ -991,12 +992,20 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'bot_manifest': [], 'players': [snapshot_human], 'bots': [],
             'projectiles': [],
         }
+        equipment_rows = [{
+            'id': 11, 'vehicle': 'ussr:R11_MS-1', 'team': 1, 'slot': 1,
+            'x': 1.0, 'y': 0.0, 'z': 2.0,
+            'equipment_states': _projected_bot_equipment_states()}]
+        snapshot['bots'], snapshot['bot_equipment_contracts'] = (
+            bot_state_codec.encode_snapshot_equipment(equipment_rows))
         with mock.patch.object(
                 lan_client_module.effective_params_wire, 'canonical',
                 wraps=lan_client_module.effective_params_wire.canonical
         ) as canonical:
             client._handle_message(snapshot)
             self.assertEqual(0, canonical.call_count)
+            self.assertEqual(equipment_rows, client.last_snapshot['bots'])
+            self.assertNotIn('bot_equipment_contracts', client.last_snapshot)
 
             full_snapshot = dict(snapshot)
             full_snapshot['server_tick'] = 1
@@ -1032,6 +1041,43 @@ class AuthorityWorkerClientTests(unittest.TestCase):
         self.assertIs(
             client._published_player_effective_params[WORKER_AUTHORITY_ID],
             snapshot_dummy['effective_params'])
+        self.assertIsNone(client.last_error)
+
+    def test_poll_materializes_snapshot_before_worker_projects_player_rows(self):
+        events = []
+        world = mock.Mock()
+        world.callback.return_value = 1
+        client = AuthorityWorkerLANClient(
+            '127.0.0.1', 28782, bigworld=world,
+            on_event=lambda kind, message: events.append((kind, message)))
+        client.running = True
+        client.phase = 'battle'
+        client.round_id = 1
+        frame = {
+            'type': 'snapshot', 'protocol': PROTOCOL_VERSION,
+            'round_id': 1, 'map': '01_karelia', 'authority_epoch': 0,
+            'server_tick': 1, 'server_time_ms': 12,
+            'bot_state_revision': 1, 'projectile_revision': 0,
+            'bot_authority_id': WORKER_AUTHORITY_ID,
+            'bot_manifest': [], 'players': [_human()], 'bots': [],
+            'projectiles': [],
+        }
+        wire, unused = snapshot_delta.encode(frame, None, 1)
+        pending = client._decode_received_snapshot(
+            wire, client._transport_generation)
+        self.assertNotIn('players', pending)
+        client._queue_message(pending, client._transport_generation)
+        with mock.patch.object(client, '_project_runtime_message',
+                               wraps=client._project_runtime_message) as project:
+            client._poll()
+        self.assertEqual(1, project.call_count)
+        projected_input = project.call_args[0][0]
+        self.assertEqual([1], [row['id'] for row in projected_input['players']])
+        json.dumps(projected_input)
+        self.assertEqual(['snapshot'], [kind for kind, unused in events])
+        self.assertEqual([1, WORKER_AUTHORITY_ID], [
+            row['id'] for row in client.last_snapshot['players']])
+        self.assertTrue(client.running)
         self.assertIsNone(client.last_error)
 
     def test_worker_full_snapshot_cache_hit_requires_exact_scalar_types(self):
@@ -1429,7 +1475,7 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             'native adapter failed',
             str(session._worker_failure.call_args[0][0]))
 
-    def test_worker_routes_terminal_player_launch_result_to_runtime(self):
+    def test_worker_does_not_route_another_owners_launch_rejection(self):
         world = _DrawWorld()
         client = _WorkerClient()
         runtime = _WorkerRuntime(client, world)
@@ -1448,9 +1494,9 @@ class AuthorityWorkerClientTests(unittest.TestCase):
 
             session._on_event('fire_intent_result', message)
 
-        self.assertEqual([message], runtime.fire_intent_results)
+        self.assertEqual([], runtime.fire_intent_results)
 
-    def test_bigworld_poll_flushes_fire_intent_at_batch_tail(self):
+    def test_worker_poll_has_no_human_fire_batch_tail_work(self):
         scheduled = []
 
         def callback(delay, function):
@@ -1505,8 +1551,8 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             session.runtime = runtime
             session._active_round_id = 7
             client.on_event = session._on_event
-            client.on_batch_drained = (
-                lambda source: session._on_batch_drained())
+            self.assertFalse(hasattr(client, 'on_batch_drained'))
+            self.assertFalse(hasattr(session, '_on_batch_drained'))
 
             client._queue_message(message)
             client._queue_message(result)
@@ -1514,12 +1560,11 @@ class AuthorityWorkerClientTests(unittest.TestCase):
             self.assertEqual(1, len(scheduled))
             scheduled[0][1]()
 
-        self.assertEqual(['intent', 'result', 'flush'], [
-            call[0] for call in calls])
-        self.assertTrue(all(
-            threading.current_thread() is call[1] for call in calls))
-        self.assertEqual(message, calls[0][2])
-        self.assertEqual(result, calls[1][2])
+        # Stale human-fire frames cannot create worker work, even if a legacy
+        # runtime double still exposes the old methods. Polling stays alive.
+        self.assertEqual([], calls)
+        self.assertTrue(client.running)
+        self.assertEqual(2, len(scheduled))
 
     def test_worker_routes_player_destructible_contact_to_runtime(self):
         world = _DrawWorld()

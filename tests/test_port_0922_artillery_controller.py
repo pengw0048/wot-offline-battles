@@ -52,6 +52,89 @@ class ArtilleryControllerTests(unittest.TestCase):
             'yaw': math.pi * 0.5, 'speed': 8.0,
         }
 
+    def test_pending_and_cached_family_requests_do_not_rebuild_candidates(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                controller = self.module.ArtilleryController()
+                source, target, descriptor = self.source(), self.target(), _descriptor()
+                controller.request(source, target, descriptor, 0, 1.0)
+                if completed:
+                    controller.advance(1.01, 1000, lambda first, second: None)
+                original = controller._candidates
+                calls = []
+                def counted(*args):
+                    calls.append(args)
+                    return original(*args)
+                controller._candidates = counted
+                for index in range(5):
+                    moved = dict(target, position=(float(index), 0.0, 560.0))
+                    ready, result = controller.request(
+                        source, moved, descriptor, 0, 1.02 + index * 0.01)
+                    self.assertEqual(completed, ready)
+                    self.assertEqual(completed, result is not None)
+                self.assertEqual([], calls)
+
+    def test_completed_family_solution_still_releads_current_target_once(self):
+        controller = self.module.ArtilleryController()
+        source, target, descriptor = self.source(), self.target(), _descriptor()
+        controller.request(source, target, descriptor, 0, 1.0)
+        controller.advance(1.01, 1000, lambda first, second: None)
+        original = controller._candidates
+        calls = []
+        def counted(*args):
+            calls.append(args)
+            return original(*args)
+        controller._candidates = counted
+        moved = dict(target, position=(30.0, 0.0, 560.0))
+        solution = controller.solution(source, moved, descriptor, 0, 1.02)
+        self.assertIsNotNone(solution)
+        self.assertGreater(solution['aim_position'][0], 30.0)
+        self.assertEqual(1, len(calls))
+
+    def test_cached_family_failure_rebuilds_only_after_retry_deadline(self):
+        controller = self.module.ArtilleryController()
+        source, target, descriptor = self.source(), self.target(), _descriptor()
+        controller.request(source, target, descriptor, 0, 1.0)
+        controller.advance(1.01, 1000, lambda first, second: False)
+        original = controller._candidates
+        calls = []
+        def counted(*args):
+            calls.append(args)
+            return original(*args)
+        controller._candidates = counted
+        self.assertEqual((True, None), controller.request(
+            source, target, descriptor, 0, 1.1))
+        self.assertEqual([], calls)
+        self.assertEqual((False, None), controller.request(
+            source, target, descriptor, 0, 1.27))
+        self.assertEqual(1, len(calls))
+
+    def test_exact_pending_and_failure_reuse_path_until_retry_deadline(self):
+        controller = self.module.ArtilleryController()
+        arguments = (self.source(), self.target(), _descriptor(), 0, 1,
+                     (0.0, 2.0, 0.0), 0.01, 0.08, 0.81)
+        controller.request_launch(*(arguments + (1.0,)))
+        original = self.module.ballistics.ballistic_path
+        calls = []
+        def counted(*args):
+            calls.append(args)
+            return original(*args)
+        self.module.ballistics.ballistic_path = counted
+        try:
+            self.assertEqual((False, None), controller.request_launch(
+                *(arguments + (1.01,))))
+            self.assertEqual([], calls)
+            controller.advance(1.02, 1000, lambda first, second: False)
+            self.assertEqual((True, None), controller.request_launch(
+                *(arguments + (1.1,))))
+            self.assertEqual([], calls)
+            self.assertEqual((False, None), controller.request_launch(
+                *(arguments + (1.28,))))
+            self.assertEqual(1, len(calls))
+        finally:
+            self.module.ballistics.ballistic_path = original
+
+
     def test_real_b4_pitch_limit_uses_valid_low_root_not_invalid_high_root(self):
         controller = self.module.ArtilleryController()
         candidates = controller._candidates(
@@ -116,7 +199,7 @@ class ArtilleryControllerTests(unittest.TestCase):
         self.assertEqual((False, None), controller.result(
             moved, target, 0, 3.0))
 
-    def test_moving_target_job_can_finish_but_solution_expires_quickly(self):
+    def test_moving_target_job_survives_observation_poll_but_expires(self):
         controller = self.module.ArtilleryController()
         source = self.source()
         target = self.target()
@@ -140,8 +223,10 @@ class ArtilleryControllerTests(unittest.TestCase):
 
         self.assertIsNotNone(solution)
         self.assertLess(now - 4.0, 0.35)
+        self.assertIsNotNone(controller.solution(
+            source, moved, _descriptor(), 0, now + 1.0))
         self.assertIsNone(controller.solution(
-            source, moved, _descriptor(), 0, now + 0.36))
+            source, moved, _descriptor(), 0, now + 2.51))
 
     def test_moving_target_preserves_job_and_reaches_clear_high_arc(self):
         controller = self.module.ArtilleryController(maximum_step=0.12)
@@ -275,6 +360,30 @@ class ArtilleryControllerTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(path), 2)
         self.assertLessEqual(0.8 / float(len(path) - 1), 0.12)
+
+    def test_launch_workload_receipt_matches_the_completed_native_queries(self):
+        for step in (0.04, 0.12, 0.20):
+            with self.subTest(step=step):
+                controller = self.module.ArtilleryController(maximum_step=step)
+                arguments = (
+                    self.source(), dict(self.target(), speed=0.0),
+                    _descriptor(), 0, 1,
+                    (0.0, 2.0, 0.0), 0.01, 0.08, 0.81)
+                queries = []
+                controller.request_launch(*(arguments + (1.0,)))
+                for frame in range(1, 20):
+                    now = 1.0 + frame / 20.0
+                    used = controller.advance(
+                        now, 4, lambda start, end: (
+                            queries.append((start, end)) or None))
+                    self.assertLessEqual(used, 4)
+                    ready, receipt = controller.request_launch(
+                        *(arguments + (now,)))
+                    if ready:
+                        break
+                self.assertIsNotNone(receipt)
+                self.assertEqual(len(queries), receipt['proof_chords'])
+                self.assertEqual(step, receipt['proof_maximum_step'])
 
     def test_cancel_launch_discards_pending_and_pinned_receipts(self):
         controller = self.module.ArtilleryController(maximum_step=0.2)

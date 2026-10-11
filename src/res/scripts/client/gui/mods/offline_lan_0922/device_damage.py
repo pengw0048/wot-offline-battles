@@ -607,6 +607,19 @@ def repair_seconds(name, td, repair_skill_pct=0.0, repair_factor=None):
     return base / factor
 
 
+def damaged_hp(current_hp, hp_loss, destroyed=False):
+    """Apply a successful module hit, restarting an unfinished repair.
+
+    While red, the accumulated HP represents repair progress, not a restored
+    functional device. A new positive module hit discards that progress. A
+    failed saving throw, hull-only hit or zero loss cannot restart anything.
+    """
+    hp_loss = max(0.0, float(hp_loss))
+    if destroyed and hp_loss > 0.0:
+        return 0.0
+    return max(0.0, float(current_hp) - hp_loss)
+
+
 def repair_step_hp(current_hp, name, td, dt, repair_skill_pct=0.0,
                    repair_factor=None):
     """Advance a device's HP one tick toward its regen cap (~50%). Returns the new

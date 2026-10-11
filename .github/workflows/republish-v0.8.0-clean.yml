@@ -1,0 +1,208 @@
+name: Rebuild corrected v0.8.0 release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/republish-v0.8.0-clean.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-server:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+      - name: Install pinned Windows server packager
+        run: python -m pip install -r server/requirements-windows-build.txt
+      - name: Build Windows LAN server
+        shell: pwsh
+        run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v080-clean-server
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  client-payload:
+    needs: windows-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install Pillow==12.3.0
+      - name: Run client test suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run launcher test suite
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - uses: actions/download-artifact@v4
+        with:
+          name: v080-clean-server
+          path: dist/server
+      - name: Build Python 2.7 0.9.22 client package
+        run: >-
+          docker run --rm --platform linux/amd64 -v "$PWD:/work"
+          -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}"
+          -w /work python:2.7.18
+          python build_wotmod.py
+      - name: Validate client package and diagnostic identity
+        env:
+          EXPECTED_BUILD_IDENTITY: colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+          python - <<'PY'
+          import glob
+          import json
+          import os
+          paths = glob.glob('dist/WoT-0.9.22-LAN-Client-*/mods/configs/offline_lan_0922/build_identity.json')
+          assert len(paths) == 1, paths
+          with open(paths[0], encoding='utf-8') as stream:
+              identity = json.load(stream)
+          expected = os.environ['EXPECTED_BUILD_IDENTITY']
+          assert identity == {
+              'schema': 1,
+              'semanticVersion': '0.8.0',
+              'buildIdentity': expected,
+          }, identity
+          print('Client identity verified: version=0.8.0 build=%s' % expected)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v080-clean-launcher-input
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-launcher-and-release:
+    needs: client-payload
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+      - name: Install pinned Windows packager
+        run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v080-clean-launcher-input
+          path: dist
+      - name: Test launcher on Windows
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Verify source branding and version
+        shell: pwsh
+        run: |
+          @'
+          import os
+          import sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import wot_launcher
+          assert wot_launcher.LAUNCHER_VERSION == '0.8.0'
+          assert wot_launcher.WINDOW_TITLE == 'wot-0.9.22-offline-battles v0.8.0'
+          source = open(os.path.join('launcher', 'wot_launcher.py'), encoding='utf-8').read()
+          assert 'text="wot-0.9.22-offline-battles"' in source
+          print(wot_launcher.WINDOW_TITLE)
+          '@ | python -
+      - name: Build launcher distribution
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify bundled runtime identity and package flat ZIP
+        shell: pwsh
+        env:
+          EXPECTED_BUILD_IDENTITY: colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $appName = "wot-0.9.22-offline-battles"
+          $appRoot = Join-Path $PWD "launcher\dist\$appName"
+          $launcher = Join-Path $appRoot "$appName.exe"
+          if (-not (Test-Path -LiteralPath $launcher)) {
+              throw "Launcher executable is missing"
+          }
+          @'
+          import os
+          import sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          base_dir = os.path.join(os.getcwd(), 'launcher', 'dist', 'wot-0.9.22-offline-battles', '_internal')
+          identity = core.bundled_payload_identity(core.PORT_0_9_22, base_dir=base_dir)
+          expected = os.environ['EXPECTED_BUILD_IDENTITY']
+          assert identity == {
+              'schema': 1,
+              'semanticVersion': '0.8.0',
+              'buildIdentity': expected,
+          }, identity
+          text = core.payload_identity_text(identity)
+          expected_text = 'version=0.8.0 build=%s' % expected
+          assert text == expected_text, (text, expected_text)
+          print('Launcher runtime identity verified: ' + text)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "Bundled runtime identity verification failed" }
+
+          $releaseZip = Join-Path $PWD "wot-0.9.22-offline-battles-0.8.0-Windows-x64.zip"
+          if (Test-Path -LiteralPath $releaseZip) { Remove-Item -LiteralPath $releaseZip -Force }
+          Compress-Archive -Force -Path (Join-Path $appRoot "*") -DestinationPath $releaseZip
+          @'
+          from zipfile import ZipFile
+          path = 'wot-0.9.22-offline-battles-0.8.0-Windows-x64.zip'
+          with ZipFile(path) as archive:
+              names = archive.namelist()
+          assert 'wot-0.9.22-offline-battles.exe' in names
+          assert '_internal/client/0.9.22.zip' in names
+          assert not [n for n in names if n.lower().endswith('.zip') and '/' not in n.rstrip('/')]
+          print('Single-layer release ZIP verified:', path)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "Release ZIP verification failed" }
+      - name: Write corrected v0.8.0 release notes
+        shell: pwsh
+        run: |
+          @'
+          本版本仍为 **v0.8.0**，本次重新构建并替换发布包，修正了启动器外壳版本已经是 0.8.0、但内置客户端 payload 仍携带 0.7.7 / 原构建身份的问题。
+
+          ### 本次修正
+
+          - 启动器窗口、主界面标题、EXE 文件信息统一为 `wot-0.9.22-offline-battles` / `0.8.0`。
+          - 内置 0.9.22 客户端包版本统一为 `0.8.0`。
+          - Mod ID 统一为 `org.colorfulmeans.offline_lan_0922`。
+          - 运行日志的诊断身份改为 `version=0.8.0 build=colorfulmeans-...`，不再显示 `0.7.7` 或 `github-...`。
+          - 清理源码、测试、构建脚本和文档中的旧作者/旧项目品牌残留，同时保留第三方许可证和必要的法律声明。
+          - 发布包保持单层 ZIP，完整解压一次即可运行。
+
+          ### v0.8.0 功能改进
+
+          - 改善车辆近距离碰撞、质量与推动响应。
+          - Bot 贴车后继续尝试脱困，而不是直接停止。
+          - 优化侧向接触和车体旋转限制。
+          - 改善弹药架爆炸后飞脱炮塔的碰撞、落地和状态同步。
+
+          适用客户端：**国服高清版 World of Tanks 0.9.22.0.1 #1513**。
+          '@ | Set-Content -LiteralPath RELEASE_NOTES.md -Encoding utf8
+      - name: Replace v0.8.0 release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload v0.8.0 "wot-0.9.22-offline-battles-0.8.0-Windows-x64.zip" --clobber
+          gh release edit v0.8.0 --title "wot-0.9.22-offline-battles v0.8.0" --notes-file RELEASE_NOTES.md

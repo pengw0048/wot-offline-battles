@@ -73,9 +73,9 @@ HEADER = '''# -*- coding: utf-8 -*-
 Do not edit by hand.  Run ``tools/bake_prices_0922.py "$WOT_0922_CLIENT"``
 to regenerate it against the pinned client.
 
-Each entry is ``(credits, gold, not_in_shop)`` for one item definition name.
+Each entry is ``(credits, gold, not_in_shop[, crystal])`` for one item name.
 Exactly one currency is ever non-zero, because a #1513 ``<price>`` section
-carries either a credit amount or a gold amount. ``not_in_shop`` marks an item
+carries a credit, gold or crystal amount. ``not_in_shop`` marks an item
 the retail shop never offered; it is still a real item with a real price, and
 the launcher uses it to offer the gold vehicles a retail account could not buy.
 
@@ -93,6 +93,7 @@ SELL_PRICE_FACTOR = 0.5
 CREDITS = 0
 GOLD = 1
 NOT_IN_SHOP = 2
+CRYSTAL = 3
 
 '''
 
@@ -137,6 +138,8 @@ def money(price):
     """
     if not price:
         return None
+    if len(price) > CRYSTAL and price[CRYSTAL]:
+        return {'crystal': price[CRYSTAL]}
     return ({'gold': price[GOLD]} if price[GOLD] else
             {'credits': price[CREDITS]})
 '''
@@ -283,9 +286,7 @@ def scan(client_root):
 def _render_table(name, table, comment):
     text = '\n# %s\n%s = {\n' % (comment, name)
     for key in sorted(table):
-        credits_amount, gold, not_in_shop = table[key]
-        text += '    %r: (%d, %d, %s),\n' % (
-            key, credits_amount, gold, not_in_shop)
+        text += '    %r: %r,\n' % (key, table[key])
     return text + '}\n'
 
 

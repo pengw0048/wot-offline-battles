@@ -21,13 +21,15 @@ SPOT_MEMORY_SECONDS = 10.0
 # ``gunner_rancorous`` extends the ordinary visibility lease by two seconds
 # while its living carrier keeps the target inside the five-degree sector.
 DESIGNATED_SPOT_MEMORY_SECONDS = SPOT_MEMORY_SECONDS + 2.0
+# The trained Designated Target directive extends memory by four seconds.
+MAX_SPOT_MEMORY_SECONDS = SPOT_MEMORY_SECONDS + 4.0
 LAST_EFFORT_SECONDS = 2.0
 MOVING_SPEED_EPSILON = 0.5
 SHOT_CAMOUFLAGE_SECONDS = 0.75
 
 # The client package does not carry the cell-app detection implementation.
 # Preserve the existing cap instead of treating a published maximum as an
-# exact #1513 calibration for this port's single-ray coverage approximation.
+# exact #1513 calibration for this port's vegetation coverage approximation.
 CAMOUFLAGE_LIMIT = 0.95
 # Preserve the existing tuning until exact per-asset density and coverage are
 # available. Published vegetation values vary by density; a single ray through
@@ -40,11 +42,12 @@ FOLIAGE_CAMOUFLAGE_LIMIT = 0.60
 # nearby foliage after firing; the exact residual coefficient is unverified.
 FOLIAGE_TRANSPARENCY_DISTANCE = 15.0
 
-# One owner for the spotting ray's geometry.  The hidden worker decides
+# Fallback heights before descriptor collision geometry is available.
+# One owner for spotting geometry. The hidden worker decides
 # spotting and the visible client samples the same pair for its own
 # presentation, so a client ray that is even slightly more permissive draws an
 # enemy the authority never spotted: no spotting credit, no Bot reaction, and
-# no warning for the target.  The vegetation query uses the same two heights.
+# no warning for the target. Vegetation queries share the selected checkpoints.
 OBSERVER_EYE_HEIGHT = 2.0
 TARGET_CHECK_HEIGHT = 1.5
 # Retain the authority ray's existing allowance for a hit near the target
@@ -125,3 +128,88 @@ def is_detected(distance, view_range, camouflage, has_line_of_sight=True):
 		return True
 	return bool(has_line_of_sight and
 		distance <= detection_distance(view_range, camouflage))
+
+
+def descriptor_check_points(descriptor):
+    """Build #1513 cell-side checkpoints from the loaded client collision BSPs.
+
+    VehicleDescriptor.__updateAttributes assigns visibilityCheckPoints only
+    under IS_CELLAPP. Client descriptors therefore need the same construction
+    after their hit testers have loaded; a fixed-height ray loses both the
+    chassis observation port and exposed hull checkpoints.
+    """
+    from gui.mods.offline_lan_0922 import shot_geometry
+    field = shot_geometry._field
+    points = field(descriptor, 'visibilityCheckPoints', ()) or ()
+    if len(points) >= 6:
+        return tuple(points[:6])
+    try:
+        chassis = field(descriptor, 'chassis')
+        hull = field(descriptor, 'hull')
+        turret = field(descriptor, 'turret')
+        hp = shot_geometry._box_point(field(chassis, 'hullPosition'))
+        tp = shot_geometry._box_point(field(hull, 'turretPositions')[0])
+        gp = shot_geometry._box_point(field(turret, 'gunPosition'))
+        hull_box = field(field(hull, 'hitTester'), 'bbox')
+        turret_box = field(field(turret, 'hitTester'), 'bbox')
+        lo = shot_geometry._box_point(hull_box[0])
+        hi = shot_geometry._box_point(hull_box[1])
+        turret_top = shot_geometry._box_point(turret_box[1])[1]
+        top = max(hi[1], tp[1] + turret_top)
+        gun = tuple(tp[i] + gp[i] for i in range(3))
+        center_y = (lo[1] + hi[1]) / 2.0
+        center_z = (lo[2] + hi[2]) / 2.0
+        local = (gun, (0.0, center_y, hi[2]),
+                 (0.0, center_y, lo[2]),
+                 (hi[0], gun[1], center_z),
+                 (lo[0], gun[1], center_z))
+        return ((0.0, hp[1] + top, 0.0),) + tuple(
+            tuple(hp[i] + point[i] for i in range(3)) for point in local)
+    except (AttributeError, TypeError, ValueError, IndexError, KeyError):
+        return ()
+
+
+def vehicle_check_points(descriptor, pose, observer=False, phase=0):
+    """Project six checkpoints, alternating the chassis/turret observer ports."""
+    from gui.mods.offline_lan_0922 import shot_geometry
+    field = shot_geometry._field
+    points = descriptor_check_points(descriptor)
+    position = pose.get('position') or (
+        pose.get('x', 0.0), pose.get('y', 0.0), pose.get('z', 0.0))
+    if len(points) < 6:
+        height = OBSERVER_EYE_HEIGHT if observer else TARGET_CHECK_HEIGHT
+        return ((position[0], position[1] + height, position[2]),)
+    indices = (int(phase) % 2,) if observer else range(6)
+    result = []
+    for index in indices:
+        point = shot_geometry._box_point(points[index])
+        if index == 1:
+            chassis = field(descriptor, 'chassis', {})
+            hull = field(descriptor, 'hull', {})
+            try:
+                hp = shot_geometry._box_point(field(chassis, 'hullPosition'))
+                tp = shot_geometry._box_point(field(hull, 'turretPositions')[0])
+                mount = tuple(hp[i] + tp[i] for i in range(3))
+                yaw = float(pose.get('yaw', 0.0))
+                turret_yaw = field(field(descriptor, 'gun', {}), 'staticTurretYaw')
+                if turret_yaw is None:
+                    turret_yaw = pose.get('turret_yaw', pose.get('aim_yaw', yaw) - yaw)
+                relative = tuple(point[i] - mount[i] for i in range(3))
+                relative = shot_geometry._rotate_y(relative, float(turret_yaw))
+                point = tuple(mount[i] + relative[i] for i in range(3))
+            except (TypeError, ValueError, IndexError, KeyError):
+                pass
+        result.append(shot_geometry.transform_vehicle_point(
+            point, position, pose.get('yaw', 0.0),
+            pose.get('pitch', 0.0), pose.get('roll', 0.0)))
+    return tuple(result)
+
+
+def radio_link(first_position, first_range, second_position, second_range):
+    """Direct legacy radio contact: sum both ranges, never relay chains."""
+    distance_squared = sum((float(first_position[i]) -
+                            float(second_position[i])) ** 2 for i in range(3))
+    first_range, second_range = float(first_range), float(second_range)
+    reach = max(0.0, first_range) + max(0.0, second_range)
+    return (first_range > 0.0 and second_range > 0.0 and
+            distance_squared <= reach * reach)

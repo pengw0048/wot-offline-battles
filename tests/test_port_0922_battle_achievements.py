@@ -71,6 +71,20 @@ RECORD_DB_IDS_0922 = {
     ('achievements', 'medalGore'): 298,
     ('achievements', 'medalCoolBlood'): 299,
     ('achievements', 'medalStark'): 300,
+    # Additional records cross-checked against the 0.9.22 reference layout.
+    ('achievements', 'impenetrable'): 517,
+    ('achievements', 'reliableComradeSeries'): 518,
+    ('achievements', 'reliableComrade'): 519,
+    ('achievements', 'maxAimerSeries'): 520,
+    ('achievements', 'shootToKill'): 521,
+    ('achievements', 'fighter'): 522,
+    ('achievements', 'duelist'): 523,
+    ('achievements', 'demolition'): 524,
+    ('achievements', 'arsonist'): 525,
+    ('achievements', 'bonecrusher'): 526,
+    ('achievements', 'charmed'): 527,
+    ('achievements', 'even'): 528,
+    ('singleAchievements', 'aimer'): 529,
 }
 
 EMPTY_STATS = dict((name, 0) for name in RECEIPT_STAT_NAMES)
@@ -124,7 +138,7 @@ class AchievementTableTests(unittest.TestCase):
     def test_every_awardable_name_maps_to_an_exact_1513_record(self):
         for name in AWARDABLE_ACHIEVEMENTS:
             self.assertIn(
-                ('achievements', name), RECORD_DB_IDS_0922,
+                battle_achievements.achievement_record(name), RECORD_DB_IDS_0922,
                 '%s is not a #1513 achievements record' % name)
 
     def test_unawarded_names_are_documented_and_never_awarded(self):
@@ -751,7 +765,8 @@ class DossierAccumulationTests(unittest.TestCase):
         self.assertTrue(store.accept(second))
         progress = store.progress()
         self.assertEqual(
-            progress['achievements'], {'warrior': 2, 'medalKolobanov': 1})
+            progress['achievements'], {'warrior': 2, 'medalKolobanov': 1,
+                                       'reliableComradeSeries': 2})
         self.assertEqual(
             progress['vehicles']['ussr:R11_MS-1']['achievements'],
             {'warrior': 2, 'medalKolobanov': 1})
@@ -831,7 +846,7 @@ class DossierAccumulationTests(unittest.TestCase):
         second['round_id'] = 9
         self.assertTrue(reloaded.accept(second))
         self.assertEqual(
-            {'warrior': 1}, reloaded.progress()['achievements'])
+            {'warrior': 1, 'reliableComradeSeries': 1}, reloaded.progress()['achievements'])
         self.assertEqual(
             {'warrior': 1},
             reloaded.progress()['vehicles']['ussr:R11_MS-1']['achievements'])

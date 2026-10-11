@@ -1,4 +1,4 @@
-WoT 0.9.22 Offline LAN Server
+WoT 0.9.22 Offline LAN Server v0.9.2
 ================================
 
 1. Double-click WoT-0.9.22-LAN-Server.exe.
@@ -35,12 +35,12 @@ other server instance and try again.
 License, source, and bundled runtimes
 =====================================
 
-This test-candidate server is part of wot-offline-battles and is distributed
+This test-candidate server is part of wot-0.9.22-offline-battles and is distributed
 under GNU GPL version 3, without warranty. Corresponding source and the
 complete project license are available at:
 
-https://github.com/pengw0048/wot-offline-battles/tree/peng/0922-feedback-candidate
-https://github.com/pengw0048/wot-offline-battles/blob/peng/0922-feedback-candidate/LICENSE
+https://github.com/colorfulmeans/wot-0.9.22-offline-battles/tree/main/server
+https://github.com/colorfulmeans/wot-0.9.22-offline-battles/blob/main/LICENSE
 
 The executable bundles CPython 3.11.9, distributed under the Python Software
 Foundation License Version 2 and the licenses/notices for software incorporated

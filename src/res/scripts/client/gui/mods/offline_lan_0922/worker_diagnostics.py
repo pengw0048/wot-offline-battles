@@ -22,6 +22,15 @@ MAX_CAPTURE_ACTORS = 64
 MAX_FRAME_ACTORS_REPORTED = 6
 MAX_ACTOR_STAGES_REPORTED = 8
 MAX_GEOMETRY_KEYS = 2048
+MAX_NATIVE_ROWS = 1024
+NATIVE_ENTRY_COLUMNS = (
+    'name', 'opcode', 'calls', 'errors', 'inclusive_ms', 'parse_ms',
+    'body_self_ms', 'pack_ms', 'callback_inclusive_ms',
+    'child_native_inclusive_ms', 'reentrant_calls')
+NATIVE_CALLBACK_COLUMNS = (
+    'family', 'opcode', 'calls', 'rows', 'errors', 'inclusive_ms',
+    'self_ms', 'nested_native_inclusive_ms')
+NATIVE_COUNTER_COLUMNS = ('name', 'observations', 'sum', 'max')
 
 # Only synchronous, instrumented Python calls bind this observer. No native
 # hook, entity, scheduled callback or process-global simulation state is owned.
@@ -153,6 +162,8 @@ class WorkerCombatDiagnostics(object):
         self._capture_detail_stages = {}
         self._capture_detail_counts = {}
         self._capture_detail_frames = 0
+        self._native_frame = None
+        self._native_capture = None
         self._reset_actor_frame()
 
     def _reset_actor_frame(self):
@@ -294,6 +305,7 @@ class WorkerCombatDiagnostics(object):
                 self._capture_detail_stages = {}
                 self._capture_detail_counts = {}
                 self._capture_detail_frames = 0
+                self._native_capture = None
             self._frame = int(frame)
             self._now = now
             self.active = self._deadline is not None
@@ -304,6 +316,7 @@ class WorkerCombatDiagnostics(object):
             self._waits = []
             self._selected_waits = []
             self._queue_snapshot = {}
+            self._native_frame = None
             self._reset_actor_frame()
             return self.active
         except Exception:
@@ -323,6 +336,97 @@ class WorkerCombatDiagnostics(object):
 
     def call(self, stage, function, *args, **kwargs):
         return call(self, stage, function, *args, **kwargs)
+
+    def native_frontier(self, snapshot):
+        """Keep the native ledger separate from overlapping Python stages.
+
+        Only parse/body_self/pack and callback self are disjoint native-ledger
+        costs. Inclusive columns explain nesting; they must not be added to
+        those costs or to the surrounding Python stage totals.
+        """
+        if not self.active or not self.detail_active:
+            return
+        try:
+            frame, wall, depth, reentrant, entries, callbacks, counters = snapshot
+            if int(frame) != self._frame or self._native_frame is not None:
+                raise ValueError('native diagnostic frame mismatch')
+            result = {'frames': 1, 'wall_ms': self._finite(wall) * 1000.0,
+                      'max_depth': int(depth),
+                      'reentrant_entries': int(reentrant),
+                      'entries': {}, 'callbacks': {}, 'counters': {}}
+            for key, source, width, times in (
+                    ('entries', entries, len(NATIVE_ENTRY_COLUMNS), range(4, 10)),
+                    ('callbacks', callbacks, len(NATIVE_CALLBACK_COLUMNS), range(5, 8))):
+                if len(source) > MAX_NATIVE_ROWS:
+                    raise ValueError('native diagnostic row overflow')
+                for raw in source:
+                    if len(raw) != width:
+                        raise ValueError('native diagnostic row width')
+                    row = [str(raw[0])] + [self._finite(v) for v in raw[1:]]
+                    for index in range(1, width):
+                        if index in times:
+                            row[index] *= 1000.0
+                        else:
+                            row[index] = int(row[index])
+                    result[key][(row[0], row[1])] = row
+            if len(counters) > MAX_NATIVE_ROWS:
+                raise ValueError('native diagnostic counter overflow')
+            for raw in counters:
+                if len(raw) != len(NATIVE_COUNTER_COLUMNS):
+                    raise ValueError('native diagnostic counter width')
+                result['counters'][str(raw[0])] = [str(raw[0])] + [
+                    int(self._finite(v)) for v in raw[1:]]
+            self._native_frame = result
+        except Exception:
+            # A diagnostic mismatch never changes an accepted physical step.
+            self.count('native_frontier_invalid')
+
+    @staticmethod
+    def _native_rows(value):
+        if value is None:
+            return None
+        result = dict((key, value[key]) for key in (
+            'frames', 'wall_ms', 'max_depth', 'reentrant_entries'))
+        result['wall_ms'] = round(result['wall_ms'], 3)
+        result['scope'] = 'selected_bot_control'
+        result['entry_columns'] = NATIVE_ENTRY_COLUMNS
+        result['callback_columns'] = NATIVE_CALLBACK_COLUMNS
+        result['counter_columns'] = NATIVE_COUNTER_COLUMNS
+        for key in ('entries', 'callbacks', 'counters'):
+            result[key] = [
+                [round(v, 3) if isinstance(v, float) else v for v in row]
+                for unused, row in sorted(value[key].items())]
+        return result
+
+    def _sum_native_frame(self):
+        value = self._native_frame
+        if value is None:
+            return
+        if self._native_capture is None:
+            self._native_capture = {
+                'frames': 0, 'wall_ms': 0.0, 'max_depth': 0,
+                'reentrant_entries': 0, 'entries': {}, 'callbacks': {},
+                'counters': {}}
+        total = self._native_capture
+        for key in ('frames', 'wall_ms', 'reentrant_entries'):
+            total[key] += value[key]
+        total['max_depth'] = max(total['max_depth'], value['max_depth'])
+        for key in ('entries', 'callbacks'):
+            for identity, row in value[key].items():
+                if identity not in total[key]:
+                    total[key][identity] = list(row)
+                else:
+                    summed = total[key][identity]
+                    for index in range(2, len(row)):
+                        summed[index] += row[index]
+        for name, row in value['counters'].items():
+            if name not in total['counters']:
+                total['counters'][name] = list(row)
+            else:
+                summed = total['counters'][name]
+                summed[1] += row[1]
+                summed[2] += row[2]
+                summed[3] = max(summed[3], row[3])
 
     def stop(self, stage, token):
         if token is None or not self.active:
@@ -522,6 +626,9 @@ class WorkerCombatDiagnostics(object):
                 'selected_completed_wait': self._wait_summary(
                     self._selected_waits),
             }
+            if self._native_frame is not None:
+                result['native_frontier'] = self._native_rows(self._native_frame)
+                self._sum_native_frame()
             for name, row in self._stages.items():
                 total = self._capture_totals.setdefault(
                     name, [0, 0.0, 0.0, 0.0])
@@ -610,6 +717,7 @@ class WorkerCombatDiagnostics(object):
                 'frames': self._capture_detail_frames,
                 'stages': self._stage_rows(self._capture_detail_stages),
                 'counts': dict(self._capture_detail_counts),
+                'native_frontier': self._native_rows(self._native_capture),
             },
             'queue_maxima': dict(self._capture_queue_maxima),
             'completed_wait': self._wait_summary(
@@ -618,6 +726,29 @@ class WorkerCombatDiagnostics(object):
                 self._capture_selected_waits,
                 self._capture_selected_wait_count),
         })
+
+    def checkpoint(self):
+        """Expose completed frames without ending a live capture.
+
+        A launcher can terminate the worker before its final capture closes.
+        Periodic PERF emission saves this cumulative checkpoint; consumers
+        select the latest checkpoint or final summary, never add both.
+        The in-progress frame is excluded from every ledger here.
+        """
+        if self._deadline is None or self._native_capture is None:
+            return None
+        return {
+            'capture': self.capture, 'cumulative': True,
+            'authority_start': self._capture_started,
+            'authority_last_frame': self._capture_last,
+            'frames': self._capture_frames,
+            'detail': {
+                'frames': self._capture_detail_frames,
+                'stages': self._stage_rows(self._capture_detail_stages),
+                'counts': dict(self._capture_detail_counts),
+                'native_frontier': self._native_rows(self._native_capture),
+            },
+        }
 
     def drain_completed(self):
         completed = self._completed

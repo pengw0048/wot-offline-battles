@@ -1,0 +1,38 @@
+[
+  {
+    "name": "regular_1_3_11",
+    "operation": 1,
+    "chain": 3,
+    "number": 11,
+    "qid": 41,
+    "main": "<postBattle>\n          <and>\n            <vehicleDamage>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleDamage>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleDamage>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleDamage>\n            <win />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_2_3_11",
+    "operation": 2,
+    "chain": 3,
+    "number": 11,
+    "qid": 116,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n            <win />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_3_3_11",
+    "operation": 3,
+    "chain": 3,
+    "number": 11,
+    "qid": 191,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <rammingInfo>\tstayedAlive\t</rammingInfo>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <rammingInfo>\tstayedAlive\t</rammingInfo>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n            <isAlive />\n            <win />\n          </and>\n        </postBattle>\n      "
+  },
+  {
+    "name": "regular_4_3_11",
+    "operation": 4,
+    "chain": 3,
+    "number": 11,
+    "qid": 266,
+    "main": "<postBattle>\n          <and>\n            <vehicleKills>\n              <lvlDiff>\t1\t</lvlDiff>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n          </and>\n        </postBattle>\n      ",
+    "add": "<postBattle>\n          <and>\n            <vehicleKills>\n              <lvlDiff>\t1\t</lvlDiff>\n              <attackReason>\t2\t</attackReason>\n              <greaterOrEqual>\t1\t</greaterOrEqual>\n            </vehicleKills>\n            <win />\n            <isAlive />\n          </and>\n        </postBattle>\n      "
+  }
+]

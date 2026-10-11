@@ -54,6 +54,17 @@ def _load_join_runtime():
     return LobbyHeader
 
 
+def _load_training_selector_runtime():
+    from gui.Scaleform.daapi.view.lobby.header import battle_selector_items
+    return battle_selector_items._TrainingItem
+
+
+def _load_squad_selector_runtime():
+    from gui.Scaleform.daapi.view.lobby.header.SquadTypeSelectPopover import \
+        SquadTypeSelectPopover
+    return SquadTypeSelectPopover
+
+
 def _refresh_join_button():
     """Ask the existing #1513 lobby header to repaint its fight button."""
     from gui.shared import events, g_eventBus
@@ -82,9 +93,10 @@ def open_picker():
 
 
 class JoinButtonUI(object):
-    """A reversible adapter for #1513's native lobby fight button."""
+    """Route the native Battle, Training and Create Platoon entries to LAN."""
 
-    def __init__(self, on_join, runtime=None, refresh=None):
+    def __init__(self, on_join, runtime=None, refresh=None,
+                 training_runtime=None, squad_runtime=None):
         self._on_join = on_join
         self._runtime = runtime
         self._refresh = refresh
@@ -96,14 +108,30 @@ class JoinButtonUI(object):
         self._original_update_controls = None
         self._had_own_update_controls = False
         self._update_controls_wrapper = None
+        self._training_runtime = training_runtime
+        self._training_type = None
+        self._original_training_select = None
+        self._had_own_training_select = False
+        self._training_select_wrapper = None
+        self._squad_runtime = squad_runtime
+        self._squad_hooks = []
 
     def install(self):
         if self._installed:
             return
         default_runtime = self._runtime is None
         header_type = self._runtime or _load_join_runtime()
+        training_type = self._training_runtime
+        if training_type is None and default_runtime:
+            training_type = _load_training_selector_runtime()
+        squad_type = self._squad_runtime
+        if squad_type is None and default_runtime:
+            squad_type = _load_squad_selector_runtime()
         self._runtime = header_type
         self._header_type = header_type
+        self._training_runtime = training_type
+        self._training_type = training_type
+        self._squad_runtime = squad_type
         self._had_own_fight_click = 'fightClick' in header_type.__dict__
         self._had_own_update_controls = (
             '_updatePrebattleControls' in header_type.__dict__)
@@ -114,6 +142,11 @@ class JoinButtonUI(object):
         self._original_update_controls = header_type.__dict__.get(
             '_updatePrebattleControls',
             getattr(header_type, '_updatePrebattleControls'))
+        if training_type is not None:
+            self._had_own_training_select = (
+                'select' in training_type.__dict__)
+            self._original_training_select = training_type.__dict__.get(
+                'select', getattr(training_type, 'select'))
         adapter = self
 
         def wrapped_fight_click(header, map_id, action_name):
@@ -131,20 +164,56 @@ class JoinButtonUI(object):
             header.as_disableFightButtonS(False)
             return result
 
+        def wrapped_training_select(item):
+            # The stock selector enters retail's TrainingListRequester before
+            # the fight button exists.  With no retail cell app that requester
+            # remains on "updating" forever. The explicit mode must survive
+            # the selector's native "trainingList" action name.
+            adapter._on_join(None, 'training')
+            return None
+
+        def wrapped_show_squad(header):
+            # The retail entry starts Waiting('prebattle/create') and sends
+            # unitMgr.createSquad(), whose reply the LAN server cannot supply.
+            # Join the configured room through the same lifecycle as Battle.
+            adapter._on_join(None, 'random')
+            return None
+
+        def wrapped_squad_select(popover, action_name):
+            # The dropdown dispatches directly, bypassing showSquad(). Both
+            # native squad choices open our ordinary LAN room, not a WG unit.
+            adapter._on_join(None, 'random')
+            return None
+
         self._fight_click_wrapper = wrapped_fight_click
         self._update_controls_wrapper = wrapped_update_controls
+        self._training_select_wrapper = wrapped_training_select
         self._installed = True
         try:
             header_type.fightClick = wrapped_fight_click
             header_type._updatePrebattleControls = wrapped_update_controls
+            if training_type is not None:
+                training_type.select = wrapped_training_select
+            self._replace_squad_entry(header_type, 'showSquad',
+                                      wrapped_show_squad)
+            if squad_type is not None:
+                self._replace_squad_entry(squad_type, 'selectFight',
+                                          wrapped_squad_select)
             refresh = self._refresh
             if refresh is None and default_runtime:
                 refresh = _refresh_join_button
+                self._refresh = refresh
             if callable(refresh):
                 refresh()
         except Exception:
             self.uninstall()
             raise
+
+    def _replace_squad_entry(self, owner, name, wrapper):
+        had_own = name in owner.__dict__
+        original = owner.__dict__.get(name, getattr(owner, name))
+        self._squad_hooks.append((owner, name, original, wrapper, had_own))
+        setattr(owner, name, wrapper)
 
     def _restore(self, name, original, wrapper, had_own):
         current = self._header_type.__dict__.get(name)
@@ -164,6 +233,20 @@ class JoinButtonUI(object):
                       self._original_update_controls,
                       self._update_controls_wrapper,
                       self._had_own_update_controls)
+        if self._training_type is not None:
+            current = self._training_type.__dict__.get('select')
+            if current is self._training_select_wrapper:
+                if self._had_own_training_select:
+                    self._training_type.select = self._original_training_select
+                else:
+                    delattr(self._training_type, 'select')
+        for owner, name, original, wrapper, had_own in reversed(self._squad_hooks):
+            if owner.__dict__.get(name) is wrapper:
+                if had_own:
+                    setattr(owner, name, original)
+                else:
+                    delattr(owner, name)
+        self._squad_hooks = []
         self._installed = False
 
 

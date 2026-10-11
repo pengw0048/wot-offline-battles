@@ -4,6 +4,7 @@ from __future__ import print_function
 
 from gui.mods.offline_lan_0922 import vehicle_blacklist
 from gui.mods.offline_lan_0922 import vehicle_configuration
+from gui.mods.offline_lan_0922 import stun_mechanics
 
 
 def _value(source, name, default=None):
@@ -95,6 +96,9 @@ def _complete_shell_projection(shell, names, default_radius=False):
                     (name == "explosionEdgeDamageFactor" and value > 1.0)):
                 value = default
             projection[name] = value
+        stun = stun_mechanics.shell_component(_value(shell, 'stun'))
+        if stun is not None:
+            projection['stun'] = stun
     return projection
 
 

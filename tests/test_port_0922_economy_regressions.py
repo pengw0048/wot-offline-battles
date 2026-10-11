@@ -144,7 +144,7 @@ class EconomyRegressionTests(unittest.TestCase):
         retry = self.stores.GarageStore(self.path).apply_battle_crew_xp(
             snapshot, 'review:1:1', 50001, 200, 1, **args)
         self.assertFalse(retry['applied'])
-        self.assertEqual({'credits': 2500, 'xp': 500, 'free_xp': 25}, retry['awarded'])
+        self.assertEqual({'credits': 2500, 'xp': 500, 'free_xp': 25, 'crystal': 0}, retry['awarded'])
         self.assertEqual(first['awarded'], retry['awarded'])
         self.assertEqual(wallet, snapshot['wallet'])
 
@@ -333,7 +333,7 @@ class EconomyRegressionTests(unittest.TestCase):
         applied = store.apply_battle_crew_xp(
             self.stock, 'costs:1:1', 50001, 100, 1, **args)
         expected = dict(repair_credits=1200, ammo_credits=200, ammo_gold=0,
-                        equipment_credits=0, equipment_gold=50)
+                        equipment_credits=0, equipment_gold=50, equipment_crystal=0)
         self.assertEqual(expected, applied['service_costs'])
         wallet = dict(self.stock['wallet'])
         retry = self.stores.GarageStore(self.path).apply_battle_crew_xp(
@@ -377,7 +377,7 @@ class EconomyRegressionTests(unittest.TestCase):
             rewards={'credits': 1000, 'xp': 100, 'free_xp': 5})
 
         self.assertTrue(applied['applied'])
-        self.assertEqual({'credits': 1000, 'xp': 100, 'free_xp': 5},
+        self.assertEqual({'credits': 1000, 'xp': 100, 'free_xp': 5, 'crystal': 0},
                          applied['awarded'])
         self.assertEqual(before + 1000, self.stock['wallet']['credits'])
         self.assertEqual(4, len(applied['refused']))

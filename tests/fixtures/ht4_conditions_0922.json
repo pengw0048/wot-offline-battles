@@ -1,0 +1,30 @@
+[
+  {
+    "name": "regular_1_2_4",
+    "operation": 1,
+    "qid": 19,
+    "main": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>1</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>1</greaterOrEqual></results><isAlive /><win /></and></postBattle>"
+  },
+  {
+    "name": "regular_2_2_4",
+    "operation": 2,
+    "qid": 94,
+    "main": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>3</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>3</greaterOrEqual></results><vehicleKills><greaterOrEqual>1</greaterOrEqual></vehicleKills></and></postBattle>"
+  },
+  {
+    "name": "regular_3_2_4",
+    "operation": 3,
+    "qid": 169,
+    "main": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>5</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>5</greaterOrEqual></results><vehicleKills><greaterOrEqual>3</greaterOrEqual></vehicleKills></and></postBattle>"
+  },
+  {
+    "name": "regular_4_2_4",
+    "operation": 4,
+    "qid": 244,
+    "main": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>6</greaterOrEqual></results></and></postBattle>",
+    "add": "<postBattle><and><results><key>innerModuleCritCount</key><greaterOrEqual>6</greaterOrEqual></results><vehicleKills><greaterOrEqual>5</greaterOrEqual></vehicleKills></and></postBattle>"
+  }
+]

@@ -44,16 +44,17 @@ OWN_MOD_DIRECTORIES = ("configs/offline_lan_0922",)
 # BigWorld writes its own crash banner onto the faulting thread's stack:
 # "Application <exe> crashed <date> at <time> / Message: / FATAL ERROR: ...".
 # The same words also appear in the module image as printf templates, so a
-# candidate that still holds a format specifier or a build path is the
-# template, not the event.
+# candidate that still holds a format specifier is a template, not the event.
+# A real MF_ASSERT_DEV banner includes the engine's BuildAgent source path;
+# rejecting that path discarded the assertion in report 83fea4595275.
 CRASH_TEXT_MARKERS = (
     b" crashed ",
     b"EXCEPTION_ACCESS_VIOLATION",
     b"Memory status:",
 )
-CRASH_TEXT_REJECT = (b"%s", b"%d", b"%ll", b"%3.", b"%02",
-                     b"buildagent", b"BuildAgent")
-CRASH_TEXT_REQUIRE = (b"FATAL ERROR", b"Memory status", b"EXCEPTION_")
+CRASH_TEXT_REJECT = (b"%s", b"%d", b"%ll", b"%3.", b"%02")
+CRASH_TEXT_REQUIRE = (b"FATAL ERROR", b"Memory status", b"EXCEPTION_",
+                      b"MF_ASSERT")
 CRASH_TEXT_BEFORE = 512
 CRASH_TEXT_WINDOW = 1536
 CRASH_TEXT_LIMIT = 8192

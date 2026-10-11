@@ -1,0 +1,81 @@
+name: Update v0.9.4 cumulative release notes
+on:
+  push:
+    branches: [release/v0.9.4]
+    paths: [.github/workflows/update-v094-release-notes.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: update-v094-release-notes
+  cancel-in-progress: false
+jobs:
+  update-notes:
+    if: github.repository == 'colorfulmeans/wot-0.9.22-offline-battles' && github.ref == 'refs/heads/release/v0.9.4'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Replace release body only and verify unchanged tag and package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          repo = 'colorfulmeans/wot-0.9.22-offline-battles'
+          root = 'https://api.github.com/repos/' + repo
+          release_id = 394748644
+          published_sha = 'd97faf40df5d6f6863a358041a79da2d3fd4bf79'
+          expected_digest = 'sha256:a3d3afa6fff56db87756c57a02abe15f21361df1b6f1e44a4cff7b0ab428fb23'
+          notes_path = 'docs/releases/v0.9.4.md'
+          expected_blob = '2d9c6fae1b7810cff62917e12eab4f7e5ca63705'
+          assert subprocess.check_output(['git', 'hash-object', notes_path], text=True).strip() == expected_blob
+          notes = pathlib.Path(notes_path).read_text(encoding='utf-8')
+          for required in ('cumulative changelog', 'LT-12', 'HT-12', 'TD-7', 'TD-8', 'TD-9', 'Battle directives', 'LAN command delivery'):
+              assert required in notes, required
+          def api(path, method='GET', payload=None):
+              data = None if payload is None else json.dumps(payload).encode('utf-8')
+              request = urllib.request.Request(root + path, data=data, method=method, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'User-Agent': 'v094-release-notes-only-update'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          def invariants(release):
+              assets = sorted((a['id'], a['name'], a['size'], a.get('digest')) for a in release['assets'])
+              return (release['id'], release['tag_name'], release['target_commitish'], release['name'],
+                      release['draft'], release['prerelease'], release['published_at'], assets)
+          tag = api('/git/ref/tags/v0.9.4')
+          assert tag['object']['sha'] == published_sha and tag['object']['type'] == 'commit'
+          before = api('/releases/' + str(release_id))
+          assert before['tag_name'] == 'v0.9.4' and not before['draft'] and not before['prerelease']
+          assert len(before['assets']) == 1
+          asset = before['assets'][0]
+          assert (asset['id'], asset['name'], asset['size'], asset.get('digest')) == (
+              583943863, 'wot-0.9.22-offline-battles-0.9.4-Windows-x64.zip', 31032186, expected_digest)
+          if before['body'] != notes:
+              original = api('/contents/' + notes_path + '?ref=' + published_sha)
+              original_notes = base64.b64decode(original['content']).decode('utf-8')
+              assert before['body'].strip() == original_notes.strip(), 'Release notes changed since review; refusing to overwrite another edit.'
+              api('/releases/' + str(release_id), method='PATCH', payload={'body': notes})
+          after = api('/releases/' + str(release_id))
+          assert after['body'] == notes
+          assert invariants(after) == invariants(before), 'Unexpected release or asset metadata change'
+          assert api('/git/ref/tags/v0.9.4')['object']['sha'] == published_sha
+          print(json.dumps({'release': after['html_url'], 'updated_at': after['updated_at'],
+              'notes_characters': len(notes), 'unchanged_tag': published_sha,
+              'unchanged_asset_id': asset['id'], 'unchanged_asset_digest': expected_digest,
+              'change_scope': 'Release body only; no build, tag movement, asset replacement or main-branch update.'}, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write('Updated the existing v0.9.4 release body with all retained changes since v0.9.3.\n\n')
+              out.write('Tag, release status, published package ID, size and SHA-256 are unchanged.\n')
+          PY

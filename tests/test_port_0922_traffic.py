@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src' / 'res' / 'scripts' / 'client'))
 from gui.mods.offline_lan_0922.ai.traffic import (
-    HEAD_ON_OFFSET, TrafficCoordinator, YIELD_SECONDS,
+    HEAD_ON_OFFSET, HEAD_ON_RETREAT_SECONDS, TrafficCoordinator, YIELD_SECONDS,
 )
 from gui.mods.offline_lan_0922 import tank_collision
 
@@ -118,34 +118,53 @@ class TrafficTests(unittest.TestCase):
             self.assertEqual(own['yaw'], result['target_yaw'])
         self.assertEqual(before, (first, second))
 
-    def test_blocked_head_on_hold_releases_one_hull_instead_of_deadlocking(self):
-        """A passage narrower than the offset must not stop both hulls forever.
-
-        Neither footprint can separate laterally and neither centre can pass
-        the other while both are held, so the lease never clears. Exactly one
-        hull keeps waiting; the other returns to its own command and the
-        blockage is resolved by contact and ordinary recovery.
-        """
-        first, second = body(1, 0.0, 0.0, speed=0.0), body(2, 0.0, 7.5, math.pi, 0.0)
+    def test_head_on_lease_cannot_mask_route_recovery_forever(self):
+        first = body(1, 0., 0., speed=0.)
+        second = body(2, 0., 7.5, math.pi, 0.)
         for own, other in ((first, second), (second, first)):
-            result = self.adjust(own, other, clear=False)
-            self.assertEqual((0.0, 0.0), (result['throttle'], result['turn']))
-        later = YIELD_SECONDS + 0.1
-        self.assertEqual(
-            command(first['yaw']),
-            self.adjust(first, second, later, clear=False))
-        held = self.adjust(second, first, later, clear=False)
-        self.assertEqual(0.0, held['throttle'])
-        self.assertEqual('head_on_blocked', held['traffic_mode'])
+            held = self.adjust(own, other, clear=False)
+            self.assertEqual(0., held['throttle'])
+        for now in (YIELD_SECONDS+.1, YIELD_SECONDS+4.):
+            for own, other in ((first, second), (second, first)):
+                self.assertEqual(command(own['yaw']), self.adjust(own, other, now, clear=False))
+                retreat = self.adjust(own, other, now, clear=True)
+                self.assertEqual(-.72 if own is second else .72, retreat['throttle'])
+                self.assertEqual(0., retreat['turn'])
+        # Even a completely stationary pair cannot renew the backing attempt.
+        for now in (YIELD_SECONDS+HEAD_ON_RETREAT_SECONDS, 20.):
+            for own, other in ((first, second), (second, first)):
+                self.assertEqual(command(own['yaw']), self.adjust(own, other, now, clear=True))
+        # Physical separation is required before another avoidance episode.
+        first['position'] = (20., 0., 0.)
+        self.adjust(first, second, 10.)
+        first['position'] = (0., 0., 0.)
+        self.assertEqual('head_on', self.adjust(first, second, 10.1)['traffic_mode'])
 
-    def test_reopened_head_on_swing_restores_the_full_hold(self):
-        """Room to swing is a new situation, not a spent hold."""
-        first, second = body(1, 0.0, 0.0, speed=0.0), body(2, 0.0, 7.5, math.pi, 0.0)
-        self.adjust(first, second, clear=False)
-        opened = self.adjust(first, second, YIELD_SECONDS + 0.1, clear=True)
-        self.assertEqual('head_on', opened['traffic_mode'])
-        blocked = self.adjust(first, second, YIELD_SECONDS + 0.2, clear=False)
-        self.assertEqual('head_on_blocked', blocked['traffic_mode'])
+    def test_head_on_retreat_checks_rear_hulls_and_keeps_reverse_control(self):
+        first = body(1, 0., 0., speed=0.)
+        second = body(2, 0., 7.5, math.pi, 0.)
+        for own, other in ((first, second), (second, first)):
+            self.adjust(own, other, clear=False)
+        # A reversing tank must keep the chosen retreat instead of alternating
+        # with a forward driver order every time velocity changes sign.
+        second['velocity'] = (0., 0., 1.)
+        self.assertEqual(-.72, self.adjust(second, first, YIELD_SECONDS+.1)['throttle'])
+        rear = body(3, 0., 15., math.pi, 0.)
+        order = self.traffic.adjust(2, second, command(math.pi), [first, rear],
+                                    YIELD_SECONDS+.2, lambda *a: True)
+        self.assertGreaterEqual(order['throttle'], 0.)
+        # Explicit hold orders and physically separated pairs release control.
+        held = dict(command(math.pi), movement_intent=False, throttle=0.)
+        self.assertEqual(held, self.adjust(second, first, YIELD_SECONDS+.3, order=held))
+        second['position'] = (10., 0., 7.5)
+        self.assertEqual(command(math.pi), self.adjust(second, first, YIELD_SECONDS+.4))
+
+    def test_head_on_offset_checks_swept_pose_as_well_as_direction_ray(self):
+        first, second = body(1, 0., 0.), body(2, 0., 7.5, math.pi)
+        first['pose_clear'] = lambda yaw: False
+        result = self.adjust(first, second, clear=True)
+        self.assertEqual('head_on_blocked', result['traffic_mode'])
+        self.assertEqual((0., 0.), (result['throttle'], result['turn']))
 
     def _hold_then_meet(self, hold_first):
         waiting = body(9, 0.0, -4.0)

@@ -1,14 +1,16 @@
 import math
-from pathlib import Path
+import os
+import struct
 import sys
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-CLIENT_SCRIPTS = ROOT / 'src' / 'res' / 'scripts' / 'client'
-sys.path.insert(0, str(CLIENT_SCRIPTS))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CLIENT_SCRIPTS = os.path.join(ROOT, 'src', 'res', 'scripts', 'client')
+sys.path.insert(0, os.path.join(
+    CLIENT_SCRIPTS, 'gui', 'mods', 'offline_lan_0922'))
 
-from gui.mods.offline_lan_0922 import gun_pitch_limits  # noqa: E402
+import gun_pitch_limits  # noqa: E402
 
 
 def _project(raw_points):
@@ -25,6 +27,44 @@ def _limits(minimum, maximum):
         # This deliberately wrong envelope proves it is not consumed here.
         'absolute': (12.0, 13.0),
     }
+
+
+def _reference_limits(turret_yaw, limits):
+    """Retain the original per-operand x86 float rounding as an oracle."""
+    def single(value):
+        return struct.unpack('<f', struct.pack('<f', float(value)))[0]
+
+    def add(left, right):
+        return single(single(left) + single(right))
+
+    def subtract(left, right):
+        return single(single(left) - single(right))
+
+    def multiply(left, right):
+        return single(single(left) * single(right))
+
+    def divide(left, right):
+        return single(single(left) / single(right))
+
+    yaw = single(turret_yaw)
+    if yaw < 0.0:
+        yaw = add(yaw, single(2.0 * math.pi))
+    result = []
+    for name in ('minPitch', 'maxPitch'):
+        points = tuple((single(x), single(y)) for x, y in limits[name])
+        lower, upper = 0, len(points) - 1
+        while upper - lower > 1:
+            middle = (lower + upper) // 2
+            if yaw > points[middle][0]:
+                lower = middle
+            else:
+                upper = middle
+        span = subtract(points[upper][0], points[lower][0])
+        fraction = divide(subtract(yaw, points[lower][0]), span)
+        result.append(add(
+            multiply(points[lower][1], subtract(1.0, fraction)),
+            multiply(points[upper][1], fraction)))
+    return tuple(result)
 
 
 class GunPitchLimits1513OracleTests(unittest.TestCase):
@@ -89,9 +129,50 @@ class GunPitchLimits1513OracleTests(unittest.TestCase):
                 limits))
 
     def test_absolute_envelope_cannot_replace_the_two_curves(self):
-        with self.assertRaisesRegex(ValueError, 'no yaw curves'):
+        with self.assertRaises(ValueError) as caught:
             gun_pitch_limits.calc_pitch_limits(
                 0.0, {'absolute': (-0.35, 0.15)})
+        self.assertIn('no yaw curves', str(caught.exception))
+
+    def test_per_operation_rounding_at_curve_knots_and_adjacent_float32_yaws(self):
+        limits = _limits(
+            ((0.0, -45.0), (0.333333, -45.0),
+             (0.347222, -14.0), (0.652778, -14.0),
+             (0.666667, -45.0), (1.0, -45.0)),
+            ((0.0, 2.0), (0.138889, 2.0), (0.152778, 5.0),
+             (0.847222, 5.0), (0.861111, 2.0), (1.0, 2.0)))
+        yaws = [index * math.pi / 180.0 for index in range(-360, 361)]
+        for name in ('minPitch', 'maxPitch'):
+            for yaw, unused_pitch in limits[name]:
+                bits = struct.unpack('<I', struct.pack('<f', yaw))[0]
+                for neighbor in (max(0, bits - 1), bits, bits + 1):
+                    adjacent = struct.unpack('<f', struct.pack('<I', neighbor))[0]
+                    yaws.extend((adjacent, adjacent - 2.0 * math.pi))
+        for yaw in yaws:
+            expected = _reference_limits(yaw, limits)
+            actual = gun_pitch_limits.calc_pitch_limits(yaw, limits)
+            self.assertEqual(struct.pack('<ff', *expected),
+                             struct.pack('<ff', *actual), repr(yaw))
+
+    def test_mutable_curve_nodes_are_read_again_on_every_solve(self):
+        limits = {
+            'minPitch': [[0.0, -0.3], [2.0 * math.pi, -0.3]],
+            'maxPitch': [[0.0, 0.1], [2.0 * math.pi, 0.1]],
+        }
+        first = gun_pitch_limits.calc_pitch_limits(0.5, limits)
+        limits['maxPitch'][0][1] = 0.2
+        changed = gun_pitch_limits.calc_pitch_limits(0.5, limits)
+        self.assertNotEqual(first, changed)
+        self.assertEqual(_reference_limits(0.5, limits), changed)
+
+    def test_distinct_double_nodes_that_collapse_to_float32_still_fail(self):
+        limits = {
+            'minPitch': ((1.0, -0.3), (1.0 + 1.0e-9, -0.2)),
+            'maxPitch': ((0.0, 0.1), (2.0 * math.pi, 0.1)),
+        }
+        with self.assertRaises(ValueError) as caught:
+            gun_pitch_limits.calc_pitch_limits(1.0, limits)
+        self.assertIn('duplicate yaw nodes', str(caught.exception))
 
 
 if __name__ == '__main__':

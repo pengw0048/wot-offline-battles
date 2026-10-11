@@ -267,7 +267,14 @@ def _ensure_chunk(spaceID, chunkID, pos):
 			' failed_entity=%s' % entry['entityID'])
 	if chunkID not in entities:
 		c = _chunk(chunkID)
-		entityID = BigWorld.createEntity('AreaDestructibles', spaceID, 0, Math.Vector3(pos[0], pos[1], pos[2]), (0.0, 0.0, 0.0), {
+		# A prop's bounds/impact can cross the chunk boundary. onEnterWorld
+		# derives the controller's chunk from its position, not from our ledger
+		# key. Use the centre of the exact #1513 chunk, otherwise every later
+		# break sees a controller in the wrong chunk and destroys/recreates it.
+		controller_pos = Math.Vector3(
+			((chunkID >> 8) - 127) * 100.0 + 50.0, 0.0,
+			((chunkID & 255) - 127) * 100.0 + 50.0)
+		entityID = BigWorld.createEntity('AreaDestructibles', spaceID, 0, controller_pos, (0.0, 0.0, 0.0), {
 			'fallenTrees': list(c['fallenTrees']),
 			'fallenColumns': list(c['fallenColumns']),
 			'destroyedFragiles': list(c['destroyedFragiles']),
@@ -286,7 +293,7 @@ def _ensure_chunk(spaceID, chunkID, pos):
 		# its own from the entity position, so report both.
 		reader = getattr(AreaDestructibles, 'chunkIDFromPosition', None)
 		try:
-			derived = reader(Math.Vector3(pos[0], pos[1], pos[2]))
+			derived = reader(controller_pos)
 		except Exception as error:
 			derived = 'unavailable:%s' % (error,)
 		controller = mgr.getController(chunkID)
@@ -530,6 +537,7 @@ def _destroy_tree(
 			initial_signature = None
 	entry = {
 		'data': data,
+		'fallPitch': pitch,
 		'pos': (float(pos[0]), float(pos[1]), float(pos[2])),
 		'initialMatrixSignature': initial_signature,
 		'status': 'pending',

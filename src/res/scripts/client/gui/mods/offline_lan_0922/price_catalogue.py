@@ -4,9 +4,9 @@
 Do not edit by hand.  Run ``tools/bake_prices_0922.py "$WOT_0922_CLIENT"``
 to regenerate it against the pinned client.
 
-Each entry is ``(credits, gold, not_in_shop)`` for one item definition name.
+Each entry is ``(credits, gold, not_in_shop[, crystal])`` for one item name.
 Exactly one currency is ever non-zero, because a #1513 ``<price>`` section
-carries either a credit amount or a gold amount. ``not_in_shop`` marks an item
+carries a credit, gold or crystal amount. ``not_in_shop`` marks an item
 the retail shop never offered; it is still a real item with a real price, and
 the launcher uses it to offer the gold vehicles a retail account could not buy.
 
@@ -24,6 +24,7 @@ SELL_PRICE_FACTOR = 0.5
 CREDITS = 0
 GOLD = 1
 NOT_IN_SHOP = 2
+CRYSTAL = 3
 
 
 # Keyed '<nation>:<vehicle name>'.
@@ -5283,7 +5284,7 @@ SHELL_PRICES = {
 
 # Equipment and optional devices are nation independent.
 ARTEFACT_PRICES = {
-    'aimingStabilizerBattleBooster': (10, 0, False),
+    'aimingStabilizerBattleBooster': (0, 0, False, 10),
     'aimingStabilizer_Mk1': (500000, 0, False),
     'aimingStabilizer_Mk2': (600000, 0, False),
     'antifragmentationLining_heavy': (500000, 0, False),
@@ -5319,21 +5320,21 @@ ARTEFACT_PRICES = {
     'bomber_tier7': (0, 400, False),
     'bomber_tier8': (0, 500, False),
     'bomber_tier9': (0, 650, False),
-    'camouflageBattleBooster': (12, 0, False),
+    'camouflageBattleBooster': (0, 0, False, 12),
     'camouflageNet': (100000, 0, False),
     'carbonDioxide': (500000, 0, False),
     'chocolate': (0, 50, False),
     'coatedOptics': (500000, 0, False),
-    'coatedOpticsBattleBooster': (8, 0, False),
+    'coatedOpticsBattleBooster': (0, 0, False, 8),
     'cocacola': (0, 50, False),
-    'deluxAimingStabilizer': (5000, 0, False),
-    'deluxCoatedOptics': (4000, 0, False),
-    'deluxEnhancedAimDrives': (5000, 0, False),
-    'deluxImprovedVentilation': (5000, 0, False),
-    'deluxRammer': (5000, 0, False),
-    'deluxToolbox': (3000, 0, False),
+    'deluxAimingStabilizer': (0, 0, False, 5000),
+    'deluxCoatedOptics': (0, 0, False, 4000),
+    'deluxEnhancedAimDrives': (0, 0, False, 5000),
+    'deluxImprovedVentilation': (0, 0, False, 5000),
+    'deluxRammer': (0, 0, False, 5000),
+    'deluxToolbox': (0, 0, False, 3000),
     'enhancedAimDrives': (500000, 0, False),
-    'enhancedAimDrivesBattleBooster': (10, 0, False),
+    'enhancedAimDrivesBattleBooster': (0, 0, False, 10),
     'enhancedBelwillWashers': (600000, 0, False),
     'enhancedHorizontal_elastic_elements': (200000, 0, False),
     'enhancedHorizontal_springs': (20000, 0, False),
@@ -5355,13 +5356,13 @@ ARTEFACT_PRICES = {
     'enhancedVertical_springs_class2': (200000, 0, False),
     'enhancedVertical_springs_class3': (500000, 0, False),
     'filterCyclone': (500000, 0, False),
-    'fireFightingBattleBooster': (2, 0, False),
+    'fireFightingBattleBooster': (0, 0, False, 2),
     'gasoline100': (5000, 0, False),
     'gasoline105': (0, 50, False),
     'grousers': (250000, 0, False),
     'handExtinguishers': (3000, 0, False),
     'hotCoffee': (0, 50, False),
-    'improvedVentilationBattleBooster': (12, 0, False),
+    'improvedVentilationBattleBooster': (0, 0, False, 12),
     'improvedVentilation_class1': (50000, 0, False),
     'improvedVentilation_class2': (150000, 0, False),
     'improvedVentilation_class3': (600000, 0, False),
@@ -5369,14 +5370,14 @@ ARTEFACT_PRICES = {
     'largeCaliberTankRammer': (500000, 0, False),
     'largeMedkit': (0, 50, False),
     'largeRepairkit': (0, 50, False),
-    'lastEffortBattleBooster': (4, 0, False),
+    'lastEffortBattleBooster': (0, 0, False, 4),
     'lendLeaseOil': (5000, 0, False),
     'mediumCaliberHowitzerRammer': (300000, 0, False),
     'mediumCaliberTankRammer': (200000, 0, False),
-    'pedantBattleBooster': (6, 0, False),
+    'pedantBattleBooster': (0, 0, False, 6),
     'qualityOil': (5000, 0, False),
-    'rammerBattleBooster': (12, 0, False),
-    'rancorousBattleBooster': (2, 0, False),
+    'rammerBattleBooster': (0, 0, False, 12),
+    'rancorousBattleBooster': (0, 0, False, 2),
     'ration': (0, 50, False),
     'ration_china': (0, 50, False),
     'ration_czech': (0, 50, False),
@@ -5385,15 +5386,15 @@ ARTEFACT_PRICES = {
     'ration_sweden': (0, 50, False),
     'ration_uk': (0, 50, False),
     'removedRpmLimiter': (3000, 0, False),
-    'sixthSenseBattleBooster': (6, 0, False),
+    'sixthSenseBattleBooster': (0, 0, False, 6),
     'smallMedkit': (3000, 0, False),
     'smallRepairkit': (3000, 0, False),
-    'smoothDrivingBattleBooster': (10, 0, False),
-    'smoothTurretBattleBooster': (10, 0, False),
+    'smoothDrivingBattleBooster': (0, 0, False, 10),
+    'smoothTurretBattleBooster': (0, 0, False, 10),
     'stereoscope': (500000, 0, False),
     'toolbox': (500000, 0, False),
-    'toolboxBattleBooster': (6, 0, False),
-    'virtuosoBattleBooster': (8, 0, False),
+    'toolboxBattleBooster': (0, 0, False, 6),
+    'virtuosoBattleBooster': (0, 0, False, 8),
     'wetCombatPack_class1': (200000, 0, False),
     'wetCombatPack_class2': (600000, 0, False),
 }
@@ -5438,5 +5439,7 @@ def money(price):
     """
     if not price:
         return None
+    if len(price) > CRYSTAL and price[CRYSTAL]:
+        return {'crystal': price[CRYSTAL]}
     return ({'gold': price[GOLD]} if price[GOLD] else
             {'credits': price[CREDITS]})

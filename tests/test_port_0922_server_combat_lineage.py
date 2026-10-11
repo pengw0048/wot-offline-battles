@@ -174,7 +174,12 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
             'name': 'Lineage-%d' % index,
         } for index in range(29)]
 
-    def _runtime_and_server(self):
+    def _runtime_and_server(self, worker_authority=False):
+        from test_port_0922_server_projectiles import (
+            _attach_worker_authority, SIMULATION_WORKER_AUTHORITY_ID,
+        )
+
+        authority_id = SIMULATION_WORKER_AUTHORITY_ID if worker_authority else 1
         command = {
             'target_yaw': 0.0, 'throttle': 0.0, 'turn': 0.0,
             'shell_index': 0, 'fire_allowed': True,
@@ -186,7 +191,7 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
             'recovery_mode': 'arrived', 'movement_intent': False,
         }
         runtime = self.bot_runtime.BotRuntime(
-            1, descriptor_resolver=lambda unused: _descriptor(),
+            authority_id, descriptor_resolver=lambda unused: _descriptor(),
             adapter_factory=lambda *unused, **kwargs: _FixedAdapter(command),
             direction_probe=lambda *unused: {'clear': True, 'slope': 0.0},
             visibility_probe=lambda *unused: True,
@@ -197,7 +202,7 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         roster = self._roster()
         manifest = runtime.battle_start({
             'round_id': 1, 'map': '01_karelia',
-            'bot_authority_id': 1, 'bots': roster,
+            'bot_authority_id': authority_id, 'bots': roster,
         })[0]
         for state in runtime.states.values():
             state.update(x=0.0, y=0.0, z=0.0,
@@ -209,10 +214,22 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         server.tick = 100000
         server.players[1] = Player(
             1, object(), ('127.0.0.1', 1), team=1, slot=0)
-        server.bot_authority_id = 1
+        if worker_authority:
+            _attach_worker_authority(server)
+        else:
+            server.bot_authority_id = authority_id
         server.bot_roster = list(roster)
-        self.assertTrue(server.update_bot_manifest(1, {
-            'round_id': server.round_id, 'bots': bot_state_rows.bots(manifest)}))
+        message = {
+            'round_id': server.round_id, 'bots': bot_state_rows.bots(manifest)}
+        if worker_authority:
+            params = effective_params()
+            message['player_collision_profiles'] = [{
+                'id': 1, 'vehicle': server.players[1].vehicle,
+                'mass': params['physics']['mass'],
+                'shape': [3.4, 7.0, -0.8, 2.0],
+                'ram_profile': dict(params['ramming']),
+            }]
+        self.assertTrue(server.update_bot_manifest(authority_id, message))
         return runtime, server, roster
 
     def test_same_source_batch_horizon_preserves_slow_callback_burst_edges(
@@ -531,11 +548,13 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
     def test_unavailable_shot_recovers_after_reload_before_next_trigger(self):
         from test_port_0922_server_projectiles import _launch
 
-        runtime, server, unused_roster = self._runtime_and_server()
+        runtime, server, unused_roster = self._runtime_and_server(
+            worker_authority=True)
+        authority_id = server.bot_authority_id
         runtime._resolve_tank_contacts = lambda *unused: []
         for index in range(12):
             first = runtime.update(0.1, 1.0 + index * 0.1)[0]
-            self.assertTrue(server.update_bot_states(1, dict(
+            self.assertTrue(server.update_bot_states(authority_id, dict(
                 first, round_id=server.round_id)))
         state = runtime.states[11]
         gun = runtime._gun_states[11]
@@ -558,7 +577,7 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         try:
             for index in range(12):
                 failed = runtime.update(0.1, 2.2 + index * 0.1)[0]
-                self.assertTrue(server.update_bot_states(1, dict(
+                self.assertTrue(server.update_bot_states(authority_id, dict(
                     failed, round_id=server.round_id)))
         finally:
             codec.encode_row = original
@@ -569,7 +588,7 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
         self.assertEqual(1, state['fire_seq'])
         recovered = runtime.update(0.1, 3.4)[0]
         self.assertEqual([frozen], recovered['launches'])
-        self.assertTrue(server.update_bot_states(1, dict(
+        self.assertTrue(server.update_bot_states(authority_id, dict(
             recovered, round_id=server.round_id)))
         self.assertIn((11, 1), server.bot_pending_projectile_launches)
         current = copy.deepcopy(server.bot_states[11])
@@ -585,16 +604,16 @@ class ServerCombatLineageIntegrationTests(unittest.TestCase):
             launch_pose=list(frozen['launch_pose']),
             origin=list(frozen['shot_origin']))
         launch['authority_epoch'] = server.authority_epoch
-        self.assertTrue(server.launch_projectile(1, launch))
+        self.assertTrue(server.launch_projectile(authority_id, launch))
         self.assertEqual(1, len(server.projectiles))
-        self.assertTrue(server.launch_projectile(1, launch))
+        self.assertTrue(server.launch_projectile(authority_id, launch))
         self.assertEqual(1, len(server.projectiles))
         self.assertTrue(runtime.ack_projectile_launch(11, 1))
         self.assertTrue(runtime._fire(
             state, gun, 1.0, descriptor,
             launch_preview=dict(preview, fire_seq=2)))
         second = runtime.update(0.1, 3.5)[0]
-        self.assertTrue(server.update_bot_states(1, dict(
+        self.assertTrue(server.update_bot_states(authority_id, dict(
             second, round_id=server.round_id)))
         self.assertIn((11, 2), server.bot_pending_projectile_launches)
 

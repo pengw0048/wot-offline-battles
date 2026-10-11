@@ -274,3 +274,43 @@ class TurretObstacleClientTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TurretRevisionTests(unittest.TestCase):
+    def test_server_accepts_support_revision_and_rejects_an_old_replay(self):
+        state = state_with_wreck()
+        self.assertTrue(publish(state, [proposal()]))
+        initial = state._detached_turret_snapshot()[0]
+        supported = copy.deepcopy(initial)
+        supported.update(motion_seq=1, motion_time_ms=state._server_time_ms(),
+                         support_key='player:1')
+        supported['flight']['rest'][1] = 5
+        supported['flight']['rest_attitude'] = [0, -.153, .088]
+        self.assertTrue(publish(state, [supported]))
+        accepted = state._detached_turret_snapshot()[0]
+        self.assertEqual(1, accepted['motion_seq'])
+        self.assertEqual(5, accepted['flight']['rest'][1])
+        self.assertTrue(publish(state, [initial]))
+        self.assertEqual(accepted, state._detached_turret_snapshot()[0])
+
+    def test_receiver_keeps_newest_revision_across_coalesced_snapshots(self):
+        client = client_module.LANClient('127.0.0.1', 28782, 'test', 'ussr:R11_MS-1')
+        initial = record()
+        supported = copy.deepcopy(initial)
+        supported.update(motion_seq=2, motion_time_ms=1300,
+                         created_time_ms=1300, support_key='player:1')
+        supported['flight']['rest'][1] = 5
+        def snapshot(rows):
+            return {'round_id': 1, 'detached_turrets': rows}
+        client._adopt_detached_turrets(snapshot([initial]))
+        result = client._adopt_detached_turrets(snapshot([supported]))
+        self.assertEqual(2, result['detached_turrets'][0]['motion_seq'])
+        replay = client._adopt_detached_turrets(snapshot([initial]))
+        self.assertEqual(result, replay)
+        self.assertEqual([], client._adopt_detached_turrets(
+            {'round_id': 2, 'detached_turrets': []})['detached_turrets'])
+
+    def test_malformed_support_identity_is_contained(self):
+        for support in (True, 7, {}, [], 'bot:0', 'bot:-2', 'vehicle:1'):
+            value = dict(proposal(), motion_seq=1, motion_time_ms=1000,
+                         support_key=support)
+            self.assertIsNone(schema.normalize_proposal(value))

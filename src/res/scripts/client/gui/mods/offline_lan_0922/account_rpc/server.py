@@ -6,6 +6,7 @@ except ImportError:
     import pickle as _pickle
 import zlib
 import traceback
+import copy
 
 from gui.mods.offline_lan_0922.account_rpc import commands, data, requests
 
@@ -105,6 +106,7 @@ class FakeServer(object):
         self._player_getter = player_getter
         self._context = dict(context or {})
         self._pending_inventory_updates = 0
+        self._campaign_notifications_sent = set()
         if self._context.get('account_state') is None:
             from gui.mods.offline_lan_0922.account_rpc.state import AccountState
             self._context['account_state'] = AccountState(path=None)
@@ -151,7 +153,8 @@ class FakeServer(object):
             revision = int(getattr(player.syncData, 'revision', 0) or 0)
         except (AttributeError, TypeError, ValueError):
             revision = 0
-        diff.setdefault('potapovQuests', data.personal_missions())
+        diff.setdefault('potapovQuests', data.personal_missions(
+            self._context.get('selected_vehicle')))
         diff.setdefault('prevRev', revision)
         diff.setdefault('rev', revision + 1)
         payload = _pickle.dumps(diff, _pickle.HIGHEST_PROTOCOL)
@@ -169,7 +172,10 @@ class FakeServer(object):
             return True
 
         def finish():
-            if not release() or self._player() is not player:
+            if self._player() is not player:
+                fail('account changed during inventory refresh')
+                return
+            if not release():
                 return
             try:
                 if callable(after_publish):
@@ -188,20 +194,23 @@ class FakeServer(object):
                               'not be published to the room: %s' % error)
 
         def fail(error):
-            if not release() or self._player() is not player:
+            if not release():
                 return
+            # Failure callbacks release transaction-owned pending state even
+            # after the Account retires. Their command-response continuation
+            # separately guards the captured player identity.
             print('[Offline LAN 0.9.22] account update failed: %s' % error)
             if callable(after_failure):
                 after_failure(error)
 
         def publish():
             if self._player() is not player:
-                release()
+                fail('account changed before update')
                 return
             try:
                 player.update(payload)
                 if self._player() is not player:
-                    release()
+                    fail('account changed during update')
                     return
                 if inventory:
                     _refresh_garage_views(
@@ -235,11 +244,29 @@ class FakeServer(object):
         # PlayerAccount._update treats every descriptor carried by an
         # incremental ``eliteVehicles`` field as a newly elite vehicle and
         # emits one modal notification for each.  A post-battle update changes
-        # only these accumulated values; the static unlocked/elite snapshot
-        # belongs exclusively to the initial full sync.
+        # accumulated values plus exact new research from reward vehicles;
+        # the full historical unlock/elite sets belong to initial sync.
         stats = snapshot['stats']
         diff = {'stats': dict((name, stats[name]) for name in (
-            'credits', 'gold', 'freeXP', 'vehTypeXP', 'dossier'))}
+            'credits', 'gold', 'crystal', 'freeXP', 'vehTypeXP', 'dossier',
+            'slots', 'berths', 'vehicleSellsLeft'))}
+        diff['account'] = snapshot['account']
+        diff['tokens'] = data.personal_mission_tokens(
+            self._context.get('selected_vehicle'))
+        diff['stats'][('multipliedXPVehs', '_r')] = stats['multipliedXPVehs']
+        research_delta = {}
+        for name in ('unlocks', 'eliteVehicles'):
+            pending = self._context.get('postbattle_added_' + name)
+            added = set(pending or ()) & set(stats[name])
+            if added:
+                diff['stats'][name] = added
+                research_delta[name] = added
+                # Claim this one-shot notification before admission, so two
+                # queued post-battle pushes cannot announce it twice.
+                pending.difference_update(added)
+        from gui.mods.offline_lan_0922 import offline_services
+        diff.update(offline_services.service_diff(
+            self._context.get('selected_vehicle') or {}))
         touched = self._context.get('postbattle_touched_vehicles')
         touched = set(touched or ())
         # A battle spends rounds and consumables, and the vehicle's own
@@ -269,7 +296,61 @@ class FakeServer(object):
             if callable(resync):
                 resync()
 
-        return self._push_update(diff, after_publish=resync_dossiers)
+        def restore_research(unused_error=None):
+            for name, added in research_delta.items():
+                self._context.setdefault('postbattle_added_' + name, set()).update(added)
+
+        accepted = self._push_update(diff, after_publish=resync_dossiers,
+                                     after_failure=restore_research)
+        if not accepted:
+            restore_research()
+        return accepted
+
+    def publish_campaign_notifications(self, delivered=None):
+        """Drain saved launcher settlements; return (published, pending).
+
+        ``delivered`` belongs to the session, surviving Account replacement.
+        A successful native push followed by a failed save retries only its
+        acknowledgement in this process. No reward settlement runs here.
+        """
+        if delivered is None:
+            delivered = self._campaign_notifications_sent
+        state = requests._garage(self._context)
+        snapshot = state.snapshot()
+        rows = list(snapshot.get('personalMissionNotifications') or ())
+        if not rows:
+            return 0, False
+        store = self._context.get('garage_store')
+        player = self._player()
+        if store is None or player is None:
+            return 0, True
+        from gui.mods.offline_lan_0922.personal_campaign_ui import notify
+        published = 0
+        for row in rows:
+            identifier = row['id']
+            if identifier not in delivered:
+                if notify(row.get('settlement')):
+                    published += 1
+                # An obsolete empty message can be acknowledged too. The
+                # enqueue path only writes messages with visible content.
+                delivered.add(identifier)
+            if self._player() is not player:
+                return published, True
+            # Stage just the acknowledgement. Mutating the live queue before
+            # a failed flush would lose retry state, while acknowledging only
+            # selected_vehicle would leave the shared GarageState unchanged.
+            remaining = [entry for entry in
+                         snapshot.get('personalMissionNotifications', ())
+                         if entry.get('id') != identifier]
+            staged = copy.deepcopy(snapshot)
+            staged['personalMissionNotifications'] = remaining
+            store.mark_dirty()
+            if not store.flush(staged):
+                return published, True
+            snapshot['personalMissionNotifications'] = remaining
+            state.revision += 1
+            self._context['selected_vehicle'] = snapshot
+        return published, bool(snapshot.get('personalMissionNotifications'))
 
     def _respond(self, request_id, command, args):
         result = requests.dispatch(command, self._context, args)

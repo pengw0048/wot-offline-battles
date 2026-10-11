@@ -1,7 +1,9 @@
 from pathlib import Path
+import io
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,6 +114,85 @@ class SixthSenseTests(unittest.TestCase):
                                   lambda: 1, lambda: True,
                                   lambda: True, lambda: True,
                                   self.presenter)
+
+    def test_diagnostic_logs_only_at_stock_presentation_boundary(self):
+        output = io.StringIO()
+        with mock.patch.object(battle_feedback.sys, 'stdout', output):
+            self.assertTrue(self.controller.observe(True, 1.0))
+            self.assertEqual('', output.getvalue())
+            token = list(self.scheduler.callbacks)[0]
+            self.scheduler.invoke(token)
+
+        self.assertEqual(
+            '[Offline LAN 0.9.22] SIXTH result=presented\n',
+            output.getvalue())
+        summary = self.controller.diagnostic_summary()
+        self.assertEqual(1, summary['scheduled'])
+        self.assertEqual(1, summary['presented'])
+        self.assertEqual(0, summary['presentation_failed'])
+
+    def test_diagnostic_summary_is_detached_and_reset_is_silent(self):
+        output = io.StringIO()
+        with mock.patch.object(battle_feedback.sys, 'stdout', output):
+            self.assertTrue(self.controller.observe(True, 1.0))
+            self.controller.reset()
+        summary = self.controller.diagnostic_summary()
+        summary['scheduled'] = 99
+
+        self.assertEqual('', output.getvalue())
+        self.assertEqual(1, summary['suppressed_reset'])
+        self.assertEqual(
+            1, self.controller.diagnostic_summary()['scheduled'])
+
+    def test_presentation_failure_is_counted_without_success_log(self):
+        output = io.StringIO()
+
+        def fail(unused_value):
+            raise RuntimeError('presentation failed')
+
+        self.presenter.notify_observed_by_enemy = fail
+        with mock.patch.object(battle_feedback.sys, 'stdout', output):
+            self.assertTrue(self.controller.observe(True, 1.0))
+            token = list(self.scheduler.callbacks)[0]
+            with self.assertRaises(RuntimeError):
+                self.scheduler.invoke(token)
+
+        summary = self.controller.diagnostic_summary()
+        self.assertEqual('', output.getvalue())
+        self.assertEqual(0, summary['presented'])
+        self.assertEqual(1, summary['presentation_failed'])
+
+    def test_presented_log_failure_does_not_replace_the_hud(self):
+        with mock.patch.object(
+                battle_feedback.sys.stdout, 'write',
+                side_effect=IOError('closed')):
+            self.assertTrue(self.controller.observe(True, 1.0))
+            token = list(self.scheduler.callbacks)[0]
+            self.scheduler.invoke(token)
+
+        self.assertEqual([True], self.presenter.values)
+        summary = self.controller.diagnostic_summary()
+        self.assertEqual(1, summary['presented'])
+        self.assertEqual(0, summary['presentation_failed'])
+
+    def test_presented_detail_is_bounded_but_summary_keeps_total(self):
+        output = io.StringIO()
+        with mock.patch.object(battle_feedback.sys, 'stdout', output):
+            for index in range(
+                    battle_feedback.SIXTH_DIAGNOSTIC_DETAIL_LIMIT + 1):
+                self.assertTrue(self.controller.observe(
+                    True, index * (OBSERVATION_SECONDS + 1.0)))
+                token = list(self.scheduler.callbacks)[0]
+                self.scheduler.invoke(token)
+
+        lines = output.getvalue().splitlines()
+        summary = self.controller.diagnostic_summary()
+        self.assertEqual(
+            battle_feedback.SIXTH_DIAGNOSTIC_DETAIL_LIMIT, len(lines))
+        self.assertEqual(
+            battle_feedback.SIXTH_DIAGNOSTIC_DETAIL_LIMIT + 1,
+            summary['presented'])
+        self.assertEqual(1, summary['detail_dropped'])
 
 
 class VehicleStatePresenterTests(unittest.TestCase):

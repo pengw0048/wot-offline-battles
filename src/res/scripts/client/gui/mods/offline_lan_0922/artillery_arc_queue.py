@@ -43,6 +43,7 @@ class ArcProbeQueue(object):
         self.waiting = {}
         self.waiting_order = []
         self.results = {}
+        self.details = {}
 
     def reset(self):
         """Drop all pending work and positive/negative cached results."""
@@ -51,10 +52,14 @@ class ArcProbeQueue(object):
         self.waiting = {}
         self.waiting_order = []
         self.results = {}
+        self.details = {}
 
-    def _cache_result(self, key, now, solution):
+    def _cache_result(self, key, now, solution, detail=None):
         ttl = self.success_ttl if solution is not None else self.failure_ttl
         self.results[key] = (float(now) + ttl, solution)
+        self.details[key] = dict(detail or {},
+                                 state='clear' if solution is not None else 'failed',
+                                 completed=float(now))
 
     def _discard_job(self, key):
         self.jobs.pop(key, None)
@@ -64,7 +69,18 @@ class ArcProbeQueue(object):
             pass
 
     def _complete(self, key, now, solution):
-        self._cache_result(key, now, solution)
+        job = self.jobs.get(key) or {}
+        blocks = list(job.get('blocks') or ())
+        detail = {'blocks': blocks}
+        if solution is None:
+            detail['reason'] = ('world_blocked' if blocks and
+                                all(row.get('hit') is not None for row in blocks)
+                                else 'unresolved')
+            detail['local_blockage'] = bool(
+                len(blocks) == len(job.get('candidates') or ()) and blocks and
+                all(row.get('hit') is not None and
+                    row.get('distance', 1e9) <= 25.0 for row in blocks))
+        self._cache_result(key, now, solution, detail)
         self._discard_job(key)
 
     def _discard_waiting(self, key):
@@ -91,6 +107,7 @@ class ArcProbeQueue(object):
         for key, value in list(self.results.items()):
             if float(value[0]) <= now:
                 self.results.pop(key, None)
+                self.details.pop(key, None)
         for key in list(self.order):
             job = self.jobs.get(key)
             if job is None:
@@ -99,6 +116,7 @@ class ArcProbeQueue(object):
                 # Expired/incomplete work is a short negative result.  It must
                 # never become an unchecked clear lane.
                 self._complete(key, now, None)
+                self.details[key].update(reason='timeout', local_blockage=False)
         for key in list(self.waiting_order):
             job = self.waiting.get(key)
             if job is None:
@@ -141,7 +159,7 @@ class ArcProbeQueue(object):
             if has_chord:
                 usable.append(candidate)
         if not usable:
-            self._cache_result(key, now, None)
+            self._cache_result(key, now, None, {'reason': 'no_candidate'})
             return True, None
         job = {
             'created': float(now),
@@ -149,6 +167,7 @@ class ArcProbeQueue(object):
             'candidates': usable,
             'candidate': 0,
             'chord': 0,
+            'blocks': [],
         }
         if len(self.jobs) >= self.max_jobs:
             # Keep a bounded FIFO so fixed bot iteration order cannot starve
@@ -223,8 +242,37 @@ class ArcProbeQueue(object):
             if reaches_target and chord == len(path) - 2:
                 self._complete(key, now, solution)
             else:
+                try:
+                    point = _coords(hit)
+                    if any(math.isnan(v) or math.isinf(v) for v in point):
+                        raise ValueError('invalid world point')
+                    distance = _distance(point, path[0])
+                except Exception:
+                    point, distance = None, None
+                job['blocks'].append({
+                    'arc': solution.get('arc'), 'chord': chord,
+                    'hit': point, 'distance': distance,
+                })
                 self._blocked_candidate(key, job, now)
         return used
+
+    def status(self, key, now):
+        """Read existing work only; never submit or perform a native query."""
+        result = self.results.get(key)
+        if result is not None and float(result[0]) > float(now):
+            return dict(self.details.get(key) or {},
+                        state='clear' if result[1] is not None else 'failed')
+        job = self.jobs.get(key) or self.waiting.get(key)
+        if job is None:
+            return {'state': 'missing'}
+        index = int(job['candidate'])
+        candidates = job['candidates']
+        candidate = candidates[index] if index < len(candidates) else {}
+        return {'state': 'queued' if key in self.waiting else 'pending',
+                'age': max(0.0, float(now) - float(job['created'])),
+                'arc': candidate.get('arc'), 'chord': int(job['chord']),
+                'chords': max(0, len(candidate.get('path') or ()) - 1),
+                'blocks': list(job.get('blocks') or ())}
 
     def diagnostics(self):
         return {

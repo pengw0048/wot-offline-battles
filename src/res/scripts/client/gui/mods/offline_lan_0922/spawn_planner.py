@@ -67,6 +67,23 @@ class SpawnPlanner(object):
                 _finite(point[1], 'map %s team %d objective base z' %
                         (self.map_name, team))),)
 
+    @property
+    def capture_bases(self):
+        """Keep navigation coordinates separate from authored capture circles."""
+        radii = self.navigation_graph.get('objective_base_radii')
+        if radii is None:
+            return self.bases
+        if not isinstance(radii, (list, tuple)) or len(radii) != 2:
+            raise ValueError('objective base radii must contain two teams')
+        result = {}
+        for team in (1, 2):
+            radius = _finite(radii[team - 1], 'objective base radius')
+            if radius <= 0.0:
+                raise ValueError('objective base radius must be positive')
+            result[team] = tuple(dict(x=x, z=z, radius=radius)
+                                 for x, z in self.bases[team])
+        return result
+
     def _validate_separation(self):
         all_slots = []
         for team in (1, 2):
@@ -98,3 +115,35 @@ class SpawnPlanner(object):
                 (self.map_name, team, slot))
         x, y, z, yaw = self.formations[team][slot]
         return ((x, y, z), yaw)
+
+    def assign_artillery_rear(self, classes):
+        """Permute authored slots so SPGs occupy the back of each formation.
+
+        Depth follows the axis between the two spawn centroids, not slot
+        numbering or the nearest enemy slot. Every pose remains an unchanged,
+        separation-validated point from the map's spawn contract.
+        """
+        result = {}
+        centres = {}
+        for team in (1, 2):
+            points = self.formations[team]
+            centres[team] = tuple(sum(point[axis] for point in points) /
+                                  self.SLOT_COUNT for axis in (0, 2))
+        for team in (1, 2):
+            artillery = sorted(slot for slot in range(self.SLOT_COUNT)
+                               if classes.get((team, slot)) == 'SPG')
+            mapping = dict((slot, slot) for slot in range(self.SLOT_COUNT))
+            if artillery:
+                own, enemy = centres[team], centres[3 - team]
+                dx, dz = enemy[0] - own[0], enemy[1] - own[1]
+                rear = sorted(range(self.SLOT_COUNT), key=lambda slot: (
+                    (self.formations[team][slot][0] - own[0]) * dx +
+                    (self.formations[team][slot][2] - own[1]) * dz, slot))
+                reserved = set(rear[:len(artillery)])
+                mapping.update(zip(artillery, rear[:len(artillery)]))
+                displaced = sorted(reserved.difference(artillery))
+                vacated = sorted(set(artillery).difference(reserved))
+                mapping.update(zip(displaced, vacated))
+            result.update(((team, slot), target)
+                          for slot, target in mapping.items())
+        return result

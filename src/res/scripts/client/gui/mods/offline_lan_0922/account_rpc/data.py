@@ -5,6 +5,8 @@ The numeric item indices come from the target client's exact
 wire shapes can be tested without importing BigWorld.
 """
 
+import time
+
 
 VEHICLE_ITEM_TYPE = 1
 TANKMAN_ITEM_TYPE = 8
@@ -38,6 +40,21 @@ BARRACKS_VEHICLE_ID = -1
 BATTLE_HERO_ACHIEVEMENTS = frozenset((
     'warrior', 'invader', 'sniper', 'sniper2', 'mainGun', 'defender',
     'steelwall', 'supporter', 'scout', 'evileye'))
+PREMIUM_ACCOUNT_ATTR = 4294967296
+DAILY_MULTIPLIED_XP_ATTR = 2048
+# Exact #1513 data has four regular operations.  Every operation contains the
+# same five vehicle-class chains, with fifteen missions in each chain.  The
+# account may run one mission per chain, so ``slots`` is five; it is not a
+# garage-vehicle capacity despite the stock error key saying ``SLOTS``.
+PERSONAL_MISSION_REGULAR_CHAINS = (
+    'lightTank', 'heavyTank', 'mediumTank', 'AT-SPG', 'SPG')
+PERSONAL_MISSION_QUESTS_PER_CHAIN = 15
+PERSONAL_MISSION_REGULAR_OPERATIONS = 4
+PERSONAL_MISSION_REGULAR_SLOTS = len(PERSONAL_MISSION_REGULAR_CHAINS)
+PERSONAL_MISSION_REGULAR_MAX_ID = (
+    PERSONAL_MISSION_REGULAR_SLOTS *
+    PERSONAL_MISSION_QUESTS_PER_CHAIN *
+    PERSONAL_MISSION_REGULAR_OPERATIONS)
 
 
 DEFAULT_TANKMAN_COSTS = (
@@ -56,6 +73,41 @@ DEFAULT_TANKMAN_COSTS = (
 )
 
 
+def personal_mission_regular_chain_id(mission_id):
+    """Return #1513's vehicle-class chain for a regular mission id.
+
+    ``potapov_quests/list.xml`` assigns regular ids 1..300 in blocks of
+    fifteen missions, five blocks per operation.  Chain ids repeat for every
+    operation because selecting a mission in a later operation replaces the
+    active mission for that same vehicle class.
+    """
+    try:
+        mission_id = int(mission_id)
+    except (TypeError, ValueError):
+        return None
+    if mission_id < 1 or mission_id > PERSONAL_MISSION_REGULAR_MAX_ID:
+        return None
+    return ((mission_id - 1) // PERSONAL_MISSION_QUESTS_PER_CHAIN %
+            PERSONAL_MISSION_REGULAR_SLOTS) + 1
+
+
+def personal_mission_regular_selection(values):
+    """Sanitize persisted regular missions to one valid id per chain."""
+    selected = []
+    selected_chains = set()
+    for value in values or ():
+        try:
+            mission_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        chain_id = personal_mission_regular_chain_id(mission_id)
+        if chain_id is None or chain_id in selected_chains:
+            continue
+        selected.append(mission_id)
+        selected_chains.add(chain_id)
+    return selected
+
+
 def _device_removal_cost(vehicle):
     """Return what taking a complex optional device off costs.
 
@@ -64,7 +116,7 @@ def _device_removal_cost(vehicle):
     """
     cost = vehicle.get('deviceRemovalCost')
     if not isinstance(cost, dict):
-        return {'gold': 0}
+        return {'gold': 10}
     return dict((str(currency), int(amount))
                 for currency, amount in cost.items())
 
@@ -76,9 +128,9 @@ def _crew_cost(vehicle, key, currency='gold'):
     gold amounts rather than ``Money`` mappings, so the shop publishes the
     amount and the garage charges the same mapping it was built from.
     """
-    cost = vehicle.get(key)
-    if not isinstance(cost, dict):
-        return 0
+    from gui.mods.offline_lan_0922.account_rpc import economy
+
+    cost = economy.crew_service_cost(vehicle, key)
     try:
         return max(0, int(cost.get(currency, 0) or 0))
     except (TypeError, ValueError):
@@ -102,7 +154,11 @@ def _restore_config(vehicle):
             tankmen[name] = max(0, int(config.get(name, 0) or 0))
         except (TypeError, ValueError):
             tankmen[name] = 0
-    return {'tankmen': tankmen, 'vehicles': {}}
+    from gui.mods.offline_lan_0922 import offline_services
+    return {'tankmen': tankmen, 'vehicles': {
+        'premiumDuration': offline_services.VEHICLE_RESTORE_SECONDS,
+        'actionCooldown': 0,
+        'sellToRestoreFactor': offline_services.VEHICLE_RESTORE_FACTOR}}
 
 
 def _recycle_bin(vehicle):
@@ -123,7 +179,9 @@ def _recycle_bin(vehicle):
                     compact_descr, int(dismissed_at))
             except (TypeError, ValueError):
                 continue
-    return {'tankmen': {'buffer': buffer_rows}, 'vehicles': {'buffer': {}}}
+    from gui.mods.offline_lan_0922 import offline_services
+    return {'tankmen': {'buffer': buffer_rows}, 'vehicles': {
+        'buffer': offline_services.vehicle_recovery_buffer(vehicle)}}
 
 
 def recycle_bin_diff(vehicle, touched_tankmen):
@@ -279,9 +337,9 @@ def _validate_selected_vehicle(vehicle):
                 raise ValueError('selected vehicle repair cost cannot be negative')
             for key in ('eqs', 'eqsLayout'):
                 value = record.get(key)
-                if not isinstance(value, (tuple, list)) or len(value) != 3:
+                if not isinstance(value, (tuple, list)) or len(value) not in (3, 4):
                     raise ValueError(
-                        'selected vehicle %s must contain three slots' % key)
+                        'selected vehicle %s must contain three or four slots' % key)
 
             shells = record.get('shells')
             if (not isinstance(shells, (tuple, list)) or not shells or
@@ -701,6 +759,11 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             if record.get('vehicleTypeCompactDescr') is not None)
     unlocks = set(vehicle.get('unlockItemCompactDescrs', ()))
     unlocks.update(vehicle_types)
+    # #1513's stock ShopVehicleTab applies REQ_CRITERIA.UNLOCKED to premium
+    # offers too.  Retail server data exposes offered gold vehicles as
+    # buyable without turning them into persisted research; reproduce that
+    # presentation entitlement only on the wire.
+    unlocks.update(vehicle.get('shopVehicleOfferCompactDescrs', ()) or ())
     # The garage owns the balances: research spends vehicle experience and a
     # purchase spends credits, so the same file that records what the player
     # has must record what it cost. ``postbattle_progress`` keeps the battle
@@ -713,7 +776,7 @@ def stats(selected_vehicle=None, postbattle_progress=None):
         (name, max(0, int(wallet.get(name, default) or 0)))
         for name, default in (('credits', OFFLINE_CREDITS),
                               ('gold', OFFLINE_GOLD),
-                              ('freeXP', OFFLINE_FREE_XP)))
+                              ('freeXP', OFFLINE_FREE_XP), ('crystal', 0)))
     vehicle_xp = dict((compact_descr, 0) for compact_descr in vehicle_types)
     saved_xp = vehicle.get('vehicleXP')
     if isinstance(saved_xp, dict):
@@ -724,15 +787,22 @@ def stats(selected_vehicle=None, postbattle_progress=None):
                 continue
     # Sold vehicles retain experience and remain conversion candidates.
     elite = _elite_vehicles(vehicle_types | set(vehicle_xp), unlocks)
+    premium_expiry = max(0, int(vehicle.get('premiumExpiryTime', 0) or 0))
+    premium_active = premium_expiry > int(time.time())
     return {
         'account': {
-            'clanDBID': 0, 'attrs': 0, 'premiumExpiryTime': 0,
+            'clanDBID': 0,
+            # The carousel reads dailyXPFactor; its tooltip additionally
+            # requires the account's native daily-multiplier entitlement.
+            'attrs': DAILY_MULTIPLIED_XP_ATTR | (
+                PREMIUM_ACCOUNT_ATTR if premium_active else 0),
+            'premiumExpiryTime': premium_expiry if premium_active else 0,
             'autoBanTime': 0, 'globalRating': 0,
         },
         'stats': {
             'credits': balances['credits'],
             'gold': balances['gold'],
-            'crystal': 0,
+            'crystal': balances['crystal'],
             'freeXP': balances['freeXP'],
             'slots': max(0, int(
                 vehicle.get('accountSlots', OFFLINE_GARAGE_SLOTS) or 0)),
@@ -751,7 +821,8 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             # starts the stock lobby tutorial/hints lifecycle even though this
             # account cannot persist its tutorial actions on a retail server.
             'denunciationsLeft': 0, 'tutorialsCompleted': 33553532,
-            'dossier': account_dossier(progress),
+            'dossier': account_dossier(progress, badges=vehicle.get('accountBadges'),
+                mission_dossier=vehicle.get('personalMissionDossier')),
             'battlesTillCaptcha': 0, 'dailyPlayHours': [0],
             # Full daily/weekly periods disable parental-control blocking in
             # the native #1513 GameSessionController.  Zero means no allowed
@@ -762,7 +833,9 @@ def stats(selected_vehicle=None, postbattle_progress=None):
             'globalVehicleLocks': {}, 'refSystem': {'referrals': {}},
             'unlocks': unlocks,
             'eliteVehicles': elite,
-            'multipliedXPVehs': set(),
+            'multipliedXPVehs': set(int(key) for key, day in
+                (vehicle.get('firstWinDays') or {}).items()
+                if int(day) == int(time.time()) // 86400),
         },
         'cache': {
             'isFinPswdVerified': True,
@@ -776,18 +849,128 @@ def stats(selected_vehicle=None, postbattle_progress=None):
     }
 
 
-def personal_missions():
+def personal_mission_completed(value):
+    result = {}
+    for key, state in (value.items() if isinstance(value, dict) else ()):
+        try:
+            mission = int(key)
+        except (TypeError, ValueError):
+            continue
+        if (1 <= mission <= PERSONAL_MISSION_REGULAR_MAX_ID and
+                type(state) is int and state in (1, 2)):
+            result[str(mission)] = int(state)
+    return result
+
+
+def personal_mission_orders(value):
+    try:
+        # The native token requester does not apply the reference's 21-order
+        # constant to balances. A manually supplied balance must still accept
+        # later mission earnings without silently discarding them.
+        return max(0, min(2147483647, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def personal_mission_pawned(value):
+    """Persist the refundable orders committed to each regular mission."""
+    result = {}
+    for key, count in (value.items() if isinstance(value, dict) else ()):
+        try:
+            mission, count = int(key), int(count)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        cost = 4 if mission % 15 == 0 else 1
+        if 1 <= mission <= PERSONAL_MISSION_REGULAR_MAX_ID and count == cost:
+            result[str(mission)] = cost
+    return result
+
+
+def personal_mission_tokens(snapshot):
+    """Publish account tokens, including the native per-mission pawn marker."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    tokens = {}
+    saved = snapshot.get('personalMissionTokens') or {}
+    for name, value in (saved.items() if isinstance(saved, dict) else ()):
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            try:
+                expiry = max(0, min(2 ** 32 - 1, int(value[0])))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            tokens[name] = (expiry, personal_mission_orders(value[1]))
+    tokens['free_award_list'] = (4104777660, personal_mission_orders(
+        snapshot.get('personalMissionOrders', 0)))
+    completed = personal_mission_completed(snapshot.get('personalMissionProgress'))
+    pawned = personal_mission_pawned(snapshot.get('personalMissionPawned'))
+    if completed or pawned:
+        import personal_missions
+        cache = getattr(personal_missions, 'g_cache', None)
+        if cache is not None:
+            for key in set(completed) | set(pawned):
+                mission = cache.questByPersonalMissionID(int(key))
+                # Keep zero entries after an honors completion: incremental
+                # token caches must clear the previous pawn marker as well.
+                tokens[mission.mainAwardListQuestID] = (
+                    4104777660, 1 if key in pawned else 0)
+    return tokens
+
+
+def account_badges(value):
+    result = {}
+    for key, timestamp in (value.items() if isinstance(value, dict) else ()):
+        try:
+            badge, timestamp = int(key), int(timestamp)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 < badge <= 65535 and 0 < timestamp <= 2 ** 32 - 1:
+            result[str(badge)] = timestamp
+    return result
+
+
+def personal_missions(selected_vehicle=None):
     """#1513's _PersonalMissionsProgressRequester._response indexes
     ``value['potapovQuests']['compDescr']`` for every non-empty diff."""
+    vehicle = selected_vehicle if isinstance(selected_vehicle, dict) else {}
+    saved = vehicle.get('personalMissionSelections')
+    saved = saved if isinstance(saved, dict) else {}
+    completed = personal_mission_completed(vehicle.get('personalMissionProgress'))
+    regular = [qid for qid in personal_mission_regular_selection(saved.get('regular', ()))
+               if completed.get(str(qid)) != 2]
+    descriptor = ''
+    if completed:
+        from personal_missions import PMStorage, PM_STATE
+        storage = {}
+        rewarded = personal_mission_completed(vehicle.get('personalMissionRewarded'))
+        tankwomen = vehicle.get('personalMissionTankwomen') or {}
+        for qid, state in completed.items():
+            paid = rewarded.get(qid, 0)
+            crew_delivered = int(qid) % 15 != 0 or bool(tankwomen.get(qid))
+            if state == 1:
+                native_state = (PM_STATE.MAIN_REWARD_GOTTEN
+                                if paid >= 1 and crew_delivered
+                                else PM_STATE.NEED_GET_MAIN_REWARD)
+            elif paid >= 2 and crew_delivered:
+                native_state = PM_STATE.ALL_REWARDS_GOTTEN
+            elif paid >= 1 and crew_delivered:
+                native_state = PM_STATE.NEED_GET_ADD_REWARD
+            else:
+                native_state = PM_STATE.NEED_GET_ALL_REWARDS
+            storage[int(qid)] = (0, native_state)
+        descriptor = PMStorage(storage=storage).makeCompDescr()
     return {
-        'compDescr': '',
-        'regular': {'slots': 0, 'selected': [], 'lastIDs': {}},
+        'compDescr': descriptor,
+        'regular': {
+            'slots': PERSONAL_MISSION_REGULAR_SLOTS,
+            'selected': regular,
+            'lastIDs': {},
+        },
         'training': {'slots': 0, 'selected': [], 'lastIDs': {}},
     }
 
 
 def sync_data(revision=0, selected_vehicle=None, int_user_settings=None,
               postbattle_progress=None):
+    from gui.mods.offline_lan_0922 import offline_services
     # These are deliberately present even when empty.  #1513's account
     # helpers only create a requester cache entry when the corresponding key
     # exists in the sync diff; several lobby requesters then index that entry
@@ -799,8 +982,8 @@ def sync_data(revision=0, selected_vehicle=None, int_user_settings=None,
     result = {
         'rev': int(revision) + 1,
         'quests': {},
-        'tokens': {},
-        'potapovQuests': personal_missions(),
+        'tokens': personal_mission_tokens(selected_vehicle),
+        'potapovQuests': personal_missions(selected_vehicle),
         'intUserSettings': dict(int_user_settings or {}),
         'goodies': {},
         'groupLocks': {'groupBattles': [], 'isGroupLocked': []},
@@ -814,7 +997,17 @@ def sync_data(revision=0, selected_vehicle=None, int_user_settings=None,
     }
     result.update(inventory(selected_vehicle))
     result.update(stats(selected_vehicle, postbattle_progress))
+    result.update(offline_services.service_diff(selected_vehicle or {}))
     return result
+
+
+def _medal_bond_rewards():
+    from gui.mods.offline_lan_0922 import battle_bonds
+    try:
+        from dossiers2.custom.records import RECORD_DB_IDS
+    except ImportError:
+        return {'isEnabled': False, 'groups': {}, 'medals': {}}
+    return battle_bonds.shop_rewards(RECORD_DB_IDS)
 
 
 def shop(revision=0, selected_vehicle=None):
@@ -825,14 +1018,18 @@ def shop(revision=0, selected_vehicle=None):
     ``Shop.__onSyncDataReceived``; the remaining values keep read-only getters
     deterministic instead of leaving a half-synchronized cache.
     """
+    from gui.mods.offline_lan_0922.account_rpc import economy, garage
+
     vehicle = selected_vehicle if isinstance(selected_vehicle, dict) else {}
     _validate_selected_vehicle(vehicle)
     item_prices = dict(vehicle.get('shopItemPrices', {}))
     nation_count = max(1, int(vehicle.get('shopNationCount', 16)))
+    not_in_shop_items = set(vehicle.get('notInShopItems', ()) or ())
+    not_in_shop_items.difference_update(
+        vehicle.get('shopVehicleOfferCompactDescrs', ()) or ())
     empty_items = {
         'itemPrices': item_prices,
-        'notInShopItems': set(
-            vehicle.get('notInShopItems', ()) or ()),
+        'notInShopItems': not_in_shop_items,
         'vehiclesNotToBuy': set(),
         'vehiclesRentPrices': {},
         'vehiclesToSellForGold': set(),
@@ -853,15 +1050,20 @@ def shop(revision=0, selected_vehicle=None):
         'vehicleCamouflagePriceFactors': {},
         'vehicleHornPriceFactors': {},
     }
-    empty_goodies = {'prices': {}, 'notInShop': set(), 'goodies': {}}
+    from gui.mods.offline_lan_0922 import offline_services
+    empty_goodies = offline_services.reserve_catalogue()
     return {
         'rev': int(revision) + 1,
         'prevRev': int(revision),
-        'crystalExchangeRate': 0,
+        'crystalExchangeRate': 200,
+        'achievementsReward': _medal_bond_rewards(),
         'sellPriceFactor': OFFLINE_SELL_PRICE_FACTOR,
         'items': dict(empty_items),
         'defaults': {
             'items': dict(empty_items),
+            'slotsPrices': (0, [garage.GARAGE_SLOT_GOLD_PRICE]),
+            'berthsPrices': (0, garage.BARRACKS_BERTH_COUNT,
+                             [garage.BARRACKS_BERTH_GOLD_PRICE]),
             'freeXPToTManXPRate': 10,
             'goodies': dict(empty_goodies),
             # SkillDropWindow reads shop.defaults.dropSkillsCost beside the
@@ -871,14 +1073,16 @@ def shop(revision=0, selected_vehicle=None):
             'paidRemovalCost': _device_removal_cost(vehicle),
             # #1513 OptionalDevice.getRemovalPrice uses a separate Money
             # value for optional devices tagged ``deluxe``.
-            'paidDeluxeRemovalCost': {'crystal': 0},
+            'paidDeluxeRemovalCost': {'crystal': 200},
+            'premiumCost': dict(economy.PREMIUM_COSTS),
         },
         'goodies': dict(empty_goodies),
-        # Exact #1513 consumers fall back to the final price entry and the
-        # berth helper divides by pack size.  Empty lists and a zero pack size
-        # therefore crash even though the outer tuple arity is correct.
-        'berthsPrices': (0, 1, [0]),
-        'slotsPrices': (0, [0]),
+        # Prices are scalar gold amounts: ShopCommonStats wraps the helper's
+        # result in Money(gold=...). Both dialogs and transactions use the
+        # same price and the barracks dialog must show the entire 16-bed pack.
+        'berthsPrices': (0, garage.BARRACKS_BERTH_COUNT,
+                         [garage.BARRACKS_BERTH_GOLD_PRICE]),
+        'slotsPrices': (0, [garage.GARAGE_SLOT_GOLD_PRICE]),
         # Stock-compatible, non-zero exchange ratios.  The native exchange
         # dialogs divide by both freeXPConversion[0] and this tankman rate.
         'freeXPConversion': (25, 1),
@@ -888,7 +1092,7 @@ def shop(revision=0, selected_vehicle=None):
         # carries the same table, so what the window shows is what the garage
         # charges.
         'tankmanCost': _tankman_costs(vehicle),
-        'premiumCost': {},
+        'premiumCost': dict(economy.PREMIUM_COSTS),
         # RefSystem.__update indexes posByXPinTeam directly.  Once this dict is
         # non-empty, its #1513 helpers also index the other three values, so
         # keep the entire native disabled/default shape together.
@@ -899,12 +1103,12 @@ def shop(revision=0, selected_vehicle=None):
             'posByXPinTeam': 0,
         },
         # ShopRequester calls .get(Currency.GOLD) on this value.
-        'paidRemovalCost': {'gold': 0},
+        'paidRemovalCost': _device_removal_cost(vehicle),
         # Deluxe optional devices do not use paidRemovalCost.  Publish their
         # exact #1513 shop field so the requester does not use its retail
         # crystal-price fallback.
-        'paidDeluxeRemovalCost': {'crystal': 0},
-        'dailyXPFactor': 1,
+        'paidDeluxeRemovalCost': {'crystal': 200},
+        'dailyXPFactor': 2,
         # The crew shop.  These three are #1513's own ShopCommonStats
         # fallbacks rather than offline policy, and the garage charges the
         # same numbers the player is shown here.
@@ -944,6 +1148,7 @@ def _write_achievements(dossier, counts):
     if not isinstance(counts, dict) or not counts:
         return
     block = dossier['achievements']
+    from gui.mods.offline_lan_0922.battle_achievements import achievement_record
     heroes = 0
     for name in sorted(counts):
         value = counts.get(name)
@@ -955,7 +1160,7 @@ def _write_achievements(dossier, counts):
         if name in BATTLE_HERO_ACHIEVEMENTS:
             heroes += value
         try:
-            block[name] = value
+            dossier[achievement_record(name)[0]][name] = value
         except (KeyError, TypeError, ValueError):
             continue
     if heroes:
@@ -1047,7 +1252,7 @@ def _write_battle_statistics(dossier, stats):
 
 
 def account_dossier(postbattle_progress=None, dossier_factory=None,
-                    vehicle_type_resolver=None):
+                    vehicle_type_resolver=None, badges=None, mission_dossier=None):
     """Return the account dossier compact descriptor #1513 reads.
 
     ``StatsRequester.accountDossier`` of the pinned client reads the ``stats``
@@ -1058,7 +1263,8 @@ def account_dossier(postbattle_progress=None, dossier_factory=None,
                 if isinstance(postbattle_progress, dict) else {})
     counts = progress.get('achievements')
     vehicle_rows = progress.get('vehicles', {})
-    if not vehicle_rows and not counts:
+    badges = account_badges(badges)
+    if not vehicle_rows and not counts and not badges and not mission_dossier:
         return ''
     if dossier_factory is None:
         from dossiers2.custom.builders import getAccountDossierDescr
@@ -1095,6 +1301,11 @@ def account_dossier(postbattle_progress=None, dossier_factory=None,
         for name, type_cd in maximum_vehicles.items():
             dossier['max15x15'][name] = type_cd
     _write_achievements(dossier, counts)
+    for badge, timestamp in badges.items():
+        dossier['playerBadges'][int(badge)] = timestamp
+    for identifier, amount in (mission_dossier or {}).items():
+        block, name = str(identifier).split(':', 1)
+        dossier[block][name] = max(0, int(amount))
     return dossier.makeCompDescr()
 
 

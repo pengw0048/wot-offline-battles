@@ -3,6 +3,7 @@ set -eu
 
 PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+python3 "$PROJECT_ROOT/tools/build_replay_runtime.py"
 docker run --rm --platform linux/amd64 \
   -v "$PROJECT_ROOT:/work" \
   -w /work \

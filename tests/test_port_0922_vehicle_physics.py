@@ -32,6 +32,77 @@ class _Strict1513Component(object):
     values = _forbidden
 
 
+class TrackScrollTests(unittest.TestCase):
+    def test_belt_speeds_follow_the_motion_of_their_chassis_sides(self):
+        # Measure the longitudinal velocity of points on each chassis side
+        # under the same yaw transform as the hull. This independently checks
+        # the turn sign instead of repeating the track-scroll equation.
+        step = 1.0e-5
+        for half_gauge in (0.8, 1.5, 2.2):
+            params = {'trackCenter': half_gauge, 'speedFwd': 30.0}
+            for yaw in (0.0, 1.1, math.pi - 0.001):
+                for speed in (-5.0, 0.0, 5.0):
+                    for omega in (-0.7, 0.7):
+                        with self.subTest(gauge=half_gauge, yaw=yaw,
+                                          speed=speed, omega=omega):
+                            forward = (math.sin(yaw), math.cos(yaw))
+                            expected = []
+                            for side in (-half_gauge, half_gauge):
+                                before = (side * math.cos(yaw),
+                                          -side * math.sin(yaw))
+                                after = (
+                                    speed * forward[0] * step +
+                                    side * math.cos(yaw + omega * step),
+                                    speed * forward[1] * step -
+                                    side * math.sin(yaw + omega * step))
+                                expected.append(sum(
+                                    (end - start) * direction / step
+                                    for start, end, direction in
+                                    zip(before, after, forward)))
+                            actual = vehicle_physics.track_scroll(
+                                params, speed, omega)
+                            for observed, required in zip(actual, expected):
+                                self.assertAlmostEqual(required, observed,
+                                                       places=6)
+
+    def test_straight_travel_and_existing_animation_caps_are_preserved(self):
+        params = {'trackCenter': 1.5, 'speedFwd': 20.0}
+        for speed in (-10.0, 0.0, 10.0):
+            self.assertEqual((speed, speed),
+                             vehicle_physics.track_scroll(params, speed, 0))
+        cap = params['speedFwd'] * vehicle_physics.SCROLL_CAP
+        self.assertEqual((cap, -cap),
+                         vehicle_physics.track_scroll(params, 0, 100))
+        self.assertEqual((-cap, cap),
+                         vehicle_physics.track_scroll(params, 0, -100))
+
+
+class ChassisSupportGeometryTests(unittest.TestCase):
+    def test_uneven_ledge_support_contains_com_and_never_penetrates_samples(self):
+        for yaw in (0.0, 1.1, -2.0):
+            for heights in ((3.2, 3.2, 9.93, 3.2, 3.2),
+                            (9.93, 9.93, 9.93, 3.2, 3.2),
+                            (10.0, 10.0, 7.0, 7.0, 7.0)):
+                with self.subTest(yaw=yaw, heights=heights):
+                    plane = vehicle_physics.sampled_chassis_support(
+                        *(heights + (yaw, 7.0, 3.0)))
+                    self.assertIsNotNone(plane)
+                    offsets = ((0, 3.5), (0, -3.5), (1.5, 0), (-1.5, 0), (0, 0))
+                    for (right, front), height in zip(offsets, heights):
+                        x = right * math.cos(yaw) + front * math.sin(yaw)
+                        z = -right * math.sin(yaw) + front * math.cos(yaw)
+                        support = plane['center_y'] + plane['gradient_x'] * x + plane['gradient_z'] * z
+                        self.assertGreaterEqual(support + 1e-7, height)
+                    self.assertLessEqual(plane['center_y'], max(heights))
+
+    def test_true_cliff_floor_remains_far_below_com(self):
+        plane = vehicle_physics.sampled_chassis_support(
+            10, -20, -20, -20, -20, 0, 7, 3)
+        self.assertLess(plane['center_y'], 0.0)
+        self.assertIsNone(vehicle_physics.sampled_chassis_support(
+            10, None, -20, -20, -20, 0, 7, 3))
+
+
 class VehiclePhysicsDescriptorTests(unittest.TestCase):
 
     @staticmethod
@@ -721,14 +792,14 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
             (1.0, 2.0), 3.0, None, 0.5)
         self.assertEqual(3.0, ground)
         retained, stationary_miss = vehicle_physics.retained_ground_contact(
-            (1.0, 2.0), None, memory, 0.5)
+            (1.0, 2.0), None, memory, 0.5, (0.0, 0.0))
         self.assertEqual(3.0, retained)
         self.assertEqual(
             (None, None),
             vehicle_physics.retained_ground_contact(
-                (1.0, 2.0), None, stationary_miss, 0.5))
+                (1.0, 2.0), None, stationary_miss, 0.5, (0.0, 0.0)))
         retained, moved_memory = vehicle_physics.retained_ground_contact(
-            (1.2, 2.2), None, memory, 0.5)
+            (1.2, 2.2), None, memory, 0.5, (0.0, 0.0))
         self.assertEqual(3.0, retained)
         self.assertNotEqual(memory, moved_memory)
         sloped, unused_sloped_memory = \
@@ -739,23 +810,23 @@ class VehiclePhysicsSuspensionTrialTests(unittest.TestCase):
         self.assertEqual(
             (None, None),
             vehicle_physics.retained_ground_contact(
-                (1.2, 2.2), None, moved_memory, 0.5))
+                (1.2, 2.2), None, moved_memory, 0.5, (0.0, 0.0)))
         self.assertEqual(
             (None, None),
             vehicle_physics.retained_ground_contact(
-                (1.6, 2.0), None, memory, 0.5))
+                (1.6, 2.0), None, memory, 0.5, (0.0, 0.0)))
 
         unused_ground, memory = vehicle_physics.retained_ground_contact(
             (0.0, 0.0), 4.0, None, 0.5)
         for point in ((0.1, 0.0), (0.1, 0.1), (0.0, 0.1),
                       (0.0, 0.0), (-0.1, 0.0)):
             retained, memory = vehicle_physics.retained_ground_contact(
-                point, None, memory, 0.5)
+                point, None, memory, 0.5, (0.0, 0.0))
             self.assertEqual(4.0, retained)
         self.assertEqual(
             (None, None),
             vehicle_physics.retained_ground_contact(
-                (-0.1, -0.1), None, memory, 0.5))
+                (-0.1, -0.1), None, memory, 0.5, (0.0, 0.0)))
 
     def test_ground_plane_uses_contacts_and_rejects_a_discontinuity(self):
         gradient_x = 0.12
@@ -1100,38 +1171,158 @@ class VehiclePhysicsCoastTests(unittest.TestCase):
             self.params, speed, 0.0, False,
             math.radians(slope_degrees), dt)
 
-    def _flat_stop(self, frame_rate):
-        speed = self.params['speedFwd']
-        dt = 1.0 / frame_rate
-        distance = 0.0
-        elapsed = 0.0
-        while speed > 0.0 and elapsed < 5.0:
-            speed = self._coast(speed, 0.0, dt)
-            # BattleRuntime integrates the post-step speed into the pose.
-            distance += speed * dt
-            elapsed += dt
-        return elapsed, distance
+    def test_release_restores_partial_braking_without_locking_the_tracks(self):
+        # Retail observation establishes braking on release. These inequalities
+        # verify the restored offline calibration, not an official stop time.
+        for direction in (-1.0, 1.0):
+            initial = min(8.0, self.params[
+                'speedFwd' if direction > 0.0 else 'speedBwd'])
+            speed = direction * initial
+            coast = abs(self._coast(speed, 0.0, 0.1))
+            rolling = initial - (vehicle_physics.rolling_resist_force(
+                self.params) / self.params['mass']) * 0.1
+            locked = abs(vehicle_physics.longitudinal_step(
+                self.params, speed, 0.0, False, 0.0, 0.1, handbrake=True))
+            self.assertLess(coast, rolling)
+            self.assertGreater(coast, locked)
+            speeds = []
+            for fps in (24, 60):
+                speed = direction * initial
+                for unused in range(fps // 2):
+                    speed = self._coast(speed, 0.0, 1.0 / fps)
+                speeds.append(speed)
+            self.assertGreaterEqual(speeds[0] * direction, 0.0)
+            self.assertAlmostEqual(speeds[0], speeds[1], places=10)
 
-    def test_type62_flat_release_stops_in_the_conservative_calibrated_window(self):
-        results = [self._flat_stop(rate) for rate in (24, 30, 60, 120)]
+    def test_direction_change_brakes_before_accelerating_with_tuned_speed(self):
+        params = dict(self.params, speedFwd=100./3.6, speedBwd=100./3.6)
+        for sign in (-1., 1.):
+            for neutral in (False, True):
+                speed, previous, active = sign*100./3.6, sign, False
+                if neutral:
+                    active = vehicle_physics.direction_brake(previous, active, 0, speed)
+                    previous = 0
+                command = -sign
+                for unused in range(600):
+                    active = vehicle_physics.direction_brake(previous, active, command, speed)
+                    self.assertTrue(active)
+                    before = speed
+                    coast = vehicle_physics.longitudinal_step(params, speed, 0, False, 0., .01)
+                    speed = vehicle_physics.longitudinal_step(params, speed, command,
+                        False, 0., .01, service_brake=active)
+                    self.assertLessEqual(abs(speed), abs(coast))
+                    if speed:
+                        self.assertLess(abs(speed), abs(coast))
+                    self.assertGreaterEqual(speed*sign, 0.)
+                    previous = command
+                    if speed == 0.:
+                        break
+                self.assertEqual(0., speed)
+                active = vehicle_physics.direction_brake(previous, active, command, speed)
+                self.assertFalse(active)
+                following = vehicle_physics.longitudinal_step(params, speed, command,
+                    False, 0., .01, service_brake=active)
+                self.assertGreater(following*command, 0.)
 
-        for elapsed, distance in results:
-            self.assertGreaterEqual(elapsed, 1.50)
-            self.assertLessEqual(elapsed, 1.60)
-            self.assertGreaterEqual(distance, 12.5)
-            self.assertLessEqual(distance, 12.9)
-        self.assertLess(
-            max(row[1] for row in results) -
-            min(row[1] for row in results),
-            0.30)
+    def test_held_input_pushed_back_does_not_latch_service_brakes(self):
+        for command in (-1., 1.):
+            self.assertFalse(vehicle_physics.direction_brake(command, False, command, -command*4.))
+            self.assertFalse(vehicle_physics.direction_brake(command, True, 0, -command*4.))
+            # Changing mind back to the travel direction cancels braking.
+            self.assertFalse(vehicle_physics.direction_brake(-command, True, command, command*4.))
+            self.assertEqual(-command*4., vehicle_physics.longitudinal_step(
+                self.params, -command*4., command, False, 0., .1,
+                airborne=True, service_brake=True))
 
-    def test_parkable_descent_brakes_and_a_steeper_one_slides(self):
-        # The 2.3-reviewed coast law: every slope the parked hold can keep
-        # brakes like the flat; past the perch limit gravity owns the descent.
-        self.assertLess(self._coast(5.0, 15.0, 0.1), 5.0)
-        self.assertGreater(self._coast(5.0, 15.0, 0.1),
-                           self._coast(5.0, 0.0, 0.1))
-        self.assertGreater(self._coast(5.0, 28.0, 0.1), 5.0)
+    def test_service_brake_uses_installed_force_not_engine_power(self):
+        for mass in (20000., 100000.):
+            for power in (200000., 1000000.):
+                p = dict(self.params, mass=mass, powerW=power,
+                    speedFwd=30., speedBwd=30., brakeDecel=3.)
+                for sign in (-1., 1.):
+                    self.assertAlmostEqual(sign*9.7, vehicle_physics.longitudinal_step(
+                        p, sign*10., -sign, False, 0., .1, service_brake=True))
+
+    def test_release_is_half_service_brake_including_rolling_resistance(self):
+        for mass in (21000., 100575.):
+            for brake in (3., vehicle_physics.COHESION * vehicle_physics.GRAVITY):
+                params = dict(self.params, mass=mass, brakeDecel=brake,
+                              speedFwd=100./3.6, speedBwd=100./3.6)
+                for sign in (-1., 1.):
+                    for terrain in range(3):
+                        for dt in (.01, .1):
+                            with self.subTest(mass=mass, brake=brake,
+                                              sign=sign, terrain=terrain, dt=dt):
+                                initial = sign * 100./3.6
+                                coast = vehicle_physics.longitudinal_step(
+                                    params, initial, 0., False, 0., dt, terrainIdx=terrain)
+                                active = vehicle_physics.longitudinal_step(
+                                    params, initial, -sign, False, 0., dt,
+                                    terrainIdx=terrain, service_brake=True)
+                                self.assertAlmostEqual(abs(initial - active) / 2.,
+                                                       abs(initial - coast))
+                                self.assertAlmostEqual(
+                                    vehicle_physics.brake_force(params, False, terrain),
+                                    abs(initial - coast) * mass / dt)
+
+    def test_coasting_retains_terrain_drag_after_steep_descent_brake_relief(self):
+        for direction in (-1.0, 1.0):
+            speeds = [abs(vehicle_physics.longitudinal_step(
+                self.params, direction * 2.5, 0.0, False,
+                direction * math.radians(28.), 0.1,
+                terrainIdx=terrain)) for terrain in range(3)]
+            self.assertGreater(speeds[0], speeds[1])
+            self.assertGreater(speeds[1], speeds[2])
+            self.assertGreater(speeds[2], 0.0)
+
+    def test_release_never_cancels_physical_rolling_drag(self):
+        # A low installed brake cannot erase a larger terrain resistance.
+        params = dict(self.params, brakeDecel=.5)
+        for sign in (-1., 1.):
+            for terrain in range(3):
+                rolling = vehicle_physics.rolling_resist_force(params, terrain)
+                coast = vehicle_physics.longitudinal_step(
+                    params, sign*2.5, 0., False, 0., .1, terrainIdx=terrain)
+                self.assertAlmostEqual(rolling / params['mass'],
+                                       abs(sign*2.5 - coast) / .1)
+                self.assertAlmostEqual(rolling,
+                    vehicle_physics.brake_force(params, False, terrain))
+
+    def test_release_brakes_ordinary_slopes_and_relaxes_on_steep_descents(self):
+        # Restore the existing slope-dependent coast brake: ordinary descents
+        # can stop, while grades beyond the static perch shed the brake share.
+        forward_down = self._coast(2.5, 15.0, 0.1)
+        forward_up = self._coast(2.5, -15.0, 0.1)
+        self.assertLess(forward_down, 2.5)
+        self.assertLess(forward_up, self._coast(2.5, 0.0, 0.1))
+        self.assertAlmostEqual(-forward_down, self._coast(-2.5, -15.0, 0.1))
+        self.assertAlmostEqual(-forward_up, self._coast(-2.5, 15.0, 0.1))
+        self.assertGreater(self._coast(2.5, 28.0, 0.1), 2.5)
+        self.assertLess(self._coast(-2.5, -28.0, 0.1), -2.5)
+
+    def test_rolling_to_rest_does_not_reverse_or_creep(self):
+        for direction in (-1.0, 1.0):
+            speed = direction * 0.05
+            for unused in range(10):
+                speed = self._coast(speed, 0.0, 0.1)
+                self.assertGreaterEqual(speed * direction, 0.0)
+            self.assertEqual(0.0, speed)
+
+    def test_explicit_braking_and_opposite_input_still_stop_the_vehicle(self):
+        for direction in (-1.0, 1.0):
+            for brake_kind in ('handbrake', 'opposite'):
+                speed = direction * 5.0
+                # Opposite throttle uses installed engine force; it does not
+                # silently engage a full parking brake when externally pushed.
+                for unused in range(600):
+                    speed = vehicle_physics.longitudinal_step(
+                        self.params, speed,
+                        -direction if brake_kind == 'opposite' else 0.0,
+                        False, 0.0, 1.0 / 60.0,
+                        handbrake=brake_kind == 'handbrake')
+                    if speed * direction <= 0.0:
+                        break
+                self.assertLessEqual(speed * direction, 0.0)
 
     def test_static_hold_and_handbrake_are_unchanged(self):
         self.assertEqual(0.0, self._coast(0.0, 25.0, 0.1))
@@ -1155,25 +1346,107 @@ class VehiclePhysicsCoastTests(unittest.TestCase):
         self.assertGreater(results[0], 7.0)
         self.assertLess(max(results) - min(results), 1e-9)
 
-    def test_released_throttle_bleeds_the_gravity_overspeed(self):
-        speed = self.params['speedFwd'] * 1.04
-        elapsed = 0.0
-        while speed > 0.0 and elapsed < 6.0:
-            speed = self._coast(speed, 4.0, 1.0 / 30.0)
-            elapsed += 1.0 / 30.0
+    def test_releasing_throttle_does_not_add_a_speed_limit_brake(self):
+        limit = self.params['speedFwd']
+        # Crossing the drivetrain speed limit does not change a neutral
+        # tank's restored drivetrain braking.
+        low_speed = limit - 0.2
+        high_speed = limit + 0.2
+        low_next = self._coast(low_speed, 0.0, 0.1)
+        high_next = self._coast(high_speed, 0.0, 0.1)
+        self.assertAlmostEqual(low_speed - low_next, high_speed - high_next)
+        self.assertLess(self._coast(high_speed, 4.0, 0.1), high_speed)
+        self.assertGreater(self._coast(high_speed, 28.0, 0.1), high_speed)
 
-        self.assertEqual(0.0, speed)
-        self.assertLess(elapsed, 2.5)
+    def test_a_45_kmh_vehicle_has_a_49_5_kmh_downhill_cap_at_every_frame_rate(self):
+        # Reproduce the reported limit, without claiming a particular tank's
+        # installed descriptor or calibrating its downhill terminal speed.
+        params = dict(self.params, speedFwd=45.0 / 3.6)
+        speeds = []
+        for fps in (24, 30, 60, 120):
+            speed = params['speedFwd']
+            for unused in range(fps * 2):
+                speed = vehicle_physics.longitudinal_step(
+                    params, speed, 1.0, False, math.radians(20.0), 1.0 / fps)
+            speeds.append(speed)
+        self.assertGreater(min(speeds) * 3.6, 45.0)
+        self.assertAlmostEqual(49.5, speeds[0] * 3.6)
+        self.assertLess(max(speeds) - min(speeds), 1e-9)
 
-    def test_a_driven_descent_keeps_the_gravity_overspeed(self):
-        speed = self.params['speedFwd']
-        for unused in range(30 * 20):
-            speed = vehicle_physics.longitudinal_step(
-                self.params, speed, 1.0, False, math.radians(20.0),
-                1.0 / 30.0)
+    def test_approximate_descent_cap_bounds_forward_reverse_and_neutral(self):
+        for direction in (-1.0, 1.0):
+            limit = self.params['speedFwd' if direction > 0.0 else 'speedBwd']
+            maximum = limit * 1.10
+            for throttle in (0.0, direction):
+                for fps in (24, 60):
+                    speed = direction * limit
+                    for unused in range(fps * 5):
+                        speed = vehicle_physics.longitudinal_step(
+                            self.params, speed, throttle, False,
+                            direction * math.radians(28.0), 1.0 / fps)
+                        self.assertLessEqual(abs(speed), maximum)
+                    self.assertAlmostEqual(maximum, abs(speed))
 
-        self.assertAlmostEqual(self.params['speedFwd'] * 1.05, speed,
-                               places=3)
+    def test_gravity_overcoming_locked_tracks_still_obeys_downhill_cap(self):
+        for direction in (-1.0, 1.0):
+            limit = self.params['speedFwd' if direction > 0.0 else 'speedBwd']
+            speed = 0.0
+            for unused in range(60 * 5):
+                speed = vehicle_physics.longitudinal_step(
+                    self.params, speed, 0.0, False,
+                    direction * math.radians(65.0), 1.0 / 60.0, handbrake=True)
+                self.assertLessEqual(abs(speed), limit * 1.10)
+            self.assertAlmostEqual(abs(speed), limit * 1.10)
+
+    def test_gravity_overspeed_does_not_depend_on_engine_power(self):
+        initial = self.params['speedFwd'] * 1.02
+        base = vehicle_physics.longitudinal_step(
+            self.params, initial, 1.0, False, math.radians(20.0), 0.1)
+        powerful = vehicle_physics.longitudinal_step(
+            dict(self.params, powerW=self.params['powerW'] * 10.0),
+            initial, 1.0, False, math.radians(20.0), 0.1)
+        self.assertGreater(base, initial)
+        self.assertAlmostEqual(base, powerful)
+
+    def test_powered_limits_hold_on_flat_ground_in_both_directions(self):
+        for limit_kmh in (20.0, 45.0, 60.0):
+            params = dict(self.params, speedFwd=limit_kmh / 3.6,
+                          speedBwd=limit_kmh / 7.2, powerW=600.0 * 735.5)
+            for direction in (-1.0, 1.0):
+                limit = params['speedFwd' if direction > 0.0 else 'speedBwd']
+                speed = direction * (limit - 0.01)
+                for unused in range(30):
+                    speed = vehicle_physics.longitudinal_step(
+                        params, speed, direction, False, 0.0, 1.0 / 30.0)
+                    self.assertLessEqual(abs(speed), limit)
+                self.assertAlmostEqual(abs(speed), limit)
+
+    def test_overspeed_momentum_survives_leaving_a_slope_and_can_be_braked(self):
+        for direction in (-1.0, 1.0):
+            limit = self.params['speedFwd' if direction > 0.0 else 'speedBwd']
+            initial = direction * limit * 1.25
+            coast = self._coast(initial, 0.0, 0.01)
+            drive = vehicle_physics.longitudinal_step(
+                self.params, initial, direction, False, 0.0, 0.01)
+            for speed in (coast, drive):
+                self.assertGreater(abs(speed), limit)
+                self.assertLess(abs(speed), abs(initial))
+            for handbrake, throttle in ((True, 0.0), (False, -direction)):
+                braked = vehicle_physics.longitudinal_step(
+                    self.params, initial, throttle, False,
+                    math.radians(20.0) * direction, 0.1, handbrake=handbrake)
+                self.assertLess(abs(braked), abs(initial))
+
+    def test_reverse_descent_keeps_its_own_powered_limit_and_gravity(self):
+        params = dict(self.params, speedFwd=12.0, speedBwd=12.0)
+        forward, reverse = 12.0, -12.0
+        for unused in range(60):
+            forward = vehicle_physics.longitudinal_step(
+                params, forward, 1.0, False, math.radians(20.0), 1.0 / 30.0)
+            reverse = vehicle_physics.longitudinal_step(
+                params, reverse, -1.0, False, -math.radians(20.0), 1.0 / 30.0)
+        self.assertAlmostEqual(13.2, forward)
+        self.assertAlmostEqual(forward, -reverse)
 
 
 class VehiclePhysicsAirborneTests(unittest.TestCase):

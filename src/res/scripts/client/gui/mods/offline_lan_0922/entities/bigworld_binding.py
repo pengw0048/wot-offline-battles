@@ -318,8 +318,50 @@ class BigWorldVehicleBinding(object):
     def arena_vehicle_killed(self, entity_id, attacker_id=0, reason=0):
         """Publish the exact uncompressed #1513 ClientArena kill tuple."""
         payload = (int(entity_id), int(attacker_id), 0, int(reason))
+        avatar = self._avatar
+        own = int(entity_id) == int(avatar.playerVehicleID)
+        controller = getattr(getattr(avatar, 'inputHandler', None), 'ctrl', None)
+        observed = (not getattr(avatar, 'isVehicleAlive', True) and
+                    int(entity_id) == getattr(controller, 'curVehicleID', None))
         self._avatar.updateArena(self._constants.ARENA_UPDATE.VEHICLE_KILLED,
                                  _pickle.dumps(payload))
+        if own or observed:
+            # #1513's Avatar skips the own-vehicle feed, and msgs_ctrl skips
+            # the observed vehicle after death. Own deaths use the central
+            # PostmortemPanel; an observed teammate still needs the killfeed.
+            messages = self._need(self._need(
+                self._need(avatar, 'guiSessionProvider'), 'shared'), 'messages')
+            kill_info = self._need(
+                messages, '_BattleMessagesController__getKillInfo')
+            code, postfix, unused_sound, unused_extra = kill_info(
+                avatar, *payload)
+            if own:
+                # Arena's DEATH_INFO does not feed the regular #1513
+                # PostmortemPanel. Its separate server damage-info event
+                # supplies the native cause/killer text (without extra voice).
+                death_code = code
+                reasons = self._need(self._constants, 'ATTACK_REASON_INDICES')
+                fire = int(reason) == reasons['fire']
+                if fire:
+                    death_code = 'DEATH_FROM_FIRE'
+                if self._authority_entity_or_fail(entity_id).health < 0:
+                    death_code = ('DEATH_FROM_DEVICE_EXPLOSION_AT_FIRE' if fire
+                                  else 'DEATH_FROM_DEVICE_EXPLOSION_AT_SHOT')
+                elif not attacker_id and code == 'DEATH_FROM_SHOT' and not fire:
+                    death_code = 'DEATH_UNKNOWN'
+                if not attacker_id and death_code in (
+                        'DEATH_FROM_WORLD_COLLISION', 'DEATH_FROM_DROWNING',
+                        'DEATH_FROM_OVERTURN', 'DEATH_FROM_DEATH_ZONE',
+                        'DEATH_FROM_INACTIVE_CREW_AT_WORLD_COLLISION'):
+                    # #1513 has no UNKNOWN_SELF postmortem templates. Its
+                    # unassisted cause text is under SELF_SUICIDE; select the
+                    # template without inventing an attacker or kill credit.
+                    postfix = 'SELF_SUICIDE'
+                self._need(messages, 'onShowVehicleMessageByCode')(
+                    death_code, postfix, int(attacker_id), None, 0)
+            else:
+                self._need(messages, 'onShowPlayerMessageByCode')(
+                    code, postfix, int(entity_id), int(attacker_id), 0)
 
     def arena_vehicle_statistics(self, entity_id, frags):
         """Publish exact #1513 compressed ``(vehicleID, frags)`` stats."""
@@ -611,10 +653,16 @@ class BigWorldVehicleBinding(object):
         # account identity namespace.  Every Vehicle is fully materialized
         # before this producer runs; publish it ready like the 0.8.2 roster.
         team_killer = bool((snapshot or {}).get('team_killer', False))
+        # ClientArena unpacks index 15 into personalMissionIDs. The stock
+        # personal arena description consumes it on its first player roster
+        # update, before TAB is populated; publishing it later is too late.
+        mission_ids = list((snapshot or {}).get('personal_mission_ids', ()))
+        crew_group = int((snapshot or {}).get('crew_group', 0))
         values = [entity_id, public_info['compDescr'], public_info['name'],
                   public_info['team'], is_alive, True, team_killer,
                   entity_id, '', 0,
-                  public_info['prebattleID'], False, False, {}, 0, [], 0, {}]
+                  public_info['prebattleID'], False, False, {}, 0,
+                  mission_ids, crew_group, {}]
         return zlib.compress(_pickle.dumps(values))
 
     def _snapshot_properties(self, snapshot):

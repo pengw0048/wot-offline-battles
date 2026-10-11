@@ -631,12 +631,38 @@ def save_slot_initial_wallet(slot=None, user_data_dir=None):
     if not isinstance(wallet, dict):
         return {}
     result = {}
-    for name in ('credits', 'gold', 'freeXP'):
+    for name in ('credits', 'gold', 'freeXP', 'crystal'):
         if name in wallet:
             try:
                 result[name] = max(0, min(2 ** 31 - 1, int(wallet[name])))
             except (TypeError, ValueError, OverflowError):
                 pass
+    return result
+
+
+def save_slot_initial_personal_progress(slot=None, user_data_dir=None):
+    """Starting campaign state; an existing garage ledger takes priority."""
+    path = os.path.join(save_slot_dir(slot, user_data_dir), SAVE_METADATA_FILE_NAME)
+    try:
+        with open(path, 'rb') as stream:
+            value = json.load(stream)
+    except (IOError, OSError, TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    from gui.mods.offline_lan_0922.account_rpc import data
+    result = {
+        'personalMissionProgress': data.personal_mission_completed(
+            value.get('initial_personal_missions')),
+        'personalMissionOrders': data.personal_mission_orders(
+            value.get('initial_personal_orders', 0)),
+        'accountBadges': data.account_badges(value.get('initial_account_badges')),
+    }
+    notifications = value.get('initial_account_notifications')
+    if isinstance(notifications, list):
+        result['personalMissionNotifications'] = [row for row in notifications
+            if isinstance(row, dict) and row.get('id') and
+            isinstance(row.get('settlement'), dict)]
     return result
 
 

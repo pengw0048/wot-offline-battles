@@ -238,7 +238,9 @@ class SpawnDepartureTests(unittest.TestCase):
 
                 runtime._traffic_coordinator.adjust = traffic_adjust
 
-                for frame in range(1, fps * 30 + 1):
+                # Finite track grip slows a crowded queue; retain every
+                # departure and stall bound over one minute of simulation.
+                for frame in range(1, fps * 60 + 1):
                     now[0] = frame / float(fps)
                     runtime.update(1.0 / float(fps), now[0])
 

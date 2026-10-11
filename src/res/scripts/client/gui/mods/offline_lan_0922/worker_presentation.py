@@ -3,11 +3,14 @@ from __future__ import print_function
 """Reversible sound and native-window isolation for the simulation worker."""
 
 import os
+import struct
+import sys
 
 
 WORKER_READY_MARKER_ENV = \
     'OFFLINE_LAN_0922_WORKER_INTERNAL_READY_MARKER'
 PLAYER_READY_MARKER_ENV = 'OFFLINE_LAN_0922_PLAYER_READY_MARKER'
+PLAYER_FINISHED_MARKER_ENV = 'OFFLINE_LAN_0922_PLAYER_FINISHED_MARKER'
 HIDDEN_DESKTOP_ENV = 'OFFLINE_LAN_0922_HIDDEN_DESKTOP'
 
 try:
@@ -64,6 +67,29 @@ def signal_player_ready(environ=None):
     """Publish the visible client's post-loader Hangar boundary."""
     return _signal_ready_marker(
         PLAYER_READY_MARKER_ENV, 'visible player', environ)
+
+
+def signal_player_finished(environ=None):
+    """Publish successful game.fini to this launch's native process owner."""
+    environ = os.environ if environ is None else environ
+    path = environ.get(PLAYER_FINISHED_MARKER_ENV, '')
+    if not path or environ.get('OFFLINE_LAN_0922_CLIENT_MODE') != 'player':
+        return False
+    # Recording closes asynchronously. Give a still-draining writer the
+    # longer native cleanup budget instead of truncating it at normal exit.
+    replay = sys.modules.get(__package__ + '.offline_replay')
+    pending = any(not item.done for item in getattr(replay, '_FINISHING', ()))
+    temporary = path + '.tmp'
+    with open(temporary, 'wb') as stream:
+        stream.write(struct.pack('<II', os.getpid(), int(pending)))
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    os.rename(temporary, path)
+    return True
 
 
 def _load_runtime():

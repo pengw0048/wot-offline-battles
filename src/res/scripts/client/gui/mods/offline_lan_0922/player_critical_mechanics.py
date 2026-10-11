@@ -19,7 +19,7 @@ CREW_NAMES = frozenset((
     'loader1', 'loader2', 'radioman', 'radioman1', 'radioman2'))
 
 
-def project_profile(descriptor):
+def project_profile(descriptor, factors=None):
     """Project final mounted device HP pools from the exact #1513 client."""
     devices = []
     for name in DEVICE_NAMES:
@@ -27,6 +27,10 @@ def project_profile(descriptor):
         if maximum is None:
             continue
         regen = device_damage.device_regen_hp(descriptor, name)
+        if name == 'ammoBayHealth' and factors is not None:
+            factor = float(factors.get('offline/ammoBayHealth', 1.0))
+            maximum = int(round(maximum * factor))
+            regen = int(round((regen or 0.0) * factor))
         devices.append({
             'name': name,
             'max_hp': float(maximum),
@@ -227,8 +231,23 @@ def advance_critical(player, dt, now):
     # the moment the kit is spent.
     repair_factor *= 1.0 + max(
         0.0, float(passives.get('repairkitBonusValue', 0.0)))
-    rpm_loss = max(
-        0.0, float(passives.get('engineHpLossPerSecond', 0.0))) * float(dt)
+    # User-supplied governor experiment: engine wear occurs once per second
+    # below half the base forward limit, not at every simulation tick and
+    # not at cruising speed. Use accepted m/s values, before live penalties.
+    rpm_rate = max(0.0, float(passives.get('engineHpLossPerSecond', 0.0)))
+    base_speed = float((params.get('physics') or {}).get('speedFwd', 0.0))
+    speed = abs(float(getattr(player, 'speed', 0.0)))
+    rpm_loss = 0.0
+    if rpm_rate > 0.0 and base_speed > 0.0 and speed < base_speed * 0.5:
+        elapsed = float(getattr(player, 'rpm_damage_elapsed', 0.0)) + float(dt)
+        # The real server uses 1/30 s, unlike the decimal test intervals.
+        # Rounding each tick down delays a nominal whole-second boundary
+        # by one tick. Tolerate only floating-point noise at that boundary.
+        seconds = int(elapsed + 1.0e-9)
+        player.rpm_damage_elapsed = max(0.0, elapsed - seconds)
+        rpm_loss = rpm_rate * seconds
+    else:
+        player.rpm_damage_elapsed = 0.0
     rpm_payload = (critical_damage.damage_device_over_time(
         target, 'engineHealth', rpm_loss, 'equipment')
         if rpm_loss > 0.0 else None)

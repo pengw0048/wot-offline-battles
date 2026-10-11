@@ -1,0 +1,266 @@
+name: Publish v0.9.0 release
+# Release metadata assertions are aligned with the 0.9.0 binaries.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-v0.9.0.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-v0.9.0
+  cancel-in-progress: false
+
+jobs:
+  windows-server:
+    if: github.repository == 'colorfulmeans/wot-0.9.22-offline-battles'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+      - name: Install pinned Windows server packager
+        run: python -m pip install -r server/requirements-windows-build.txt
+      - name: Build Windows LAN server
+        shell: pwsh
+        run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v090-server
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  client-payload:
+    needs: windows-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install Pillow==12.3.0
+      - name: Run client test suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run launcher test suite
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - uses: actions/download-artifact@v4
+        with:
+          name: v090-server
+          path: dist/server
+      - name: Build Python 2.7 0.9.22 client package
+        run: >-
+          docker run --rm --platform linux/amd64 -v "$PWD:/work"
+          -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}"
+          -w /work python:2.7.18
+          python build_wotmod.py
+      - name: Validate client package and diagnostic identity
+        env:
+          EXPECTED_BUILD_IDENTITY: colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+          python - <<'PY'
+          import glob
+          import json
+          import os
+          paths = glob.glob('dist/WoT-0.9.22-LAN-Client-*/mods/configs/offline_lan_0922/build_identity.json')
+          assert len(paths) == 1, paths
+          with open(paths[0], encoding='utf-8') as stream:
+              identity = json.load(stream)
+          expected = os.environ['EXPECTED_BUILD_IDENTITY']
+          assert identity == {
+              'schema': 1,
+              'semanticVersion': '0.9.0',
+              'buildIdentity': expected,
+          }, identity
+          print('Client identity verified: version=0.9.0 build=%s' % expected)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v090-launcher-input
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-launcher-and-release:
+    permissions:
+      contents: write
+    needs: client-payload
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+      - name: Install pinned Windows packager
+        run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: v090-launcher-input
+          path: dist
+      - name: Test launcher on Windows
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Verify source branding and version
+        shell: pwsh
+        run: |
+          @'
+          import os
+          import sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import wot_launcher
+          assert wot_launcher.LAUNCHER_VERSION == '0.9.0'
+          assert wot_launcher.WINDOW_TITLE == 'wot-0.9.22-offline-battles v0.9.0'
+          source = open(os.path.join('launcher', 'wot_launcher.py'), encoding='utf-8').read()
+          assert 'text="wot-0.9.22-offline-battles"' in source
+          print(wot_launcher.WINDOW_TITLE)
+          '@ | python -
+      - name: Build launcher distribution
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify bundled runtime identity and package flat ZIP
+        shell: pwsh
+        env:
+          EXPECTED_BUILD_IDENTITY: colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $appName = "wot-0.9.22-offline-battles"
+          $appRoot = Join-Path $PWD "launcher\dist\$appName"
+          $launcher = Join-Path $appRoot "$appName.exe"
+          if (-not (Test-Path -LiteralPath $launcher)) {
+              throw "Launcher executable is missing"
+          }
+          foreach ($exe in @($launcher, (Join-Path $PWD "dist/server/WoT-0.9.22-LAN-Server.exe"))) {
+              $version = (Get-Item -LiteralPath $exe).VersionInfo
+              if ($version.FileVersion -ne "0.9.0" -or $version.ProductVersion -ne "0.9.0" -or
+                      $version.FileMajorPart -ne 0 -or $version.FileMinorPart -ne 9 -or
+                      $version.FileBuildPart -ne 0 -or $version.FilePrivatePart -ne 0) {
+                  throw "Incorrect EXE version: $exe"
+              }
+              Write-Host "EXE version verified: $exe 0.9.0"
+          }
+          Copy-Item -LiteralPath "docs/releases/v0.9.0.md" -Destination (Join-Path $appRoot "UPDATE_NOTES.md")
+          @'
+          import ast
+          import io
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          from zipfile import ZipFile
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          base_dir = os.path.join(os.getcwd(), 'launcher', 'dist', 'wot-0.9.22-offline-battles', '_internal')
+          identity = core.bundled_payload_identity(core.PORT_0_9_22, base_dir=base_dir)
+          expected = os.environ['EXPECTED_BUILD_IDENTITY']
+          assert identity == {
+              'schema': 1,
+              'semanticVersion': '0.9.0',
+              'buildIdentity': expected,
+          }, identity
+          text = core.payload_identity_text(identity)
+          expected_text = 'version=0.9.0 build=%s' % expected
+          assert text == expected_text, (text, expected_text)
+          with ZipFile(os.path.join(base_dir, 'client', '0.9.22.zip')) as payload:
+              mods = [name for name in payload.namelist() if name.endswith('.wotmod')]
+              assert len(mods) == 1 and mods[0].endswith('_0.9.0.wotmod'), mods
+              with ZipFile(io.BytesIO(payload.read(mods[0]))) as mod:
+                  assert ET.fromstring(mod.read('meta.xml')).findtext('version') == '0.9.0'
+                  bytecode = mod.read('res/scripts/client/gui/mods/offline_lan_0922/__init__.pyc')
+                  assert b'0.9.0' in bytecode and b'0.8.4' not in bytecode
+          server_source = os.path.join(base_dir, 'servers', '0.9.22', 'server', 'windows_server.py')
+          tree = ast.parse(open(server_source, encoding='utf-8').read())
+          version = [ast.literal_eval(node.value) for node in tree.body
+                     if isinstance(node, ast.Assign) and any(
+                         isinstance(target, ast.Name) and target.id == 'SERVER_VERSION'
+                         for target in node.targets)]
+          assert version == ['0.9.0'], version
+          print('Launcher runtime identity verified: ' + text)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "Bundled runtime identity verification failed" }
+
+          $releaseZip = Join-Path $PWD "wot-0.9.22-offline-battles-0.9.0-Windows-x64.zip"
+          if (Test-Path -LiteralPath $releaseZip) { Remove-Item -LiteralPath $releaseZip -Force }
+          Compress-Archive -Force -Path (Join-Path $appRoot "*") -DestinationPath $releaseZip
+          @'
+          import io
+          import struct
+          from zipfile import ZipFile
+          path = 'wot-0.9.22-offline-battles-0.9.0-Windows-x64.zip'
+          def require_x64(data, label):
+              assert data[:2] == b'MZ', label
+              offset = struct.unpack_from('<I', data, 0x3c)[0]
+              assert data[offset:offset + 4] == b'PE\x00\x00', label
+              assert struct.unpack_from('<H', data, offset + 4)[0] == 0x8664, label
+
+          with ZipFile(path) as archive:
+              names = archive.namelist()
+              assert archive.testzip() is None
+              # The launcher hosts the bundled server from staged Python source.
+              # The standalone EXE belongs to the manual client overlay.
+              require_x64(archive.read('wot-0.9.22-offline-battles.exe'), 'launcher/server host')
+              require_x64(open('dist/server/WoT-0.9.22-LAN-Server.exe', 'rb').read(),
+                          'standalone server')
+              assert '_internal/servers/0.9.22/server/windows_server.py' in names
+              with ZipFile(io.BytesIO(archive.read('_internal/client/0.9.22.zip'))) as payload:
+                  assert payload.testzip() is None
+              assert archive.read('UPDATE_NOTES.md') == open(
+                  'docs/releases/v0.9.0.md', 'rb').read()
+          assert 'wot-0.9.22-offline-battles.exe' in names
+          assert '_internal/client/0.9.22.zip' in names
+          assert 'UPDATE_NOTES.md' in names
+          assert not [n for n in names if n.lower().endswith('.zip') and '/' not in n.rstrip('/')]
+          print('Single-layer release ZIP verified:', path)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "Release ZIP verification failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v090-release-package
+          path: wot-0.9.22-offline-battles-0.9.0-Windows-x64.zip
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish v0.9.0 with the verified Windows package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseZip = "wot-0.9.22-offline-battles-0.9.0-Windows-x64.zip"
+          $notes = "docs/releases/v0.9.0.md"
+          $title = "wot-0.9.22-offline-battles v0.9.0"
+          $releases = gh api "repos/$env:GH_REPO/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw "Cannot check existing releases" }
+          $existing = @($releases | ConvertFrom-Json | Where-Object { $_.tag_name -eq "v0.9.0" })
+          if ($existing.Count -gt 0) {
+              $release = $existing[0]
+              if (-not $release.draft -or $release.target_commitish -ne $env:GITHUB_SHA) {
+                  throw "Refusing to replace an existing published release or another commit's draft"
+              }
+              gh release upload v0.9.0 $releaseZip --clobber
+              if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed" }
+              gh release edit v0.9.0 --title $title --notes-file $notes
+          } else {
+              gh release create v0.9.0 $releaseZip --draft --target $env:GITHUB_SHA --title $title --notes-file $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release draft preparation failed" }
+          gh release edit v0.9.0 --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }

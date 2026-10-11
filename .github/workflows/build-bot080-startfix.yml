@@ -1,0 +1,244 @@
+name: Build Bot080 startup fix with clean package
+on:
+  push:
+    branches: [fix/093-bot080-startup-clean-20260923]
+    paths: [.github/workflows/build-bot080-startfix.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bot080-startfix-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/093-bot080-startup-clean-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Reproduce and fix the retained startup caller
+        id: source
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git status --short --branch
+          git merge-base --is-ancestor 5cc40071b0b0e144575a9fde53fc80bf4eee18e3 HEAD
+          mkdir -p build-evidence
+          if python tools/test_bot080_startup_contract.py > build-evidence/roster-before.log 2>&1; then
+            echo 'Expected the pinned broken baseline to fail the new roster regression'; exit 1
+          fi
+          python - <<'PY'
+          import hashlib,json,subprocess
+          from pathlib import Path
+          path='src/res/scripts/client/gui/mods/offline_lan_0922/battle_runtime.py'
+          p=Path(path)
+          original=subprocess.check_output(['git','show','5cc40071b0b0e144575a9fde53fc80bf4eee18e3:'+path])
+          assert p.read_bytes()==original
+          text=original.decode('utf8')
+          old="lineup_random.random(), available_tiers,\n                required_tiers=[profile['level']\n                                for profiles in humans_by_team.values()\n                                for profile in profiles]))"
+          new="lineup_random.random(), available_tiers))"
+          assert text.count(old)==1
+          text=text.replace(old,new)
+          old='\n'.join(["        except Exception:",
+              "            # The local tank remains a valid descriptor fallback. The complete",
+              "            # roster table itself is a #1513 retail API and is ABI-audited.",
+              "            self._bot_vehicle_assignments = {}",
+              "            return False",''])
+          new='\n'.join(["        except Exception as error:",
+              "            # Keep the actual preparation error instead of misreporting an",
+              "            # adapter failure as a missing vehicle in the client's catalog.",
+              "            sys.stdout.write(",
+              "                '[Offline LAN 0.9.22] Bot roster preparation failed: %s: %s\\n' %",
+              "                (type(error).__name__, error))",
+              "            self._bot_vehicle_assignments = {}",
+              "            return False",''])
+          assert text.count(old)==1
+          text=text.replace(old,new)
+          p.write_bytes(text.encode('utf8'))
+          proof_path=Path('docs/testing/full-bot080-proof.json')
+          proof=json.loads(proof_path.read_text())
+          proof['runtime_sha256_lf'][path]=hashlib.sha256(p.read_bytes().replace(b'\r\n',b'\n')).hexdigest()
+          proof['startup_adapter_fix']='Remove unsupported required_tiers keyword from the retained caller; keep exact historical planner and maps.'
+          proof_path.write_text(json.dumps(proof,sort_keys=True,indent=2)+'\n')
+          PY
+          git diff --quiet 5cc40071b0b0e144575a9fde53fc80bf4eee18e3 -- navgraphs foliage destructibles src/res/scripts/client/gui/mods/offline_lan_0922/ai src/res/scripts/client/gui/mods/offline_lan_0922/bot_runtime.py
+          python -c 'import full_bot080_build; full_bot080_build.audit()'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/res/scripts/client/gui/mods/offline_lan_0922/battle_runtime.py docs/testing/full-bot080-proof.json
+          git diff --cached > build-evidence/startup-fix.patch
+          git commit -m 'Match restored Bot tier planner signature and expose roster preparation failures'
+          git push origin HEAD:refs/heads/fix/093-bot080-startup-clean-20260923
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > build-evidence/source-sha.txt
+      - name: Test nonempty startup and unchanged historical Bot boundary
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          python tools/test_bot080_startup_contract.py 2>&1 | tee build-evidence/roster-after.log
+          python -m unittest test_bot080_pinned_startup test_port_0922_battle_runtime.BattleRuntimeContractTests.test_bot_roster_uses_complete_catalog_without_persistent_pool test_port_0922_battle_runtime.BattleRuntimeContractTests.test_all_clients_preload_the_same_server_roster 2>&1 | tee build-evidence/startup-tests.log
+          python tools/full_bot080_build.py source-tests 2>&1 | tee build-evidence/historical-tests.log
+          python -m unittest test_port_0922_world_collision test_port_0922_vehicle_physics test_port_0922 2>&1 | tee build-evidence/retained-tests.log
+          cp docs/testing/full-bot080-proof.json build-evidence/
+          git archive --format=zip --output=build-evidence/source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bot080-startfix-source-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-startfix-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 3
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot080-startfix-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile and run startup contracts against actual pyc
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" -w /work \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-bot080-startfix-${{ github.run_id }}-${{ github.run_attempt }}" \
+            python:2.7.18 sh -c 'python build_wotmod.py && python tools/full_bot080_build.py bytecode && python tools/test_bot080_startup_contract.py --compiled dist/org.colorfulmeans.offline_lan_0922_*.wotmod'
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-startfix-client-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+  windows-launcher:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FULL_BOT080_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-bot080-startfix-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: bot080-startfix-client-${{ github.run_id }}
+          path: dist
+      - name: Test normal installation and build launcher
+        shell: pwsh
+        run: |
+          Push-Location launcher
+          python -m unittest discover -s tests -p 'test_launcher_core.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher tests failed' }
+          Pop-Location
+          pwsh -NoProfile -File launcher/build_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Verify exact Bot bytes, old maps, payload and installation
+        run: python tools/full_bot080_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+      - name: Check built server readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles/wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve','0.9.22' -PassThru
+          try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $ready = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) { throw 'Server exited before readiness' }
+                  $probe | python -
+                  if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $ready) { throw 'Server readiness failed' }
+          }
+          finally {
+              if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+              $global:LASTEXITCODE = 0
+          }
+      - name: Separate verification files and restore clean download layout
+        shell: python
+        run: |
+          import json, os, shutil
+          from pathlib import Path
+          app=Path('launcher/dist/wot-0.9.22-offline-battles')
+          evidence=Path('build-evidence');evidence.mkdir(exist_ok=True)
+          extras={'FULL_BOT080_BUILD_EVIDENCE.json','FULL_BOT080_TEST_README.txt','full-bot080-python27-image.json','SERVER_SMOKE_TEST.txt','server.log','TESTING_20260916_GROUP1_ZH.md'}
+          moved=[]
+          for name in sorted(extras):
+              p=app/name
+              if p.is_file():
+                  shutil.move(str(p),str(evidence/name));moved.append(name)
+          allowed={'wot-0.9.22-offline-battles.exe','_internal','README.txt','LICENSE','THIRD_PARTY_NOTICES.md','licenses'}
+          assert set(p.name for p in app.iterdir())==allowed, list(app.iterdir())
+          (evidence/'clean-package.json').write_text(json.dumps({'source':os.environ['FULL_BOT080_SOURCE_SHA'],'identity':os.environ['WOT_OFFLINE_BUILD_IDENTITY'],'root':sorted(allowed),'moved_to_evidence':moved,'server_readiness':True,'native_game_tested':False},indent=2))
+          shutil.copy('dist/full-bot080-bytecode.json',evidence/'bytecode.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot080-startfix-build-evidence-${{ github.run_id }}
+          path: build-evidence/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-bot080-startfix-clean-${{ github.run_id }}-Windows
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30

@@ -260,8 +260,18 @@ class WindowTest(unittest.TestCase):
         self.window.game_root.set(game_root)
         return game_root
 
+    def test_custom_save_restores_original_vehicle_labels_and_exposes_progress_editors(self):
+        self.assertEqual("Garage vehicles", self.window.shop_panel.cget("text"))
+        self.assertEqual("Gold and reward vehicle", self.window.gold_vehicle_label.cget("text"))
+        self.assertEqual("Personal missions", self.window.personal_missions_panel.cget("text"))
+        self.assertFalse(hasattr(self.window, "orders_entry"))
+        self.assertFalse(hasattr(self.window, "orders_label"))
+        self.assertEqual("Lowe - tier 8", self.window._gold_offer_label({
+            "label": "Lowe", "level": 8, "owned": False, "pending": False,
+            "offerKinds": ("gold", "reward")}))
+
     def test_layout_separates_play_vehicle_and_repair_controls(self):
-        self.assertEqual("0.7.7", wot_launcher.LAUNCHER_VERSION)
+        self.assertEqual("0.9.7", wot_launcher.LAUNCHER_VERSION)
         self.assertEqual(
             "Single player",
             self.window.battle_tabs.tab(self.window.single_panel).get("text"))
@@ -309,12 +319,12 @@ class WindowTest(unittest.TestCase):
 
     def test_launcher_session_identity_is_visible_and_persisted(self):
         self.assertIn(
-            "Launcher session: version=0.7.7 build=unknown role=launcher",
+            "Launcher session: version=0.9.7 build=unknown role=launcher",
             self._log_text())
         with open(core.launcher_log_path(), encoding="utf-8") as stream:
             persisted = stream.read()
         self.assertIn(
-            "Launcher session: version=0.7.7 build=unknown role=launcher",
+            "Launcher session: version=0.9.7 build=unknown role=launcher",
             persisted)
 
     def test_first_run_prompts_once_when_the_launcher_starts(self):
@@ -932,11 +942,11 @@ class WindowTest(unittest.TestCase):
     def test_settings_survive_a_new_window(self):
         self.window.game_root.set(self.settings_dir)
         self.window.mode.set(core.MODE_JOIN)
-        self.window.player_name.set("Peng")
+        self.window.player_name.set("PlayerOne")
         self.window._save_settings()
         reopened = wot_launcher.LauncherWindow(_FakeTk, _FakeTtk, self.dialog)
         self.assertEqual(reopened.mode.get(), core.MODE_JOIN)
-        self.assertEqual(reopened.player_name.get(), "Peng")
+        self.assertEqual(reopened.player_name.get(), "PlayerOne")
 
     def test_legacy_team_size_settings_are_ignored_and_removed(self):
         game_root = self._game("0.9.22.0.1", "1513")
@@ -1690,7 +1700,7 @@ class WindowTest(unittest.TestCase):
                 mock.patch.object(
                     self.window, "_run_game",
                     side_effect=RuntimeError("synthetic launch failure")):
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         prepare.assert_called_once_with(self.settings_dir, "Fast MS-1")
         cleanup.assert_called_once_with(self.settings_dir)
@@ -1743,7 +1753,7 @@ class WindowTest(unittest.TestCase):
                 mock.patch.object(self.window, "_stop_worker"), \
                 mock.patch.object(self.window, "_stop_server"), \
                 mock.patch("core.wait_for_game_shutdown", return_value=True):
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         begin.assert_called_once_with(
             self.settings_dir, needs_worker=False, local_server=False)
@@ -1802,7 +1812,7 @@ class WindowTest(unittest.TestCase):
                 mock.patch.object(self.window, "_stop_worker"), \
                 mock.patch.object(self.window, "_stop_server"), \
                 mock.patch("core.wait_for_game_shutdown", return_value=True):
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         install_mock.assert_called_once_with(
             self.settings_dir, fetch_mock.return_value["manifest"],
@@ -1848,7 +1858,7 @@ class WindowTest(unittest.TestCase):
                 mock.patch.object(self.window, "_stop_worker"), \
                 mock.patch.object(self.window, "_stop_server"), \
                 mock.patch("core.wait_for_game_shutdown", return_value=True):
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         # The running room's hidden worker is a WorldOfTanks.exe; the local
         # prepare must not touch the pinned overlay and must not be called.
@@ -1894,7 +1904,7 @@ class WindowTest(unittest.TestCase):
                 mock.patch.object(self.window, "_stop_worker"), \
                 mock.patch.object(self.window, "_stop_server"), \
                 mock.patch("core.wait_for_game_shutdown", return_value=True):
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         prepare.assert_not_called()
         install_mock.assert_not_called()
@@ -1966,7 +1976,7 @@ class WindowTest(unittest.TestCase):
                     return_value=report) as create_report, \
                 mock.patch.object(
                     self.window, "_offer_crash_report") as offer:
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
         return set_roles, create_report, offer, report
 
     def test_unexpected_visible_exit_creates_zip_and_offers_to_report(self):
@@ -2038,7 +2048,7 @@ class WindowTest(unittest.TestCase):
                     return_value=report), \
                 mock.patch.object(
                     self.window, "_offer_crash_report") as offer:
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         self.assertEqual(
             {wot_launcher.error_reports.ROLE_HIDDEN_WORKER},
@@ -2121,7 +2131,7 @@ class WindowTest(unittest.TestCase):
                     "core.wait_for_game_shutdown",
                     side_effect=lambda: (
                         order.append("shutdown_wait") or True)):
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         start_server.assert_called_once_with(
             self.settings_dir, core.PORT_0_9_22, loopback_only=True,
@@ -3104,7 +3114,7 @@ class WindowTest(unittest.TestCase):
                 mock.patch("core.listener_status",
                            return_value=core.LISTENER_OCCUPIED), \
                 mock.patch.object(self.window, "_run_game") as run_game:
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         isolate.assert_called_once_with(self.settings_dir)
         run_game.assert_not_called()
@@ -3134,7 +3144,7 @@ class WindowTest(unittest.TestCase):
                            return_value=core.LISTENER_FREE), \
                 mock.patch("core.fetch_vehicle_overlay") as fetch_overlay, \
                 mock.patch.object(self.window, "_run_game") as run_game:
-            self.window._run_session(self.settings_dir, session, "Peng")
+            self.window._run_session(self.settings_dir, session, "PlayerOne")
 
         fetch_overlay.assert_not_called()
         run_game.assert_not_called()
@@ -3143,9 +3153,9 @@ class WindowTest(unittest.TestCase):
             self._log_text())
 
     def test_closing_the_window_saves_the_settings(self):
-        self.window.player_name.set("Peng")
+        self.window.player_name.set("PlayerOne")
         self.window._on_close()
-        self.assertEqual("Peng", core.load_settings().get("name"))
+        self.assertEqual("PlayerOne", core.load_settings().get("name"))
 
     def test_close_stops_children_but_waits_for_profile_cleanup(self):
         self.window._busy = True

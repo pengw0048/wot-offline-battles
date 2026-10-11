@@ -1,0 +1,216 @@
+name: Build no-native-review Windows test
+
+on:
+  push:
+    branches: [fix/093-remove-static-native-review-20260923]
+    paths:
+      - .github/workflows/build-no-native-review-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: no-static-review-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/fix/093-remove-static-native-review-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.integrate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Apply exact reviewed deletion and commit source
+        id: integrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if test -f .static-review-transfer/apply.py; then
+            python .static-review-transfer/apply.py
+          fi
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          proof = json.loads(Path('docs/testing/airfield-build-inputs-20260923.json').read_text())
+          assert proof.get('global_static_review_removal')
+          for path, expected in proof['runtime_source_sha256_lf'].items():
+              assert hashlib.sha256(Path(path).read_bytes().replace(b'\r\n', b'\n')).hexdigest() == expected, path
+          PY
+          if ! git diff --cached --quiet; then
+            git diff --cached --stat
+            git commit -m 'Remove static native review and live topology repair for all maps'
+            git push origin HEAD:refs/heads/fix/093-remove-static-native-review-20260923
+          fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Run removal and retained-physics regressions
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: tests:server:tools
+        run: |
+          set -euo pipefail
+          mkdir -p build-evidence
+          python tools/test_immutable_navigation.py 2>&1 | tee build-evidence/removal-tests.log
+          cp immutable-navigation-tests.json build-evidence/
+          python -m unittest test_port_0922_navigation_baker test_port_0922_navigation_collision_bake test_port_0922_destructibles_baker test_port_0922 2>&1 | tee build-evidence/baker-port-tests.log
+          python -m unittest test_port_0922_ai test_port_0922_world_collision test_port_0922_vehicle_physics 2>&1 | tee build-evidence/preserved-physics-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: no-review-source-tests-${{ github.run_id }}
+          path: build-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-server:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - name: Build matching Windows LAN server
+        shell: pwsh
+        run: pwsh -NoProfile -File server/build_windows_server.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: no-review-manual-server-${{ github.run_id }}
+          path: dist/server/WoT-0.9.22-LAN-Server.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  client-payload:
+    needs: [prepare, windows-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: no-review-manual-server-${{ github.run_id }}
+          path: dist/server
+      - name: Compile Python 2.7 payload and execute compiled removal tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 -v "$PWD:/work" \
+            -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-no-static-review-${{ github.run_id }}-${{ github.run_attempt }}" \
+            -w /work python:2.7.18 sh -c \
+            'python build_wotmod.py && python tools/verify_immutable_build.py bytecode'
+          python tools/validate_wotmod.py dist/org.colorfulmeans.offline_lan_0922_*.wotmod
+          docker image inspect python:2.7.18 --format '{{json .RepoDigests}}' > dist/immutable-python27-image.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: no-review-client-payload-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-launcher:
+    needs: [prepare, client-payload]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      IMMUTABLE_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WOT_OFFLINE_BUILD_IDENTITY: colorfulmeans-no-static-review-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - run: python -m pip install -r server/requirements-windows-build.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: no-review-client-payload-${{ github.run_id }}
+          path: dist
+      - name: Test Windows launcher
+        working-directory: launcher
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build runnable launcher distribution
+        shell: pwsh
+        run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - name: Verify packaged bytecode, source, maps and installation
+        shell: pwsh
+        run: |
+          python tools/verify_immutable_build.py distribution launcher/dist/wot-0.9.22-offline-battles
+          if ($LASTEXITCODE -ne 0) { throw 'Distribution verification failed' }
+          Copy-Item dist/immutable-python27-image.json launcher/dist/wot-0.9.22-offline-battles/
+      - name: Smoke-test built server protocol
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $PWD 'launcher/dist/wot-0.9.22-offline-battles'
+          $exe = Join-Path $app 'wot-0.9.22-offline-battles.exe'
+          $probe = @'
+          import os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), 'launcher'))
+          import core
+          raise SystemExit(0 if core.probe_server_protocol('0.9.22', '127.0.0.1', 28782, timeout=1.0) else 1)
+          '@
+          $process = Start-Process -FilePath $exe -ArgumentList '--serve', '0.9.22' -PassThru
+          try {
+              $deadline = (Get-Date).AddSeconds(60)
+              $compatible = $false
+              while ((Get-Date) -lt $deadline) {
+                  if ($process.HasExited) { throw 'Server exited before protocol readiness' }
+                  $probe | python -
+                  if ($LASTEXITCODE -eq 0) { $compatible = $true; break }
+                  Start-Sleep -Milliseconds 250
+              }
+              if (-not $compatible) { throw 'Server protocol test failed' }
+              Set-Content (Join-Path $app 'SERVER_SMOKE_TEST.txt') 'PASS: built server protocol ready. Native game not executed.'
+          }
+          finally {
+              if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+              $global:LASTEXITCODE = 0
+          }
+      - name: Write test scope and installation notes
+        shell: pwsh
+        run: |
+          @'
+          GLOBAL STATIC-REVIEW REMOVAL TEST - not a formal release
+          Based on dcbc5b68. Broad static native-edge review and live missing-cell/link repair are removed from every map, not merely disabled for Airfield.
+          Airfield uses the previously rebuilt #1513 graph. Other 40 maps retain their previous graph assets and have not been rebuilt or certified by this change.
+          Moving vehicles, wreck costs, per-Bot contact recovery, read-only displaced-hull connectors and final physical collisions are retained.
+          Extract the WHOLE ZIP into a NEW empty folder and run wot-0.9.22-offline-battles.exe.
+          Select the existing Chinese HD 0.9.22.0.1 #1513 game directory. Do not mix old and new _internal folders.
+          This is an intentional test of removing the old compensation globally. Old-map route defects can reappear and need original-data correction, not another static-review layer.
+          No native battle or FPS improvement has been verified. See NO_NATIVE_REVIEW_BUILD_EVIDENCE.json for exact build identity and checked modules.
+          '@ | Set-Content -Encoding utf8 launcher/dist/wot-0.9.22-offline-battles/NO_NATIVE_REVIEW_TEST_README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-no-static-review-${{ github.run_id }}-Windows-x64
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

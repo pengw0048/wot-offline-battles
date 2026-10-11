@@ -180,6 +180,19 @@ def slew(current, desired, speed, elapsed):
     return desired
 
 
+def correction_translation(correction, center_z):
+    """Keep #1513's descriptor-owned hydraulic pivot fixed on the chassis.
+
+    BigWorld uses row-vector YPR: local +Z rotates toward -Y for positive
+    pitch. Translate back from that rotated point so (0, 0, center_z) remains
+    fixed when the suspension changes body pitch.
+    """
+    correction = _finite(correction, 'hydraulic correction')
+    center_z = _finite(center_z, 'hydraulic pivot')
+    return (0.0, center_z * math.sin(correction),
+            center_z * (1.0 - math.cos(correction)))
+
+
 def gun_pitch_step(current, desired, static_pitch, maximum_speed,
                    elapsed, turret_rotation_time=0.0, angle_limits=None):
     """Mirror #1513 static-pitch crossing and turret coordination."""

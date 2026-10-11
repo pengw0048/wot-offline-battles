@@ -62,7 +62,7 @@ class BotCorridorWidthTests(unittest.TestCase):
                     lambda start, end: abs(start.x) >= 2.0)
                 with mock.patch.object(
                         battle_runtime.vehicle_physics, 'derive_params',
-                        return_value={}):
+                        return_value={'speedFwd': 20.0, 'speedBwd': 10.0}):
                     result = battle._direction_probe(
                         (0.0, 0.0, 0.0), 0.0, 0.0,
                         _descriptor(half_width), 4.0)
@@ -79,7 +79,7 @@ class BotCorridorWidthTests(unittest.TestCase):
             lambda start, end: start.x > 2.22)
         with mock.patch.object(
                 battle_runtime.vehicle_physics, 'derive_params',
-                return_value={}):
+                return_value={'speedFwd': 20.0, 'speedBwd': 10.0}):
             result = battle._direction_probe(
                 (0.0, 0.0, 0.0), 0.0, 0.0,
                 _descriptor(2.239622116), 4.0)
@@ -90,7 +90,7 @@ class BotCorridorWidthTests(unittest.TestCase):
         battle, samples = self._battle()
         with mock.patch.object(
                 battle_runtime.vehicle_physics, 'derive_params',
-                return_value={}):
+                return_value={'speedFwd': 20.0, 'speedBwd': 10.0}):
             result = battle._direction_probe(
                 (10.0, 0.0, 20.0), math.pi / 2.0, -3.0,
                 _descriptor(1.4, left_width=1.9), 4.0)

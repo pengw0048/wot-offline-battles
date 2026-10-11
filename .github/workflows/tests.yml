@@ -10,6 +10,79 @@ permissions:
   contents: read
 
 jobs:
+  native-geometry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Exercise native geometry and background jobs through the Python 2 C API
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src python:2.7.18 /bin/sh -c '
+            set -eu
+            g++ -std=c++17 -O3 -fPIC -shared -pthread -DWOT_HOST_PYTHON \
+              -fno-fast-math -ffp-contract=off \
+              -fno-builtin-sin -fno-builtin-cos -fno-builtin-pow \
+              -fno-builtin-hypot -fno-builtin-fmod \
+              -I/usr/local/include/python2.7 \
+              native/offline_math_batch_geometry.cpp \
+              native/offline_async_worker.cpp \
+              native/offline_navigation.cpp \
+              native/native_visibility_core.cpp \
+              native/offline_visibility.cpp \
+              native/offline_contact_roster.cpp \
+              native/offline_destructible_geometry.cpp \
+              native/world_stage.cpp \
+              native/navigation_query_stage.cpp \
+              native/offline_simulation.cpp \
+              native/offline_simulation_control.cpp \
+              native/offline_simulation_motion.cpp \
+              native/offline_simulation_weapons.cpp \
+              native/offline_simulation_navigation.cpp \
+              native/offline_math_batch_native.cpp \
+              -o /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_math.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_workers.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_contacts.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_world.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_navigation_query.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_control.py \
+              --extension /tmp/offline_math_batch_native.so \
+              --client-scripts /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_weapons.py \
+              /tmp/offline_math_batch_native.so /src/src/res/scripts/client
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_navigation.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_motion.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_destructibles.py \
+              /tmp/offline_math_batch_native.so
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_visibility_frontier.py \
+              /tmp/offline_math_batch_native.so
+            g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread \
+              -I native tools/check_native_visibility_frontier.cpp \
+              native/offline_visibility.cpp native/native_visibility_core.cpp \
+              native/offline_simulation_control.cpp \
+              native/offline_async_worker.cpp -o /tmp/wot-visibility-frontier-check
+            /tmp/wot-visibility-frontier-check
+            g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -pthread \
+              tools/check_native_simulation_diagnostics.cpp \
+              -o /tmp/wot-native-diag-check
+            /tmp/wot-native-diag-check
+            PYTHONDONTWRITEBYTECODE=1 python tools/check_native_simulation_diagnostics.py \
+              /tmp/offline_math_batch_native.so
+          '
+      - name: Check combat summaries and sight frontier lifetimes
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m unittest discover -s tests -p test_port_0922_worker_diagnostics.py
+          python3 -m unittest discover -s tests -p test_port_0922_battle_visibility.py
   test:
     needs: windows-server
     runs-on: ubuntu-latest
@@ -20,6 +93,12 @@ jobs:
           python-version: "3.11"
       - name: Install pinned test dependencies
         run: python -m pip install Pillow==12.3.0
+      - name: Run gameplay follow-up regressions
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python -m unittest discover -s tests
+          -p "test_port_0922_gameplay_followup.py" -v
       - name: Run client test suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -44,16 +123,18 @@ jobs:
           name: wot-0.9.22-native-exception-trail-probe
           path: native-probe/native_exception_trail.exe
           if-no-files-found: error
+      - name: Reproduce the verified recorder resource
+        run: python tools/build_replay_runtime.py
       - name: Build Python 2.7 0.9.22 LAN client
         run: >-
           docker run --rm --platform linux/amd64 -v "$PWD:/work"
-          -e WOT_OFFLINE_BUILD_IDENTITY="github-${{ github.run_id }}-${{ github.run_attempt }}"
+          -e WOT_OFFLINE_BUILD_IDENTITY="colorfulmeans-${{ github.run_id }}-${{ github.run_attempt }}"
           -w /work python:2.7.18
-          python build_wotmod.py
+          sh -c 'python tests/test_port_0922_barracks_sorting.py -v && python build_wotmod.py'
       - name: Validate 0.9.22 wotmod package
         run: >-
           python tools/validate_wotmod.py
-          dist/org.peng.offline_lan_0922_*.wotmod
+          dist/org.colorfulmeans.offline_lan_0922_*.wotmod
       - uses: actions/upload-artifact@v4
         with:
           name: wot-0.9.22-lan-client
@@ -134,7 +215,7 @@ jobs:
                                'lean_snapshot_manifest_v1',
                                'ram_contact_ledger_v2',
                                'human_ram_timeline_v1',
-                               'player_fire_intent_v6',
+                               'player_projectile_owner_v1',
                                'player_environment_v2',
                                'effective_params_v1',
                                'ricochet_continuation_v1'],
@@ -286,12 +367,29 @@ jobs:
       - name: Build the desktop launcher
         shell: pwsh
         run: pwsh -NoProfile -File launcher/build_launcher.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wot-0.9.22-offline-battles-launcher
+          # Upload the runnable folder; Actions supplies the only outer ZIP.
+          path: launcher/dist/wot-0.9.22-offline-battles/
+          if-no-files-found: error
+      - name: Extract the actual download once
+        uses: actions/download-artifact@v4
+        with:
+          name: wot-0.9.22-offline-battles-launcher
+          path: ${{ runner.temp }}/launcher-download
       - name: Verify that the bundled servers run from the launcher
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $launcher = Join-Path $PWD ("launcher\dist\WoT-Offline-Battles-Launcher\" +
-              "WoT-Offline-Battles-Launcher.exe")
+          $download = Join-Path $env:RUNNER_TEMP "launcher-download"
+          $launcher = Join-Path $download "wot-0.9.22-offline-battles.exe"
+          if (-not (Test-Path -LiteralPath $launcher) -or
+                  -not (Test-Path -LiteralPath (Join-Path $download "_internal\client\0.9.22.zip")) -or
+                  (Get-ChildItem -LiteralPath $download -Filter *.zip)) {
+              throw "Launcher download must run after one ZIP extraction"
+          }
+          Write-Host "Downloaded launcher is runnable after one ZIP extraction"
           foreach ($port in @("0.9.22")) {
               $process = Start-Process -FilePath $launcher `
                   -ArgumentList "--serve", $port -PassThru
@@ -328,8 +426,3 @@ jobs:
                   Start-Sleep -Seconds 2
               }
           }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wot-offline-battles-launcher
-          path: launcher/dist/WoT-Offline-Battles-Launcher-Windows.zip
-          if-no-files-found: error

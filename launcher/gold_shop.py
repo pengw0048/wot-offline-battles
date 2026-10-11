@@ -82,7 +82,7 @@ def owned_vehicles(slot_id, game_root=None, environment=None, root=None):
 
 def list_offers(slot_id, game_root, environment=None, root=None,
                 catalogue=None):
-    """Return every gold vehicle with what this save can do about it.
+    """Return each manual garage vehicle with this save's ownership state.
 
     ``catalogue`` lets a caller reuse a listing it already has. Reading it
     means opening the client's 50 MB package and parsing ten rosters, and it

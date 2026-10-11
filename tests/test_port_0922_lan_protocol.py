@@ -24,9 +24,11 @@ from gui.mods.offline_lan_0922.lan_client import (
 from gui.mods.offline_lan_0922.authority_worker import (
     AuthorityWorkerLANClient)
 from gui.mods.offline_lan_0922.snapshot_sync import SnapshotSync
+from gui.mods.offline_lan_0922 import bot_state_codec
+from gui.mods.offline_lan_0922 import snapshot_delta
 from lan_battle_server import (
     BattleState, CLIENT_BUILD_0922, Player,
-    PLAYER_FIRE_INTENT_CAPABILITY, PLAYER_INPUT_FAULT_CLASSES,
+    PLAYER_PROJECTILE_OWNER_CAPABILITY, PLAYER_INPUT_FAULT_CLASSES,
     PLAYER_INPUT_FAULT_ENV, PREBATTLE_SECONDS,
     RAM_CONTACT_LEDGER_CAPABILITY, TICK_HZ,
     _bot_combat_log_message, _player_input_fault_class,
@@ -156,7 +158,7 @@ class LanProtocolTests(unittest.TestCase):
             human_ram_armors=[result]))
         self.assertEqual([result], self.sent[-1]['human_ram_armors'])
 
-    def test_projectile_effect_carries_only_an_exact_stun_end_time(self):
+    def test_projectile_effect_carries_stun_timer_and_optional_duration_fact(self):
         effect = {
             'target_kind': 'bot', 'target_id': 7,
             'damage': 0, 'shot_result': 2,
@@ -167,8 +169,13 @@ class LanProtocolTests(unittest.TestCase):
         self.assertEqual(effect, _strict_projectile_effect(effect))
         self.assertIsNone(_strict_projectile_effect(dict(
             effect, stun_end_server_time_ms=True)))
-        self.assertIsNone(_strict_projectile_effect(dict(
-            effect, stun_duration_ms=7000)))
+        timed = dict(effect, stun_duration_ms=7000)
+        self.assertEqual(timed, _strict_projectile_effect(timed))
+        for duration in (True, 7000.5, -1, 22001, '7000'):
+            self.assertIsNone(_strict_projectile_effect(dict(
+                effect, stun_duration_ms=duration)))
+        del timed['stun_end_server_time_ms']
+        self.assertIsNone(_strict_projectile_effect(timed))
 
     def test_projectile_effect_target_pose_is_an_atomic_vector(self):
         effect = {
@@ -663,6 +670,8 @@ class LanProtocolTests(unittest.TestCase):
         state.track_immobilisers[('player', 2)] = ('player', 1)
         state.player_spotted[1] = frozenset([('player', 2)])
         state._record_damage(('player', 3), ('player', 2), 240, tracked)
+        state._record_critical_damage(('player', 3), ('player', 2), {}, tracked)
+        state._record_critical_damage(('player', 3), ('player', 1), {}, tracked)
         self.assertTrue(state._finish_battle(1, 'elimination'))
 
         self.assertEqual(
@@ -679,16 +688,25 @@ class LanProtocolTests(unittest.TestCase):
         }, json.loads(json.dumps(event)))
         result = state.battle_result
         self.assertEqual(result, json.loads(json.dumps(result)))
+        self.assertEqual(
+            {'winner': 1, 'reason': 'elimination', 'base_team': 0}, result)
         rows = dict((row['actor_id'], row)
-                    for row in result['vehicle_statistics'])
+                    for row in state._vehicle_statistics_payload())
         self.assertEqual({
             'actor_kind', 'actor_id', 'team', 'shots_fired', 'shots_hit',
-            'shots_penetrated', 'damage_dealt', 'damage_received',
+            'shots_penetrated', 'max_piercing_series', 'damage_dealt', 'damage_received',
             'damage_blocked', 'damage_assisted_track',
             'damage_assisted_radio', 'damage_assisted_stun',
             'kills', 'spotted',
             'capture_points', 'dropped_capture_points',
             'potential_damage_received', 'hits_received',
+            'piercings_received', 'no_damage_direct_hits_received',
+            'explosion_hits_received', 'explosion_hits', 'damaged',
+            'team_hits', 'team_damage', 'team_kills', 'mileage', 'life_time',
+            'team_crits', 'critical_hits', 'internal_crits_at_end',
+            'stun_num', 'stun_duration_ms', 'stunned', 'not_spotted',
+            'stun_shots_2', 'stun_shots_3',
+            'kills_assisted_stun', 'kills_assisted_track',
             'damaging_hits_received', 'deflected_hits_received',
             'crits_received_mask', 'hits_with_damage',
             'sniper_damage_dealt', 'deflection_streak',
@@ -706,6 +724,10 @@ class LanProtocolTests(unittest.TestCase):
         self.assertEqual(240, rows[1]['damage_assisted_radio'])
         self.assertEqual(240, rows[3]['damage_dealt'])
         self.assertEqual(240, rows[2]['damage_received'])
+        self.assertEqual(0, rows[1]['max_piercing_series'])
+        self.assertEqual(1, rows[3]['critical_hits'])
+        self.assertEqual(1, rows[3]['team_crits'])
+        self.assertEqual(list(rows.values()), json.loads(json.dumps(list(rows.values()))))
 
     def test_destructible_report_requires_exact_identity_fields(self):
         self.assertFalse(self.client.send_destructible({
@@ -744,14 +766,21 @@ class LanProtocolTests(unittest.TestCase):
         self.assertFalse(self.client.send_battle_result(1, 'elimination'))
         self.assertEqual([], self.sent)
 
-    def test_failed_fire_send_does_not_create_sequence_gap(self):
+    def test_failed_launch_send_preserves_the_owners_frozen_shot(self):
+        self.client.authority_epoch = 1
         launch = {
-            'position': [1.0, 2.0, 3.0],
+            'shooter_kind': 'player', 'shooter_id': 1,
+            'shot_seq': 1, 'shell_index': 0,
+            'origin': [1.0, 2.0, 3.0],
+            'range_origin': [1.0, 2.0, 3.0],
             'velocity': [900.0, 0.0, 0.0],
             'gravity': 9.81,
             'max_distance': 720.0,
             'max_time_ms': 20000,
-            'trigger_server_time_ms': 100,
+            'is_he': False, 'splash_radius': 0.0,
+            'authority_epoch': self.client.authority_epoch,
+            'fire_intent_seq': 1, 'fire_input_seq': 1,
+            'launch_server_time_ms': 100,
             'source_shot': {
                 'speed': 900.0, 'gravity': 9.81,
                 'maxDistance': 720.0,
@@ -769,24 +798,14 @@ class LanProtocolTests(unittest.TestCase):
             shell_index=0, pose_time_us=123456))
         self.client._send = lambda unused_message: False
 
-        self.assertIsNone(self.client.send_fire(**launch))
-        self.assertEqual(0, self.client._fire_intent_seq)
+        self.assertIsNone(self.client.send_projectile_launch(**launch))
 
         self.client._send = lambda message: self.sent.append(message) or True
-        self.assertEqual(1, self.client.send_fire(**launch))
-        self.assertEqual({
-            'type': 'fire_intent', 'round_id': 7,
-            'intent_seq': 1, 'input_seq': 1, 'shell_index': 0,
-            'shot_origin': [1.0, 2.0, 3.0],
-            'shot_direction': [1.0, 0.0, 0.0],
-            'dispersion_angle': 0.0,
-            'presentation_ledger': [],
-            'trigger_server_time_ms': 100,
-        }, self.sent[-1])
-        self.assertFalse(any(field in self.sent[-1]
-                             for field in ('position', 'origin', 'velocity',
-                                           'gravity', 'source_shot',
-                                           'damage')))
+        self.assertEqual(1, self.client.send_projectile_launch(**launch))
+        expected = dict(launch, type='projectile_launch', round_id=7,
+                        penetration_factor=1.0, burst_group_seq=1,
+                        burst_index=0, burst_count=1)
+        self.assertEqual(expected, self.sent[-1])
 
     def test_worker_sends_hello_before_exposing_connected_socket(self):
         client = LANClient(
@@ -984,6 +1003,154 @@ class LanProtocolTests(unittest.TestCase):
         self.assertEqual(manifest, self.client.last_snapshot['bot_manifest'])
         self.assertIsNot(
             manifest, self.client.last_snapshot['bot_manifest'])
+
+    @staticmethod
+    def _equipment_snapshot(tick=1, epoch=1):
+        bots = []
+        for bot_id in (11, 12):
+            bots.append({
+                'id': bot_id, 'vehicle': 'ussr:R11_MS-1', 'team': 1,
+                'slot': bot_id - 11, 'x': float(tick), 'y': 0.0, 'z': 2.0,
+                'health': 100, 'alive': True,
+                'equipment_states': [{
+                    'equipment': {'name': 'repairkit', 'tags': ['equipment']},
+                    'usesLeft': 1, 'cooldownTimeLeft': 0.0, 'active': False,
+                    'autoPendingElapsed': None, 'aiPendingElapsed': None}]})
+        rows, table = bot_state_codec.encode_snapshot_equipment(bots)
+        return {
+            'type': 'snapshot', 'protocol': 5, 'round_id': 7,
+            'server_tick': tick, 'bot_state_revision': 0,
+            'map': '01_karelia',
+            'players': [], 'bots': rows, 'bot_manifest': [],
+            'bot_authority_id': -1, 'authority_epoch': epoch,
+            'bot_equipment_contracts': table,
+        }
+
+    def test_snapshot_equipment_restores_before_dispatch_and_replay_capture(self):
+        self.client.running = True
+        received = []
+        self.client.on_event = lambda kind, value: received.append((kind, value))
+        message = self._equipment_snapshot()
+        wire_copy = json.loads(json.dumps(message))
+        self.client._handle_message(message)
+        self.assertIsNone(self.client.last_error)
+        snapshot = self.client.last_snapshot
+        self.assertNotIn('bot_equipment_contracts', snapshot)
+        self.assertEqual('repairkit', snapshot['bots'][0][
+            'equipment_states'][0]['equipment']['name'])
+        self.assertEqual(('snapshot', snapshot), received[-1])
+        self.assertEqual(wire_copy, message)
+        first = snapshot['bots'][0]['equipment_states'][0]['equipment']
+        second = snapshot['bots'][1]['equipment_states'][0]['equipment']
+        self.assertIsNot(first, second)
+        self.assertIsNot(first['tags'], second['tags'])
+
+    def test_bad_equipment_reference_keeps_death_and_other_bots_advancing(self):
+        self.client.running = True
+        self.client._handle_message(self._equipment_snapshot())
+        message = self._equipment_snapshot(tick=2)
+        damaged = message['bots'][0]
+        damaged.update(health=0, alive=False)
+        damaged['equipment_states'][0].update(equipment=9, usesLeft=0,
+                                              cooldownTimeLeft=90.0)
+        self.client._handle_message(message)
+        accepted = self.client.last_snapshot['bots']
+        self.assertTrue(self.client.running)
+        self.assertEqual([11, 12], [row['id'] for row in accepted])
+        self.assertEqual([2.0, 2.0], [row['x'] for row in accepted])
+        self.assertFalse(accepted[0]['alive'])
+        self.assertEqual(0, accepted[0]['equipment_states'][0]['usesLeft'])
+
+    def test_equipment_reference_cannot_inherit_across_epoch_or_round(self):
+        self.client.running = True
+        first = self._equipment_snapshot()
+        self.client._handle_message(first)
+        prior = self.client.last_snapshot['bots'][0]
+        bad = self._equipment_snapshot(tick=2, epoch=2)
+        bad['bots'][0]['equipment_states'][0]['equipment'] = 9
+        self.client._handle_message(bad)
+        accepted = self.client.last_snapshot['bots']
+        # Keep the known entity alive until a usable row arrives, without
+        # attaching the old epoch's contract to new-epoch dynamic state.
+        self.assertEqual(prior, accepted[0])
+        self.assertEqual(2.0, accepted[1]['x'])
+        self.client._handle_message(self._equipment_snapshot(tick=3, epoch=2))
+        self.assertEqual(3.0, self.client.last_snapshot['bots'][0]['x'])
+        future = self._equipment_snapshot(tick=1, epoch=3)
+        future['round_id'] = 8
+        future.pop('bot_equipment_contracts')
+        rows, retained = self.client._canonical_runtime_rows(
+            future['bots'], 'bots', future)
+        self.assertEqual([], rows)
+        self.assertEqual(2, retained)
+
+    def test_new_receiver_and_next_frame_need_only_their_own_equipment_table(self):
+        self.client.running = True
+        first = self._equipment_snapshot(tick=8, epoch=5)
+        self.client._handle_message(first)
+        self.assertEqual(8, self.client.last_snapshot['server_tick'])
+        second = self._equipment_snapshot(tick=9, epoch=6)
+        second['bot_equipment_contracts'].insert(
+            0, {'name': 'unused', 'tags': []})
+        for row in second['bots']:
+            row['equipment_states'][0]['equipment'] = 1
+        self.client._handle_message(second)
+        self.assertEqual(9, self.client.last_snapshot['server_tick'])
+        self.assertEqual('repairkit', self.client.last_snapshot['bots'][0][
+            'equipment_states'][0]['equipment']['name'])
+
+    def test_unknown_actor_bad_reference_is_local_and_next_snapshot_recovers(self):
+        self.client.running = True
+        first = self._equipment_snapshot()
+        first['bots'][0]['equipment_states'][0]['equipment'] = 99
+        self.client._handle_message(first)
+        self.assertTrue(self.client.running)
+        self.assertIsNone(self.client.last_error)
+        self.assertEqual([12], [row['id']
+                               for row in self.client.last_snapshot['bots']])
+        self.client._handle_message(self._equipment_snapshot(tick=2))
+        self.assertEqual([11, 12], [row['id']
+                                   for row in self.client.last_snapshot['bots']])
+
+    def test_runtime_retained_actor_does_not_roll_back_raw_delta_baseline(self):
+        self.client.running = True
+        first = self._equipment_snapshot()
+        damaged = self._equipment_snapshot(tick=2)
+        damaged['bots'][0]['x'] = 'unusable-pose'
+        repaired = self._equipment_snapshot(tick=3)
+        wire_base = None
+        for sequence, source in enumerate((first, damaged, repaired), 1):
+            wire, wire_base = snapshot_delta.encode(source, wire_base, sequence)
+            received = self.client._decode_received_snapshot(
+                wire, self.client._transport_generation)
+            self.assertIsNotNone(received)
+            self.client._dispatch_message(received)
+            expected_x = 1.0 if sequence == 2 else float(sequence)
+            self.assertEqual(expected_x, self.client.last_snapshot['bots'][0]['x'])
+            self.assertEqual(float(sequence),
+                             self.client.last_snapshot['bots'][1]['x'])
+            self.assertEqual(sequence, self.client._snapshot_wire_sequence)
+        self.assertTrue(self.client.running)
+        self.assertIsNone(self.client.last_error)
+
+    def test_equipment_table_survives_latest_snapshot_coalescing(self):
+        self.client.running = True
+        self.client.connected = False
+        self.client.bigworld = mock.Mock()
+        self.client.bigworld.callback.return_value = 1
+        self.client.server_capabilities = (LEAN_SNAPSHOT_MANIFEST_CAPABILITY,)
+        self.client._handle_message(self._equipment_snapshot())
+        pending = [self._equipment_snapshot(tick=tick) for tick in (2, 3)]
+        for message in pending:
+            message.pop('bot_manifest')
+            message['bot_equipment_contracts'][0]['name'] = (
+                'contract-%d' % message['server_tick'])
+        with self.client._pending_lock:
+            self.client._pending = pending
+        self.client._poll()
+        self.assertEqual(3, self.client.last_snapshot['server_tick'])
+        self.assertEqual('contract-3', self.client.last_snapshot['bots'][0][
+            'equipment_states'][0]['equipment']['name'])
 
     def test_poll_does_not_coalesce_away_manifest_barrier(self):
         self.client.server_capabilities = (
@@ -1321,7 +1488,7 @@ class ShippingClientInputContractTests(unittest.TestCase):
         self.client.host_player_id = 1
         self.client.bot_authority_id = -1
         self.client.capabilities = (
-            HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+            HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
             RAM_CONTACT_LEDGER_CAPABILITY)
         self.client.server_capabilities = self.client.capabilities
         self.sent = []
@@ -1498,10 +1665,55 @@ class ShippingClientInputContractTests(unittest.TestCase):
                 ('x', float('nan')), ('z', float('inf')),
                 ('yaw', float('-inf')), ('speed', 1000.0),
                 ('x', 5000.0), ('gun_pitch', 3.0),
-                ('pitch', 1.5)):
+                ('pitch', math.pi + 0.01)):
             with self.subTest(field=field, value=value):
                 self.assertIsNone(_canonical_runtime_vehicle_row(
                     _snapshot_player(**{field: value})))
+
+    def test_reported_bridge_fall_updates_pose_and_health_for_bots_and_wrecks(self):
+        # 235422 / M41 Bulldog: accepted near deck, then frozen by the old
+        # 0.61-radian replica bound while authority continued to y=-14.6874.
+        samples = ((0.5641, 0.01827, 0.41632),
+                   (-0.17095, -0.07127, 1.40432),
+                   (-6.35, -0.45779, 1.482),
+                   (-8.79958, -3.70434, 2.17220),
+                   (-8.02788, -9.28007, 3.55465),
+                   (-14.687445, -15.797617, 9.398418))
+        identity = dict(id=29, team=2, slot=29, name='M41', max_health=1500)
+        for alive in (True, False):
+            self.client.last_snapshot = {'bots': [dict(id=29, y=0.5641)]}
+            for height, pitch, roll in samples:
+                source = dict(id=29, y=height, pitch=pitch, roll=roll,
+                              reload_time=0.0, reload_duration=5.0,
+                              health=1500 if alive else 0, alive=alive)
+                decoded = bot_state_codec.decode_row(
+                    bot_state_codec.encode_row(source), {})
+                for raw, trusted in ((source, False), (decoded, True)):
+                    published = BattleState._sanitize_bot_state(
+                        raw, identity, None, trusted=trusted)
+                    rows, retained = self.client._canonical_runtime_rows(
+                        [published], 'bots')
+                    self.assertEqual(0, retained)
+                    self.assertEqual(1, len(rows))
+                    self.assertAlmostEqual(height, rows[0]['y'], delta=0.000051)
+                    self.assertEqual(source['health'], rows[0]['health'])
+                    for key in ('pitch', 'roll'):
+                        self.assertAlmostEqual(math.sin(source[key]),
+                                               math.sin(rows[0][key]), places=5)
+                        self.assertAlmostEqual(math.cos(source[key]),
+                                               math.cos(rows[0][key]), places=5)
+
+    def test_human_rollover_pose_survives_sender_server_and_replica(self):
+        for pitch, roll in ((1.5, -1.5), (0.0, math.pi),
+                            (-15.797617, 9.398418)):
+            self.assertTrue(self._send(pitch=pitch, roll=roll))
+            self.assertTrue(self.state.update_input(1, self.sent[-1]))
+            public = self.state._public_player(self.player)
+            row = _canonical_runtime_vehicle_row(public)
+            self.assertIsNotNone(row)
+            for key, value in (('pitch', pitch), ('roll', roll)):
+                self.assertAlmostEqual(math.sin(value), math.sin(row[key]), places=5)
+                self.assertAlmostEqual(math.cos(value), math.cos(row[key]), places=5)
 
     def test_runtime_vehicle_numbers_are_canonicalized_once(self):
         source = {
@@ -1556,7 +1768,7 @@ class InputFaultInjectionTests(unittest.TestCase):
             1, _Socket(), ('127.0.0.1', 1), team=1, slot=0,
             client_position=True,
             capabilities=(
-                HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_FIRE_INTENT_CAPABILITY,
+                HUMAN_RAM_TIMELINE_CAPABILITY, PLAYER_PROJECTILE_OWNER_CAPABILITY,
                 RAM_CONTACT_LEDGER_CAPABILITY),
             effective_params=effective_params())
         self.state.players[1] = self.player
@@ -1655,8 +1867,10 @@ class OrderedEventVocabularyTests(unittest.TestCase):
         kinds = set(re.findall(r'"kind":\s*"([a-z_]+)"', source))
         # Critical-damage records have their own nested ``kind`` vocabulary;
         # they are payload rows inside a top-level hit/repair event and never
-        # enter the ordered battle-event dispatcher directly.
-        return kinds - {'device', 'ammo_rack', 'crew', 'fire'}
+        # enter the ordered battle-event dispatcher directly. Radio link
+        # recipients likewise use ``kind=human`` inside bot_observation,
+        # outside the ordered event journal.
+        return kinds - {'device', 'ammo_rack', 'crew', 'fire', 'human'}
 
     def _client_kinds(self):
         namespace = {}

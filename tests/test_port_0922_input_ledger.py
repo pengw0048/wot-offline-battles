@@ -2,7 +2,7 @@
 
 One recoverable rejected input frame must end as its own terminal decision
 without applying any state, while the next well-formed frame still advances
-automatically and a later valid fire intent still reaches a projectile.
+automatically and a later owner-frozen launch still reaches a terminal.
 """
 
 import json
@@ -21,9 +21,9 @@ from lan_battle_server import (  # noqa: E402
     SIMULATION_WORKER_AUTHORITY_ID,
 )
 from test_port_0922_server_projectiles import (  # noqa: E402
-    _attach_worker_authority, _fire_intent, _gun_checkpoint, _launch,
+    _attach_worker_authority, _gun_checkpoint, _launch,
     _launch_authority, _player_destructible_contact, _player_ram_contact,
-    _state,
+    _resolve, _state,
 )
 
 
@@ -159,9 +159,9 @@ RECOVERABLE_FAILURES = (
      'envelope_numeric'),
     ('yaw_range', lambda state: _frame(state, yaw=9.0),
      'envelope_numeric'),
-    ('pitch_range', lambda state: _frame(state, pitch=1.0),
+    ('pitch_range', lambda state: _frame(state, pitch=4.0),
      'envelope_numeric'),
-    ('roll_range', lambda state: _frame(state, roll=-1.0),
+    ('roll_range', lambda state: _frame(state, roll=-4.0),
      'envelope_numeric'),
     ('pose_time_fractional',
      lambda state: _frame(state, pose_time_us=1.5), 'envelope_integer'),
@@ -577,11 +577,8 @@ class OrderedInputLedgerTests(unittest.TestCase):
 
 class InputLedgerFireTests(unittest.TestCase):
     def _armed_state(self):
-        state = _state(players=1)
+        state = _state(players=2)
         player = state.players[1]
-        self.results = []
-        player.offer_reliable = lambda message: (
-            self.results.append(dict(message)) or True)
         self.relayed = []
         state.simulation_worker.offer_reliable = lambda message: (
             self.relayed.append(dict(message)) or True)
@@ -590,225 +587,162 @@ class InputLedgerFireTests(unittest.TestCase):
 
     @staticmethod
     def _gun_state(player):
-        return (player.fire_seq, player.shell_index,
-                player.next_shell_index, player.shell_change_pending,
-                dict(player.gun_checkpoint), player.gun_checkpoint_seq)
+        return (player.shell_index, player.next_shell_index,
+                player.shell_change_pending, dict(player.gun_checkpoint),
+                player.gun_checkpoint_seq)
 
-    def test_fire_bound_to_a_rejected_input_has_one_idempotent_terminal(self):
+    @staticmethod
+    def _shot(state, **changes):
+        message = _launch(
+            authority_epoch=state.authority_epoch, fire_intent_seq=1,
+            fire_input_seq=state.players[1].input_processed_seq,
+            range_origin=[0.0, 0.0, 0.0],
+            launch_server_time_ms=state._server_time_ms())
+        message.update(changes)
+        return message
+
+    def test_rejected_input_does_not_block_the_owners_frozen_projectile(self):
         state, player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
         gun_before = self._gun_state(player)
         relayed_before = len(self.relayed)
+        message = self._shot(state, fire_input_seq=2)
 
-        intent = _fire_intent(state, intent_seq=1, input_seq=2)
-        self.assertTrue(state.submit_fire_intent(1, intent))
+        self.assertTrue(state.launch_projectile(1, message))
+        self.assertTrue(state.launch_projectile(1, json.loads(json.dumps(message))))
 
-        self.assertEqual(
-            (False, 'gun_checkpoint_unavailable'),
-            player.fire_intent_results[1])
-        self.assertEqual('gun_checkpoint_unavailable',
-                         self.results[-1]['reason'])
-        self.assertIs(False, self.results[-1]['accepted'])
-        # No launch, and no ammunition, reload, dispersion or recoil movement.
+        self.assertEqual(2, state.projectiles['1:p:1:1']['fire_input_seq'])
+        self.assertEqual(1, state._statistics_row('player', 1)['shots_fired'])
+        self.assertEqual(gun_before, self._gun_state(player))
         self.assertEqual(relayed_before, len(self.relayed))
-        self.assertEqual(gun_before, self._gun_state(player))
-        self.assertFalse(player.pending_fire_intents)
 
-        # An exact retry folds to the same terminal without a second result.
-        results_before = len(self.results)
-        self.assertTrue(state.submit_fire_intent(1, json.loads(
-            json.dumps(intent))))
-        self.assertEqual(results_before, len(self.results))
-        self.assertEqual(gun_before, self._gun_state(player))
-
-    def test_a_reported_shell_inventory_is_relayed_not_rejected(self):
-        state, player = self._armed_state()
-
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, intent_seq=1, shells_before_shot=1)))
-
-        relay = player.pending_fire_intents[1]
-        self.assertEqual(1, relay['shells_before_shot'])
-        self.assertEqual('fire_intent', self.relayed[-1]['type'])
-
-    def test_a_trigger_without_a_shell_inventory_still_launches(self):
-        state, player = self._armed_state()
-        intent = _fire_intent(state, intent_seq=1)
-        intent.pop('shells_before_shot', None)
-
-        self.assertTrue(state.submit_fire_intent(1, intent))
-
-        self.assertIsNone(
-            player.pending_fire_intents[1]['shells_before_shot'])
-
-    def test_an_unknown_fire_intent_field_is_still_rejected(self):
+    def test_reported_shell_inventory_marks_the_final_round_at_launch(self):
         state, unused_player = self._armed_state()
+        self.assertTrue(state.launch_projectile(
+            1, self._shot(state, shells_before_shot=1)))
+        self.assertIs(True, state.last_shell_shots['1:p:1:1'])
+        self.assertFalse(any(message['type'] == 'fire_intent'
+                             for message in self.relayed))
 
-        self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-            state, intent_seq=1, unexpected_field=1)))
+    def test_launch_without_shell_inventory_still_advances(self):
+        state, unused_player = self._armed_state()
+        self.assertTrue(state.launch_projectile(1, self._shot(state)))
+        self.assertNotIn('1:p:1:1', state.last_shell_shots)
 
-        self.assertEqual(
-            'fire_intent_wire_shape', self.results[-1]['reason'])
-
-    def test_fire_bound_to_the_last_valid_input_still_launches(self):
+    def test_unknown_launch_field_is_rejected_without_consuming_sequence(self):
         state, player = self._armed_state()
+        self.assertFalse(state.launch_projectile(
+            1, self._shot(state, unexpected_field=1)))
+        self.assertEqual(0, player.fire_seq)
+        self.assertFalse(state.projectiles)
+        self.assertTrue(state.launch_projectile(1, self._shot(state)))
+
+    def test_launch_can_reference_the_last_valid_input_after_a_rejection(self):
+        state, unused_player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
+        self.assertTrue(state.launch_projectile(
+            1, self._shot(state, fire_input_seq=1)))
+        self.assertEqual(1, state.projectiles['1:p:1:1']['fire_input_seq'])
 
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, intent_seq=1, input_seq=1)))
-
-        relay = player.pending_fire_intents[1]
-        self.assertEqual(1, relay['input_seq'])
-        self.assertEqual(1, relay['gun_checkpoint_seq'])
-        self.assertEqual('fire_intent', self.relayed[-1]['type'])
-
-    def test_fire_bound_to_the_first_valid_post_rejection_input_relays(self):
+    def test_launch_keeps_the_first_valid_post_rejection_input_identity(self):
         state, player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
         self.assertTrue(state.update_input(1, _frame(state)))
+        self.assertTrue(state.launch_projectile(1, self._shot(state)))
         self.assertEqual(3, player.input_seq)
-        self.assertEqual(3, player.gun_checkpoint_seq)
+        self.assertEqual(3, state.projectiles['1:p:1:1']['fire_input_seq'])
 
-        self.assertTrue(state.submit_fire_intent(
-            1, _fire_intent(state, intent_seq=1, input_seq=3)))
-
-        relay = player.pending_fire_intents[1]
-        self.assertEqual(3, relay['input_seq'])
-        self.assertEqual(3, relay['gun_checkpoint_seq'])
-        self.assertEqual(
-            _gun_checkpoint(), relay['gun_checkpoint'])
-        self.assertEqual('fire_intent', self.relayed[-1]['type'])
-        self.assertNotIn(1, player.fire_intent_results)
-
-    def test_fire_never_falls_back_to_a_stale_or_future_checkpoint(self):
+    def test_launch_keeps_processed_identity_and_rejects_unreceived_input(self):
         state, player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
         self.assertTrue(state.update_input(1, _frame(state)))
         gun_before = self._gun_state(player)
-        relayed_before = len(self.relayed)
-
-        # The stale, rejected, future and unknown checkpoints all fail on the
-        # checkpoint identity itself: the last good checkpoint is never
-        # substituted for a different input sequence.
-        for intent_seq, input_seq in ((1, 1), (2, 2), (3, 4), (4, 99)):
-            with self.subTest(input_seq=input_seq):
-                self.assertTrue(state.submit_fire_intent(1, _fire_intent(
-                    state, intent_seq=intent_seq, input_seq=input_seq)))
-                self.assertEqual(
-                    (False, 'gun_checkpoint_unavailable'),
-                    player.fire_intent_results[intent_seq])
-        self.assertEqual(relayed_before, len(self.relayed))
+        # The owner froze its complete shot locally; neither an old nor a
+        # rejected input is replaced by the server's latest gun checkpoint.
+        for shot_seq, input_seq in ((1, 1), (2, 2)):
+            self.assertTrue(state.launch_projectile(1, self._shot(
+                state, shot_seq=shot_seq, fire_intent_seq=shot_seq,
+                fire_input_seq=input_seq)))
+            self.assertEqual(input_seq, state.projectiles[
+                '1:p:1:%d' % shot_seq]['fire_input_seq'])
+        for input_seq in (4, 99):
+            self.assertFalse(state.launch_projectile(1, self._shot(
+                state, shot_seq=3, fire_intent_seq=3,
+                fire_input_seq=input_seq)))
+        self.assertEqual(2, player.fire_seq)
         self.assertEqual(gun_before, self._gun_state(player))
 
-    def test_a_changed_fire_payload_at_a_used_intent_conflicts(self):
+    def test_changed_launch_payload_at_a_used_sequence_conflicts(self):
+        state, player = self._armed_state()
+        message = self._shot(state)
+        self.assertTrue(state.launch_projectile(1, message))
+        gun_before = self._gun_state(player)
+        self.assertFalse(state.launch_projectile(
+            1, dict(message, origin=[1.0, 1.0, 0.0])))
+        self.assertEqual([0.0, 1.0, 0.0],
+                         state.projectiles['1:p:1:1']['origin'])
+        self.assertEqual(1, state._statistics_row('player', 1)['shots_fired'])
+        self.assertEqual(gun_before, self._gun_state(player))
+
+    def test_recovered_frame_reaches_a_projectile_terminal(self):
         state, player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
-        intent = _fire_intent(state, intent_seq=1, input_seq=2)
-        self.assertTrue(state.submit_fire_intent(1, intent))
-        gun_before = self._gun_state(player)
-        results_before = len(self.results)
-
-        self.assertFalse(state.submit_fire_intent(1, dict(
-            intent, dispersion_angle=0.05)))
-
-        self.assertEqual(
-            (False, 'gun_checkpoint_unavailable'),
-            player.fire_intent_results[1])
-        self.assertEqual(results_before, len(self.results))
-        self.assertEqual(gun_before, self._gun_state(player))
-
-    def test_a_recovered_frame_still_reaches_a_projectile_terminal(self):
-        state = _state(players=2)
-        player = state.players[1]
+        self.assertEqual((1, 2), (player.input_seq, player.input_processed_seq))
         self.assertTrue(state.update_input(1, _frame(state)))
-        self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
-        self.assertEqual((1, 2), (
-            player.input_seq, player.input_processed_seq))
-
-        message = _launch(shooter_id=1, shot_seq=1)
-        self.assertTrue(_launch_authority(state, message))
-
-        # The next legal frame applied, its intent was admitted and relayed,
-        # and the worker's launch became a live authoritative projectile.
-        record = state.projectiles['1:p:1:1']
-        self.assertEqual(3, record['fire_input_seq'])
-        self.assertEqual(1, record['fire_intent_seq'])
-        self.assertEqual(3, player.input_seq)
+        self.assertTrue(state.launch_projectile(1, self._shot(state)))
+        self.assertEqual(3, state.projectiles['1:p:1:1']['fire_input_seq'])
+        self.assertTrue(state.resolve_projectile(
+            1, _resolve(state, '1:p:1:1')))
+        self.assertNotIn('1:p:1:1', state.projectiles)
+        self.assertEqual(900, state.players[2].health)
         self.assertEqual(1, player.fire_seq)
-        self.assertFalse(player.pending_fire_intents)
-        self.assertEqual(
-            (True, '1:p:1:1'), player.fire_intent_results[1])
 
-    def test_queued_frames_and_fire_intents_keep_their_order(self):
+    def test_queued_frames_and_launches_keep_their_order(self):
         state, player = self._armed_state()
-        # Everything the client had already queued before any server response
-        # could reach it, in exact FIFO order.
         queued = [('input', _frame(state, aim_yaw=7.0))]
         for index in range(3):
-            queued.append((
-                'input', _frame(state, input_seq=3 + index,
-                                forward=0.1 * (index + 1))))
-        queued.append((
-            'fire', _fire_intent(state, intent_seq=1, input_seq=2)))
-        queued.append((
-            'fire', _fire_intent(state, intent_seq=2, input_seq=5)))
-
+            queued.append(('input', _frame(
+                state, input_seq=3 + index, forward=0.1 * (index + 1))))
+        queued.extend((
+            ('launch', self._shot(state, fire_input_seq=2)),
+            ('launch', self._shot(state, shot_seq=2, fire_intent_seq=2,
+                                  fire_input_seq=5))))
         outcomes = []
         for kind, message in queued:
-            if kind == 'input':
-                outcomes.append(state.update_input(1, message))
-            else:
-                outcomes.append(state.submit_fire_intent(1, message))
-
+            method = state.update_input if kind == 'input' else state.launch_projectile
+            outcomes.append(method(1, message))
         self.assertEqual([False, True, True, True, True, True], outcomes)
-        self.assertEqual(5, player.input_seq)
-        self.assertEqual(5, player.input_processed_seq)
+        self.assertEqual((5, 5), (player.input_seq, player.input_processed_seq))
         self.assertEqual(0.3, round(player.forward, 6))
-        self.assertEqual(
-            (False, 'gun_checkpoint_unavailable'),
-            player.fire_intent_results[1])
-        self.assertEqual(5, player.pending_fire_intents[2]['input_seq'])
-        self.assertEqual([1, 2], sorted(player.fire_intent_fingerprints))
+        self.assertEqual([2, 5], [state.projectiles[
+            '1:p:1:%d' % seq]['fire_input_seq'] for seq in (1, 2)])
 
-    def test_the_historical_cascade_recovers_without_a_battle_failure(self):
-        """Model report 124651: one rejection then 36 frames and 20 fires."""
+    def test_historical_rejection_cascade_recovers_through_twenty_terminals(self):
+        """Model report 124651: one rejection then 36 frames and 20 shots."""
         state, player = self._armed_state()
         self.assertFalse(state.update_input(1, _frame(state, aim_yaw=7.0)))
-        rejected_seq = 2
-
-        launched = []
         for index in range(36):
             self.assertTrue(state.update_input(1, _frame(
                 state, forward=0.02 * (index + 1))))
             if index < 20:
-                intent_seq = index + 1
-                accepted = state.submit_fire_intent(1, _fire_intent(
-                    state, intent_seq=intent_seq,
-                    input_seq=player.input_seq))
-                self.assertTrue(accepted)
-                relay = player.pending_fire_intents.get(intent_seq)
-                self.assertIsNotNone(relay)
-                self.assertEqual(player.input_seq, relay['input_seq'])
-                launched.append(relay)
-                # Settle the barrier so the next trigger is not pending.
-                player.pending_fire_intents.pop(intent_seq)
-
-        self.assertEqual(20, len(launched))
-        self.assertEqual(38, player.input_seq)
-        self.assertEqual(38, player.input_processed_seq)
-        self.assertEqual(
-            'rejected',
-            player.input_decisions[rejected_seq]['outcome'])
-        # No global battle failure: the player stayed alive, the round is
-        # still running and the worker kept its authority.
+                shot_seq = index + 1
+                self.assertTrue(state.launch_projectile(1, self._shot(
+                    state, shot_seq=shot_seq, fire_intent_seq=shot_seq)))
+                projectile_id = '1:p:1:%d' % shot_seq
+                self.assertEqual(player.input_seq,
+                                 state.projectiles[projectile_id]['fire_input_seq'])
+                self.assertTrue(state.resolve_projectile(1, _resolve(
+                    state, projectile_id, outcome='miss', impact=None,
+                    direct=None)))
+        self.assertEqual(20, len(state.projectile_tombstones))
+        self.assertEqual((38, 38), (player.input_seq, player.input_processed_seq))
+        self.assertEqual('rejected', player.input_decisions[2]['outcome'])
         self.assertTrue(player.alive)
         self.assertTrue(player.connected)
         self.assertIsNone(state.battle_result)
         self.assertEqual('battle', state.phase)
-        self.assertEqual(
-            SIMULATION_WORKER_AUTHORITY_ID, state.bot_authority_id)
-        # Not one of the twenty triggers produced a terminal rejection.
-        self.assertFalse(player.fire_intent_results)
+        self.assertEqual(SIMULATION_WORKER_AUTHORITY_ID, state.bot_authority_id)
+        self.assertFalse(state.projectiles)
 
 
 class InputLedgerLifecycleTests(unittest.TestCase):

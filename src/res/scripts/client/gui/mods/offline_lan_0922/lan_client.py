@@ -3,17 +3,24 @@ from __future__ import print_function
 import base64
 import json
 import math
+from gui.mods.offline_lan_0922 import stun_mechanics
 import socket
 import threading
 import time
 import uuid
 
+from gui.mods.offline_lan_0922 import state_transfer
+from gui.mods.offline_lan_0922 import snapshot_delta
+
 from gui.mods.offline_lan_0922 import effective_params as effective_params_wire
 from gui.mods.offline_lan_0922.battle_achievements import (
     AWARDABLE_ACHIEVEMENTS, RECEIPT_STAT_NAMES)
 from gui.mods.offline_lan_0922 import bot_gunnery
+from gui.mods.offline_lan_0922 import bot_state_codec
 from gui.mods.offline_lan_0922 import burst_mechanics
 from gui.mods.offline_lan_0922 import equipment_mechanics
+from gui.mods.offline_lan_0922 import friendly_fire
+from gui.mods.offline_lan_0922 import mission_events
 from gui.mods.offline_lan_0922 import siege_mechanics
 from gui.mods.offline_lan_0922 import spotting
 from gui.mods.offline_lan_0922 import turret_obstacle_schema
@@ -39,18 +46,27 @@ DESTRUCTIBLE_CATALOG_V5_CAPABILITY = 'destructible_catalog_v5'
 LEAN_SNAPSHOT_MANIFEST_CAPABILITY = 'lean_snapshot_manifest_v1'
 RAM_CONTACT_LEDGER_CAPABILITY = 'ram_contact_ledger_v2'
 HUMAN_RAM_TIMELINE_CAPABILITY = 'human_ram_timeline_v1'
-PLAYER_FIRE_INTENT_CAPABILITY = 'player_fire_intent_v6'
+PLAYER_PROJECTILE_OWNER_CAPABILITY = 'player_projectile_owner_v1'
+PROJECTILE_CLOCK_LEEWAY_MS = 250
+PROJECTILE_LAUNCH_PROOF_FIELDS = frozenset((
+    'projectile_id', 'shooter_kind', 'shooter_id', 'source_vehicle',
+    'source_shot', 'shot_seq', 'shell_index',
+    'burst_group_seq', 'burst_index', 'burst_count',
+    'origin', 'velocity', 'range_origin', 'gravity', 'max_distance',
+    'max_time_ms', 'is_he', 'splash_radius', 'penetration_factor',
+    'launch_server_time_ms', 'fire_intent_seq', 'fire_input_seq'))
 PLAYER_ENVIRONMENT_CAPABILITY = 'player_environment_v2'
 EFFECTIVE_PARAMS_CAPABILITY = effective_params_wire.CAPABILITY
 SIMULATION_WORKER_CAPABILITY = 'simulation_worker_v1'
 CLIENT_CAPABILITIES = (
+    state_transfer.CAPABILITY,
     PROJECTILE_LEDGER_CAPABILITY,
     RICOCHET_CONTINUATION_CAPABILITY,
     DESTRUCTIBLE_CATALOG_V5_CAPABILITY,
     LEAN_SNAPSHOT_MANIFEST_CAPABILITY,
     RAM_CONTACT_LEDGER_CAPABILITY,
     HUMAN_RAM_TIMELINE_CAPABILITY,
-    PLAYER_FIRE_INTENT_CAPABILITY,
+    PLAYER_PROJECTILE_OWNER_CAPABILITY,
     PLAYER_ENVIRONMENT_CAPABILITY,
     EFFECTIVE_PARAMS_CAPABILITY,
 )
@@ -85,15 +101,10 @@ MAX_PROJECTILE_DISTANCE = 10000.0
 MAX_PROJECTILE_TIME_MS = 20000
 MAX_PROJECTILE_SPLASH_RADIUS = 100.0
 MAX_PLAYER_DISPERSION_ANGLE = 0.5
-# Bot identities are 1..30, so one entry per live Bot is the exact
-# upper bound of a trigger-edge presentation ledger.
-MAX_PRESENTATION_LEDGER_ENTRIES = 30
 # A displayed Bot trails authority by 60-90 ms normally and by 160-200 ms
 # after a worker stall.  One second is the wire bound the server enforces; a
 # record further behind than that is not evidence of a normal presentation.
 MAX_PRESENTATION_LAG_US = 1000000
-PRESENTATION_LEDGER_FIELDS = frozenset((
-    'bot_id', 'bot_state_revision', 'presentation_time_us'))
 MAX_PLAYER_CLIP_SIZE = 255
 MAX_PLAYER_RELOAD_SECONDS = 3600.0
 # The exact ordered-input wire contract enforced by the bundled LAN
@@ -102,7 +113,7 @@ MAX_PLAYER_RELOAD_SECONDS = 3600.0
 # client queues must already satisfy the same envelope.
 MAX_PLAYER_INPUT_SPEED = 200.0
 MAX_PLAYER_GUN_PITCH = 1.2
-MAX_PLAYER_INPUT_ATTITUDE = 0.61
+MAX_PLAYER_INPUT_ATTITUDE = math.pi
 PLAYER_INPUT_WORLD_BOUNDS = (2000.0, 1000.0, 2000.0)
 MAX_PLAYER_RAM_CONTACTS = 16
 MAX_PLAYER_DESTRUCTIBLE_CONTACTS = 16
@@ -144,9 +155,14 @@ RESULT_INTERACTION_LIMITS = {
     'ricochets_received': (0, 65535),
     'no_damage_direct_hits_received': (0, 65535),
     'target_kills': (0, 255),
+    'damage_events': (0, 65535),
+    'kills_assisted_stun': (0, 1),
+    'kills_assisted_track': (0, 1),
+    'kills_assisted_radio': (0, 1),
 }
 BOT_TIER_MODES = frozenset((
-    'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus1'))
+    'random', 'same', 'minus1_0', '0_plus1', 'minus1_plus1',
+    '0_plus2', 'minus2_0'))
 BOT_SKILL_MODES = frozenset(bot_gunnery.SKILL_MODES)
 SENDER_JOIN_TIMEOUT = 0.1
 SEND_STALL_TIMEOUT = 5.0
@@ -163,7 +179,7 @@ STATE_BARRIER_TYPES = frozenset((
     'start_denied', 'team_denied', 'team_size_denied',
     'bot_tier_mode_denied', 'bot_skill_mode_denied', 'events', 'error'))
 ORDERED_RECEIVE_TYPES = STATE_BARRIER_TYPES | frozenset((
-    'battle_receipt', 'fire_intent', 'fire_intent_result',
+    'battle_receipt', 'fire_intent_result',
     'landing_observation_result',
     'player_destructible_contact',
     'player_destructible_contact_result', 'team_command',
@@ -180,6 +196,10 @@ RECOVERABLE_RUNTIME_TYPES = frozenset((
     'team_command_terminal', 'team_chat', 'team_chat_ack'))
 
 
+_TRANSPORT_PROFILE_CLOCK = getattr(
+    time, 'monotonic', getattr(time, 'clock', time.time))
+
+
 def _monotonic_time():
     """Return one non-adjustable process clock on #1513 and test hosts."""
     function = getattr(time, 'monotonic', None)
@@ -188,6 +208,58 @@ def _monotonic_time():
     # Python 2.7 on Windows defines time.clock() as elapsed wall time backed
     # by QueryPerformanceCounter.  That is the clock used by the #1513 client.
     return float(time.clock())
+
+
+class _TransportPerformance(object):
+    """Constant-size, generation-owned transport timing; never authoritative."""
+
+    def __init__(self, generation):
+        self.generation = generation
+        self.values = {}
+        for name in ('poll', 'materialize', 'handle', 'notify'):
+            self.values[name + '_wall_seconds'] = 0.0
+            self.values[name + '_calls'] = 0
+        self.handle_depth = 0
+        self.poll_depth = 0
+        self.valid = True
+
+    def clock(self):
+        try:
+            if not self.valid:
+                return None
+            value = float(_TRANSPORT_PROFILE_CLOCK())
+            if 0.0 <= value < float('inf'):
+                return value
+        except Exception:
+            pass
+        self.valid = False
+        return None
+
+    def finish(self, name, started):
+        try:
+            if started is None:
+                return
+            elapsed = self.clock() - started
+            if elapsed < 0.0:
+                self.valid = False
+                return
+            self.values[name + '_wall_seconds'] += elapsed
+            self.values[name + '_calls'] += 1
+        except Exception:
+            self.valid = False
+
+    def snapshot(self):
+        try:
+            if self.poll_depth or not self.valid:
+                # A native callback can re-enter the frame loop mid-poll.
+                # Its child timers may be complete while the parent is not.
+                return None
+            result = dict(self.values)
+            result['generation'] = self.generation
+            return result
+        except Exception:
+            self.valid = False
+            return None
 
 
 try:
@@ -390,12 +462,14 @@ def _valid_player_siege_contract(player):
 def _canonical_angle(value, default=0.0):
     """Return one mathematically equivalent angle inside [-pi, pi].
 
-    Yaw is periodic, so an accumulated turret plus hull sum is normalized
+    Body and turret angles are periodic, so an accumulated angle is normalized
     rather than clipped: clipping would silently point the reported gun
     somewhere the player is not aiming, while normalization reports the exact
     same orientation inside the server's ordered-input contract.
     """
     angle = _finite_float(value, default)
+    if -math.pi <= angle < math.pi:
+        return angle
     period = 2.0 * math.pi
     angle = math.fmod(angle + math.pi, period)
     if angle < 0.0:
@@ -559,6 +633,12 @@ def _canonical_runtime_vehicle_row(value):
         if parsed is None:
             return None
         result[name] = parsed
+    if result.get('stun_factors'):
+        try:
+            result['stun_factors'] = stun_mechanics.canonical_factors(
+                result['stun_factors'])
+        except (TypeError, ValueError, OverflowError):
+            return None
     if 'velocity' in result:
         velocity = result.get('velocity')
         if not isinstance(velocity, (list, tuple)) or len(velocity) < 3:
@@ -707,7 +787,7 @@ def _strict_projectile_source_shot(value):
     shell_fields = set(shell) if isinstance(shell, dict) else set()
     base_shell_fields = {'kind', 'caliber', 'damage', 'explosionRadius'}
     if (not isinstance(shell, dict) or
-            shell_fields not in (
+            shell_fields - {'stun'} not in (
                 base_shell_fields,
                 base_shell_fields | PROJECTILE_HE_FACTOR_FIELDS)):
         return None
@@ -773,6 +853,13 @@ def _strict_projectile_source_shot(value):
     }
     if he_factors is not None:
         result['shell'].update(he_factors)
+    if 'stun' in shell:
+        try:
+            if kind != 'HIGH_EXPLOSIVE' or shell['stun'] is None:
+                return None
+            result['shell']['stun'] = stun_mechanics.shell_component(shell['stun'])
+        except (TypeError, ValueError, KeyError):
+            return None
     return result
 
 
@@ -844,40 +931,6 @@ def _strict_bot_launch_pose(value):
     if any(angle is None for angle in angles):
         return None
     return position + angles
-
-
-def _strict_presentation_ledger(value):
-    """Freeze what delayed Bot poses one shooter displayed at its trigger.
-
-    Each entry names the exact wire revision and motion-clock sample time a
-    ``SnapshotSync`` record was interpolated at.  The authority reconstructs
-    that timeline itself; this ledger never carries a pose or a verdict.
-    """
-    if not isinstance(value, (list, tuple)):
-        return None
-    if len(value) > MAX_PRESENTATION_LEDGER_ENTRIES:
-        return None
-    result = []
-    seen = set()
-    for raw in value:
-        if not isinstance(raw, dict) or set(raw) != PRESENTATION_LEDGER_FIELDS:
-            return None
-        bot_id = _projectile_int_range(raw.get('bot_id'), 1, 30)
-        revision = _projectile_int_range(
-            raw.get('bot_state_revision'), 0, 2147483647)
-        presentation_time_us = _projectile_int_range(
-            raw.get('presentation_time_us'), 0, MAX_MOTION_TIME_US)
-        if (bot_id is None or revision is None or
-                presentation_time_us is None or bot_id in seen):
-            return None
-        seen.add(bot_id)
-        result.append({
-            'bot_id': bot_id,
-            'bot_state_revision': revision,
-            'presentation_time_us': presentation_time_us,
-        })
-    result.sort(key=lambda entry: entry['bot_id'])
-    return result
 
 
 def _strict_launch_velocity(value):
@@ -960,6 +1013,10 @@ def _strict_projectile_effect(value):
         'critical', 'critical_target_base_revision',
         'critical_target_ack_seq', 'hull_damage', 'critical_delta'))
     stun_fields = frozenset(('stun_end_server_time_ms',))
+    if 'stun_factors' in value:
+        stun_fields |= frozenset(('stun_factors',))
+    if 'stun_duration_ms' in value:
+        stun_fields |= frozenset(('stun_duration_ms',))
     target_pose_fields = frozenset(('target_x', 'target_y', 'target_z'))
     damage_sticker_fields = frozenset(('damage_sticker',))
     potential_fields = frozenset(('potential_damage',))
@@ -1041,6 +1098,17 @@ def _strict_projectile_effect(value):
         if stun_end is None:
             return None
         result['stun_end_server_time_ms'] = stun_end
+        if 'stun_duration_ms' in value:
+            duration = _projectile_int_range(value['stun_duration_ms'], 0, stun_end)
+            if duration is None:
+                return None
+            result['stun_duration_ms'] = duration
+        if 'stun_factors' in value:
+            try:
+                result['stun_factors'] = stun_mechanics.canonical_factors(
+                    value['stun_factors'])
+            except (TypeError, ValueError):
+                return None
     if has_damage_sticker:
         damage_sticker = _projectile_int_range(
             value.get('damage_sticker'), 0,
@@ -1243,7 +1311,8 @@ def _valid_active_projectiles(value, authority_epoch, server_time_ms):
                     source_shot, velocity, gravity, max_distance, is_he,
                     splash_radius) or
                 penetration_factor is None or launch_time is None or
-                launch_time > server_time_ms or checked_through is None or
+                launch_time > server_time_ms + PROJECTILE_CLOCK_LEEWAY_MS or
+                checked_through is None or
                 checked_through > max_time_ms or checked_distance is None or
                 checked_distance > max_distance + 0.1 or
                 segment_start_time is None or
@@ -1297,21 +1366,53 @@ def _valid_battle_receipt(message):
             winner not in (0, 1, 2) or duration is None or duration < 0 or
             not isinstance(message.get('premature_leave'), bool)):
         return False
+    if ('watched_battle_to_end' in message and not isinstance(
+            message['watched_battle_to_end'], bool)):
+        return False
+    if message.get('battle_mode', 'regular') not in ('regular', 'training'):
+        return False
+    if ('vehicle_compact_descr' in message and
+            _canonical_vehicle_compact_descr(message['vehicle_compact_descr']) is None):
+        return False
+    if ('max_health' in message and
+            (type(message['max_health']) not in integer_types or
+             not 1 <= message['max_health'] <= 100000)):
+        return False
+    if ('vehicle_outfits' in message and
+            (not isinstance(message['vehicle_outfits'], dict) or
+             _canonical_wire_outfits(message['vehicle_outfits']) is None)):
+        return False
     stats = message.get('stats')
     rewards = message.get('rewards')
     stat_names = RECEIPT_STAT_NAMES
     reward_names = ('credits', 'xp', 'free_xp', 'repair_cost', 'ammo_cost')
     if not isinstance(stats, dict) or not isinstance(rewards, dict):
         return False
-    # Statistics added after a receipt was recorded default to zero, exactly
-    # as the durable store treats them.
+    # Missing optional statistics are valid legacy wire data. Evidence-bearing
+    # mission fields remain absent when the durable store normalizes them.
     if any(_exact_int(stats.get(name, 0)) is None or
            _exact_int(stats.get(name, 0)) < 0 for name in stat_names):
         return False
+    if 'max_piercing_series' in stats:
+        series = stats['max_piercing_series']
+        if (type(series) not in integer_types or series > min(
+                _exact_int(stats.get('shots', 0)),
+                _exact_int(stats.get('piercings', 0)))):
+            return False
     if any(_exact_int(rewards.get(name)) is None or
            _exact_int(rewards.get(name)) < 0 for name in reward_names):
         return False
+    if (_exact_int(rewards.get('crystal', 0)) is None or
+            rewards.get('crystal', 0) < 0):
+        return False
+    if (_exact_int(message.get('battle_booster', 0)) is None or
+            not 0 <= message.get('battle_booster', 0) <= 2 ** 31 - 1):
+        return False
     if rewards.get('repair_cost') != 0 or rewards.get('ammo_cost') != 0:
+        return False
+    try:
+        friendly_fire.facts(message.get('friendly_fire'))
+    except (TypeError, ValueError, OverflowError):
         return False
     # What the battle drew, by the shell's index in the gun's own shot order.
     # A receipt from a server that does not send it fired nothing.
@@ -1374,6 +1475,12 @@ def _valid_battle_receipt(message):
                _exact_int(row_stats.get(stat_name, 0)) < 0
                for stat_name in stat_names):
             return False
+        if 'max_piercing_series' in row_stats:
+            series = row_stats['max_piercing_series']
+            if (type(series) not in integer_types or series > min(
+                    _exact_int(row_stats.get('shots', 0)),
+                    _exact_int(row_stats.get('piercings', 0)))):
+                return False
         # Receipts recorded before offline achievements shipped omit the list.
         achievements = row.get('achievements', [])
         if (not isinstance(achievements, list) or
@@ -1391,11 +1498,20 @@ def _valid_battle_receipt(message):
             len(interactions) > len(public_rows)):
         return False
     interaction_keys = set(RESULT_INTERACTION_LIMITS) | {
-        'target_kind', 'target_id'}
+        'target_kind', 'target_id'} | mission_events.FIELDS
+    optional_interactions = {'damage_events', 'kills_assisted_stun',
+                             'kills_assisted_track', 'kills_assisted_radio'} | mission_events.FIELDS
+    required_interactions = interaction_keys - optional_interactions
     interaction_targets = set()
+    mission_event_count = 0
     for interaction in interactions:
         if (not isinstance(interaction, dict) or
-                set(interaction) != interaction_keys):
+                set(interaction) - interaction_keys or
+                not required_interactions.issubset(interaction) or
+                not mission_events.valid(interaction)):
+            return False
+        mission_event_count += len(interaction.get('mission_events', ()))
+        if mission_event_count > mission_events.MAX_EVENTS:
             return False
         target = (
             interaction.get('target_kind'),
@@ -1405,7 +1521,17 @@ def _valid_battle_receipt(message):
                 row_teams[target] == team):
             return False
         for name, (minimum, maximum) in RESULT_INTERACTION_LIMITS.items():
-            field = _exact_int(interaction.get(name))
+            if name in optional_interactions and name not in interaction:
+                continue
+            raw = interaction.get(name)
+            if name == 'stun_duration':
+                if (isinstance(raw, bool) or
+                        not isinstance(raw, integer_types + (float,)) or
+                        not minimum <= raw <= maximum):
+                    return False
+                field = float(raw)
+            else:
+                field = _exact_int(raw)
             if field is None or field < minimum or field > maximum:
                 return False
         interaction_targets.add(target)
@@ -1584,6 +1710,11 @@ class LANClient(object):
         self.last_error = None
         self.rtt_ms = None
         self.minimum_rtt_ms = None
+        self.worker_rtt_ms = None
+        self.worker_frame_ms = None
+        self._worker_ping_started = None
+        self._worker_pong_time = None
+        self._worker_ping_scope = None
         self.combat_phase = 'loading'
         self.combat_deadline = None
         self.combat_end_deadline = None
@@ -1602,12 +1733,15 @@ class LANClient(object):
         self._outbound_accepting = False
         self._sender_thread = None
         self._transport_generation = 0
+        self._transport_performance = _TransportPerformance(0)
+        self._snapshot_wire_baseline = None
+        self._snapshot_wire_sequence = None
+        self._snapshot_resync_pending = False
         self._stopping = False
         self._poll_callback = None
         self._last_ping = 0.0
         self._ping_seq = 0
         self._fire_seq = 0
-        self._fire_intent_seq = 0
         self._equipment_intent_seq = 0
         self._team_command_seq = 0
         self._team_command_round = None
@@ -1633,6 +1767,10 @@ class LANClient(object):
                 return False
             self._transport_generation += 1
             generation = self._transport_generation
+            self._transport_performance = _TransportPerformance(generation)
+            self._snapshot_wire_baseline = None
+            self._snapshot_wire_sequence = None
+            self._snapshot_resync_pending = False
             self._outbound_queue = []
             self._outbound_bytes = 0
             self._outbound_seq = 0
@@ -1651,6 +1789,11 @@ class LANClient(object):
             self.server_time_ms = None
             self.rtt_ms = None
             self.minimum_rtt_ms = None
+            self.worker_rtt_ms = None
+            self.worker_frame_ms = None
+            self._worker_ping_started = None
+            self._worker_pong_time = None
+            self._worker_ping_scope = None
             self._input_seq = 0
             self._input_seq_round = None
             self._landing_observation_seq = 0
@@ -1705,6 +1848,8 @@ class LANClient(object):
         return payload
 
     def stop(self):
+        from gui.mods.offline_lan_0922 import offline_replay
+        offline_replay.finish(self, 'transport_stop')
         with self._outbound_lock:
             if (not self.running and self.sock is None and
                     self._poll_callback is None and
@@ -1716,6 +1861,9 @@ class LANClient(object):
             sock = self.sock
             was_connected = self.connected
             self._stopping = True
+            self._snapshot_wire_baseline = None
+            self._snapshot_wire_sequence = None
+            self._snapshot_resync_pending = False
             self._outbound_accepting = False
             self.running = False
             self.connected = False
@@ -1783,11 +1931,16 @@ class LANClient(object):
                     if not is_alive():
                         self._sender_thread = None
 
-    def request_start(self, map_name=None, round_seconds=None):
+    def request_start(self, map_name=None, round_seconds=None,
+                      battle_mode='regular', training_bots=False):
         if (not self.ready or self.phase != 'waiting' or
                 self.player_id != self.host_player_id):
             return False
+        if battle_mode not in ('regular', 'training') or not isinstance(training_bots, bool):
+            return False
         message = {'type': 'start_battle', 'round_id': self.round_id}
+        if battle_mode == 'training':
+            message.update(battle_mode=battle_mode, training_bots=training_bots)
         if round_seconds is not None:
             round_seconds = _exact_int(round_seconds)
             if (round_seconds is None or
@@ -2031,13 +2184,14 @@ class LANClient(object):
                 self.player_id is not None and
                 self.player_id == self.host_player_id)
 
-    def leave_battle(self):
-        """Retire this player from the current round without closing TCP."""
+    def leave_battle(self, voluntary=True):
+        """Retire this round; native failures do not confirm desertion."""
         if not self.ready or self.phase not in ('loading', 'battle'):
             return False
         return self._send({
             'type': 'leave_battle',
             'round_id': self.round_id,
+            'voluntary': bool(voluntary),
         })
 
     def send_input(self, forward, turn, aim_yaw=0.0, gun_pitch=0.0,
@@ -2047,7 +2201,7 @@ class LANClient(object):
                    next_shell_index=None,
                    shell_change_pending=None,
                    pose_time_us=None,
-                   ram_contacts=None,
+                   ram_contacts=None, tank_pushes=None, turret_pushes=None,
                    destructible_contacts=None,
                    siege_enabled=None,
                    pitch=None, roll=None,
@@ -2108,13 +2262,9 @@ class LANClient(object):
             message['x'], message['y'], message['z'] = coordinates
             message['yaw'] = _canonical_angle(yaw)
             if pitch is not None:
-                message['pitch'] = max(
-                    -MAX_PLAYER_INPUT_ATTITUDE,
-                    min(MAX_PLAYER_INPUT_ATTITUDE, _finite_float(pitch)))
+                message['pitch'] = _canonical_angle(pitch)
             if roll is not None:
-                message['roll'] = max(
-                    -MAX_PLAYER_INPUT_ATTITUDE,
-                    min(MAX_PLAYER_INPUT_ATTITUDE, _finite_float(roll)))
+                message['roll'] = _canonical_angle(roll)
             if up_cosine is not None:
                 if (isinstance(up_cosine, bool) or
                         not isinstance(up_cosine, integer_types + (float,))):
@@ -2151,8 +2301,8 @@ class LANClient(object):
             message['next_shell_index'] = parsed_next_shell
             message['shell_change_pending'] = shell_change_pending
         checkpoint_required = bool(
-            PLAYER_FIRE_INTENT_CAPABILITY in self.capabilities and
-            PLAYER_FIRE_INTENT_CAPABILITY in self.server_capabilities)
+            PLAYER_PROJECTILE_OWNER_CAPABILITY in self.capabilities and
+            PLAYER_PROJECTILE_OWNER_CAPABILITY in self.server_capabilities)
         parsed_checkpoint = _canonical_human_gun_checkpoint(
             gun_checkpoint)
         if checkpoint_required and parsed_checkpoint is None:
@@ -2165,6 +2315,10 @@ class LANClient(object):
                     'shell_change_pending' not in message):
                 return False
             message['gun_checkpoint'] = parsed_checkpoint
+        if tank_pushes is not None:
+            message['tank_pushes'] = tank_pushes
+        if turret_pushes is not None:
+            message['turret_pushes'] = turret_pushes
         if isinstance(ram_contacts, list):
             message['ram_contacts'] = [
                 dict(value) for value in ram_contacts[
@@ -2526,76 +2680,6 @@ class LANClient(object):
             message['bases'] = wire_bases
         return self._send(message)
 
-    def send_fire(self, shell_index=0, position=None, yaw=None,
-                  aim_yaw=None, gun_pitch=None, velocity=None, gravity=None,
-                  max_distance=None, max_time_ms=None, is_he=False,
-                  splash_radius=0.0, penetration_factor=1.0,
-                  source_shot=None, dispersion_angle=0.0,
-                  presentation_ledger=(), trigger_server_time_ms=None):
-        """Compatibility wrapper that submits only a player trigger intent."""
-        parsed_velocity = _strict_launch_velocity(velocity)
-        if parsed_velocity is None:
-            return None
-        speed = math.sqrt(sum(
-            component * component for component in parsed_velocity))
-        return self.send_fire_intent(
-            shell_index, position,
-            [component / speed for component in parsed_velocity],
-            dispersion_angle, presentation_ledger, trigger_server_time_ms)
-
-    def send_fire_intent(self, shell_index, shot_origin, shot_direction,
-                         dispersion_angle, presentation_ledger,
-                         trigger_server_time_ms, shells_before_shot=None):
-        """Queue one ordered trigger input without damage or ballistics."""
-        if (not self.ready or self.phase != 'battle' or
-                self.is_bot_authority()):
-            return None
-        if (self._input_seq_round != self.round_id or
-                self._input_seq <= 0):
-            return None
-        parsed_shell = _projectile_int_range(shell_index, 0, 9)
-        parsed_origin = _strict_world_position(shot_origin)
-        parsed_direction = _strict_vector3(shot_direction, 1.0)
-        parsed_dispersion = _projectile_float_range(
-            dispersion_angle, 0.0, MAX_PLAYER_DISPERSION_ANGLE)
-        parsed_ledger = _strict_presentation_ledger(presentation_ledger)
-        parsed_trigger_time = _projectile_int_range(
-            trigger_server_time_ms, 0, MAX_MOTION_TIME_US // 1000)
-        direction_length = (math.sqrt(sum(
-            component * component for component in parsed_direction))
-            if parsed_direction is not None else 0.0)
-        if (parsed_shell is None or parsed_origin is None or
-                parsed_direction is None or parsed_dispersion is None or
-                parsed_ledger is None or
-                parsed_trigger_time is None or
-                direction_length <= 0.000001):
-            return None
-        parsed_direction = [
-            component / direction_length for component in parsed_direction]
-        with self._projectile_lock:
-            sequence = self._fire_intent_seq + 1
-            message = {
-                'type': 'fire_intent', 'round_id': self.round_id,
-                'intent_seq': sequence, 'shell_index': parsed_shell,
-                'input_seq': self._input_seq,
-                'shot_origin': parsed_origin,
-                'shot_direction': parsed_direction,
-                'dispersion_angle': parsed_dispersion,
-                'presentation_ledger': parsed_ledger,
-                'trigger_server_time_ms': parsed_trigger_time,
-            }
-            # The client owns its ammunition, so Fadin's medal needs the
-            # shell total standing at the trigger edge, this round included.
-            # A shot that happened was drawn from at least one shell, so
-            # zero is not a smaller count, it is an invalid report.
-            parsed_shells = _projectile_int_range(shells_before_shot, 1, 1000)
-            if parsed_shells is not None:
-                message['shells_before_shot'] = parsed_shells
-            if not self._send(message):
-                return None
-            self._fire_intent_seq = sequence
-            return sequence
-
     def send_equipment_intent(
             self, equipment_id, activation_code=None, selected=None,
             requested_active=None):
@@ -2611,7 +2695,9 @@ class LANClient(object):
             return None
         if selected is not None:
             if (not isinstance(selected, string_types) or not selected or
-                    len(selected) > 64):
+                    len(selected) > 64 or
+                    selected not in equipment_mechanics.ACTIVATION_DEVICE_NAMES and
+                    selected not in equipment_mechanics.ACTIVATION_CREW_NAMES):
                 return None
             selected = str(selected)
         if (requested_active is not None and
@@ -2633,23 +2719,30 @@ class LANClient(object):
             self._equipment_intent_seq = sequence
             return sequence
 
-    def send_fire_intent_result(self, player_id, intent_seq, reason):
-        """Publish one worker-owned terminal rejection."""
-        parsed_player = _projectile_int_range(
-            player_id, 1, MAX_PROJECTILE_ID)
-        parsed_sequence = _projectile_int_range(
-            intent_seq, 1, MAX_PROJECTILE_ID)
-        if (not self.is_bot_authority() or parsed_player is None or
-                parsed_sequence is None or self.round_id is None or
-                self.authority_epoch is None):
+    def _owns_projectile_id(self, projectile_id):
+        """The visible client owns its shots; the hidden worker owns Bots."""
+        if _strict_projectile_id(projectile_id) is None:
             return False
-        return self._send({
-            'type': 'fire_intent_result', 'round_id': self.round_id,
-            'authority_epoch': self.authority_epoch,
-            'player_id': parsed_player, 'intent_seq': parsed_sequence,
-            'accepted': False,
-            'reason': _safe_text(reason, 'rejected', 64),
-        })
+        parts = projectile_id.split(':')
+        if len(parts) != 4 or parts[0] != str(self.round_id):
+            return False
+        if self.is_bot_authority():
+            return parts[1] == 'b'
+        return parts[1] == 'p' and parts[2] == str(self.player_id)
+
+    def _freeze_projectile_launch_proof(self, projectile_id, proof):
+        if self.is_bot_authority():
+            return None
+        if (not isinstance(proof, dict) or
+                set(proof) != PROJECTILE_LAUNCH_PROOF_FIELDS or
+                proof.get('projectile_id') != projectile_id or
+                proof.get('shooter_kind') != 'player' or
+                proof.get('shooter_id') != self.player_id):
+            return None
+        try:
+            return _freeze_outbound(proof, [0])[0]
+        except _OutboundPayloadError:
+            return None
 
     def send_projectile_launch(
             self, shooter_kind, shooter_id, shot_seq, shell_index, origin,
@@ -2658,7 +2751,8 @@ class LANClient(object):
             source_shot=None, fire_intent_seq=None, fire_input_seq=None,
             burst_group_seq=None, burst_index=None, burst_count=None,
             launch_time_us=None, launch_pose=None,
-            shells_before_shot=None):
+            shells_before_shot=None, range_origin=None,
+            launch_server_time_ms=None):
         """Enqueue one immutable projectile launch and return its shot seq."""
         if not self.ready or self.phase != 'battle':
             return None
@@ -2702,10 +2796,15 @@ class LANClient(object):
                 fire_intent_seq, 1, MAX_PROJECTILE_ID)
             parsed_input_seq = _projectile_int_range(
                 fire_input_seq, 1, MAX_PROJECTILE_ID)
-            if (not self.is_bot_authority() or
-                    _exact_int(self.player_id) != WORKER_AUTHORITY_ID or
+            parsed_range_origin = _strict_world_position(range_origin)
+            parsed_launch_server_time = _projectile_int_range(
+                launch_server_time_ms, 0, MAX_MOTION_TIME_US // 1000)
+            if (self.is_bot_authority() or
+                    parsed_shooter_id != _exact_int(self.player_id) or
                     parsed_epoch is None or parsed_intent_seq is None or
                     parsed_input_seq is None or
+                    parsed_range_origin is None or
+                    parsed_launch_server_time is None or
                     parsed_epoch != _exact_int(self.authority_epoch)):
                 return None
         else:
@@ -2764,8 +2863,9 @@ class LANClient(object):
             if parsed_intent_seq is not None:
                 message['fire_intent_seq'] = parsed_intent_seq
                 message['fire_input_seq'] = parsed_input_seq
-            # The worker owns Bot ammunition, so it is the only producer that
-            # can report the shell total this shot was drawn from.
+                message['range_origin'] = parsed_range_origin
+                message['launch_server_time_ms'] = parsed_launch_server_time
+            # Each projectile owner reports the ammunition at its trigger edge.
             # A shot that happened was drawn from at least one shell, so
             # zero is not a smaller count, it is an invalid report.
             parsed_shells = _projectile_int_range(shells_before_shot, 1, 1000)
@@ -2777,7 +2877,7 @@ class LANClient(object):
 
     def send_projectile_progress(self, authority_epoch, cursors):
         """CAS-advance at most thirty server-ledger projectile cursors."""
-        if self.phase != 'battle' or not self.is_bot_authority():
+        if self.phase != 'battle':
             return False
         parsed_epoch = _projectile_int_range(
             authority_epoch, 0, MAX_PROJECTILE_ID)
@@ -2795,7 +2895,8 @@ class LANClient(object):
             'destructibles'))
         destructible_count = 0
         for cursor in cursors:
-            if not isinstance(cursor, dict) or set(cursor) != exact_keys:
+            if (not isinstance(cursor, dict) or
+                    set(cursor) - {'launch_proof'} != exact_keys):
                 return False
             projectile_id = _strict_projectile_id(
                 cursor.get('projectile_id'))
@@ -2829,6 +2930,14 @@ class LANClient(object):
                     penetration_factor is None or
                     destructible_count > MAX_PROJECTILE_DESTRUCTIBLES):
                 return False
+            if not self._owns_projectile_id(projectile_id):
+                return False
+            proof = self._freeze_projectile_launch_proof(
+                projectile_id, cursor.get('launch_proof'))
+            if not self.is_bot_authority() and proof is None:
+                return False
+            if self.is_bot_authority() and cursor.get('launch_proof') is not None:
+                return False
             seen.add(projectile_id)
             parsed_cursors.append({
                 'projectile_id': projectile_id,
@@ -2839,6 +2948,8 @@ class LANClient(object):
                 'penetration_factor': penetration_factor,
                 'destructibles': parsed_destructibles,
             })
+            if proof is not None:
+                parsed_cursors[-1]['launch_proof'] = proof
         return self._send({
             'type': 'projectile_progress',
             'round_id': self.round_id,
@@ -2850,13 +2961,19 @@ class LANClient(object):
             self, authority_epoch, projectile_id, base_checked_ms, outcome,
             resolved_time_ms, impact, direct, splash, checked_distance=0.0,
             piercing_loss=0.0, penetration_factor=1.0,
-            destructibles=None, hit_vehicle=None, wreck_hit=None):
+            destructibles=None, hit_vehicle=None, wreck_hit=None,
+            launch_proof=None):
         """Resolve one server-ledger projectile with an atomic effect set."""
-        if self.phase != 'battle' or not self.is_bot_authority():
+        if self.phase != 'battle':
             return False
         parsed_epoch = _projectile_int_range(
             authority_epoch, 0, MAX_PROJECTILE_ID)
         parsed_projectile_id = _strict_projectile_id(projectile_id)
+        proof = self._freeze_projectile_launch_proof(projectile_id, launch_proof)
+        if (not self._owns_projectile_id(projectile_id) or
+                (not self.is_bot_authority() and proof is None) or
+                (self.is_bot_authority() and launch_proof is not None)):
+            return False
         parsed_base = _projectile_int_range(
             base_checked_ms, 0, MAX_PROJECTILE_TIME_MS)
         parsed_time = _projectile_int_range(
@@ -2953,6 +3070,8 @@ class LANClient(object):
             'splash': parsed_splash,
             'destructibles': parsed_destructibles,
         }
+        if proof is not None:
+            message['launch_proof'] = proof
         if self.has_projectile_hit_vehicle():
             message['hit_vehicle'] = parsed_hit_vehicle
         if (parsed_wreck_hit is not None and
@@ -2965,13 +3084,18 @@ class LANClient(object):
             resolved_time_ms, impact, segment_origin, segment_velocity,
             base_penetration_multiplier, direct, checked_distance=0.0,
             piercing_loss=0.0, penetration_factor=1.0,
-            destructibles=None):
+            destructibles=None, launch_proof=None):
         """Atomically replace a first-impact projectile with its ricochet."""
-        if self.phase != 'battle' or not self.is_bot_authority():
+        if self.phase != 'battle':
             return False
         parsed_epoch = _projectile_int_range(
             authority_epoch, 0, MAX_PROJECTILE_ID)
         parsed_projectile_id = _strict_projectile_id(projectile_id)
+        proof = self._freeze_projectile_launch_proof(projectile_id, launch_proof)
+        if (not self._owns_projectile_id(projectile_id) or
+                (not self.is_bot_authority() and proof is None) or
+                (self.is_bot_authority() and launch_proof is not None)):
+            return False
         parsed_base = _projectile_int_range(
             base_checked_ms, 0, MAX_PROJECTILE_TIME_MS)
         parsed_time = _projectile_int_range(
@@ -3026,7 +3150,7 @@ class LANClient(object):
                 (parsed_origin[index] - parsed_impact[index]) ** 2
                 for index in range(3))) > 0.1:
             return False
-        return self._send({
+        message = {
             'type': 'projectile_ricochet',
             'round_id': self.round_id,
             'authority_epoch': parsed_epoch,
@@ -3042,7 +3166,10 @@ class LANClient(object):
             'base_penetration_multiplier': parsed_multiplier,
             'direct': parsed_direct,
             'destructibles': parsed_destructibles,
-        })
+        }
+        if proof is not None:
+            message['launch_proof'] = proof
+        return self._send(message)
 
     def send_destructible(self, event):
         """Publish one worker-resolved map destruction."""
@@ -3164,7 +3291,7 @@ class LANClient(object):
         message['authority_epoch'] = self.authority_epoch
 
     def _adopt_detached_turrets(self, message):
-        """Retain immutable server records until the accepted round changes."""
+        """Retain the newest server revision until the accepted round changes."""
         round_id = message.get('round_id')
         if self._detached_turret_round_id != round_id:
             self._detached_turret_round_id = round_id
@@ -3176,9 +3303,11 @@ class LANClient(object):
                 if row is None:
                     continue
                 key = turret_obstacle_schema.row_key(row)
-                if (key not in self._detached_turrets and
-                        len(self._detached_turrets) <
-                        turret_obstacle_schema.MAX_ACTIVE_TURRETS):
+                previous = self._detached_turrets.get(key)
+                if ((previous is None and len(self._detached_turrets) <
+                     turret_obstacle_schema.MAX_ACTIVE_TURRETS) or
+                        (previous is not None and row.get('motion_seq', 0) >
+                         previous.get('motion_seq', 0))):
                     self._detached_turrets[key] = row
         if 'detached_turrets' not in message and not self._detached_turrets:
             return message
@@ -3319,13 +3448,16 @@ class LANClient(object):
         self._team_chat_seq = sequence
         return sequence
 
-    def send_bot_observation(self, contacts, affordances=None):
+    def send_bot_observation(self, contacts, affordances=None, radio_links=None,
+                             player_vision_ranges=None):
         if not self.is_bot_authority():
             return False
         return self._send({'type': 'bot_observation',
                            'round_id': self.round_id,
+                           'player_vision_ranges': list(player_vision_ranges or ())[:30],
                            'contacts': list(contacts or ())[:64],
-                           'affordances': list(affordances or ())[:16]})
+                           'affordances': list(affordances or ())[:16],
+                           'radio_links': list(radio_links or ())[:30]})
 
     def send_descriptor_catalog(self, vehicles):
         if not self.ready:
@@ -3410,11 +3542,79 @@ class LANClient(object):
                 raise
         return True
 
+    @staticmethod
+    def _state_transfer_diagnostic(stage, fields):
+        print('[Offline LAN 0.9.22] STATE_TRANSFER %s %s' % (
+            stage, json.dumps(fields, sort_keys=True, separators=(',', ':'))))
+
+    def _request_snapshot_resync(self, message, generation):
+        """Request one complete wire baseline without blocking either peer."""
+        with self._outbound_lock:
+            if (generation != self._transport_generation or
+                    self._snapshot_resync_pending or self._stopping or
+                    not self.running):
+                return
+            sequence = self._snapshot_wire_sequence
+        request = {
+            'type': 'snapshot_resync',
+            'round_id': _exact_int(message.get('round_id')),
+            'authority_epoch': _exact_int(message.get('authority_epoch')),
+            'last_sequence': sequence,
+        }
+        frozen, size = _freeze_outbound(request, [0])
+        # Binding the enqueue to the receiver's generation prevents an old
+        # socket from requesting recovery on a newly connected transport.
+        if self._enqueue_outbound(frozen, size + 1, generation):
+            with self._outbound_lock:
+                if generation == self._transport_generation:
+                    self._snapshot_resync_pending = True
+
+    def _decode_received_snapshot(self, message, generation):
+        """Advance raw actor state before any main-thread queue coalescing.
+
+        The wire baseline is independent of ``last_snapshot``: gameplay
+        admission may retain an invalid actor, and runtime consumers may
+        enrich or mutate their own rows. Neither operation may change the
+        ordered transport's next patch base. Only snapshots selected for
+        dispatch need mutable actor copies; the queue holds private versions.
+        """
+        if not isinstance(message, dict) or message.get('type') != 'snapshot':
+            return message
+        with self._outbound_lock:
+            if (generation != self._transport_generation or
+                    self._stopping or not self.running):
+                return None
+            baseline = self._snapshot_wire_baseline
+        try:
+            restored, next_baseline = snapshot_delta.decode(
+                message, baseline, return_pending_actors=True)
+        except snapshot_delta.SnapshotDeltaError:
+            with self._outbound_lock:
+                if (generation != self._transport_generation or
+                        self._stopping or not self.running):
+                    return None
+                # Only a new full message can repair a broken wire chain.
+                # Retaining an invalid high sequence would reject the
+                # server's otherwise valid recovery snapshot indefinitely.
+                self._snapshot_wire_baseline = None
+            self._request_snapshot_resync(message, generation)
+            return None
+        with self._outbound_lock:
+            if (generation != self._transport_generation or
+                    self._stopping or not self.running):
+                return None
+            self._snapshot_wire_baseline = next_baseline
+            self._snapshot_wire_sequence = _exact_int(
+                message.get('snapshot_seq'))
+            if message.get('snapshot_delta') is not True:
+                self._snapshot_resync_pending = False
+        return restored
+
     def _worker(self, generation=None):
         if generation is None:
             generation = self._transport_generation
         sock = None
-        recv_buffer = u''
+        decoder = state_transfer.StreamDecoder(self._state_transfer_diagnostic)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3.0)
@@ -3452,31 +3652,21 @@ class LANClient(object):
                 try:
                     chunk = sock.recv(8192)
                 except socket.timeout:
+                    decoder.check_timeout(_monotonic_time())
                     continue
                 if generation != self._transport_generation:
                     break
                 if not chunk:
+                    decoder.finish()
                     self._record_peer_close(generation, sock)
                     break
                 received_time = _monotonic_time()
-                try:
-                    recv_buffer += chunk.decode('utf-8')
-                except UnicodeError:
-                    self._record_transport_error(
-                        'server sent invalid UTF-8', generation, sock)
-                    break
-                if len(recv_buffer) > MAX_BUFFER_BYTES:
-                    self._record_transport_error(
-                        'server message buffer exceeded limit',
-                        generation, sock)
-                    break
-                while u'\n' in recv_buffer:
-                    line, recv_buffer = recv_buffer.split(u'\n', 1)
-                    if not line:
-                        continue
-                    try:
-                        message = json.loads(line)
-                    except (TypeError, ValueError):
+                for message in decoder.feed(chunk, received_time):
+                    if generation != self._transport_generation:
+                        break
+                    message = self._decode_received_snapshot(
+                        message, generation)
+                    if message is None:
                         continue
                     if isinstance(message, dict):
                         # Frame stalls must not inflate RTT or countdown
@@ -3517,12 +3707,39 @@ class LANClient(object):
             return None
         lineage = (
             message.get('round_id'), message.get('authority_epoch'),
-            message.get('bot_authority_id'))
+            message.get('bot_authority_id'), message.get('map'))
         try:
             hash(lineage)
         except TypeError:
             return None
         return lineage
+
+    @staticmethod
+    def _snapshot_order_revision(message):
+        if (not isinstance(message, dict) or
+                _strict_mapping_list(message.get('bot_orders'), 30) is None):
+            return None
+        revision = _exact_int(message.get('bot_order_revision'))
+        return revision if revision is not None and revision >= 0 else None
+
+    def _merge_snapshot_orders(self, previous, message):
+        """Carry a sparse order section without retaining an old motion frame."""
+        lineage = self._snapshot_lineage(previous)
+        if lineage is None or lineage != self._snapshot_lineage(message):
+            return message
+        previous_revision = self._snapshot_order_revision(previous)
+        if previous_revision is None:
+            return message
+        revision = self._snapshot_order_revision(message)
+        if 'bot_orders' in message and (
+                revision is None or revision >= previous_revision):
+            # An explicit empty list clears orders too. Leave malformed new
+            # sections intact for the normal payload validator to contain.
+            return message
+        merged = dict(message)
+        merged['bot_orders'] = previous['bot_orders']
+        merged['bot_order_revision'] = previous_revision
+        return merged
 
     def _queue_message(self, message, generation=None):
         if not isinstance(message, dict):
@@ -3533,16 +3750,35 @@ class LANClient(object):
                      self._stopping or not self.running)):
                 return
             if len(self._pending) >= MAX_PENDING_MESSAGES:
+                # Move only the sparse orders through consecutive snapshots.
+                # A lifecycle/event message ends this run; it must observe the
+                # preceding state before later orders can replace it.
+                incoming_lineage = self._snapshot_lineage(message)
+                if incoming_lineage is not None:
+                    for value in reversed(self._pending):
+                        if self._snapshot_lineage(value) != incoming_lineage:
+                            break
+                        message = self._merge_snapshot_orders(value, message)
                 latest_manifests = {}
                 latest_turrets = {}
+                latest_orders = {}
+                snapshot_run = 0
                 for index, value in enumerate(self._pending):
                     lineage = self._snapshot_lineage(value)
+                    if lineage is None:
+                        snapshot_run += 1
                     if (lineage is not None and
                             'bot_manifest' in value):
                         latest_manifests[lineage] = index
                     if lineage is not None and value.get('detached_turrets'):
                         latest_turrets[lineage] = index
-                incoming_lineage = self._snapshot_lineage(message)
+                    revision = self._snapshot_order_revision(value)
+                    if lineage is not None and revision is not None:
+                        order_key = (snapshot_run, lineage)
+                        previous_order = latest_orders.get(order_key)
+                        if (previous_order is None or
+                                revision >= previous_order[0]):
+                            latest_orders[order_key] = (revision, index)
                 if (incoming_lineage is not None and
                         'bot_manifest' in message):
                     # The incoming full snapshot supersedes an older barrier
@@ -3553,8 +3789,17 @@ class LANClient(object):
                         self._pending[turret_index].get('detached_turrets') ==
                         message.get('detached_turrets')):
                     latest_turrets.pop(incoming_lineage, None)
+                incoming_revision = self._snapshot_order_revision(message)
+                incoming_order_key = (snapshot_run, incoming_lineage)
+                previous_order = latest_orders.get(incoming_order_key)
+                if (incoming_revision is not None and
+                        previous_order is not None and
+                        incoming_revision >= previous_order[0]):
+                    latest_orders.pop(incoming_order_key, None)
                 protected_snapshots = set(latest_manifests.values())
                 protected_snapshots.update(latest_turrets.values())
+                protected_snapshots.update(
+                    value[1] for value in latest_orders.values())
                 snapshot_index = next((
                     index for index, value in enumerate(self._pending)
                     if (index not in protected_snapshots and
@@ -3871,13 +4116,48 @@ class LANClient(object):
         self._poll_callback = self.bigworld.callback(
             POLL_INTERVAL, self._poll)
 
-    def _poll(self):
-        self._poll_callback = None
-        messages = []
-        with self._pending_lock:
-            if self._pending:
-                messages = self._pending
-                self._pending = []
+    def _dispatch_message(self, message, generation=None):
+        # Worker overrides inspect players before calling the base handler.
+        # Detach here, after coalescing and before that virtual dispatch.
+        # An ordinary EOF stops reads but must still drain accepted messages;
+        # only an explicit stop or a new transport invalidates this batch.
+        if (generation is not None and
+                (generation != self._transport_generation or
+                 self._stopping)):
+            return False
+        performance = self._transport_performance
+        started = performance.clock()
+        try:
+            try:
+                prepared = snapshot_delta.materialize(message)
+            finally:
+                performance.finish('materialize', started)
+        except snapshot_delta.SnapshotDeltaError:
+            if (generation is not None and
+                    (generation != self._transport_generation or
+                     self._stopping)):
+                return False
+            self._snapshot_drop_streak += 1
+            self._snapshot_drop_reason = 'actor_materialization'
+            self._ignore_runtime_payload(
+                'snapshot', self._snapshot_drop_reason, message)
+            return True
+        if (generation is not None and
+                (generation != self._transport_generation or
+                 self._stopping)):
+            return False
+        started = performance.clock()
+        performance.handle_depth += 1
+        try:
+            self._handle_message(prepared)
+        finally:
+            performance.handle_depth -= 1
+            performance.finish('handle', started)
+        return (generation is None or
+                (generation == self._transport_generation and
+                 not self._stopping))
+
+    def _dispatch_pending_messages(self, messages, generation):
         latest_snapshot = None
         for message in messages:
             if message.get('type') == 'snapshot':
@@ -3892,11 +4172,14 @@ class LANClient(object):
                     # space loading several server ticks can accumulate in one
                     # poll; consuming only the last lean snapshot would leave
                     # this replica with no manifest to inherit.
-                    self._handle_message(latest_snapshot)
+                    if not self._dispatch_message(latest_snapshot, generation):
+                        return
                     latest_snapshot = None
-                    if not self.running:
-                        break
-                latest_snapshot = message
+                # The server omits orders after their socket write succeeds.
+                # A later lean frame therefore supersedes motion, but cannot
+                # supersede an order section still waiting for this poll.
+                latest_snapshot = self._merge_snapshot_orders(
+                    latest_snapshot, message)
             elif (message.get('type') == 'events' and
                   latest_snapshot is not None and
                   message.get('round_id') ==
@@ -3905,19 +4188,63 @@ class LANClient(object):
                   latest_snapshot.get('server_tick')):
                 # Preserve event-before-state semantics even if a fixture or
                 # an older relay batches one tick in the opposite order.
-                self._handle_message(message)
-                self._handle_message(latest_snapshot)
+                if not self._dispatch_message(message, generation):
+                    return
+                if not self._dispatch_message(latest_snapshot, generation):
+                    return
                 latest_snapshot = None
             else:
                 # A roster/battle_start is a state-transition barrier.  Flush
                 # the newest preceding snapshot before it so a terminal round
                 # cannot be replayed after the waiting-room reset.
                 if latest_snapshot is not None:
-                    self._handle_message(latest_snapshot)
+                    if not self._dispatch_message(latest_snapshot, generation):
+                        return
                     latest_snapshot = None
-                self._handle_message(message)
+                if not self._dispatch_message(message, generation):
+                    return
         if latest_snapshot is not None:
-            self._handle_message(latest_snapshot)
+            if not self._dispatch_message(latest_snapshot, generation):
+                return
+
+    def _poll(self):
+        performance = self._transport_performance
+        if performance.poll_depth:
+            # Nested polls would count their shared wall interval twice.
+            # Preserve dispatch, but do not publish misleading totals.
+            performance.valid = False
+        performance.poll_depth += 1
+        started = performance.clock()
+        try:
+            self._poll_messages()
+        finally:
+            performance.finish('poll', started)
+            performance.poll_depth -= 1
+
+    def transport_performance_snapshot(self):
+        """Return cumulative coarse main-thread costs for this transport.
+
+        Materialization and handler time are included in poll time. Notify
+        time includes replay capture and the session/runtime consumer and is
+        included in handler time. These wall times do not measure receiver
+        thread CPU or engine rendering.
+        """
+        try:
+            return self._transport_performance.snapshot()
+        except Exception:
+            return None
+
+    def _poll_messages(self):
+        generation = self._transport_generation
+        self._poll_callback = None
+        messages = []
+        with self._pending_lock:
+            if self._pending:
+                messages = self._pending
+                self._pending = []
+        self._dispatch_pending_messages(messages, generation)
+        if generation != self._transport_generation:
+            return
         now = _monotonic_time()
         self._report_snapshot_stall(now)
         if self.connected and now - self._last_ping >= PING_INTERVAL:
@@ -3928,6 +4255,19 @@ class LANClient(object):
                 'seq': self._ping_seq,
                 'client_time': now,
             })
+            scope = (self.round_id, self.authority_epoch)
+            if self._worker_ping_scope != scope:
+                self._worker_ping_scope = scope
+                self.worker_rtt_ms = None
+                self.worker_frame_ms = None
+                self._worker_ping_started = None
+                self._worker_pong_time = None
+            if (self.round_id is not None and
+                    self.player_id != WORKER_AUTHORITY_ID):
+                if self._worker_ping_started is None:
+                    self._worker_ping_started = now
+                self._send({'type': 'worker_ping', 'seq': self._ping_seq,
+                            'client_time': now})
         if self.last_error is not None:
             self._notify('error', {'message': self.last_error})
             self.last_error = None
@@ -3993,6 +4333,24 @@ class LANClient(object):
         self._combat_timing_tick = server_tick
         return True
 
+    def worker_ping_display(self, now=None):
+        now = _monotonic_time() if now is None else float(now)
+        if not self.connected:
+            return 999, True
+        reference = self._worker_pong_time
+        if reference is None:
+            reference = self._worker_ping_started
+        if reference is None:
+            return 0, False
+        age = max(0.0, now - reference)
+        stale = age > max(2.0, PING_INTERVAL * 2.0)
+        sample = self.worker_frame_ms
+        if stale:
+            sample = max(sample or 0.0, age * 1000.0)
+        elif sample is None:
+            sample = 0.0
+        return int(round(max(0.0, min(sample, 999.0)))), stale
+
     def _report_snapshot_stall(self, now):
         """Say out loud that the replica is drawing a frozen world.
 
@@ -4035,7 +4393,7 @@ class LANClient(object):
                 int(uncanonical_rows)))
         return True
 
-    def _canonical_runtime_rows(self, rows, field):
+    def _canonical_runtime_rows(self, rows, field, message=None):
         """Canonicalize one runtime row list, retaining unusable rows.
 
         ``SnapshotSync`` destroys any entity a snapshot omits, so dropping an
@@ -4046,7 +4404,14 @@ class LANClient(object):
         """
         previous_rows = {}
         previous = self.last_snapshot
-        if isinstance(previous, dict):
+        same_scope = (message is None or (
+            isinstance(previous, dict) and
+            (previous.get('round_id'), previous.get('authority_epoch')) ==
+            (message.get('round_id'), message.get('authority_epoch'))))
+        same_round = (message is None or (
+            isinstance(previous, dict) and
+            previous.get('round_id') == message.get('round_id')))
+        if isinstance(previous, dict) and same_round:
             for value in previous.get(field) or ():
                 if not isinstance(value, dict):
                     continue
@@ -4056,7 +4421,17 @@ class LANClient(object):
         canonical = []
         retained = 0
         for value in rows:
-            row = _canonical_runtime_vehicle_row(value)
+            try:
+                restored = (
+                    bot_state_codec.decode_snapshot_equipment(
+                        value, (message or {}).get('bot_equipment_contracts'),
+                        (previous_rows.get(_exact_int(value.get('id')))
+                         if same_scope else None))
+                    if field == 'bots' else value)
+                row = _canonical_runtime_vehicle_row(restored)
+            except (bot_state_codec.BotStateCodecError, TypeError,
+                    ValueError, OverflowError):
+                row = None
             if row is not None:
                 canonical.append(row)
                 continue
@@ -4148,6 +4523,10 @@ class LANClient(object):
     def _handle_message(self, message, trusted_player_static=None):
         if not isinstance(message, dict):
             return
+        replay_hint = None
+        if getattr(self, '_offline_replay_recorder', None) is not None:
+            from gui.mods.offline_lan_0922 import offline_replay
+            replay_hint = offline_replay.sparse_hint(message)
         kind = message.get('type')
         if kind == 'battle_receipt':
             if (not _valid_battle_receipt(message) or
@@ -4216,7 +4595,7 @@ class LANClient(object):
                     PROJECTILE_LEDGER_CAPABILITY not in capabilities or
                     RAM_CONTACT_LEDGER_CAPABILITY not in capabilities or
                     HUMAN_RAM_TIMELINE_CAPABILITY not in capabilities or
-                    PLAYER_FIRE_INTENT_CAPABILITY not in capabilities or
+                    PLAYER_PROJECTILE_OWNER_CAPABILITY not in capabilities or
                     PLAYER_ENVIRONMENT_CAPABILITY not in capabilities or
                     EFFECTIVE_PARAMS_CAPABILITY not in capabilities or
                     RICOCHET_CONTINUATION_CAPABILITY not in capabilities or
@@ -4227,7 +4606,7 @@ class LANClient(object):
                     server_capabilities or
                     HUMAN_RAM_TIMELINE_CAPABILITY not in
                     server_capabilities or
-                    PLAYER_FIRE_INTENT_CAPABILITY not in
+                    PLAYER_PROJECTILE_OWNER_CAPABILITY not in
                     server_capabilities or
                     PLAYER_ENVIRONMENT_CAPABILITY not in
                     server_capabilities or
@@ -4421,7 +4800,6 @@ class LANClient(object):
             if round_id != self.round_id:
                 self.last_snapshot = None
                 self._fire_seq = 0
-                self._fire_intent_seq = 0
                 self._equipment_intent_seq = 0
                 self._battle_start_round_id = None
                 self._battle_live_round_id = None
@@ -4550,7 +4928,6 @@ class LANClient(object):
             if round_id != self.round_id:
                 self.last_snapshot = None
                 self._fire_seq = 0
-                self._fire_intent_seq = 0
                 self._equipment_intent_seq = 0
                 self._battle_start_round_id = None
                 self._battle_live_round_id = None
@@ -4725,7 +5102,8 @@ class LANClient(object):
                 prepared_players is not None and prepared_players[2])
             bots = _strict_mapping_list(message.get('bots'), 30)
             if bots is not None:
-                bots, retained = self._canonical_runtime_rows(bots, 'bots')
+                bots, retained = self._canonical_runtime_rows(
+                    bots, 'bots', message)
                 uncanonical_rows += retained
             manifest = None
             if 'bot_manifest' in message:
@@ -4891,7 +5269,7 @@ class LANClient(object):
                 message = dict(message)
                 message.pop('timing', None)
             players = self._commit_player_static_inputs(prepared_players)
-            if (players or bots or
+            if (players or bots or 'bot_equipment_contracts' in message or
                     players != message.get('players') or
                     bots != message.get('bots')):
                 # Keep an empty, already-canonical snapshot untouched.  There
@@ -4900,6 +5278,7 @@ class LANClient(object):
                 message = dict(message)
                 message['players'] = players
                 message['bots'] = bots
+                message.pop('bot_equipment_contracts', None)
             if ('bot_manifest' not in message and
                     lean_manifest_valid):
                 message = dict(message)
@@ -5100,7 +5479,7 @@ class LANClient(object):
                 isinstance(contact.get('fresh'), bool) and
                 _projectile_float_range(
                     contact.get('time_left'), 0.0,
-                    spotting.DESIGNATED_SPOT_MEMORY_SECONDS) is not None and
+                    spotting.MAX_SPOT_MEMORY_SECONDS) is not None and
                 bool(contact.get('visible')) == (
                     float(contact.get('time_left')) > 0.0) and
                 isinstance(contact.get('visible_by_bot_ids'),
@@ -5150,6 +5529,21 @@ class LANClient(object):
             if 'server_time_ms' in message:
                 self.server_time_ms = _projectile_int_range(
                     message.get('server_time_ms'), 0, MAX_PROJECTILE_ID)
+        elif kind == 'worker_pong':
+            if ((message.get('round_id'), message.get('authority_epoch')) !=
+                    (self.round_id, self.authority_epoch)):
+                return
+            client_time = _finite_float(message.get('client_time'), 0.0)
+            received_time = _finite_float(
+                message.get('_client_received_time'), _monotonic_time())
+            if client_time <= 0.0 or received_time < client_time:
+                return
+            sample = (received_time - client_time) * 1000.0
+            self.worker_rtt_ms = (sample if self.worker_rtt_ms is None else
+                                  self.worker_rtt_ms * 0.5 + sample * 0.5)
+            frame_ms = _finite_float(message.get('frame_ms'), -1.0)
+            self.worker_frame_ms = frame_ms if frame_ms > 0.0 else None
+            self._worker_pong_time = received_time
         elif kind == 'pong':
             client_time = _finite_float(message.get('client_time'), 0.0)
             if client_time > 0.0:
@@ -5176,9 +5570,20 @@ class LANClient(object):
             message = self._adopt_detached_turrets(message)
             if kind == 'snapshot':
                 self.last_snapshot = message
-        self._notify(kind, message)
+        self._notify(kind, message, replay_hint=replay_hint)
 
-    def _notify(self, kind, message):
+    def _notify(self, kind, message, replay_hint=None):
+        performance = self._transport_performance
+        started = (performance.clock()
+                   if performance.handle_depth else None)
+        try:
+            self._notify_message(kind, message, replay_hint)
+        finally:
+            performance.finish('notify', started)
+
+    def _notify_message(self, kind, message, replay_hint):
+        from gui.mods.offline_lan_0922 import offline_replay
+        offline_replay.observe_wire(self, message, replay_hint)
         if self.on_event is not None and kind is not None:
             if (isinstance(message, dict) and
                     '_client_received_time' in message):

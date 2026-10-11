@@ -22,7 +22,8 @@ from gui.mods.offline_lan_0922 import price_catalogue
 CREDITS = 'credits'
 GOLD = 'gold'
 FREE_XP = 'freeXP'
-CURRENCIES = (CREDITS, GOLD)
+CRYSTAL = 'crystal'
+CURRENCIES = (CREDITS, GOLD, CRYSTAL)
 
 # items/__init__ ITEM_TYPE_NAMES indices used when a compact descriptor has to
 # be turned back into the catalogue key that names it.
@@ -61,6 +62,7 @@ CAREER_BARRACKS_BERTHS = 30
 SANDBOX_CREDITS = 100000000
 SANDBOX_GOLD = 1000000
 SANDBOX_FREE_XP = 100000000
+SANDBOX_BONDS = 1000000
 SANDBOX_GARAGE_SLOTS = 2000
 SANDBOX_BARRACKS_BERTHS = 2000
 
@@ -81,12 +83,36 @@ MAX_EARNINGS_PERCENT = 10000
 PREMIUM_VEHICLE_CREDITS_PERCENT = 150
 PREMIUM_VEHICLE_TAG = 'premium'
 
+# Offline shop policy. Premium packet prices are server data and are absent
+# from the packaged client; these are the standard legacy WoT gold packages
+# exposed by the #1513 PremiumWindow contract.
+PREMIUM_COSTS = {
+    1: 250,
+    3: 650,
+    7: 1250,
+    30: 2500,
+    180: 10000,
+    360: 18000,
+}
+
 # What #1513's own ``ShopCommonStats`` falls back to when the shop stream does
 # not carry the key, in gold.  These are shipped client values, not policy, so
 # the offline shop publishes exactly them and the garage charges exactly them.
 CHANGE_ROLE_COST = {'gold': 600}
 PASSPORT_CHANGE_COST = {'gold': 50}
 FEMALE_PASSPORT_CHANGE_COST = {'gold': 500}
+
+
+def crew_service_cost(snapshot, key):
+    """Keep legacy saves and shop dialogs on the same crew-service price."""
+    defaults = {
+        'crewChangeRoleCost': CHANGE_ROLE_COST,
+        'crewPassportCost': PASSPORT_CHANGE_COST,
+        'crewFemalePassportCost': FEMALE_PASSPORT_CHANGE_COST,
+    }
+    cost = snapshot.get(key)
+    return dict(cost if isinstance(cost, dict) else defaults.get(key, {}))
+
 
 # The recycle bin holds a dismissed crew member until the window closes, and
 # hiring them back costs what the shop says.  #1513 receives the whole window
@@ -116,9 +142,10 @@ DROP_SKILLS_COSTS = {
 }
 
 CAREER_WALLET = {
-    CREDITS: CAREER_CREDITS, GOLD: CAREER_GOLD, FREE_XP: CAREER_FREE_XP}
+    CREDITS: CAREER_CREDITS, GOLD: CAREER_GOLD, FREE_XP: CAREER_FREE_XP, CRYSTAL: 0}
 SANDBOX_WALLET = {
-    CREDITS: SANDBOX_CREDITS, GOLD: SANDBOX_GOLD, FREE_XP: SANDBOX_FREE_XP}
+    CREDITS: SANDBOX_CREDITS, GOLD: SANDBOX_GOLD, FREE_XP: SANDBOX_FREE_XP,
+    CRYSTAL: SANDBOX_BONDS}
 
 # The three recruitment schools #1513 offers, in the order its shop data lists
 # them: ``Shop.buyTankman`` sends the player's choice as an index into this
@@ -137,11 +164,10 @@ def _tankman_cost(credits_amount, gold, role_level, premium=False):
 
 
 # ``ShopCommonStats.paidRemovalCost`` falls back to 10 gold when the shop
-# publishes none, and ``paidDeluxeRemovalCost`` to 100 crystal.  Those are the
-# client's own numbers for taking a complex optional device off a vehicle, so
-# a career charges them and the historical sandbox charges nothing.
+# publishes none. The live shop, its undiscounted defaults and both save modes
+# use the same standard-equipment price. Improved equipment uses 200 bonds.
 CAREER_DEVICE_REMOVAL = {'gold': 10}
-SANDBOX_DEVICE_REMOVAL = {'gold': 0}
+SANDBOX_DEVICE_REMOVAL = {'gold': 10}
 
 CAREER_TANKMAN_COSTS = (
     _tankman_cost(0, 0, 50),
@@ -171,11 +197,11 @@ def _int(value, default=0):
 
 
 def empty_wallet():
-    return {CREDITS: 0, GOLD: 0, FREE_XP: 0}
+    return {CREDITS: 0, GOLD: 0, FREE_XP: 0, CRYSTAL: 0}
 
 
 def normalized_wallet(value):
-    """Return a wallet with exactly the three balances, never negative."""
+    """Return a wallet with the persisted balances, never negative."""
     value = value if isinstance(value, dict) else {}
     wallet = empty_wallet()
     for name in wallet:
@@ -231,13 +257,15 @@ def premium_xp_bonus(value, factor_100):
     return int(amount + 0.5)
 
 
-def scale_rewards(rewards, credits_percent=100, experience_percent=100):
+def scale_rewards(rewards, credits_percent=100, experience_percent=100,
+                  bonds_percent=100):
     """Return one battle's rewards after the account's own multipliers.
 
     The receipt states what the battle did; the multipliers are the account's,
     so the client applies them.  Credits and experience are scaled separately
     because the offline credit policy is separate from descriptor-owned XP
-    bonuses, while the save's own multiplier moves both.
+    bonuses. Bonds use only the save multiplier, independently of premium
+    vehicle/account bonuses. Service costs are never earnings.
     """
     rewards = rewards if isinstance(rewards, dict) else {}
     scaled = dict(rewards)
@@ -245,6 +273,7 @@ def scale_rewards(rewards, credits_percent=100, experience_percent=100):
         ('credits', credits_percent),
         ('xp', experience_percent),
         ('free_xp', experience_percent),
+        ('crystal', bonds_percent),
     )
     for name, percent in factors:
         try:
@@ -255,8 +284,66 @@ def scale_rewards(rewards, credits_percent=100, experience_percent=100):
     return scaled
 
 
+def award_record(value):
+    """Keep an actual settlement delta; friendly-fire debits can exceed income."""
+    result = {}
+    for name in ('credits', 'xp', 'free_xp', 'crystal'):
+        try:
+            amount = int(value.get(name, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            amount = 0
+        result[name] = amount if name == 'credits' else max(0, amount)
+    return result
+
+
+def battle_income(base, reserves, premium=False, first_win=False,
+                  vehicle_xp_factor=0, xp_penalty=0, original=None):
+    """One 0.9.22 income calculation shared by banking and result replays.
+
+    The native results factors use tenths for account/first-win bonuses and
+    hundredths for vehicle XP. Reserve bonuses are additive to the first-win
+    bonus, and account premium scales both. Repair and ammunition costs and
+    bonds are outside these factors. Round at each native ValueReplay step.
+    """
+    account = 150 if premium else 100
+    daily = 200 if first_win else 100
+    original = base if original is None else original
+    basis = dict((key, min(base.get(key, 0), original.get(key, 0)))
+                 for key in ('credits', 'xp', 'free_xp'))
+    extras = dict((key, max(0, base.get(key, 0) - basis[key]))
+                  for key in basis)
+    boosters = {}
+    result = dict(base)
+    for key in ('credits', 'xp', 'free_xp'):
+        value = premium_xp_bonus(basis[key], account)
+        if key == 'xp':
+            value = (premium_xp_bonus(basis[key] + xp_penalty, account) -
+                     premium_xp_bonus(xp_penalty, account))
+        extra = extras[key]
+        if key != 'credits':
+            value = premium_xp_bonus(value, daily)
+            value = premium_xp_bonus(value, 100 + vehicle_xp_factor)
+            extra = premium_xp_bonus(extra, daily)
+            extra = premium_xp_bonus(extra, 100 + vehicle_xp_factor)
+        # Save-owned extra income shares the native boosters row. Keep the
+        # battle's original gross XP intact for penalties and both columns.
+        boosters[key] = extra + reserves.get(key, 0)
+        result[key] = value + premium_xp_bonus(boosters[key], account)
+    crew = (premium_xp_bonus(basis['xp'] + xp_penalty, account) -
+            premium_xp_bonus(xp_penalty, account))
+    crew = premium_xp_bonus(crew, daily)
+    crew += premium_xp_bonus(premium_xp_bonus(extras['xp'], daily) +
+                             reserves.get('xp', 0), account)
+    crew += premium_xp_bonus(reserves.get('crew_xp', 0), account)
+    record = dict(basis)
+    record.update({'premium': bool(premium), 'first_win': bool(first_win),
+                   'vehicle_xp_factor': int(vehicle_xp_factor),
+                   'boosters': boosters})
+    return result, crew, record
+
+
 def price_index(vehicles_module, nations_module):
-    """Return ``{compactDescr: (credits, gold, not_in_shop)}``.
+    """Return ``{compactDescr: (credits, gold, not_in_shop[, crystal])}``.
 
     The installed client is the authority on which items exist and what their
     compact descriptors are; the baked catalogue only supplies the amount.  An
@@ -327,12 +414,37 @@ def shop_prices(index):
     return prices, not_in_shop
 
 
+def retail_gold_vehicle_offers(vehicles_module, nations_module, index):
+    """Return gold vehicles the stock #1513 shop actually offered.
+
+    The native vehicle shop applies ``REQ_CRITERIA.UNLOCKED`` even to a
+    premium vehicle and renders ``SHOP_ERRORS_UNLOCKNEEDED`` otherwise.  A
+    retail account receives those offer descriptors in its server-side
+    unlock view; they are purchasable offers, not researched tech-tree
+    progress.  Keep ``notInShop`` reward vehicles out of this set so hidden
+    event/reward definitions do not leak into the ordinary armory.
+    """
+    offers = set()
+    make = vehicles_module.makeIntCompactDescrByID
+    for nation_id in range(len(nations_module.NAMES)):
+        for vehicle_type_id in vehicles_module.g_list.getList(nation_id):
+            compact_descr = make('vehicle', nation_id, vehicle_type_id)
+            price = index.get(compact_descr)
+            if (price is not None and
+                    price[price_catalogue.GOLD] > 0 and
+                    not price[price_catalogue.NOT_IN_SHOP]):
+                offers.add(int(compact_descr))
+    return offers
+
+
 def cost(index, compact_descr, count=1):
     """Return what ``count`` of one item costs, as a currency mapping."""
     price = index.get(_int(compact_descr))
     if price is None:
         return {CREDITS: 0}
     count = max(1, _int(count, 1))
+    if len(price) > 3 and price[3]:
+        return {CRYSTAL: price[3] * count}
     if price[price_catalogue.GOLD]:
         return {GOLD: price[price_catalogue.GOLD] * count}
     return {CREDITS: price[price_catalogue.CREDITS] * count}
@@ -449,7 +561,7 @@ def spend_research(wallet, vehicle_xp, vehicle_type_compact_descr, xp_cost):
 
 SERVICE_COST_FIELDS = (
     'repair_credits', 'ammo_credits', 'ammo_gold',
-    'equipment_credits', 'equipment_gold')
+    'equipment_credits', 'equipment_gold', 'equipment_crystal')
 
 
 def service_costs(value):

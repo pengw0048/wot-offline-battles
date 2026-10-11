@@ -40,7 +40,7 @@ MODE_NEW_ACCOUNT = "new_account"
 MODES = (MODE_UNLOCKED, MODE_NEW_ACCOUNT)
 
 # What a save multiplies its battle earnings by, as a whole percentage.  The
-# client reads this and scales the credits and experience every battle pays,
+# client reads this and scales the credits, experience and bonds a battle pays,
 # so 100 is an ordinary save and 250 earns two and a half times as much.  It
 # is an integer rather than a fraction because the launcher writes it from
 # Python 3 and the game reads it from Python 2.7.

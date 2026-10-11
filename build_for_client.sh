@@ -8,6 +8,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 repo_root="$(cd "$(dirname "$0")" && pwd)"
+python3 "$repo_root/tools/build_replay_runtime.py"
 python3 "$repo_root/tools/inspect_client.py" "$1"
 
 if command -v python2.7 >/dev/null 2>&1; then
@@ -49,4 +50,4 @@ else
 fi
 
 python3 "$repo_root/tools/validate_wotmod.py" \
-  "$repo_root/dist/org.peng.offline_lan_0922_0.7.7.wotmod"
+  "$repo_root/dist/org.colorfulmeans.offline_lan_0922_0.9.7.wotmod"

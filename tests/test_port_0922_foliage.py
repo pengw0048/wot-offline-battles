@@ -266,7 +266,7 @@ class FoliageTests(unittest.TestCase):
         new_cells = set(foliage_map.fallen_tree_cells[(7, 3)])
         for cell in old_cells - new_cells:
             self.assertNotIn(dynamic_id, foliage_map.cells.get(cell, ()))
-        self.assertTrue(foliage_map.update_fallen_tree_pose(
+        self.assertFalse(foliage_map.update_fallen_tree_pose(
             7, 3, *_fallen_pose_x((45.0, 1.0, 0.0))))
         for cell in new_cells:
             self.assertEqual(
@@ -287,6 +287,39 @@ class FoliageTests(unittest.TestCase):
             0.0, foliage_map.camouflage_bonus(observer, target))
         self.assertEqual(BUSH, foliage_map.camouflage_bonus(
             (20.0, 0.0, 0.0), (60.0, 0.0, 0.0)))
+
+    def test_identical_fallen_pose_preserves_revision_and_spatial_index(self):
+        foliage_map = foliage.FoliageMap({
+            'fallen_trees': [_fallen_profile()],
+        })
+        foliage_map.activate_fallen_tree(7, 3)
+        self.assertTrue(foliage_map.update_fallen_tree_pose(
+            7, 3, *_fallen_pose_x()))
+        revision = foliage_map.native_revision
+        instance_id = foliage_map.fallen_tree_instances[(7, 3)]
+        row = foliage_map.instances[instance_id]
+        members = dict(foliage_map.cells)
+        foliage_map.native_dirty_instances.clear()
+        foliage_map.native_dirty_cells.clear()
+        self.assertFalse(foliage_map.update_fallen_tree_pose(
+            7, 3, *_fallen_pose_x()))
+        self.assertEqual(foliage_map.native_revision, revision)
+        self.assertIs(foliage_map.instances[instance_id], row)
+        self.assertTrue(all(foliage_map.cells[cell] is values
+                            for cell, values in members.items()))
+        self.assertEqual(foliage_map.native_dirty_instances, set())
+        self.assertEqual(foliage_map.native_dirty_cells, set())
+
+    def test_first_fallen_pose_marks_the_old_standing_cells_dirty(self):
+        foliage_map = foliage.FoliageMap({
+            'cell_size': 8., 'instances': [_row(5.)],
+            'cells': {'0,0': [0], '0,-1': [0]},
+            'fallen_trees': [_fallen_profile(0)],
+        })
+        foliage_map.activate_fallen_tree(7, 3)
+        foliage_map.update_fallen_tree_pose(
+            7, 3, *_fallen_pose_x((1000., 1., 1000.)))
+        self.assertTrue({(0, 0), (0, -1)} <= foliage_map.native_dirty_cells)
 
     def test_sloped_fallen_tree_uses_full_3d_angle_not_vertical_prism(self):
         # The transparency radius would hide this crown from both observers,

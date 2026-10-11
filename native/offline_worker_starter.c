@@ -26,6 +26,9 @@
 #define WORKER_INTERNAL_READY_MARKER_ENV \
 	L"OFFLINE_LAN_0922_WORKER_INTERNAL_READY_MARKER"
 #define PLAYER_READY_MARKER_ENV L"OFFLINE_LAN_0922_PLAYER_READY_MARKER"
+#define PLAYER_FINISHED_MARKER_ENV L"OFFLINE_LAN_0922_PLAYER_FINISHED_MARKER"
+#define PLAYER_FINISH_GRACE_MS 5000
+#define PLAYER_RECORDING_FINISH_GRACE_MS 30000
 #define WORKER_READY_MARKER_FILE L"offline-worker.ready"
 #define WORKER_INTERNAL_READY_MARKER_FILE L"offline-worker.internal-ready"
 #define PLAYER_READY_MARKER_FORMAT L"offline-player-%lu.ready"
@@ -40,7 +43,6 @@
  * report says why the worker never became ready. */
 #define WORKER_READY_TIMEOUT_MS 60000
 #define WORKER_READY_POLL_MS 50
-#define PLAYER_HANDOFF_GRACE_MS 10000
 #define PLAYER_HANDOFF_POLL_MS 100
 #define MAX_GAME_PROCESS_IDS 32
 #define BW_RES_PATH_ENV L"BW_RES_PATH"
@@ -967,6 +969,42 @@ static DWORD active_tracked_player_count(
 }
 
 
+static DWORD finished_player_id(const WCHAR *path,
+		const PlayerProcessTracker *tracker, DWORD *grace_ms)
+{
+	HANDLE file;
+	DWORD data[2], received = 0, index;
+	BOOL found = FALSE;
+	file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	if (file == INVALID_HANDLE_VALUE) {
+		return 0;
+	}
+	if (!ReadFile(file, data, sizeof(data), &received, 0)) {
+		received = 0;
+	}
+	CloseHandle(file);
+	if (received != sizeof(data) || data[0] == 0 || data[1] > 1 ||
+			tracker->count == 0 ||
+			tracker->processes[tracker->count - 1].id != data[0]) {
+		return 0;
+	}
+	for (index = 0; index < tracker->count; ++index) {
+		const TrackedGameProcess *tracked = &tracker->processes[index];
+		if (tracked->id == data[0]) {
+			found = TRUE;
+		} else if (!tracked->exited) {
+			/* A replacement client owns its own lifetime. An old client's
+			 * fini must never retire a later process handoff. */
+			return 0;
+		}
+	}
+	*grace_ms = data[1] ? PLAYER_RECORDING_FINISH_GRACE_MS :
+		PLAYER_FINISH_GRACE_MS;
+	return found ? data[0] : 0;
+}
+
+
 static int latest_nonzero_player_exit(
 		const PlayerProcessTracker *tracker)
 {
@@ -1104,13 +1142,14 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 {
 	WCHAR child_command[2 * MAX_PATH];
 	WCHAR player_ready_marker[MAX_PATH];
+	WCHAR player_finished_marker[MAX_PATH];
 	STARTUPINFOW startup;
 	PROCESS_INFORMATION process;
 	JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
 	HANDLE player_job = 0;
 	DWORD exit_code = 1;
-	DWORD quiet_ms = 0;
 	DWORD wait_state;
+	DWORD finishing_id = 0, finishing_started = 0;
 	PlayerProcessTracker tracker;
 	BOOL completed_normally = FALSE;
 	BOOL stop_failed = FALSE;
@@ -1118,6 +1157,7 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 	int preserved_crash_exit = -1;
 	int result = 1;
 	player_ready_marker[0] = L'\0';
+	player_finished_marker[0] = L'\0';
 	if (paired_worker) {
 		if (!SetEnvironmentVariableW(MULTI_CLIENT_ENV, MULTI_CLIENT_VALUE)) {
 			log_failure("SetEnvironmentVariableW", GetLastError());
@@ -1157,6 +1197,11 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 	}
 	if (!configure_player_ready_marker(player_ready_marker, MAX_PATH) ||
 			!remove_marker_path(player_ready_marker) ||
+			FAILED(StringCchPrintfW(player_finished_marker, MAX_PATH,
+				L"%s.finished", player_ready_marker)) ||
+			!remove_marker_path(player_finished_marker) ||
+			!SetEnvironmentVariableW(
+				PLAYER_FINISHED_MARKER_ENV, player_finished_marker) ||
 			!SetEnvironmentVariableW(
 				PLAYER_READY_MARKER_ENV, player_ready_marker)) {
 		log_failure("player_ready_marker", GetLastError());
@@ -1169,6 +1214,7 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 		log_failure("CreateProcessW(player)", GetLastError());
 		CloseHandle(player_job);
 		SetEnvironmentVariableW(PLAYER_READY_MARKER_ENV, 0);
+		SetEnvironmentVariableW(PLAYER_FINISHED_MARKER_ENV, 0);
 		(void)remove_marker_path(player_ready_marker);
 		return 22;
 	}
@@ -1196,6 +1242,7 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 	 * and replacement clients remain in this Job. Only Job-owned PIDs belong
 	 * to this launch; scanning every same-path process can claim another game. */
 	for (;;) {
+		DWORD finished_id, finish_grace;
 		if (!track_player_job_processes(&tracker, player_job, game_path) ||
 				!update_tracked_player_exits(&tracker) ||
 				!attach_ready_player_procdumps(
@@ -1232,12 +1279,37 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 		}
 		if (accounting.ActiveProcesses == 0 &&
 				active_tracked_player_count(&tracker) == 0) {
-			quiet_ms += PLAYER_HANDOFF_POLL_MS;
-			if (quiet_ms >= PLAYER_HANDOFF_GRACE_MS) {
-				break;
+			/* The job contains the initial client and every descendant.
+			 * A live replacement keeps ActiveProcesses nonzero, even after
+			 * its parent exits. Once both owners report no live process,
+			 * there is no remaining parent that can launch a replacement.
+			 * Do not add a fixed ten-second delay to every normal exit. */
+			break;
+		}
+		finished_id = finished_player_id(
+			player_finished_marker, &tracker, &finish_grace);
+		if (finished_id == 0) {
+			finishing_id = 0;
+		} else if (finishing_id != finished_id) {
+			finishing_id = finished_id;
+			finishing_started = GetTickCount();
+			log_status("player_fini_complete", "pid", finishing_id);
+		} else if (GetTickCount() - finishing_started >= finish_grace) {
+			/* game.fini has returned: account/settings and sound cleanup
+			 * finished. Bound any native/browser tail that otherwise keeps
+			 * this starter (and the launcher's worker) alive forever. */
+			preserved_crash_exit = latest_nonzero_player_exit(&tracker);
+			stopped = preserved_crash_exit < 0;
+			if (stopped) {
+				cancel_player_procdumps(&tracker);
 			}
-		} else {
-			quiet_ms = 0;
+			log_status("player_fini_retire", "active_processes",
+				accounting.ActiveProcesses);
+			if (!TerminateJobObject(player_job, ERROR_PROCESS_ABORTED)) {
+				log_failure("TerminateJobObject(player fini)", GetLastError());
+				stop_failed = TRUE;
+			}
+			break;
 		}
 		if (process.hProcess == 0) {
 			Sleep(PLAYER_HANDOFF_POLL_MS);
@@ -1268,6 +1340,10 @@ static int launch_player(const WCHAR *game_path, BOOL paired_worker,
 
 player_cleanup:
 	SetEnvironmentVariableW(PLAYER_READY_MARKER_ENV, 0);
+	SetEnvironmentVariableW(PLAYER_FINISHED_MARKER_ENV, 0);
+	if (player_finished_marker[0] != L'\0') {
+		(void)remove_marker_path(player_finished_marker);
+	}
 	if (player_ready_marker[0] != L'\0') {
 		(void)remove_marker_path(player_ready_marker);
 	}

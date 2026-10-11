@@ -1,0 +1,85 @@
+{
+  "evidence": "Public 0.9.22 reference, not a #1513 archive audit. Production reads the installed mission definitions.",
+  "missions": [
+    {
+      "name": "regular_1_1_12",
+      "operation": 1,
+      "chain": 1,
+      "number": 12,
+      "qid": 12,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_1/chain_1/regular_1_1_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>250</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><preBattle><vehicle><and><installedModules><optionalDevice>camouflageNet</optionalDevice></installedModules><correspondedCamouflage /></and></vehicle></preBattle><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>250</greaterOrEqual></results></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_1_2_12",
+      "operation": 1,
+      "chain": 2,
+      "number": 12,
+      "qid": 27,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_1/chain_2/regular_1_2_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>1</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>500</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>1</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>500</greaterOrEqual></results><isAlive /><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_1_12",
+      "operation": 2,
+      "chain": 1,
+      "number": 12,
+      "qid": 87,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_2/chain_1/regular_2_1_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>750</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>750</greaterOrEqual></results><isAlive /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_2_2_12",
+      "operation": 2,
+      "chain": 2,
+      "number": 12,
+      "qid": 102,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_2/chain_2/regular_2_2_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>2</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>1000</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>2</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>1000</greaterOrEqual></results><win /><isAlive /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_1_12",
+      "operation": 3,
+      "chain": 1,
+      "number": 12,
+      "qid": 162,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_3/chain_1/regular_3_1_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>1500</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>1500</greaterOrEqual></results><isAlive /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_3_2_12",
+      "operation": 3,
+      "chain": 2,
+      "number": 12,
+      "qid": 177,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_3/chain_2/regular_3_2_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>3</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>2000</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>3</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>2000</greaterOrEqual></results><isAlive /><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_1_12",
+      "operation": 4,
+      "chain": 1,
+      "number": 12,
+      "qid": 237,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_4/chain_1/regular_4_1_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>3000</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageAssistedRadioWhileInvisible</key><greaterOrEqual>3000</greaterOrEqual></results><isAlive /><win /></and></postBattle></conditions>"
+    },
+    {
+      "name": "regular_4_2_12",
+      "operation": 4,
+      "chain": 2,
+      "number": 12,
+      "qid": 252,
+      "source": "https://github.com/StranikS-Scan/WorldOfTanks-Decompiled/blob/0.9.22/source/res/scripts/item_defs/potapov_quests/regular/tile_4/chain_2/regular_4_2_12.xml",
+      "main": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>3</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>3000</greaterOrEqual></results></and></postBattle></conditions>",
+      "add": "<conditions><postBattle><and><results><key>damageBlockedByArmor</key><greaterOrEqual>3</greaterOrEqual><compareWithMaxHealth /></results><results><key>damageDealt</key><greaterOrEqual>3000</greaterOrEqual></results><isAlive /><win /></and></postBattle></conditions>"
+    }
+  ]
+}

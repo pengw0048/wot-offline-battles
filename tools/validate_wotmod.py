@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 from collections import Counter
 from pathlib import Path
 import sys
@@ -11,6 +12,12 @@ import zipfile
 PYTHON_27_MAGIC = b'\x03\xf3\r\n'
 ENTRY = 'res/scripts/client/gui/mods/mod_offline_lan_0922.pyc'
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / 'src'
+REPLAY_READER = 'res/offline_replay/replay_reader_process.py'
+REPLAY_RESOURCES = {
+    REPLAY_READER: '5ad6a0bfaa92e99826d8d9ed3cd385503600f5583aa464a3955033d6355d65ca',
+    'res/offline_replay/recorder-runtime.zip':
+        '8aee9faae63078408922d2ec000dc4211195a62a6921422a096042be3fe5f37b',
+}
 
 
 def expected_pyc_members(source_root=SOURCE_ROOT):
@@ -60,8 +67,8 @@ def validate(path, expected_members=None):
                              sorted(missing_directories))
         unwanted_files = sorted(
             name for name in names
-            if (name.endswith(('.py', '.pyo')) or
-                '__pycache__/' in name))
+            if name != REPLAY_READER and
+                (name.endswith(('.py', '.pyo')) or '__pycache__/' in name))
         if unwanted_files:
             raise ValueError(
                 'release package contains unwanted Python files: %s' %
@@ -77,10 +84,18 @@ def validate(path, expected_members=None):
         root = ET.fromstring(archive.read('meta.xml'))
         mod_id = (root.findtext('id') or '').strip()
         version = (root.findtext('version') or '').strip()
-        if mod_id != 'org.peng.offline_lan_0922':
+        if mod_id != 'org.colorfulmeans.offline_lan_0922':
             raise ValueError('unexpected mod id: %r' % mod_id)
         if not version:
             raise ValueError('meta.xml has no version')
+        # This is data for an isolated Python 3 process, never a game import.
+        # Permit only the accepted helper bytes, not arbitrary source files.
+        if version == '0.9.7' or names.intersection(REPLAY_RESOURCES):
+            for name, expected in REPLAY_RESOURCES.items():
+                if name not in names:
+                    raise ValueError('required replay resource is missing: %s' % name)
+                if hashlib.sha256(archive.read(name)).hexdigest() != expected:
+                    raise ValueError('replay resource integrity mismatch: %s' % name)
         for name in sorted(actual_members):
             if archive.read(name)[:4] != PYTHON_27_MAGIC:
                 raise ValueError('non-Python-2.7 bytecode: %s' % name)

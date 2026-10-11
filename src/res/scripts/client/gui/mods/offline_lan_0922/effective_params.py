@@ -15,6 +15,8 @@ importable on both the embedded Python 2 client and the Python 3 server.
 import math
 
 from gui.mods.offline_lan_0922 import equipment_mechanics
+from gui.mods.offline_lan_0922 import crew_battle
+from gui.mods.offline_lan_0922 import stun_mechanics
 
 
 SCHEMA_VERSION = 1
@@ -46,7 +48,8 @@ _PHYSICS_FLOATS = (
     'specificFriction', 'brakeDecel', 'trackCenter', 'minPlaneNormalY',
     'nativePowerRatio',
 )
-_PHYSICS_KEYS = frozenset(_PHYSICS_FLOATS + ('terrainResist',))
+_PHYSICS_KEYS = frozenset(_PHYSICS_FLOATS + (
+    'terrainResist', 'rotationIsAroundCenter'))
 
 _SPOTTING_FLOATS = (
     'commander_level', 'recon_level', 'situational_level',
@@ -249,6 +252,10 @@ def _canonical_physics(value):
     if terrain is None:
         return None
     result['terrainResist'] = terrain
+    pivot = _bool(value.get('rotationIsAroundCenter'))
+    if pivot is None:
+        return None
+    result['rotationIsAroundCenter'] = pivot
     return result
 
 
@@ -349,7 +356,7 @@ def _canonical_source_shot(value):
         return None
     shell = value.get('shell')
     if (not isinstance(shell, dict) or
-            set(shell) not in (
+            set(shell) - {'stun'} not in (
                 _SOURCE_SHELL_KEYS,
                 _SOURCE_SHELL_KEYS | _SOURCE_SHELL_HE_FACTOR_KEYS)):
         return None
@@ -404,6 +411,13 @@ def _canonical_source_shot(value):
     }
     if he_factors is not None:
         result['shell'].update(he_factors)
+    if 'stun' in shell:
+        try:
+            if kind != 'HIGH_EXPLOSIVE' or shell['stun'] is None:
+                return None
+            result['shell']['stun'] = stun_mechanics.shell_component(shell['stun'])
+        except (TypeError, ValueError, KeyError):
+            return None
     return result
 
 
@@ -598,11 +612,23 @@ def _canonical_crew(value):
     if set(raw_states) != expected:
         return None
     states = {}
+    battle_rows = []
     for key in sorted(expected):
         row = raw_states.get(key)
-        if not _mapping(row, _DYNAMIC_SPOTTING_ROW_KEYS):
+        if not isinstance(row, dict):
+            return None
+        has_battle = 'battle_factors' in row
+        battle_rows.append(has_battle)
+        keys = (_DYNAMIC_SPOTTING_ROW_KEYS | frozenset(('battle_factors',))
+                if has_battle else _DYNAMIC_SPOTTING_ROW_KEYS)
+        if not _mapping(row, keys):
             return None
         canonical_row = {}
+        if has_battle:
+            battle = crew_battle.canonical(row['battle_factors'])
+            if battle is None:
+                return None
+            canonical_row['battle_factors'] = battle
         for name in ('vision', 'signal', 'camouflage'):
             value = _number(row.get(name), 0.0, 10.0)
             if value is None:
@@ -619,6 +645,8 @@ def _canonical_crew(value):
                 return None
             canonical_row[name] = pair
         states[key] = canonical_row
+    if any(battle_rows) and not all(battle_rows):
+        return None
     return {
         'members': members,
         'dynamic_spotting': {'crew': list(instances), 'states': states},
@@ -714,10 +742,37 @@ def skill_summary(value, crew_ko=()):
     return result
 
 
+def _canonical_battle_booster(value):
+    if not _mapping(value, frozenset(('compact_descr', 'skill_overrides'))):
+        return None
+    compact_descr = _exact_int(value['compact_descr'], 1, 2 ** 31 - 1)
+    overrides = value['skill_overrides']
+    bounds = {
+        'sixth_sense_delay': (0.0, 3.0),
+        'designated_target_duration': (0.0, 4.0),
+        'designated_target_sector': (0.0, math.pi),
+        'last_effort_duration': (0.0, 5.0),
+    }
+    if (compact_descr is None or not isinstance(overrides, dict) or
+            not set(overrides).issubset(bounds)):
+        return None
+    result = {}
+    for name, raw in overrides.items():
+        result[name] = _number(raw, *bounds[name])
+        if result[name] is None:
+            return None
+    return {'compact_descr': compact_descr, 'skill_overrides': result}
+
+
+def booster_skill_value(snapshot, name, default):
+    booster = (snapshot or {}).get('battle_booster') or {}
+    return booster.get('skill_overrides', {}).get(name, default)
+
+
 def canonical(value):
     """Return a detached canonical snapshot, or ``None`` when invalid."""
     if (not isinstance(value, dict) or
-            set(value) not in (
+            set(value).difference(('battle_booster',)) not in (
                 _TOP_LEVEL_KEYS, _TOP_LEVEL_KEYS_WITH_EQUIPMENT,
                 _TOP_LEVEL_KEYS_WITH_CRITICAL)):
         return None
@@ -741,6 +796,10 @@ def canonical(value):
             gun, equipment)):
         return None
     if 'critical' in value and critical is None:
+        return None
+    booster = (_canonical_battle_booster(value['battle_booster'])
+               if 'battle_booster' in value else None)
+    if 'battle_booster' in value and booster is None:
         return None
     if (critical is not None and critical.get('crew_roster') is not None and
             critical.get('crew_roster') !=
@@ -777,4 +836,6 @@ def canonical(value):
     }
     if critical is not None:
         result['critical'] = critical
+    if booster is not None:
+        result['battle_booster'] = booster
     return result

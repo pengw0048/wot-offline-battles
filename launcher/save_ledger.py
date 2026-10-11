@@ -16,6 +16,7 @@ and every write replaces the file atomically rather than updating it in place.
 import io
 import json
 import os
+import uuid
 
 try:
     from . import save_slots
@@ -28,16 +29,40 @@ class SaveLedgerError(Exception):
 
 
 LEDGER_FILE_NAME = "garage_state.json"
-CURRENCIES = ("credits", "gold", "freeXP")
+CURRENCIES = ("credits", "gold", "freeXP", "crystal")
 # The client refuses to publish a balance it cannot represent, and #1513's own
 # account fields are 32-bit signed.
 MAX_BALANCE = 2 ** 31 - 1
 INITIAL_WALLET_KEY = "initial_wallet"
 DEFAULT_BALANCES = {
-    save_slots.MODE_NEW_ACCOUNT: {"credits": 100000, "gold": 0, "freeXP": 0},
+    save_slots.MODE_NEW_ACCOUNT: {"credits": 100000, "gold": 0, "freeXP": 0, "crystal": 0},
     save_slots.MODE_UNLOCKED: {
-        "credits": 100000000, "gold": 1000000, "freeXP": 100000000},
+        "credits": 100000000, "gold": 1000000, "freeXP": 100000000, "crystal": 1000000},
 }
+
+
+def queue_account_changes(container, changes, has_garage=True):
+    """Save actual launcher deltas in the client's durable native-message queue."""
+    if not changes:
+        return
+    owner = container.setdefault('personalMissions', {}) if has_garage else container
+    key = 'notifications' if has_garage else 'initial_account_notifications'
+    owner.setdefault(key, []).append({
+        'id': uuid.uuid4().hex,
+        'settlement': {'account_changes': changes}})
+
+
+def _wallet_changes(before, after):
+    changes = []
+    for phase, sign in (('granted', 1), ('revoked', -1)):
+        rewards = []
+        for name in CURRENCIES:
+            delta = (_balance(after.get(name)) - _balance(before.get(name))) * sign
+            if delta > 0:
+                rewards.append({'kind': name, 'count': delta})
+        if rewards:
+            changes.append({'phase': phase, 'rewards': rewards})
+    return changes
 
 
 def ledger_path(slot_id, game_root=None, environment=None, root=None):
@@ -126,12 +151,14 @@ def write_balances(slot_id, balances, game_root=None, environment=None,
     state = _read_state(path)
     if state is None:
         updated = _initial_balances(slot_id, game_root, environment, root)
+        previous = dict(updated)
         updated.update((name, _balance(balances[name]))
                        for name in CURRENCIES if name in balances)
         metadata_path = save_slots.metadata_path(
             slot_id, game_root, environment, root)
         metadata = _read_state(metadata_path) or {}
         metadata[INITIAL_WALLET_KEY] = updated
+        queue_account_changes(metadata, _wallet_changes(previous, updated), False)
         os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
         _write_state(metadata_path, metadata)
         return updated
@@ -146,6 +173,7 @@ def write_balances(slot_id, balances, game_root=None, environment=None,
         if name in balances:
             updated[name] = _balance(balances[name])
     ledger["wallet"] = updated
+    queue_account_changes(ledger, _wallet_changes(wallet, updated))
     _write_state(path, state)
     return dict((name, _balance(updated.get(name))) for name in CURRENCIES)
 
