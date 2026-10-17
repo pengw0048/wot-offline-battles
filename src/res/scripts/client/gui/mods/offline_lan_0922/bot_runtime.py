@@ -63,6 +63,14 @@ DESTRUCTIBLE_SCAN_MIN_SPEED = 1.0
 # command and acquire a new physical corridor only after ongoing motion has
 # consumed or rotated beyond the previous proof.
 MAX_CONTROL_ELAPSED_SECONDS = 0.20
+# A fixed-control worker consumes every elapsed second in bounded slices, and
+# ordinary low-FPS catch-up must stay exact.  Past this horizon the backlog is
+# pathological - the consumer is falling behind faster than real time - and
+# would starve the process that relays player fire intents.  The oldest debt
+# is dropped there: bots slow down for a moment instead of the whole worker
+# falling silent.  Burst edges inside the retained window are still consumed
+# exactly.
+MAX_FIXED_CONTROL_BACKLOG_SECONDS = 5.0
 LOCAL_ACTION_SECONDS = 0.10
 TACTICAL_REFRESH_SECONDS = 1.0
 # Eight protocol-maximum exact paths can share only two of the four native
@@ -10906,6 +10914,19 @@ class BotRuntime(object):
                 else:
                     elapsed = self._accumulator
                     self._accumulator = 0.0
+                    if elapsed > MAX_FIXED_CONTROL_BACKLOG_SECONDS:
+                        dropped = elapsed - MAX_FIXED_CONTROL_BACKLOG_SECONDS
+                        elapsed = MAX_FIXED_CONTROL_BACKLOG_SECONDS
+                        backlog_log = getattr(
+                            self, '_fixed_control_backlog_log_time', 0.0)
+                        if now - backlog_log >= 5.0:
+                            self._fixed_control_backlog_log_time = now
+                            sys.stdout.write(
+                                '[Offline LAN 0.9.22] WORKER CONTROL '
+                                'backlog dropped %.2fs beyond the %.1fs '
+                                'horizon\n' % (
+                                    dropped,
+                                    MAX_FIXED_CONTROL_BACKLOG_SECONDS))
                     refresh_control = True
                     while elapsed > 1e-12:
                         frame_step = self._bounded_burst_step(

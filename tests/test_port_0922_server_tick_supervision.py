@@ -192,6 +192,11 @@ class TickLoopSupervisionTest(unittest.TestCase):
         sleeps = []
 
         def sleep(delay):
+            # Zero-delay calls are the catch-up yield that lets connection
+            # handler threads in between back-to-back due ticks; they are
+            # not the scheduler's real wait.
+            if delay <= 0.0:
+                return
             sleeps.append(delay)
             if len(sleeps) == 1:
                 clock[0] = 1.0
@@ -205,6 +210,47 @@ class TickLoopSupervisionTest(unittest.TestCase):
         self.assertTrue(all(
             abs(step - 1.0 / TICK_HZ) < 1e-12
             for step in state.steps))
+
+    def test_catch_up_ticks_yield_to_handlers_and_report_slow_ticks(self):
+        # Back-to-back catch-up ticks each hold the state lock for their
+        # whole duration.  The loop must yield between them so connection
+        # handler threads can admit inputs and fire intents, and a tick that
+        # overruns its budget must say so in the log.
+        interval = 1.0 / TICK_HZ
+        clock = [0.0]
+
+        class State(object):
+            running = True
+
+            def __init__(self):
+                self.steps = 0
+                self.tick = 0
+
+            def tick_once(self, dt):
+                self.steps += 1
+                self.tick += 1
+                clock[0] += 2.0 * interval
+                if self.steps >= 3:
+                    self.running = False
+
+        state = State()
+        sleeps = []
+
+        def sleep(delay):
+            sleeps.append(delay)
+            clock[0] += delay
+
+        with mock.patch(
+                'lan_battle_server._server_log_limited') as limited:
+            _run_tick_loop(
+                state, tick_clock=lambda: clock[0], sleeper=sleep)
+
+        self.assertEqual(3, state.steps)
+        yields = [delay for delay in sleeps if delay == 0.0]
+        self.assertEqual(state.steps - 1, len(yields))
+        self.assertTrue(any(
+            call[0][0] == 'server-tick-slow'
+            for call in limited.call_args_list))
 
 
 class _WelcomeHandler(socketserver.BaseRequestHandler):

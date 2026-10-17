@@ -100,6 +100,11 @@ _WORKER_DIAGNOSTIC_FIELDS = (
     'shot_lane_budget_deferred_attempts')
 AMMO_SECONDS = 0.10
 NETWORK_INPUT_SECONDS = 1.0 / 30.0
+# The server terminates an unanswered fire intent after two seconds; the
+# local pending gate must outlive that plus transport, or a lost result would
+# block the trigger for the rest of the round.  A late result for an expired
+# intent is ignored by its sequence number.
+LOCAL_FIRE_INTENT_TIMEOUT_SECONDS = 3.0
 RPM_PRESENTATION_SECONDS = 0.10
 SPOTTING_UPDATE_SECONDS = 0.10
 SPOTTING_PROBE_SECONDS = 0.50
@@ -24964,7 +24969,24 @@ class BattleRuntime(object):
         if not state.can_fire(self._battle_live):
             return self._reject_local_fire('gun_not_ready')
         if isinstance(self._local_fire_intent, dict):
-            return self._reject_local_fire('intent_pending')
+            pending_intent = self._local_fire_intent
+            sent_at = _number(pending_intent.get('sent_at'), now)
+            if now - sent_at <= LOCAL_FIRE_INTENT_TIMEOUT_SECONDS:
+                return self._reject_local_fire('intent_pending')
+            # The server answer is lost or the round pipeline stalled.  The
+            # server itself expires the intent after two seconds, so this
+            # trigger edge is already terminal there; release the local gate
+            # instead of deadlocking the gun for the rest of the round.  A
+            # late result for the expired sequence is ignored on arrival.
+            sys.stdout.write(
+                '[Offline LAN 0.9.22] FIRE INTENT expired locally '
+                'intent=%s age=%.3fs\n' % (
+                    str(pending_intent.get('intent_seq')), now - sent_at))
+            self._local_fire_intent = None
+            try:
+                self._cancel_native_shot_wait()
+            except Exception:
+                pass
         shell_index = state.shot_index
         sender = getattr(self.client, 'send_fire_intent', None)
         if not callable(sender) or self._sender is None:
