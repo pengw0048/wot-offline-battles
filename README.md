@@ -759,3 +759,48 @@ Use a launcher built from the integration commit so its native module, client
 and server match. Version 0.10.1 ships this integration. Performance depends on the map, vehicle
 count and hardware; component benchmarks do not establish a universal
 frame-time improvement.
+
+### Blender terrain authoring experiment
+
+`tools/blender_wot_terrain.py` is a Blender 4.3+ add-on for creating a new
+200 m terrain and exporting its evaluated surface, including modifiers and
+object transforms. Install that file through **Preferences > Add-ons > Install
+from Disk**, then open **3D View > Sidebar > WoT Map**. Choose **New 200 m
+Terrain**, edit or sculpt its height, and choose **Export Terrain Source**.
+The selected terrain must cover its original rectangle and the 6.25 m apron
+on each side. Blender X/Y become game X/Z; Blender Z becomes game height.
+Scene unit scale is applied. Terrain is sampled every 3.125 m, so smaller
+features are not retained. Holes, vertical walls and overhangs require a
+separate geometry pipeline and are outside this experiment.
+
+The `.wotmap.json` source contains signed millimetre heights. Convert it to
+four 100 m tiles with an explicit two-sample border:
+
+```bash
+python3 tools/map_terrain_source.py terrain.wotmap.json --output /tmp/terrain-tiles
+```
+
+The output directory must be new or empty. Each 37-by-37 PNG stores one
+little-endian signed int32 height per RGBA pixel; these are raw data, not
+color-managed images. Adjacent tiles share five identical rows or columns.
+The manifest explicitly marks the result as **authoring-only**: this is not
+a playable map or a mod. Native terrain headers, derived terrain textures,
+compiled space, collision, arena registration and exact #1513 Windows
+validation remain necessary. No client installation is modified.
+
+Generate a new editable example and its Blender preview, or run the real
+Blender smoke checks, with a Blender executable on your path:
+
+```bash
+blender --background --factory-startup --python-exit-code 1 --python tools/create_blender_terrain_demo.py -- --output-dir /tmp/wot-terrain-demo
+blender --background --factory-startup --python-exit-code 1 --python tests/blender_terrain_smoke.py
+python3 -m unittest discover -s tests -p test_map_terrain_source.py
+```
+
+Existing asset/map import can use the open-source
+[WoT-Blender-Addons](https://github.com/Simi4/WoT-Blender-Addons/tree/main/tank_viewer/map_viewer).
+It includes terrain and object loaders, but no complete Blender-to-new-map
+compiler. Its client-specific import path has not been accepted against the
+Chinese #1513 build here; do not infer that compatibility from successful
+add-on registration. This experiment adds only the missing authored-height
+source path and does not duplicate that asset importer.
