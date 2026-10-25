@@ -44,7 +44,8 @@ public:
         logger_ = new DebugMessageFileLogger();
         logger_->config( "standalone.log", DebugMessageFileLogger::SERVERITY_ALL,
             "", DebugMessageFileLogger::SOURCE_ALL,
-            DebugMessageFileLogger::OVERWRITE, true );
+            DebugMessageFileLogger::OVERWRITE, false );
+        logger_->enable( true );
         INFO_MSG( "StandaloneLog: native startup logging enabled\n" );
         return true;
     }
