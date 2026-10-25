@@ -1,0 +1,45 @@
+name: Standalone native core
+
+on:
+  push:
+    paths:
+      - native/standalone_client/**
+      - .github/workflows/native-core.yml
+  pull_request:
+    paths:
+      - native/standalone_client/**
+      - .github/workflows/native-core.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-core:
+    name: Native core (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            configure-args: -DCMAKE_BUILD_TYPE=Release
+          - name: macOS
+            os: macos-latest
+            configure-args: -DCMAKE_BUILD_TYPE=Release
+          - name: Windows x86
+            os: windows-2022
+            configure-args: -A Win32
+    steps:
+      - uses: actions/checkout@v7
+      # These tests use synthetic data and require no proprietary client files.
+      - name: Configure C++17 core
+        run: >-
+          cmake -S native/standalone_client -B build/native-core
+          -DBUILD_TESTING=ON ${{ matrix.configure-args }}
+      - name: Build core and tests
+        run: cmake --build build/native-core --config Release --parallel 2
+      - name: Run core tests
+        run: ctest --test-dir build/native-core -C Release --output-on-failure --no-tests=error

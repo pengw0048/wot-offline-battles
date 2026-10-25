@@ -3237,3 +3237,81 @@ layout); they are not a newly verified complete #1513 resource set. Exact
 Windows #1513 acceptance must still check font availability, Chinese glyphs,
 notification rendering and panel clipping at supported resolutions, in both
 launcher languages. A Chinese stock garage alone does not validate GUI.Text.
+
+## Independent native client foundation
+
+The opt-in `native/standalone_client` target begins a separate executable,
+using C++17 without a runtime dependency on the original game executable.
+The existing launcher, mod, server and mandatory worker are unchanged. The
+native target currently provides an audit CLI, not a playable replacement.
+
+The engine candidate is public BigWorld 14.4.1, revision
+`3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb` from
+[v2v3v4/BigWorld-Engine-14.4.1](https://github.com/v2v3v4/BigWorld-Engine-14.4.1/tree/3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb).
+Its client has a Windows entry point and links rendering, terrain, models,
+collision and compiled-space modules. Its build still embeds Python 2.7.
+`tools/build_bigworld_client.ps1` attempts a reproducible Win32/Hybrid MSVC
+build, using the pinned Microsoft.DXSDK.D3DX 9.29.952.8 package. It keeps source,
+SDK staging, build adaptation and logs in a caller-selected new directory.
+A successful build is evidence of an engine binary, not WoT resource loading
+or behavior. No client assets or original executable are bundled by this target.
+
+### Compiled-space metadata
+
+The public engine's BWT2 and BWSG readers expect section version 1. The exact
+#1513 numeric map packages examined contain BWTB version 1 containers with
+BWT2 and BWSG version 2 sections. Merely changing a version constant is not a
+format conversion: the #1513 terrain settings have a length-prefixed 32-byte
+layout, unlike the public engine's 20-byte settings.
+
+The C++ reader checks the BWTB directory, 64-bit ranges, overlaps and duplicate
+identifiers, then reads the BWT2 v2 settings and terrain block list. It accepts
+the zero declared-file-length sentinel observed in the real resources. It
+preserves directory order and explicitly records the decoded BWT2 prefix size.
+Other sections and the remaining BWT2 payload are opaque. Resource IDs have
+not been resolved into models or textures; BWSG geometry, collision, render
+submission and native loading have not been implemented by this reader.
+
+`tools/verify_native_compiled_space.py` first runs the exact-client inspector,
+then compares the CLI output against `tools/space_bin_0922.py` for every
+`space.bin` in numeric map packages, using temporary extracted files. The
+reviewed dataset contained 81 packages, 45 scenes, 1080 sections and 6853
+terrain blocks; all decoded fields matched. The tool discovers these counts,
+rather than accepting that fixed count as a correctness condition. Synthetic
+CTest cases cover valid variations and malformed lengths, counts, ranges,
+coordinates and settings.
+
+### Recovered point-velocity arithmetic
+
+REA 6.8.0 with Ghidra 12.1.4 analyzed the exact x86 wrapper at VA `0x00f4a420`.
+The local retained evidence includes pseudocode, assembly and value flow;
+Ghidra's default analysis completed before the function was read. The
+`WGVehiclePhysics` method registration at `0x01a5b4b0` identifies this wrapper
+as `getPointVelocity`. Its argument-count and Vector3 conversion guards precede
+the arithmetic. The result is wrapped as a Python vector afterward.
+
+`point_velocity.cpp` recovers only VA `[0x00f4a481, 0x00f4a533)`: 36
+straight-line instructions. The wrapper's pointer at `self + 0x910` supplies
+angular velocity at `+0x2d8`, linear velocity at `+0x2e4` and an origin at
+`+0x338`. The recovered operation is `linear + angular cross (point - origin)`,
+with each scalar operation rounded to binary32 and no FMA contraction.
+The origin's writer and complete lifecycle have not been established; it is
+not labeled as the center of mass.
+
+`tools/verify_native_point_velocity.py` verifies the local PE layout, method
+registration and exact instruction semantics, then emulates just that slice
+with synthetic memory in Unicorn. No Windows or game process is started. The
+C++ output matched all 4130 fixed boundary and seeded random test cases bit for
+bit on the reviewed macOS build. This is a finite corpus, not a universal
+float32 proof: finite inputs can overflow, and NaN sign/payload propagation
+can differ between ARM64 and x86. Bitwise comparison assumes default IEEE
+rounding, gradual underflow and finite intermediate results. The audit also
+rejects altered instructions, a wrong PE architecture and malformed or
+mismatched CLI output.
+
+This slice does not acquire live state, integrate motion, compute suspension
+or contacts, or reproduce the Python wrapper. No direct Python caller of
+`getPointVelocity` was found in the inspected `scripts.pkg`; this is a
+verified reconstruction exercise, not a measured battle-hotspot replacement.
+Full vehicle simulation, scene loading, native battle rules, Windows rendering,
+input/lifecycle acceptance and comparative frame timings remain unproved.

@@ -231,6 +231,58 @@ This is a reconstruction from the frozen clients and same-era mechanics, not
 Wargaming's retail server. LAN play assumes trusted clients. Native rendering,
 physics and frame pacing can only be judged in the Windows client.
 
+## Independent client development
+
+`native/standalone_client` starts the independent C++ client effort. It builds
+without the original executable, BigWorld or Python. The current executable
+is an audit harness: it reads #1513 compiled-space metadata and implements one
+recovered vehicle-physics arithmetic kernel. It does not yet render a map,
+drive a vehicle or play a battle. The launcher still runs the existing mod.
+
+Build and test the native core with CMake 3.16+ and a C++17 compiler:
+
+```bash
+cmake -S native/standalone_client -B build/native-core -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native-core --config Release
+ctest --test-dir build/native-core -C Release --output-on-failure
+```
+
+The optional local audits use your own exact #1513 installation. They do not
+start the game, modify its files or distribute executable bytes:
+
+```bash
+export WOT_0922_CLIENT=/path/to/World_of_Tanks_0.09.22.00.01_CH_1513_HD
+python3 -m venv /tmp/wot-native-audit
+/tmp/wot-native-audit/bin/pip install -r tools/requirements-native-audit.txt
+PYTHONDONTWRITEBYTECODE=1 python3 tools/verify_native_compiled_space.py \
+  --client-root "$WOT_0922_CLIENT" --native-core build/native-core/wot-native-core
+PYTHONDONTWRITEBYTECODE=1 /tmp/wot-native-audit/bin/python \
+  tools/verify_native_point_velocity.py --client-root "$WOT_0922_CLIENT" \
+  --native-core build/native-core/wot-native-core
+```
+
+Use `build/native-core/Release/wot-native-core.exe` for a Visual Studio build.
+The map audit compares the decoded metadata with the independent Python
+reader. The physics audit emulates the original function's arithmetic slice
+and compares its output bits with the C++ implementation. These checks do not
+establish complete resource, vehicle-physics or gameplay parity; the reviewed
+boundaries are in [COMPATIBILITY_REVIEW.md](COMPATIBILITY_REVIEW.md).
+
+The separate `Build standalone BigWorld client` workflow builds the pinned
+[BigWorld 14.4.1 source](https://github.com/v2v3v4/BigWorld-Engine-14.4.1/tree/3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb)
+with Windows/MSVC. To reproduce it on Windows with Visual Studio 2022, v142,
+CMake and PowerShell 7, use a new temporary work directory:
+
+```powershell
+./tools/build_bigworld_client.ps1 -WorkDirectory "$env:TEMP\bigworld-client-build"
+```
+
+It downloads source and Microsoft's D3DX package into that directory and saves
+build diagnostics there. The upstream engine still embeds Python 2.7; the
+independent battle core does not. An engine build alone is not a playable WoT
+client: #1513 scene loading, vehicle simulation and native battle integration
+remain separate implementation work.
+
 ## Build it yourself
 
 The `Build Windows launcher` GitHub Actions workflow builds the server, client
