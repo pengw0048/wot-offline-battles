@@ -3348,3 +3348,13 @@ Portable D3DX-equivalent angle/normalization calculations retain the algorithm
 but do not establish cross-platform last-bit equivalence. The original wrapper
 returns immediately after a failed speed guard, without rebuilding inverse
 matrices; the C++ path retains that behavior.
+
+`vehicle_drive.cpp` reconstructs the contact friction ellipse at `0x00f88e90`
+and `0x00f967a0`, reaction limits at `0x00f89090`, and the resulting friction
+constraint bounds. It consumes actual contact-point motion, ground friction,
+normal constraint reactions and chassis configuration. It does not approximate
+the engine or replace the constraint solver with a direct force. The two full
+x86 functions matched 8000 seeded cases without external math stubs, excluding
+NaN payload comparisons. The ordinary client descriptor's xphysics fields are
+only a subset of the complete native configuration; a complete loader and the
+remaining engine/contact constraints are still required for driving.
