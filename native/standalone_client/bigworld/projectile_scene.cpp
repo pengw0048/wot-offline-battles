@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "projectile_scene.hpp"
+#include "target_scene.hpp"
 
 #include "cstdmf/debug.hpp"
 #include "moo/geometrics.hpp"
@@ -7,10 +8,13 @@
 #include "physics2/collision_callback.hpp"
 #include "physics2/collision_obstacle.hpp"
 #include "pyscript/script.hpp"
+#include "romp/font_manager.hpp"
 #include "wot/projectile_motion.hpp"
+#include "wot/combat_rules.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <vector>
 
 DECLARE_DEBUG_COMPONENT2( "StandaloneProjectiles", 0 )
@@ -38,8 +42,8 @@ bool finite( const Vector3 & value )
         std::isfinite( value.z );
 }
 
-// This first scene adapter only terminates on native static geometry. Moving
-// obstacles need the vehicle's real material and current-pose collision owner.
+// Native static geometry and the target's original BSP both own their actual
+// hit distances; the projectile adapter always chooses the nearer surface.
 class StaticCollision : public CollisionCallback
 {
 public:
@@ -65,13 +69,19 @@ struct ProjectileScene::State
         wot::BallisticVector3 gravity;
         double maxDistance;
         double age;
+        double travelled;
+        wot::CombatShot combat;
+        double penetrationFactor;
+        double damageRoll;
+        std::shared_ptr<TargetScene::ShotState> targetState;
         BW::string shell;
         std::vector<Vector3> trace;
     };
 
     State() : configured( false ), speed( 0.0 ), gravity( 0.0 ),
         maxDistance( 0.0 ), reloadTime( 0.0 ), time( 0.0 ), readyTime( 0.0 ),
-        remainingAmmo( 0 ), lastImpact( false ) {}
+        remainingAmmo( 0 ), hasCombat( false ), lastImpact( false ),
+        fontAttempted( false ) {}
 
     ClientSpacePtr space;
     bool configured;
@@ -85,9 +95,13 @@ struct ProjectileScene::State
     double time;
     double readyTime;
     int remainingAmmo;
+    bool hasCombat;
+    wot::CombatShot combat;
     std::vector<Shot> shots;
     std::vector<Vector3> lastTrace;
     bool lastImpact;
+    FontPtr font;
+    bool fontAttempted;
 
     void terminal( const Shot & shot, const char * reason, bool impact )
     {
@@ -100,7 +114,8 @@ struct ProjectileScene::State
     }
 };
 
-ProjectileScene::ProjectileScene() : state_( new State() ), hasDrawn_( false )
+ProjectileScene::ProjectileScene() : state_( new State() ), target_( NULL ),
+    hasDrawn_( false )
 {
     // Finale ends and presents the D3D scene. Render here while it is open,
     // independently of StandaloneApp's later startup/earlier teardown order.
@@ -153,6 +168,50 @@ bool ProjectileScene::configure( DataSectionPtr assembly,
         return false;
     }
     state.space = space;
+    if (shot->openSection( "kind" ))
+    {
+        const char * combatFields[] = { "caliber", "damage_armor", "piercing_power" };
+        for (size_t index = 0; index < sizeof( combatFields ) / sizeof( combatFields[0] ); ++index)
+            if (!shot->openSection( combatFields[index] ))
+            {
+                ERROR_MSG( "ProjectileScene: combat shot is missing %s\n", combatFields[index] );
+                return false;
+            }
+        state.combat.shell.kind = wot::shell_kind( shot->readString( "kind" ).c_str() );
+        state.combat.shell.caliber = shot->readDouble( "caliber" );
+        state.combat.shell.damage = shot->readDouble( "damage_armor" );
+        const Vector2 piercing = shot->readVector2( "piercing_power" );
+        state.combat.piercing_power = { piercing.x, piercing.y };
+        state.combat.max_distance = state.maxDistance;
+        if (!std::isfinite( state.combat.shell.caliber ) || state.combat.shell.caliber <= 0.0 ||
+            !std::isfinite( *state.combat.shell.damage ) || *state.combat.shell.damage < 0.0 ||
+            !std::isfinite( piercing.x ) || !std::isfinite( piercing.y ) ||
+            piercing.x < 0.f || piercing.y < 0.f)
+        {
+            ERROR_MSG( "ProjectileScene: combat descriptor has invalid numeric values\n" );
+            return false;
+        }
+        struct OptionalField { const char * name; std::optional<double> * value; };
+        OptionalField optionalFields[] = {
+            { "explosion_damage_factor", &state.combat.shell.explosion_damage_factor },
+            { "explosion_absorption_factor", &state.combat.shell.explosion_absorption_factor },
+            { "explosion_edge_damage_factor", &state.combat.shell.explosion_edge_damage_factor }
+        };
+        for (size_t index = 0; index < sizeof( optionalFields ) / sizeof( optionalFields[0] ); ++index)
+            if (shot->openSection( optionalFields[index].name ))
+            {
+                const double value = shot->readDouble( optionalFields[index].name );
+                if (!std::isfinite( value )) return false;
+                *optionalFields[index].value = value;
+            }
+        if (shot->openSection( "explosion_radius" ))
+        {
+            state.combat.shell.explosion_radius = shot->readDouble( "explosion_radius" );
+            if (!std::isfinite( state.combat.shell.explosion_radius ) ||
+                state.combat.shell.explosion_radius < 0.0) return false;
+        }
+        state.hasCombat = true;
+    }
     state.configured = true;
     s_projectileScene = this;
     INFO_MSG( "ProjectileScene: firing preview configured shell=%s speed=%g gravity=%g range=%g baseReload=%g selectedShellAmmo=%d\n",
@@ -166,6 +225,8 @@ void ProjectileScene::setAssemblyTransform( const Matrix & transform )
     if (state_->configured)
         state_->muzzle = transform.applyPoint( state_->localMuzzle );
 }
+
+void ProjectileScene::target( TargetScene * target ) { target_ = target; }
 
 bool ProjectileScene::fire()
 {
@@ -187,6 +248,11 @@ bool ProjectileScene::fire()
         INFO_MSG( "ProjectileScene: fire refused; selected-shell preview ammunition is empty\n" );
         return false;
     }
+    if (target_ && target_->active() && !state.hasCombat)
+    {
+        WARNING_MSG( "ProjectileScene: fire refused; target damage requires exported combat shot data\n" );
+        return false;
+    }
     Vector3 direction = Moo::rc().invView().applyToUnitAxisVector( 2 );
     if (!finite( direction ) || direction.lengthSquared() <= 0.f)
     {
@@ -201,7 +267,14 @@ bool ProjectileScene::fire()
     shot.gravity = { 0.0, -state.gravity, 0.0 };
     shot.maxDistance = state.maxDistance;
     shot.age = 0.0;
+    shot.travelled = 0.0;
     shot.shell = state.shell;
+    shot.combat = state.combat;
+    shot.penetrationFactor = state.hasCombat ? wot::sample_penetration_factor() : 1.0;
+    shot.damageRoll = state.hasCombat ? wot::shell_damage_roll( shot.combat ) : 0.0;
+    if (target_ && target_->active())
+        shot.targetState = target_->createShot( shot.combat,
+            shot.penetrationFactor, shot.damageRoll );
     shot.trace.push_back( state.muzzle );
     // Freeze all shot state once. Later scene/configuration input cannot
     // rebind a launched shell, muzzle, direction, or its reload deadline.
@@ -225,6 +298,7 @@ void ProjectileScene::advance( float elapsed )
     for (std::vector<State::Shot>::iterator shot = state.shots.begin();
         shot != state.shots.end(); )
     {
+        BW::string ownedTerminal;
         const char * terminal = NULL;
         bool impact = false;
         if (!state.space || state.space->cleared())
@@ -288,6 +362,24 @@ void ProjectileScene::advance( float elapsed )
                 terminal = "invalid_native_collision";
                 break;
             }
+            const Vector3 nativeFinish = distance >= 0.f ?
+                start + segment * (distance / length) : finish;
+            if (target_ && shot->targetState && length > 0.f)
+            {
+                const TargetScene::TraceResult hit = target_->trace( *shot->targetState,
+                    native( shot->start ), start, nativeFinish, shot->travelled );
+                if (hit.terminal)
+                {
+                    finish = hit.point;
+                    const double fraction = (nativeFinish - start).length() / length * hit.fraction;
+                    shot->age = interval.start + (stopTime - interval.start) * fraction;
+                    shot->trace.push_back( finish );
+                    ownedTerminal = hit.reason;
+                    terminal = ownedTerminal.c_str();
+                    impact = hit.reason != "target_query_failure";
+                    break;
+                }
+            }
             if (distance >= 0.f)
             {
                 const double fraction = distance / length;
@@ -304,6 +396,7 @@ void ProjectileScene::advance( float elapsed )
                     terminal = "maximum_range";
             }
             shot->trace.push_back( finish );
+            shot->travelled += (finish - start).length();
         }
         if (!terminal && endTime >= wot::projectile_max_flight_seconds)
         {
@@ -322,7 +415,7 @@ void ProjectileScene::advance( float elapsed )
 
 void ProjectileScene::draw()
 {
-    const State & state = *state_;
+    State & state = *state_;
     const Moo::Colour activeColour( 1.f, 0.9f, 0.15f, 1.f );
     const Moo::Colour terminalColour( state.lastImpact ? 1.f : 0.3f,
         state.lastImpact ? 0.2f : 0.7f, 0.2f, 1.f );
@@ -343,6 +436,38 @@ void ProjectileScene::draw()
         for (size_t index = 1; index < state.shots[shot].trace.size(); ++index)
             Geometrics::drawLine( state.shots[shot].trace[index - 1],
                 state.shots[shot].trace[index], activeColour, false );
+    if (target_)
+        target_->draw();
+    if (state.configured && Moo::rc().device())
+    {
+        // Presentation only: the camera-forward aiming direction crosses the
+        // screen centre. The muzzle and ballistic trajectory remain physical.
+        const float centerX = Moo::rc().screenWidth() * 0.5f;
+        const float centerY = Moo::rc().screenHeight() * 0.5f;
+        const Moo::Colour colour( 0.85f, 1.f, 0.85f, 1.f );
+        Geometrics::drawRect( Vector2( centerX - 7.f, centerY ),
+            Vector2( centerX + 8.f, centerY + 1.f ), colour );
+        Geometrics::drawRect( Vector2( centerX, centerY - 7.f ),
+            Vector2( centerX + 1.f, centerY + 8.f ), colour );
+        if (FontManager::pInstance())
+        {
+            if (!state.fontAttempted)
+            {
+                state.font = FontManager::instance().get( "system_small.font" );
+                state.fontAttempted = true;
+            }
+            if (state.font && FontManager::instance().begin( *state.font ))
+            {
+                std::ostringstream status;
+                status << "Ammo: " << state.remainingAmmo << "   Reload: "
+                    << std::max( 0.0, state.readyTime - state.time ) << " s";
+                state.font->drawString( BW::string( status.str().c_str() ), 16, 60 );
+                state.font->drawString( "W/S drive  A/D steer  Space brake  Mouse aim  LMB fire  Arrows camera",
+                    16, 82 );
+                FontManager::instance().end();
+            }
+        }
+    }
     if (!hasDrawn_ && Moo::rc().device())
     {
         hasDrawn_ = true;
@@ -358,6 +483,7 @@ void ProjectileScene::clear()
         state_->terminal( state_->shots[index], "scene_teardown", false );
     delete state_;
     state_ = new State();
+    target_ = NULL;
 }
 
 static bool standaloneFire()

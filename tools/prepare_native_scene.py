@@ -7,6 +7,7 @@ are not adapted. No client files are modified or redistributed by this tool.
 """
 
 import argparse
+import copy
 import io
 import json
 from pathlib import Path
@@ -15,7 +16,7 @@ import sys
 import xml.etree.ElementTree as ET
 import zipfile
 
-from bake_navigation_0922 import _legacy_baker
+from bake_navigation_0922 import PackageVFS, _legacy_baker
 from inspect_client import inspect_client
 from space_bin_0922 import CompiledSpace as SpaceDirectory
 
@@ -34,6 +35,39 @@ def write_xml(path, root):
 def extract_member(archive, member, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(archive.read(member))
+
+
+def prepare_lighting(packages, settings, scene, scene_path):
+    """Project authored forward sunlight/ambient keys into public TimeOfDay."""
+    resource = settings.findtext('timeOfDay')
+    if not resource:
+        raise ValueError('map has no authored timeOfDay resource')
+    vfs = PackageVFS(str(packages))
+    try:
+        source = XmlUnpacker().read(io.BytesIO(vfs.read(resource.strip())))
+    finally:
+        vfs.close()
+    cycle = source.find('day_night_cycle')
+    if cycle is None:
+        raise ValueError('timeOfDay has no day_night_cycle: ' + resource)
+    # #1513 stores renderer-specific directional lighting below forward/;
+    # public TimeOfDay::load reads angle/lightkey directly below the cycle.
+    # The unchanged root-level ambient curve and clock remain shared.
+    forward = cycle.find('forward')
+    directional = forward if forward is not None else cycle
+    result = ET.Element('root')
+    converted = ET.SubElement(result, 'day_night_cycle')
+    for name in ('starttime', 'hourlength', 'sunColor', 'moonColor', 'moonAngle',
+                 'ambientkey', 'fogkey'):
+        for node in cycle.findall(name):
+            converted.append(copy.deepcopy(node))
+    for name in ('angle', 'lightkey'):
+        for node in directional.findall(name):
+            converted.append(copy.deepcopy(node))
+    if not converted.findall('lightkey') or not converted.findall('ambientkey'):
+        raise ValueError('timeOfDay lacks sunlight or ambient keys: ' + resource)
+    write_xml(scene / 'native_lighting.xml', result)
+    return scene_path + '/native_lighting.xml', resource.strip()
 
 
 def prepare(client_root, map_name, output):
@@ -99,6 +133,9 @@ def prepare(client_root, map_name, output):
         ET.SubElement(terrain_settings, 'version').text = str(terrain['settings2']['terrain_version'])
         ET.SubElement(terrain_settings, 'heightMapSize').text = str(next(iter(sample_sizes)))
         ET.SubElement(terrain_settings, 'lodMapSize').text = str(terrain['settings2']['lod_map_size'])
+        lighting, lighting_source = prepare_lighting(
+            packages, settings, scene, scene_path)
+        ET.SubElement(preview_settings, 'timeOfDay').text = lighting
         write_xml(scene / 'space.settings', preview_settings)
         original = output / 'source'
         original.mkdir()
@@ -146,6 +183,8 @@ def prepare(client_root, map_name, output):
         'terrain_payload_bytes': terrain_bytes,
         'landscape_texture_files': len(landscape_files),
         'camera_position': camera,
+        'lighting_source': lighting_source,
+        'lighting_adapter': 'Authored forward sunlight and shared ambient keys; public TimeOfDay schema.',
         'omitted_compiled_sections': sorted(set(directory.sections) - {'BWST', 'BWT2'}),
         'limitations': [
             'Terrain preview only; compiled statics, water, flora and the original sky are not adapted.',

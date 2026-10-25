@@ -3281,8 +3281,24 @@ outcomes. Assembly export reads the first authored gun shot; exact
 `miscParams/projectileSpeedFactor` and gravity by its square. The gun-local
 reload/maxAmmo overrides follow `items/vehicles._readGunLocals`. The muzzle is
 the original `HP_gunFire` hierarchy's bind transform. This static firing preview
-does not implement crew modifiers, dispersion, turret aiming, magazine guns,
-moving vehicle collision or armor damage.
+does not implement crew modifiers, dispersion, turret aiming or magazine guns.
+
+Optional stationary targets load original per-component BSPv2 triangle arrays
+and ordered material tables. `WGBspCollisionModel.collideSegment` in the exact
+executable (`0x00f443f0` wrapper, `0x00f44fe0` implementation) faces returned
+normals against the incident ray and returns a nonnegative angle cosine.
+Its seam comparator (`0x00f43e30`) uses a `float(0.0004)` distance tolerance,
+equal raw local normals and equal material identity. The portable query follows
+these rules with deterministic ordering, without claiming native BSP traversal
+order or final-bit parity. `Vehicle.__collideSegment`'s legal missing-material
+sentinel remains a null material; no armor is invented for it.
+
+Targets consume the ported armor/damage rules using frozen per-shot random
+rolls and actual reached surface contacts. External-plate history persists
+between trajectory substeps. Terrain obstruction is applied before target
+queries, structural damage settles once, and zero health removes the target
+models. HUD feedback exposes health, damage, ammunition and reload. Ricochets
+currently terminate; reflected continuation and HE radial damage are not wired.
 
 The driving preview consumes the native port of the existing offline mod's
 longitudinal and traverse laws. Stock module mass, engine power, speed limits

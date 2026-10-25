@@ -6,8 +6,11 @@ endif()
 set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/projectile_motion.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_control.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_control.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/combat_rules.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_collision.cpp")
 target_sources(bwclient PRIVATE "${CMAKE_CURRENT_LIST_DIR}/standalone_app.cpp"
     ${WOT_NUMERICAL_SOURCES})
 target_include_directories(bwclient PRIVATE "${BW_SOURCE_DIR}/client"
@@ -17,11 +20,12 @@ target_include_directories(bwclient PRIVATE "${BW_SOURCE_DIR}/client"
 if(MSVC)
     set_source_files_properties(${WOT_NUMERICAL_SOURCES}
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
-    # These two adapters include the public engine's C++14 STL declarations.
+    # These adapters include the public engine's C++14 STL declarations.
     # Retain that observed surface in their otherwise C++17 translation units.
     set_source_files_properties(
         "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
         PROPERTIES COMPILE_DEFINITIONS
         "_HAS_AUTO_PTR_ETC=1;_HAS_TR1_NAMESPACE=1;_ENFORCE_MATCHING_ALLOCATORS=0")
 else()

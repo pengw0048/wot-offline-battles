@@ -18,8 +18,8 @@ import re
 import struct
 import xml.etree.ElementTree as ET
 
-from bake_navigation_0922 import PackageVFS
-from bw_primitives_geometry import _sections
+from bake_navigation_0922 import PackageVFS, _bsp_triangles_0922
+from bw_primitives_geometry import _material_names, _sections
 from inspect_client import inspect_client
 from packed_xml import (PACKED_XML_MAGIC, TYPE_BOOLEAN, TYPE_COMPRESSED_STRING,
                         TYPE_ELEMENT, TYPE_VECTOR, read_packed_xml)
@@ -94,6 +94,27 @@ def vector(node, path):
     return result
 
 
+def reader_float(node, path, default=None):
+    """DataSection readFloat values reach Python after binary32 conversion."""
+    text = node.findtext(path)
+    if text is None:
+        if default is None:
+            raise ValueError('missing descriptor float: ' + path)
+        text = default
+    return struct.unpack('<f', struct.pack('<f', float(text)))[0]
+
+
+def reader_vector(node, path, count):
+    text = node.findtext(path)
+    if text is None:
+        raise ValueError('missing descriptor vector: ' + path)
+    values = [struct.unpack('<f', struct.pack('<f', float(value)))[0]
+              for value in text.split()]
+    if len(values) != count:
+        raise ValueError('invalid descriptor vector: ' + path)
+    return values
+
+
 def add(left, right):
     return [a + b for a, b in zip(left, right)]
 
@@ -158,7 +179,7 @@ def preview_shot(vfs, resource_root, nation, gun, gun_component):
     reload_time = gun.findtext('reloadTime', definition.findtext('reloadTime'))
     max_ammo = gun.findtext('maxAmmo', definition.findtext('maxAmmo'))
     muzzle = model_node_position(resource_root, gun_component['model'], 'HP_gunFire')
-    return {
+    result = {
         'shell': nation + ':' + shot.tag,
         'speed': float(shot.findtext('speed')) * factor,
         'gravity': float(shot.findtext('gravity')) * factor ** 2,
@@ -166,7 +187,34 @@ def preview_shot(vfs, resource_root, nation, gun, gun_component):
         'reloadTime': float(reload_time),
         'maxAmmo': int(max_ammo),
         'muzzlePosition': add(gun_component['position'], muzzle),
-    }, None
+    }
+    shells = xml_root(vfs.read(
+        'scripts/item_defs/vehicles/%s/components/shells.xml' % nation))
+    shell = shells.find(shot.tag)
+    if shell is None:
+        raise ValueError('missing shot shell descriptor: ' + shot.tag)
+    result.update({
+        'kind': shell.findtext('kind'),
+        'caliber': reader_float(shell, 'caliber'),
+        'damage_armor': reader_float(shell, 'damage/armor'),
+        'piercing_power': reader_vector(shot, 'piercingPower', 2),
+    })
+    if not result['kind']:
+        raise ValueError('shell has no kind: ' + shot.tag)
+    if result['kind'] == 'HIGH_EXPLOSIVE':
+        # #1513 _readShell replaces nonpositive HE values using these exact
+        # resource fields; non-HE shells have no explosion-specific values.
+        radius = reader_float(shell, 'explosionRadius', 0.0)
+        result['explosion_radius'] = (radius if radius > 0 else
+                                      result['caliber'] ** 2 / 5555.0)
+        for source, target in (
+                ('explosionDamageFactor', 'explosion_damage_factor'),
+                ('explosionDamageAbsorptionFactor', 'explosion_absorption_factor'),
+                ('explosionEdgeDamageFactor', 'explosion_edge_damage_factor')):
+            value = reader_float(shell, source, 0.0)
+            result[target] = (value if value > 0 else
+                              reader_float(common, 'miscParams/' + source))
+    return result, None
 
 
 def preview_drive(vfs, nation, descriptor, chassis, hull, turret, gun):
@@ -177,22 +225,6 @@ def preview_drive(vfs, nation, descriptor, chassis, hull, turret, gun):
     KMH_TO_MS=0.27778 constant. DataSection readFloat/readVector values are
     binary32 before the Python readers perform their double arithmetic.
     """
-    def reader_float(node, path):
-        text = node.findtext(path)
-        if text is None:
-            raise ValueError('missing mounted drive descriptor field: ' + path)
-        return struct.unpack('<f', struct.pack('<f', float(text)))[0]
-
-    def reader_vector(node, path, count):
-        text = node.findtext(path)
-        if text is None:
-            raise ValueError('missing mounted drive descriptor vector: ' + path)
-        values = [struct.unpack('<f', struct.pack('<f', float(value)))[0]
-                  for value in text.split()]
-        if len(values) != count:
-            raise ValueError('invalid mounted drive descriptor vector: ' + path)
-        return values
-
     definitions = {}
     mounted = {}
     resources = []
@@ -281,6 +313,86 @@ def collision_bounds(vfs, definition):
         'collision_max': vector(root, 'boundingBox/max'),
         'collision_bounds_source': {'model': model_resource, 'visual': visual_resource},
     }
+
+
+ARMOR_FLAGS = {
+    'useHitAngle': 'use_hit_angle',
+    'mayRicochet': 'may_ricochet',
+    'checkCaliberForHitAngleNorm': 'check_caliber_for_hit_angle_norm',
+    # The misspelling belongs to the exact #1513 descriptor ABI.
+    'checkCaliberForRichet': 'check_caliber_for_ricochet',
+    'collideOnceOnly': 'collide_once_only',
+    'useAntifragmentationLining': 'use_antifragmentation_lining',
+    'useArmorHomogenization': 'use_armor_homogenization',
+}
+
+
+def collision_geometry(vfs, nation, definition, component, common, resource):
+    """Export raw BSPv2 plus the exact material-index table, never render vertices."""
+    source = component.get('collision_bounds_source')
+    if source is None:
+        raise ValueError('component has no client collision model: ' + component['name'])
+    visual = xml_root(vfs.read(source['visual']))
+    primitives = visual.findtext('primitivesName') or source['visual'].split('.visual')[0]
+    primitives = normalized(primitives) + '.primitives'
+    if primitives.lower() not in vfs.index:
+        primitives += '_processed'
+    sections = _sections(vfs.read(primitives))
+    if 'bsp2' not in sections or 'bsp2_materials' not in sections:
+        raise ValueError('collision primitive has no BSP/material table: ' + primitives)
+    bsp = sections['bsp2']
+    if len(bsp) < 4 or struct.unpack_from('<I', bsp)[0] != 0x02505342:
+        raise ValueError('collision primitive is not reviewed BSPv2: ' + primitives)
+    triangle_count = len(_bsp_triangles_0922(bsp, None))
+    names = _material_names(sections['bsp2_materials'])
+    for index in range(triangle_count):
+        material_index = struct.unpack_from('<H', bsp, 60 + index * 40 + 36)[0]
+        if material_index >= len(names):
+            raise ValueError('BSP triangle material is outside table: ' + primitives)
+
+    base_armor = None
+    if component['name'] == 'gun' and (definition.text or '').strip() == 'shared':
+        guns = xml_root(vfs.read(
+            'scripts/item_defs/vehicles/%s/components/guns.xml' % nation))
+        shared = guns.find('shared/' + definition.tag)
+        if shared is None:
+            raise ValueError('missing shared gun armor: ' + definition.tag)
+        base_armor = shared.find('armor')
+    local_armor = definition.find('armor')
+    if local_armor is None and base_armor is None:
+        raise ValueError('component has no authored armor section: ' + component['name'])
+    materials = []
+    for name in names:
+        template = common.find('materials/' + name)
+        if template is None:
+            raise ValueError('unknown BSP armor material: ' + name)
+        base = base_armor.find(name) if base_armor is not None else None
+        override = local_armor.find(name) if local_armor is not None else None
+        authored = override if override is not None else base
+        if authored is None:
+            # Vehicle.__collideSegment uses materials.get(kind). The client
+            # deliberately returns None for e.g. unconfigured surveyingDevice
+            # triangles; keep that sentinel, never invent an armor thickness.
+            materials.append({'name': name, 'present': False})
+            continue
+        material = {'name': name, 'present': True,
+                    'armor': reader_float(authored, '.')}
+        for source_name, target in ARMOR_FLAGS.items():
+            value = template.findtext(source_name)
+            if authored.find(source_name) is not None:
+                value = authored.findtext(source_name)
+            if value not in ('true', 'false'):
+                raise ValueError('missing/invalid armor flag %s/%s' % (name, source_name))
+            material[target] = value == 'true'
+        value = reader_float(template, 'vehicleDamageFactor')
+        if authored.find('vehicleDamageFactor') is not None:
+            value = reader_float(authored, 'vehicleDamageFactor')
+        material['vehicle_damage_factor'] = value
+        materials.append(material)
+    component.update({'collision_mesh': resource, 'materials': materials,
+                      'collision_mesh_source': primitives,
+                      'collision_triangle_count': triangle_count})
+    return bsp
 
 
 def descriptor_data(node):
@@ -471,10 +583,14 @@ def prepare(client_root, requested, output, engine_res=None):
         hull = descriptor.find('hull')
         drive, drive_provenance, drive_resources = preview_drive(
             vfs, nation, descriptor, chassis, hull, turret, gun)
+        common_resource = 'scripts/item_defs/vehicles/common/vehicle.xml'
+        common = xml_root(vfs.read(common_resource))
+        assembly_directory = 'standalone/vehicles/%s_%s' % (nation, listing.tag)
         hull_position = vector(chassis, 'hullPosition')
         turret_position = add(hull_position, vector(hull, 'turretPositions/turret'))
         gun_position = add(turret_position, vector(turret, 'gunPosition'))
         components = []
+        collision_meshes = []
         for name, definition, position in (
                 ('chassis', chassis, [0.0, 0.0, 0.0]),
                 ('hull', hull, hull_position),
@@ -486,13 +602,23 @@ def prepare(client_root, requested, output, engine_res=None):
             component = {'name': name, 'model': normalized(model),
                          'position': position, 'descriptor': descriptor_data(definition)}
             component.update(collision_bounds(vfs, definition))
+            mesh_resource = assembly_directory + '/collision/' + name + '.bsp'
+            collision_meshes.append((mesh_resource, collision_geometry(
+                vfs, nation, definition, component, common, mesh_resource)))
             components.append(component)
         output.mkdir(parents=True, exist_ok=False)
+        for resource, data in collision_meshes:
+            destination = output / 'res' / resource
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
         extractor = Extractor(vfs, output)
         extractor.enqueue(descriptor_path, 'vehicle_descriptor')
         # Keep the shared definitions used for mounted mass/power provenance.
         for resource in drive_resources:
             extractor.enqueue(resource, 'assembly/drive')
+        for resource in (common_resource,
+                         'scripts/item_defs/vehicles/%s/components/shells.xml' % nation):
+            extractor.enqueue(resource, 'assembly/combat')
         for component in components:
             extractor.enqueue(component['model'], 'assembly/' + component['name'])
         extractor.extract()
@@ -509,7 +635,7 @@ def prepare(client_root, requested, output, engine_res=None):
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(data.replace('world[51]', 'world[%d]' % palette_rows),
                                    encoding='utf-8')
-        assembly_path = 'standalone/vehicles/%s_%s/assembly.xml' % (nation, listing.tag)
+        assembly_path = assembly_directory + '/assembly.xml'
         assembly = ET.Element('root')
         for component in components:
             item = ET.SubElement(assembly, 'component')
@@ -519,6 +645,21 @@ def prepare(client_root, requested, output, engine_res=None):
             for key in ('collision_min', 'collision_max'):
                 if key in component:
                     ET.SubElement(item, key).text = ' '.join(repr(v) for v in component[key])
+            ET.SubElement(item, 'collision_mesh').text = component['collision_mesh']
+            for material in component['materials']:
+                material_node = ET.SubElement(item, 'material')
+                for key, value in material.items():
+                    ET.SubElement(material_node, key).text = (
+                        str(value).lower() if isinstance(value, bool) else str(value))
+        # VehicleDescriptor.__updateAttributes adds hull health and the health
+        # of each installed turret. The preview selects the first authored one
+        # in each turret slot, matching its stock component selection.
+        max_health = int(hull.findtext('maxHealth'))
+        for turret_slot in descriptor:
+            if re.fullmatch(r'turrets\d+', turret_slot.tag):
+                max_health += int(turret_slot[0].findtext('maxHealth'))
+        combat = ET.SubElement(assembly, 'combat')
+        ET.SubElement(combat, 'max_health').text = str(max_health)
         drive_node = ET.SubElement(assembly, 'drive')
         for name, value in drive.items():
             ET.SubElement(drive_node, name).text = (
@@ -543,6 +684,7 @@ def prepare(client_root, requested, output, engine_res=None):
                               'chassis': chassis.tag, 'turret': turret.tag, 'gun': gun.tag},
             'components': components, 'assembly': assembly_path,
             'drive': drive, 'drive_provenance': drive_provenance,
+            'combat': {'max_health': max_health},
             'shot': shot,
             'firing_limitation': firing_limitation,
             'resource_paths': [str(output / 'res')],
@@ -564,6 +706,7 @@ def prepare(client_root, requested, output, engine_res=None):
                 'Firing uses the first authored shell, base reload and full capacity for that shell; crew, dispersion and turret control are not applied.',
                 'Drive parameters use mounted stock modules and the existing offline-mod laws; no crew/equipment factors or recovered retail contact solver are applied.',
                 'Blocking uses conservative boxes from authored collision_client visual bounds, not exact BSP mesh contacts.',
+                'Projectile armor queries use isolated original BSPv2 collision meshes and authored material tables; unspecified material entries preserve the original None sentinel.',
                 'Authored model nodes, geometry, texture data and LOD parent chains are retained.',
                 'Public lightonly materials use original diffuse textures; original PBS appearance is not restored.',
                 'Add public engine runtime resources after resource_paths, including compiled lightonly effects.',

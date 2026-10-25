@@ -7,6 +7,8 @@
 
 BW_BEGIN_NAMESPACE
 
+class TargetScene;
+
 // An assembly firing preview, owned by the independent native scene.
 // Its descriptor capacity is loaded entirely with the selected preview shell;
 // it does not model vehicle armour, crew modifiers, or a mixed shell loadout.
@@ -19,6 +21,7 @@ public:
     bool configure( DataSectionPtr assembly, const Vector3 & origin,
         ClientSpacePtr space );
     void setAssemblyTransform( const Matrix & transform );
+    void target( TargetScene * target );
     bool fire();
     void advance( float elapsed );
     void clear();
@@ -29,6 +32,7 @@ private:
     ProjectileScene & operator=( const ProjectileScene & );
     struct State;
     State * state_;
+    TargetScene * target_;
     bool hasDrawn_;
 };
 

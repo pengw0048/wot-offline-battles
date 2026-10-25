@@ -333,8 +333,12 @@ impact cross show the result. The preview applies the exact descriptor's speed
 factor, base reload and ammunition capacity. Magazine/burst guns remain visual
 previews. W/S drive, A/D steer and Space applies the handbrake using the ported
 offline controller. Native terrain queries support the vehicle; collision-bound
-box sweeps block static obstacles. Crew, dispersion, turret control, armor
-damage, suspension, airborne motion and track animation are not connected yet.
+box sweeps block static obstacles. Add `--target-assembly` with a prepared
+assembly and `--target-position x,y,z` to place a stationary target. Original
+collision triangles and armor materials determine penetration and damage;
+the HUD shows health, ammunition and reload. A destroyed target leaves the scene.
+Crew, dispersion, turret control, suspension, airborne motion, track animation,
+ricochet continuation and HE area damage are not connected yet.
 
 ## Build it yourself
 

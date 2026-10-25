@@ -6,6 +6,7 @@
 #include "connection_control.hpp"
 #include "projectile_scene.hpp"
 #include "vehicle_scene.hpp"
+#include "target_scene.hpp"
 
 #include "camera/free_camera.hpp"
 #include "chunk/chunk_manager.hpp"
@@ -146,6 +147,35 @@ public:
             ERROR_MSG( "StandaloneApp: model position must be finite\n" );
             return false;
         }
+        BW::string targetAssembly = config->readString( "standalone/targetAssembly", "" );
+        const char * requestedTarget = commandLine.getFullParam( "--target-assembly" );
+        if (requestedTarget)
+        {
+            if (requestedTarget[0] == '\0' || requestedTarget[0] == '-')
+            {
+                ERROR_MSG( "StandaloneApp: --target-assembly requires an XML resource path\n" );
+                return false;
+            }
+            targetAssembly = requestedTarget;
+        }
+        Vector3 targetPosition = config->readVector3( "standalone/targetPosition",
+            modelPosition + Vector3( 0.f, 0.f, 30.f ) );
+        const char * requestedTargetPosition = commandLine.getFullParam( "--target-position" );
+        if (requestedTargetPosition)
+        {
+            std::istringstream input( requestedTargetPosition );
+            char separator1 = 0, separator2 = 0;
+            if (!(input >> targetPosition.x >> separator1 >> targetPosition.y >>
+                    separator2 >> targetPosition.z) || separator1 != ',' ||
+                separator2 != ',' || !(input >> std::ws).eof())
+            {
+                ERROR_MSG( "StandaloneApp: --target-position requires x,y,z\n" );
+                return false;
+            }
+        }
+        if (!std::isfinite( targetPosition.x ) || !std::isfinite( targetPosition.y ) ||
+            !std::isfinite( targetPosition.z ))
+            return false;
         spaceID_ = ConnectionControl::instance().createLocalSpace();
         space_ = SpaceManager::instance().space( spaceID_ );
         if (!space_)
@@ -197,6 +227,13 @@ public:
             this->fini();
             return false;
         }
+        if (!targetAssembly.empty() &&
+            !this->loadAssembly( targetAssembly, targetPosition, true ))
+        {
+            this->fini();
+            return false;
+        }
+        projectiles_.target( &target_ );
 
         INFO_MSG( "StandaloneApp: native application started; space=%u, geometry=%s\n",
             spaceID_, path_.empty() ? "<unmapped>" : path_.c_str() );
@@ -250,10 +287,12 @@ public:
     {
         vehicle_.clear();
         projectiles_.clear();
+        target_.clear();
         for (EntityEmbodiments::iterator model = models_.begin();
             model != models_.end(); ++model)
         {
-            (*model)->leaveSpace();
+            if ((*model)->space())
+                (*model)->leaveSpace();
         }
         models_.clear();
         if (space_ && DeprecatedSpaceHelpers::cameraSpace() == space_)
@@ -268,7 +307,7 @@ public:
         space_ = NULL;
         mapped_ = false;
         ready_ = false;
-        camera_ = NULL;
+        camera_ = BaseCameraPtr();
         cameraPlaced_ = false;
         if (spaceID_ != 0)
         {
@@ -324,7 +363,8 @@ private:
         return true;
     }
 
-    bool loadAssembly( const BW::string & resource, const Vector3 & origin )
+    bool loadAssembly( const BW::string & resource, const Vector3 & origin,
+        bool target = false )
     {
         DataSectionPtr assembly = BWResource::openSection( resource );
         BW::vector<DataSectionPtr> components;
@@ -360,6 +400,8 @@ private:
         }
         INFO_MSG( "StandaloneApp: native model assembly attached: %s (%u components)\n",
             resource.c_str(), static_cast<uint32>( components.size() ) );
+        if (target)
+            return target_.configure( assembly, origin, assemblyModels );
         return vehicle_.configure( assembly, origin,
             mapped_ ? space_ : ClientSpacePtr(), assemblyModels ) &&
             projectiles_.configure( assembly, origin,
@@ -371,6 +413,7 @@ private:
     EntityEmbodiments models_;
     ProjectileScene projectiles_;
     VehicleScene vehicle_;
+    TargetScene target_;
     BaseCameraPtr camera_;
     Vector3 cameraOrigin_;
     BW::string path_;
