@@ -82,6 +82,8 @@ try {
     }
     $CompilerOptionsText.Replace('/WX', '/WX /wd4996 /wd4834') |
         Set-Content -LiteralPath $CompilerOptions -Encoding utf8
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_shader_compiler.py"),
+        $EngineRoot) "shader-compiler-patch.log"
 
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.
@@ -133,7 +135,8 @@ try {
         source_adaptation = @(
             "Define D3DX9 GUIDs for the modern Windows SDK",
             "Suppress observed legacy API/nodiscard warnings C4996 and C4834; retain /WX",
-            "Link the repository's native standalone application bootstrap"
+            "Link the repository's native standalone application bootstrap",
+            "Compile FX sources locally through BWResource and cache native FXO files"
         )
     } | ConvertTo-Json | Set-Content -LiteralPath `
         (Join-Path $ArtifactRoot "build-inputs.json") -Encoding utf8

@@ -33,10 +33,19 @@ jobs:
             -RedirectStandardOutput "$logs\startup-stdout.log" `
             -RedirectStandardError "$logs\startup-stderr.log"
           try {
-            $exited = $process.WaitForExit(20000)
+            $deadline = [DateTime]::UtcNow.AddSeconds(120)
+            $started = $false
+            do {
+              $exited = $process.WaitForExit(1000)
+              if (Test-Path "$client\standalone.log") {
+                $started = [bool](Select-String -Path "$client\standalone.log" `
+                  -SimpleMatch 'StandaloneApp: native application started' -Quiet)
+              }
+            } while (-not $exited -and -not $started -and [DateTime]::UtcNow -lt $deadline)
             $process.Refresh()
             @{
               exited = $exited
+              native_application_started = $started
               exit_code = $(if ($exited) { $process.ExitCode } else { $null })
               window_title = $process.MainWindowTitle
               window_handle = $process.MainWindowHandle.ToInt64()
