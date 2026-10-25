@@ -9,3 +9,7 @@ src/res/scripts/client/gui/mods/offline_lan_0922/world_collision.py -whitespace
 # Navigation manifests hash the exact LF-normalized JSON payload.  Prevent a
 # Windows checkout from rewriting the final newline before PyInstaller embeds it.
 navgraphs/*.json -text
+
+# The resource reader verifies this vendored baseline byte for byte.
+# Keep Git's Windows line-ending conversion out of its pinned source files.
+tools/vendor/navigation_baseline_f5b0173/** -text
