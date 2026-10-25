@@ -2,6 +2,11 @@ name: Build standalone BigWorld client
 
 on:
   workflow_dispatch:
+    inputs:
+      client_build_run:
+        description: 'Reuse an existing client artifact for startup debugging'
+        required: false
+        type: string
   push:
     paths:
       - 'tools/build_bigworld_client.ps1'
@@ -10,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   client:
@@ -18,37 +24,62 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build pinned BigWorld engine with MSVC
+        if: ${{ !inputs.client_build_run }}
         shell: pwsh
         run: >-
           ./tools/build_bigworld_client.ps1
           -WorkDirectory "$env:RUNNER_TEMP\bigworld-client"
+      - name: Reuse the selected native client build
+        if: ${{ inputs.client_build_run }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLIENT_BUILD_RUN: ${{ inputs.client_build_run }}
+        run: |
+          $root = "$env:RUNNER_TEMP\bigworld-client\artifacts"
+          New-Item -ItemType Directory -Path "$root\client", "$root\logs" | Out-Null
+          gh run download $env:CLIENT_BUILD_RUN --repo $env:GITHUB_REPOSITORY `
+            -n bigworld-client-win32 -D "$root\client"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to retrieve the selected build' }
       - name: Capture first startup diagnostics
         continue-on-error: true
         shell: pwsh
         run: |
           $client = "$env:RUNNER_TEMP\bigworld-client\artifacts\client"
           $logs = "$env:RUNNER_TEMP\bigworld-client\artifacts\logs"
-          $process = Start-Process -FilePath "$client\bwclient_h.exe" `
-            -ArgumentList '-noConversion' -WorkingDirectory $client -PassThru `
+          $debugger = "$env:RUNNER_TEMP\procdump"
+          Invoke-WebRequest 'https://download.sysinternals.com/files/Procdump.zip' `
+            -OutFile "$debugger.zip"
+          Expand-Archive "$debugger.zip" $debugger
+          $monitor = Start-Process -FilePath "$debugger\procdump.exe" `
+            -ArgumentList @('-accepteula', '-ma', '-e', '-l', '-x', $logs, `
+              "$client\bwclient_h.exe", '-noConversion') `
+            -WorkingDirectory $client -PassThru `
             -RedirectStandardOutput "$logs\startup-stdout.log" `
             -RedirectStandardError "$logs\startup-stderr.log"
+          $process = $null
           try {
             $deadline = [DateTime]::UtcNow.AddSeconds(120)
             $started = $false
             do {
-              $exited = $process.WaitForExit(1000)
+              $exited = $monitor.WaitForExit(1000)
+              if (-not $process) {
+                $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($monitor.Id)" |
+                  Where-Object Name -eq 'bwclient_h.exe' | Select-Object -First 1
+                if ($child) { $process = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue }
+              }
               if (Test-Path "$client\standalone.log") {
                 $started = [bool](Select-String -Path "$client\standalone.log" `
                   -SimpleMatch 'StandaloneApp: native application started' -Quiet)
               }
             } while (-not $exited -and -not $started -and [DateTime]::UtcNow -lt $deadline)
-            $process.Refresh()
+            if ($process) { $process.Refresh() }
             @{
               exited = $exited
               native_application_started = $started
-              exit_code = $(if ($exited) { $process.ExitCode } else { $null })
-              window_title = $process.MainWindowTitle
-              window_handle = $process.MainWindowHandle.ToInt64()
+              exit_code = $(if ($process -and $process.HasExited) { $process.ExitCode } else { $null })
+              window_title = $(if ($process) { $process.MainWindowTitle } else { '' })
+              window_handle = $(if ($process) { $process.MainWindowHandle.ToInt64() } else { 0 })
               scope = "First startup on a hosted runner; no map or gameplay acceptance"
             } | ConvertTo-Json | Set-Content "$logs\startup.json"
             Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -63,8 +94,16 @@ jobs:
               $bitmap.Dispose()
             }
           } finally {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            if (-not $monitor.WaitForExit(10000)) { Stop-Process -Id $monitor.Id -Force }
             Get-ChildItem $client -Filter *.log | Copy-Item -Destination $logs
+          }
+          $cdb = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86\cdb.exe"
+          if (Test-Path $cdb) {
+            Get-ChildItem $logs -Filter *.dmp | ForEach-Object {
+              & $cdb -z $_.FullName -i $client -y $client -c '.ecxr;kv;lm;qd' 2>&1 |
+                Out-File "$logs\native-stack.txt" -Append
+            }
           }
       - name: Upload build diagnostics
         if: always()
@@ -77,6 +116,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Upload standalone engine binary
+        if: ${{ !inputs.client_build_run }}
         uses: actions/upload-artifact@v4
         with:
           name: bigworld-client-win32
