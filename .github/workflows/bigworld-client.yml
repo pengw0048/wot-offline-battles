@@ -53,6 +53,16 @@ jobs:
           write_overlay_resources(root / 'engine-res/resources.xml', root / 'res/resources.xml')
           '@ | python -
           if ($LASTEXITCODE -ne 0) { throw 'Unable to merge application resource mappings' }
+      - name: Bundle local resource preparation
+        shell: pwsh
+        run: |
+          $client = "$env:RUNNER_TEMP\bigworld-client\artifacts\client"
+          python tools/package_native_prototype.py --client-output $client
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to package resource preparation' }
+          & "$client\prepare-runtime\python.exe" -B "$client\tools\prepare_native_prototype.py" --help
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled resource preparation cannot start' }
+          & "$client\prepare-runtime\python.exe" -B -c "import prepare_native_scene, prepare_native_vehicle; from bake_navigation_0922 import _legacy_baker; _legacy_baker()"
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled resource readers cannot load' }
       - name: Capture first startup diagnostics
         continue-on-error: true
         shell: pwsh

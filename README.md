@@ -297,6 +297,13 @@ engine still embeds Python 2.7; the independent battle core does not. This is
 a prototype, with the resource and gameplay limits described below. It does
 not start the original game executable or a hidden original client.
 
+The workflow's download includes `Start-Prototype.cmd` and a portable resource
+preparation tool. On another Windows computer, run it and enter the path to
+your installed Chinese HD #1513 client. It prepares Karelia and a stock T-34
+under the package's `prepared` directory, then starts the scene; subsequent
+runs reuse those files. Original game resources are not included in the
+download, and preparation does not modify or start the original installation.
+
 Prepare a terrain preview from your own client into a new directory:
 
 ```bash
