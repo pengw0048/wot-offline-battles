@@ -82,6 +82,13 @@ try {
     }
     $CompilerOptionsText.Replace('/WX', '/WX /wd4996 /wd4834') |
         Set-Content -LiteralPath $CompilerOptions -Encoding utf8
+    # This is our application build, not a vendor diagnostic build. Keep
+    # native crash reporting local instead of invoking BigWorld's uploader.
+    $EngineConfig = Join-Path $EngineRoot "lib\cstdmf\config.hpp"
+    $EngineConfigText = Get-Content -LiteralPath $EngineConfig -Raw
+    $EngineConfigText -replace '(?m)^#define BUILT_BY_BIGWORLD[\t ]+1[\t ]*$', `
+        '#define BUILT_BY_BIGWORLD 0' |
+        Set-Content -LiteralPath $EngineConfig -Encoding utf8
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_shader_compiler.py"),
         $EngineRoot) "shader-compiler-patch.log"
 
@@ -137,6 +144,7 @@ try {
             "Suppress observed legacy API/nodiscard warnings C4996 and C4834; retain /WX",
             "Link the repository's native standalone application bootstrap",
             "Compile FX sources locally through BWResource and cache native FXO files"
+            "Disable the upstream vendor crash uploader for this independent build"
         )
     } | ConvertTo-Json | Set-Content -LiteralPath `
         (Join-Path $ArtifactRoot "build-inputs.json") -Encoding utf8

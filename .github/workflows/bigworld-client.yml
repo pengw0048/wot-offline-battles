@@ -52,7 +52,7 @@ jobs:
           Expand-Archive "$debugger.zip" $debugger
           $monitor = Start-Process -FilePath "$debugger\procdump.exe" `
             -ArgumentList @('-accepteula', '-ma', '-e', '-x', $logs, `
-              "$client\bwclient_h.exe", '-noConversion') `
+              "$client\bwclient_h.exe", '-noConversion', '-unattended') `
             -WorkingDirectory $client -PassThru `
             -RedirectStandardOutput "$logs\startup-stdout.log" `
             -RedirectStandardError "$logs\startup-stderr.log"
@@ -96,6 +96,7 @@ jobs:
             if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
             if (-not $monitor.WaitForExit(10000)) { Stop-Process -Id $monitor.Id -Force }
             Get-ChildItem $client -Filter *.log | Copy-Item -Destination $logs
+            Get-ChildItem $client -Filter *.dmp | Copy-Item -Destination $logs
           }
           $cdb = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86\cdb.exe"
           if (Test-Path $cdb) {
