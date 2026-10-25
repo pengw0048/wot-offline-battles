@@ -106,6 +106,27 @@ BinaryPtr EffectCompiler::loadOrCompile( const BW::string& resourceID )
         "BinaryPtr bin = EffectHelpers::loadEffectBinary( resourceID_ );",
         "BinaryPtr bin = EffectCompiler::loadOrCompile( resourceID_ );",
         "reload local compilation")
+    effect = replace_once(effect, '''\tID3DXEffect* pEffect = NULL;
+\tHRESULT hr = D3DXCreateEffect( rc().device(),
+\t\tbin->cdata(), bin->len(),
+\t\tNULL, NULL, USE_LEGACY_D3DX9_DLL,\x20
+\t\trc().effectVisualContext().pEffectPool(),\x20
+\t\t&pEffect, NULL );''', '''\tID3DXEffect* pEffect = NULL;
+\tComObjectWrap<ID3DXBuffer> creationErrors;
+\t// The input is CompileEffect bytecode, not FX source. No compiler flags
+\t// belong here; keep the runtime's normal shader validation enabled.
+\tHRESULT hr = D3DXCreateEffect( rc().device(),
+\t\tbin->cdata(), bin->len(),
+\t\tNULL, NULL, 0,
+\t\trc().effectVisualContext().pEffectPool(),
+\t\t&pEffect, &creationErrors );''', "compiled effect creation flags and diagnostics")
+    effect = replace_once(effect, '''\t\tif (E_FAIL == hr)
+\t\t\tERROR_MSG( "Check if DirectX 9 installed on your system!\\n" );''',
+        '''\t\tERROR_MSG( "ManagedEffect::reload: D3DXCreateEffect failed for '%s' "
+\t\t\t"(%d byte compiled effect): %s\\n", resourceID_.c_str(), bin->len(),
+\t\t\tcreationErrors ? static_cast<const char*>(
+\t\t\t\tcreationErrors->GetBufferPointer() ) : "<no D3DX diagnostics>" );''',
+        "compiled effect failure diagnostics")
 
     for name, contents in (("effect_compiler.hpp", header),
                            ("effect_compiler.cpp", compiler),
