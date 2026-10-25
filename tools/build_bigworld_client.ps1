@@ -185,6 +185,29 @@ bwclient_h.exe -noConversion %*
 '@ | Set-Content -LiteralPath (Join-Path $ClientOutput "run-client.cmd") -Encoding ascii
     Copy-Item -Path (Join-Path $D3dxNative "release\bin\x86\*.dll") `
         -Destination $ClientOutput
+    # Hybrid uses /MD. Ship the installed redistributable CRT beside the EXE
+    # so a clean test machine does not need the build runner's Visual Studio.
+    $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $VsRoot = & $VsWhere -latest -products '*' `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath
+    if ($LASTEXITCODE -ne 0 -or -not $VsRoot) {
+        throw "Cannot locate the installed Visual C++ redistributable."
+    }
+    $Runtime = Get-ChildItem -Path (Join-Path $VsRoot `
+        'VC\Redist\MSVC\*\x86\Microsoft.VC*.CRT\vcruntime140.dll') |
+        Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
+        Select-Object -First 1
+    if (-not $Runtime -or -not (Test-Path (Join-Path $Runtime.DirectoryName 'msvcp140.dll'))) {
+        throw "The x86 Visual C++ runtime is incomplete."
+    }
+    Copy-Item -Path (Join-Path $Runtime.DirectoryName '*.dll') -Destination $ClientOutput
+    @"
+Microsoft Visual C++ Redistributable, x86, $($Runtime.VersionInfo.FileVersion)
+Application-local runtime files from the build machine's Visual Studio redist directory.
+https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files
+https://visualstudio.microsoft.com/license-terms/
+"@ | Set-Content -LiteralPath (Join-Path $ClientOutput 'VC-RUNTIME-NOTICE.txt') -Encoding ascii
     Copy-Item -LiteralPath (Join-Path $SourceRoot "LICENSE") `
         -Destination (Join-Path $ClientOutput "BigWorld-LICENSE.txt")
     Copy-Item -LiteralPath (Join-Path $SourceRoot "THIRD-PARTY-NOTICES") `
