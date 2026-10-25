@@ -283,8 +283,9 @@ It downloads source, Microsoft's D3DX package and the public engine runtime
 resources into that directory. The resulting `artifacts/client` directory
 contains `bwclient_h.exe`, a native local-space/free-camera entry and its
 bootstrap resources. Start it through `run-client.cmd`, which selects local
-prepared resources without the upstream development asset server. The upstream engine still embeds Python 2.7; the
-independent battle core does not. An engine build alone is not a playable WoT
+prepared resources without the upstream development asset server. The upstream
+engine still embeds Python 2.7; the independent battle core does not. An engine
+build alone is not a playable WoT
 client: #1513 scene loading, vehicle simulation and native battle integration
 remain separate implementation work.
 
@@ -303,6 +304,30 @@ run the independently built executable:
 ```powershell
 & "$ClientRoot\run-client.cmd" --res "$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia
 ```
+
+The native free camera uses the mouse to look, arrow keys to move, and
+Page Up/Page Down to change height. To prepare a static vehicle assembly,
+point `--engine-res` at the built package's public engine resources:
+
+```bash
+python3 tools/prepare_native_vehicle.py --client-root "$WOT_0922_CLIENT" \
+  --vehicle ussr:R04_T-34 --engine-res /path/to/client/engine-res \
+  --output /path/to/new/vehicle-preview
+```
+
+The output's `vehicle.json` records the selected stock modules and assembly
+resource path. Geometry, model nodes, textures and LODs come from the original
+resources. The preview adapts packed vertex declarations and uses public
+diffuse materials; it does not reproduce the original PBS appearance. Add the
+vehicle `res` directory first in the resource search path, then pass its
+assembly and the chosen world position:
+
+```powershell
+& "$ClientRoot\run-client.cmd" --res "$VehicleRes;$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia --assembly standalone/vehicles/ussr_R04_T-34/assembly.xml --model-position 0,50,0
+```
+
+`--model` also accepts a single model resource. These are scene-preview entry
+points; vehicle movement and the native battle core are not connected yet.
 
 ## Build it yourself
 

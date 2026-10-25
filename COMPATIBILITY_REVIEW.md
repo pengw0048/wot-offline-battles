@@ -3250,11 +3250,25 @@ The engine candidate is public BigWorld 14.4.1, revision
 [v2v3v4/BigWorld-Engine-14.4.1](https://github.com/v2v3v4/BigWorld-Engine-14.4.1/tree/3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb).
 Its client has a Windows entry point and links rendering, terrain, models,
 collision and compiled-space modules. Its build still embeds Python 2.7.
-`tools/build_bigworld_client.ps1` attempts a reproducible Win32/Hybrid MSVC
+`tools/build_bigworld_client.ps1` builds a reproducible Win32/Hybrid MSVC
 build, using the pinned Microsoft.DXSDK.D3DX 9.29.952.8 package. It keeps source,
 SDK staging, build adaptation and logs in a caller-selected new directory.
+The independent engine and native application entry have compiled on Windows.
 A successful build is evidence of an engine binary, not WoT resource loading
 or behavior. No client assets or original executable are bundled by this target.
+
+The native entry creates a local space and free camera, loads optional model
+assemblies through the engine's model/embodiment path, and releases attachments
+before the space. The personality only forwards input to the native camera and
+satisfies the engine lifecycle. `tools/prepare_native_scene.py` exports actual
+terrain chunks and landscape textures; `tools/prepare_native_vehicle.py`
+exports descriptor-authored component positions, original geometry and LODs.
+Vehicle preview materials use public diffuse shaders. Packed skin storage
+names map to the reviewed public representations without changing the source
+geometry bytes; the public D3D9 target conversion handles UV packing. Shader
+palette capacity is derived from the actual model's node count. These resource
+adapters have been exercised on real assets, but their Windows rendering and
+complete scene behavior remain unproved.
 
 ### Compiled-space metadata
 
