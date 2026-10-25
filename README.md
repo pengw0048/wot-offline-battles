@@ -236,7 +236,7 @@ physics and frame pacing can only be judged in the Windows client.
 `native/standalone_client` starts the independent C++ client effort. It builds
 without the original executable, BigWorld or Python. The current executable
 is an audit harness: it reads #1513 compiled-space metadata, implements one
-recovered vehicle-physics arithmetic kernel, and includes the mod's native
+recovered rigid-body integration and impulse kernels, and includes the mod's native
 ballistic solutions, target interception, trajectory sampling and armour/HE
 damage rules. It does not yet render a map,
 drive a vehicle or play a battle. The launcher still runs the existing mod.

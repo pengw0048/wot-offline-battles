@@ -7,6 +7,7 @@ add_library(wot_battle_core STATIC
     src/compiled_space.cpp
     src/point_velocity.cpp
     src/projectile_motion.cpp
+    src/vehicle_dynamics.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -41,4 +42,7 @@ if(BUILD_TESTING)
     add_executable(test_projectile_motion tests/test_projectile_motion.cpp)
     target_link_libraries(test_projectile_motion PRIVATE wot_battle_core)
     add_test(NAME projectile_motion COMMAND test_projectile_motion)
+    add_executable(test_vehicle_dynamics tests/test_vehicle_dynamics.cpp)
+    target_link_libraries(test_vehicle_dynamics PRIVATE wot_battle_core)
+    add_test(NAME vehicle_dynamics COMMAND test_vehicle_dynamics)
 endif()

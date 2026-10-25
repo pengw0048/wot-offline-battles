@@ -3329,3 +3329,22 @@ or contacts, or reproduce the Python wrapper. No direct Python caller of
 verified reconstruction exercise, not a measured battle-hotspot replacement.
 Full vehicle simulation, scene loading, native battle rules, Windows rendering,
 input/lifecycle acceptance and comparative frame timings remain unproved.
+
+### Recovered rigid-body integration
+
+`vehicle_dynamics.cpp` separately reconstructs the exact-client rigid-body
+wrapper at `0x00f6ffa0`, its step at `0x00f70010`, and the impulse arithmetic.
+It retains the original force/acceleration order, pose-only correction terms,
+rotation update, three-state history, periodic orthonormalization and inverse
+inertia update. The caller supplies mass, inertia and loads. It does not invent
+engine, track, suspension or terrain-contact forces.
+
+This reconstruction used exact PE instructions, Capstone and Unicorn. A new
+REA query timed out and supplied no additional decompilation evidence. The
+reviewed corpus covered 2000 force-integration cases and 2000 complete steps
+without angular rotation, comparing original x86 instructions with C++ output.
+Those cases matched bitwise apart from excluded NaN payload comparisons.
+Portable D3DX-equivalent angle/normalization calculations retain the algorithm
+but do not establish cross-platform last-bit equivalence. The original wrapper
+returns immediately after a failed speed guard, without rebuilding inverse
+matrices; the C++ path retains that behavior.
