@@ -11,7 +11,6 @@ on:
     paths:
       - 'tools/build_bigworld_client.ps1'
       - 'native/standalone_client/bigworld/**'
-      - '.github/workflows/bigworld-client.yml'
 
 permissions:
   contents: read
@@ -52,7 +51,7 @@ jobs:
             -OutFile "$debugger.zip"
           Expand-Archive "$debugger.zip" $debugger
           $monitor = Start-Process -FilePath "$debugger\procdump.exe" `
-            -ArgumentList @('-accepteula', '-ma', '-e', '-l', '-x', $logs, `
+            -ArgumentList @('-accepteula', '-ma', '-e', '-x', $logs, `
               "$client\bwclient_h.exe", '-noConversion') `
             -WorkingDirectory $client -PassThru `
             -RedirectStandardOutput "$logs\startup-stdout.log" `
