@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 from urllib.parse import unquote
 from urllib.request import urlopen
+import xml.etree.ElementTree as ET
 
 
 SOURCE = (
@@ -86,11 +87,38 @@ def fetch_resources(output):
           (len(files), total_bytes, output), flush=True)
 
 
+def write_overlay_resources(public_resources, destination):
+    # Resource lookup may select only the first resources.xml. Preserve the
+    # complete public table in that file, then change our startup paths.
+    tree = ET.parse(public_resources)
+    root = tree.getroot()
+    overlay = ET.parse(Path(__file__).parent / "res" / "resources.xml")
+    for section in overlay.getroot():
+        target_section = root.find(section.tag)
+        if target_section is None:
+            target_section = ET.SubElement(root, section.tag)
+        for setting in section:
+            target = target_section.find(setting.tag)
+            if target is None:
+                target = ET.SubElement(target_section, setting.tag)
+            target.text = setting.text
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(destination, encoding="utf-8", xml_declaration=True)
+    print("Merged public resource mappings and standalone overrides: %s" %
+          destination, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--overlay-resources", type=Path,
+                        help="Write the complete merged resources.xml here")
     args = parser.parse_args()
-    fetch_resources(args.output.resolve())
+    output = args.output.resolve()
+    fetch_resources(output)
+    if args.overlay_resources is not None:
+        write_overlay_resources(output / "resources.xml",
+                                args.overlay_resources.resolve())
 
 
 if __name__ == "__main__":

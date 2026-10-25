@@ -22,6 +22,41 @@ jobs:
         run: >-
           ./tools/build_bigworld_client.ps1
           -WorkDirectory "$env:RUNNER_TEMP\bigworld-client"
+      - name: Capture first startup diagnostics
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $client = "$env:RUNNER_TEMP\bigworld-client\artifacts\client"
+          $logs = "$env:RUNNER_TEMP\bigworld-client\artifacts\logs"
+          $process = Start-Process -FilePath "$client\bwclient_h.exe" `
+            -WorkingDirectory $client -PassThru `
+            -RedirectStandardOutput "$logs\startup-stdout.log" `
+            -RedirectStandardError "$logs\startup-stderr.log"
+          try {
+            $exited = $process.WaitForExit(20000)
+            $process.Refresh()
+            @{
+              exited = $exited
+              exit_code = $(if ($exited) { $process.ExitCode } else { $null })
+              window_title = $process.MainWindowTitle
+              window_handle = $process.MainWindowHandle.ToInt64()
+              scope = "First startup on a hosted runner; no map or gameplay acceptance"
+            } | ConvertTo-Json | Set-Content "$logs\startup.json"
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+              $graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bitmap.Size)
+              $bitmap.Save("$logs\startup.png")
+            } finally {
+              $graphics.Dispose()
+              $bitmap.Dispose()
+            }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            Get-ChildItem $client -Filter *.log | Copy-Item -Destination $logs
+          }
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4

@@ -237,7 +237,8 @@ physics and frame pacing can only be judged in the Windows client.
 without the original executable, BigWorld or Python. The current executable
 is an audit harness: it reads #1513 compiled-space metadata, implements one
 recovered vehicle-physics arithmetic kernel, and includes the mod's native
-ballistic solutions, target interception and trajectory sampling. It does not yet render a map,
+ballistic solutions, target interception, trajectory sampling and armour/HE
+damage rules. It does not yet render a map,
 drive a vehicle or play a battle. The launcher still runs the existing mod.
 
 Build and test the native core with CMake 3.16+ and a C++17 compiler:
@@ -278,11 +279,29 @@ CMake and PowerShell 7, use a new temporary work directory:
 ./tools/build_bigworld_client.ps1 -WorkDirectory "$env:TEMP\bigworld-client-build"
 ```
 
-It downloads source and Microsoft's D3DX package into that directory and saves
-build diagnostics there. The upstream engine still embeds Python 2.7; the
+It downloads source, Microsoft's D3DX package and the public engine runtime
+resources into that directory. The resulting `artifacts/client` directory
+contains `bwclient_h.exe`, a native local-space/free-camera entry and its
+bootstrap resources. The upstream engine still embeds Python 2.7; the
 independent battle core does not. An engine build alone is not a playable WoT
 client: #1513 scene loading, vehicle simulation and native battle integration
 remain separate implementation work.
+
+Prepare a terrain preview from your own client into a new directory:
+
+```bash
+python3 tools/prepare_native_scene.py --client-root "$WOT_0922_CLIENT" \
+  --map 01_karelia --output /path/to/new/terrain-preview
+```
+
+The tool preserves original terrain payloads and textures. Buildings, water,
+flora and vehicles are not included yet. On Windows, set `$ClientRoot` to the
+built client directory and `$SceneRes` to the preview's `res` directory, then
+run the independently built executable:
+
+```powershell
+& "$ClientRoot\bwclient_h.exe" --res "$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia
+```
 
 ## Build it yourself
 

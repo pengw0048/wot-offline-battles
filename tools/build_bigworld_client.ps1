@@ -44,7 +44,7 @@ function Invoke-Checked {
 $PreviousDxSdk = $env:DXSDK_DIR
 Start-Transcript -Path (Join-Path $LogRoot "build-transcript.log") | Out-Null
 try {
-    Get-Command cmake, tar | Format-Table Name, Source
+    Get-Command cmake, tar, python | Format-Table Name, Source
     Invoke-Checked "cmake" @("--version") "cmake-version.log"
 
     $Archive = Join-Path $WorkRoot "bigworld.tar.gz"
@@ -129,6 +129,7 @@ try {
         toolset = "v142"
         platform = "Win32"
         configuration = "Hybrid"
+        runtime_resources = "Public BigWorld SourceForge SVN r10"
         source_adaptation = @(
             "Define D3DX9 GUIDs for the modern Windows SDK",
             "Suppress observed legacy API/nodiscard warnings C4996 and C4834; retain /WX",
@@ -153,6 +154,17 @@ try {
     Copy-Item -Path (Join-Path $UpstreamOutput "*") -Destination $ClientOutput -Recurse
     Copy-Item -LiteralPath (Join-Path $StandaloneRoot "res") `
         -Destination (Join-Path $ClientOutput "res") -Recurse
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "fetch_resources.py"),
+        (Join-Path $ClientOutput "engine-res"), "--overlay-resources",
+        (Join-Path $ClientOutput "res\resources.xml")) "runtime-resources.log"
+    @'
+<root>
+    <Paths>
+        <Path>res</Path>
+        <Path>engine-res</Path>
+    </Paths>
+</root>
+'@ | Set-Content -LiteralPath (Join-Path $ClientOutput "paths.xml") -Encoding utf8
     Copy-Item -Path (Join-Path $D3dxNative "release\bin\x86\*.dll") `
         -Destination $ClientOutput
     Copy-Item -LiteralPath (Join-Path $SourceRoot "LICENSE") `
@@ -164,7 +176,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $D3dxRoot "NOTICE.md") `
         -Destination (Join-Path $ClientOutput "D3DX-NOTICE.md")
     Write-Host "Built standalone BigWorld engine binary: $ClientOutput"
-    Write-Host "Includes the standalone bootstrap resource overlay; no WoT game resources are included."
+    Write-Host "Includes the standalone bootstrap and public engine resources; no WoT game resources are included."
 }
 catch {
     Write-Host ($_ | Out-String)

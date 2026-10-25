@@ -3,6 +3,7 @@ project(wot_standalone_core LANGUAGES CXX)
 
 add_library(wot_battle_core STATIC
     src/ballistics.cpp
+    src/combat_rules.cpp
     src/compiled_space.cpp
     src/point_velocity.cpp
 )
@@ -33,4 +34,7 @@ if(BUILD_TESTING)
     add_executable(test_ballistics tests/test_ballistics.cpp)
     target_link_libraries(test_ballistics PRIVATE wot_battle_core)
     add_test(NAME ballistics COMMAND test_ballistics)
+    add_executable(test_combat_rules tests/test_combat_rules.cpp)
+    target_link_libraries(test_combat_rules PRIVATE wot_battle_core)
+    add_test(NAME combat_rules COMMAND test_combat_rules)
 endif()
