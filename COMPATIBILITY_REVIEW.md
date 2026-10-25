@@ -3284,6 +3284,18 @@ the original `HP_gunFire` hierarchy's bind transform. This static firing preview
 does not implement crew modifiers, dispersion, turret aiming, magazine guns,
 moving vehicle collision or armor damage.
 
+The driving preview consumes the native port of the existing offline mod's
+longitudinal and traverse laws. Stock module mass, engine power, speed limits
+and chassis parameters follow the exact readers, including `HP_TO_WATTS=735.5`
+and `KMH_TO_MS=0.27778`. The same mod defaults remain explicit where its
+descriptor adapter supplies them. Terrain height sampling and the existing
+ground-plane rule support the chassis. Translation sweeps the authored
+collision-client chassis/hull bounding boxes through native static geometry;
+rotation checks corner trajectories. This does not implement the complete
+retail contact solver, rotational mesh sweep, suspension or airborne motion.
+Vehicle, camera translation and future muzzle positions share the committed
+current pose; admitted shots retain their original state.
+
 ### Compiled-space metadata
 
 The public engine's BWT2 and BWSG readers expect section version 1. The exact

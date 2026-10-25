@@ -77,6 +77,7 @@ struct ProjectileScene::State
     bool configured;
     BW::string shell;
     Vector3 muzzle;
+    Vector3 localMuzzle;
     double speed;
     double gravity;
     double maxDistance;
@@ -139,7 +140,8 @@ bool ProjectileScene::configure( DataSectionPtr assembly,
     state.maxDistance = shot->readDouble( "maxDistance" );
     state.reloadTime = shot->readDouble( "reloadTime" );
     state.remainingAmmo = shot->readInt( "maxAmmo" );
-    state.muzzle = origin + shot->readVector3( "muzzlePosition" );
+    state.localMuzzle = shot->readVector3( "muzzlePosition" );
+    state.muzzle = origin + state.localMuzzle;
     if (state.shell.empty() || !finite( state.muzzle ) ||
         !std::isfinite( state.speed ) || state.speed <= 0.0 ||
         !std::isfinite( state.gravity ) || state.gravity < 0.0 ||
@@ -157,6 +159,12 @@ bool ProjectileScene::configure( DataSectionPtr assembly,
         state.shell.c_str(), state.speed, state.gravity,
         state.maxDistance, state.reloadTime, state.remainingAmmo );
     return true;
+}
+
+void ProjectileScene::setAssemblyTransform( const Matrix & transform )
+{
+    if (state_->configured)
+        state_->muzzle = transform.applyPoint( state_->localMuzzle );
 }
 
 bool ProjectileScene::fire()

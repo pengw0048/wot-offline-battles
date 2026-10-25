@@ -7,7 +7,7 @@
 
 BW_BEGIN_NAMESPACE
 
-// A static assembly firing preview, owned by the independent native scene.
+// An assembly firing preview, owned by the independent native scene.
 // Its descriptor capacity is loaded entirely with the selected preview shell;
 // it does not model vehicle armour, crew modifiers, or a mixed shell loadout.
 class ProjectileScene : public MainLoopTask
@@ -18,6 +18,7 @@ public:
 
     bool configure( DataSectionPtr assembly, const Vector3 & origin,
         ClientSpacePtr space );
+    void setAssemblyTransform( const Matrix & transform );
     bool fire();
     void advance( float elapsed );
     void clear();

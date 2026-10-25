@@ -5,6 +5,7 @@
 #include "client_camera.hpp"
 #include "connection_control.hpp"
 #include "projectile_scene.hpp"
+#include "vehicle_scene.hpp"
 
 #include "camera/free_camera.hpp"
 #include "chunk/chunk_manager.hpp"
@@ -68,7 +69,8 @@ StandaloneLog s_standaloneLog;
 class StandaloneApp : public MainLoopTask
 {
 public:
-    StandaloneApp() : spaceID_( 0 ), mapped_( false ), ready_( false )
+    StandaloneApp() : spaceID_( 0 ), mapped_( false ), ready_( false ),
+        cameraPlaced_( false )
     {
         // Ordering rules refer to siblings. A top-level task runs after the
         // complete Finale group, and is finalised before it disconnects.
@@ -177,6 +179,7 @@ public:
         camera->set( view );
         camera->spaceID( spaceID_ );
         CameraApp::instance().clientCamera().camera( camera );
+        camera_ = camera;
 
         // Use the same native camera-space wiring as BigWorld.cameraSpaceID.
         DeprecatedSpaceHelpers::cameraSpace( space_ );
@@ -202,6 +205,31 @@ public:
 
     virtual void tick( float dGameTime, float /* dRenderTime */ )
     {
+        vehicle_.advance( dGameTime );
+        projectiles_.setAssemblyTransform( vehicle_.transform() );
+        if (vehicle_.supported() && camera_)
+        {
+            const Vector3 origin = vehicle_.transform().applyToOrigin();
+            Matrix view;
+            if (!cameraPlaced_)
+            {
+                const Vector3 eye = origin + Vector3( 8.f, 5.f, -12.f );
+                view.lookAt( eye, origin + Vector3( 0.f, 1.f, 0.f ) - eye,
+                    Vector3( 0.f, 1.f, 0.f ) );
+                cameraPlaced_ = true;
+            }
+            else
+            {
+                // Follow translation while preserving mouse aim and free-camera
+                // offsets. Arrow keys still allow inspecting the real scene.
+                Matrix inverseView = camera_->invView();
+                inverseView.translation( inverseView.applyToOrigin() +
+                    origin - cameraOrigin_ );
+                view.invert( inverseView );
+            }
+            camera_->set( view );
+            cameraOrigin_ = origin;
+        }
         projectiles_.advance( dGameTime );
         for (EntityEmbodiments::iterator model = models_.begin();
             model != models_.end(); ++model)
@@ -220,6 +248,7 @@ public:
 
     virtual void fini()
     {
+        vehicle_.clear();
         projectiles_.clear();
         for (EntityEmbodiments::iterator model = models_.begin();
             model != models_.end(); ++model)
@@ -239,6 +268,8 @@ public:
         space_ = NULL;
         mapped_ = false;
         ready_ = false;
+        camera_ = NULL;
+        cameraPlaced_ = false;
         if (spaceID_ != 0)
         {
             ConnectionControl::instance().clearLocalSpace( spaceID_ );
@@ -307,6 +338,7 @@ private:
                 resource.c_str() );
             return false;
         }
+        EntityEmbodiments assemblyModels;
         for (size_t index = 0; index < components.size(); ++index)
         {
             DataSectionPtr component = components[index];
@@ -324,20 +356,27 @@ private:
             {
                 return false;
             }
+            assemblyModels.push_back( models_.back() );
         }
         INFO_MSG( "StandaloneApp: native model assembly attached: %s (%u components)\n",
             resource.c_str(), static_cast<uint32>( components.size() ) );
-        return projectiles_.configure( assembly, origin,
-            mapped_ ? space_ : ClientSpacePtr() );
+        return vehicle_.configure( assembly, origin,
+            mapped_ ? space_ : ClientSpacePtr(), assemblyModels ) &&
+            projectiles_.configure( assembly, origin,
+                mapped_ ? space_ : ClientSpacePtr() );
     }
 
     SpaceID spaceID_;
     ClientSpacePtr space_;
     EntityEmbodiments models_;
     ProjectileScene projectiles_;
+    VehicleScene vehicle_;
+    BaseCameraPtr camera_;
+    Vector3 cameraOrigin_;
     BW::string path_;
     bool mapped_;
     bool ready_;
+    bool cameraPlaced_;
 };
 
 StandaloneApp s_standaloneApp;

@@ -331,8 +331,10 @@ first authored shell from its original `HP_gunFire` bind position in the camera
 direction. Native terrain/static collision ends the trajectory; a line and
 impact cross show the result. The preview applies the exact descriptor's speed
 factor, base reload and ammunition capacity. Magazine/burst guns remain visual
-previews. Crew, dispersion, turret control, armor damage and driving are not
-connected yet.
+previews. W/S drive, A/D steer and Space applies the handbrake using the ported
+offline controller. Native terrain queries support the vehicle; collision-bound
+box sweeps block static obstacles. Crew, dispersion, turret control, armor
+damage, suspension, airborne motion and track animation are not connected yet.
 
 ## Build it yourself
 

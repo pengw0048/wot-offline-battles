@@ -12,6 +12,7 @@ import argparse
 import base64
 from collections import deque
 import json
+import math
 from pathlib import Path, PurePosixPath
 import re
 import struct
@@ -166,6 +167,120 @@ def preview_shot(vfs, resource_root, nation, gun, gun_component):
         'maxAmmo': int(max_ammo),
         'muzzlePosition': add(gun_component['position'], muzzle),
     }, None
+
+
+def preview_drive(vfs, nation, descriptor, chassis, hull, turret, gun):
+    """Export mounted stock inputs for the ported offline-mod drive law.
+
+    #1513 vehicles.__computeWeight sums installed module weights, excluding
+    ammunition. _readEngine uses HP_TO_WATTS=735.5; VehicleType uses the exact
+    KMH_TO_MS=0.27778 constant. DataSection readFloat/readVector values are
+    binary32 before the Python readers perform their double arithmetic.
+    """
+    def reader_float(node, path):
+        text = node.findtext(path)
+        if text is None:
+            raise ValueError('missing mounted drive descriptor field: ' + path)
+        return struct.unpack('<f', struct.pack('<f', float(text)))[0]
+
+    def reader_vector(node, path, count):
+        text = node.findtext(path)
+        if text is None:
+            raise ValueError('missing mounted drive descriptor vector: ' + path)
+        values = [struct.unpack('<f', struct.pack('<f', float(value)))[0]
+                  for value in text.split()]
+        if len(values) != count:
+            raise ValueError('invalid mounted drive descriptor vector: ' + path)
+        return values
+
+    definitions = {}
+    mounted = {}
+    resources = []
+    for kind, selected in (
+            ('engines', next(iter(descriptor.find('engines')))),
+            ('fuelTanks', next(iter(descriptor.find('fuelTanks')))),
+            ('radios', next(iter(descriptor.find('radios')))),
+            ('guns', gun)):
+        mounted[kind] = selected.tag
+        definition = selected
+        if (selected.text or '').strip() == 'shared':
+            resource = 'scripts/item_defs/vehicles/%s/components/%s.xml' % (nation, kind)
+            definitions_root = xml_root(vfs.read(resource))
+            definition = definitions_root.find('shared/' + selected.tag)
+            if definition is None:
+                raise ValueError('missing mounted shared %s: %s' % (kind, selected.tag))
+            resources.append(resource)
+        definitions[kind] = definition
+
+    weights = {
+        'hull': reader_float(hull, 'weight'),
+        'chassis': reader_float(chassis, 'weight'),
+        'engine': reader_float(definitions['engines'], 'weight'),
+        'fuel_tank': reader_float(definitions['fuelTanks'], 'weight'),
+        'radio': reader_float(definitions['radios'], 'weight'),
+        'turret': reader_float(turret, 'weight'),
+        'gun': reader_float(definitions['guns'], 'weight'),
+    }
+    mass = (weights['hull'] + weights['chassis'] + weights['engine'] +
+            weights['fuel_tank'] + weights['radio'])
+    mass += weights['turret'] + weights['gun']
+    track_center = abs(reader_vector(chassis, 'topRightCarryingPoint', 2)[0])
+    # This is derive_params' explicit offline-mod fallback, not a native size.
+    if not 0.3 <= track_center <= 3.0:
+        track_center = 1.5
+    drive = {
+        'mass': mass,
+        'power_w': reader_float(definitions['engines'], 'power') * 735.5,
+        'speed_forward': reader_float(descriptor, 'speedLimits/forward') * 0.27778,
+        'speed_backward': reader_float(descriptor, 'speedLimits/backward') * 0.27778,
+        'rotation_speed': math.radians(reader_float(chassis, 'rotationSpeed')),
+        'terrain_resistance': reader_vector(chassis, 'terrainResistance', 3),
+        # _readChassis uses this constant and never reads XML brakeForce.
+        'specific_friction': 0.6867000000000001,
+        'brake_deceleration': 1.3 * (9.81 * 1.25),
+        'track_center': track_center,
+        # The ordinary IS_CLIENT xphysics projection is flat; the existing
+        # mod's _native_power_ratio requires a detailed entry and returns 1.
+        'native_power_ratio': 1.0,
+    }
+    provenance = {
+        'law': 'Ported offline_lan_0922.vehicle_physics.derive_params; no crew or equipment factors.',
+        'mass_components_kg': weights,
+        'mounted_modules': mounted,
+        'reader_constants': {'HP_TO_WATTS': 735.5, 'KMH_TO_MS': 0.27778,
+                             'DEFAULT_SPECIFIC_FRICTION': 0.6867000000000001},
+        'ported_mod_defaults': {
+            'brake_deceleration': 'COHESION * GRAVITY; #1513 descriptor brakeForce is zero.',
+            'native_power_ratio': '1.0 from the existing mod fallback for ordinary IS_CLIENT xphysics.',
+            'track_center': 'Absolute mounted topRightCarryingPoint.x; existing mod uses 1.5 only outside [0.3, 3.0].',
+        },
+    }
+    return drive, provenance, resources
+
+
+def collision_bounds(vfs, definition):
+    """Read the authored client collision visual's model-local bounding box.
+
+    This is a conservative box for the preview, not an exact BSP contact mesh.
+    Reading its model/visual metadata does not extract the collision geometry.
+    """
+    model_resource = definition.findtext('hitTester/collisionModelClient')
+    if not model_resource:
+        return {}
+    model_resource = normalized(model_resource)
+    model = xml_root(vfs.read(model_resource))
+    visual = model.findtext('nodefullVisual') or model.findtext('nodelessVisual')
+    if not visual:
+        raise ValueError('collision model has no visual: ' + model_resource)
+    visual_resource = normalized(visual) + '.visual'
+    if visual_resource.lower() not in vfs.index:
+        visual_resource += '_processed'
+    root = xml_root(vfs.read(visual_resource))
+    return {
+        'collision_min': vector(root, 'boundingBox/min'),
+        'collision_max': vector(root, 'boundingBox/max'),
+        'collision_bounds_source': {'model': model_resource, 'visual': visual_resource},
+    }
 
 
 def descriptor_data(node):
@@ -354,6 +469,8 @@ def prepare(client_root, requested, output, engine_res=None):
         turret = next(iter(descriptor.find('turrets0')))
         gun = next(iter(turret.find('guns')))
         hull = descriptor.find('hull')
+        drive, drive_provenance, drive_resources = preview_drive(
+            vfs, nation, descriptor, chassis, hull, turret, gun)
         hull_position = vector(chassis, 'hullPosition')
         turret_position = add(hull_position, vector(hull, 'turretPositions/turret'))
         gun_position = add(turret_position, vector(turret, 'gunPosition'))
@@ -366,18 +483,16 @@ def prepare(client_root, requested, output, engine_res=None):
             model = definition.findtext('models/undamaged')
             if not model:
                 raise ValueError('selected %s lacks an undamaged model' % name)
-            components.append({'name': name, 'model': normalized(model),
-                               'position': position, 'descriptor': descriptor_data(definition)})
+            component = {'name': name, 'model': normalized(model),
+                         'position': position, 'descriptor': descriptor_data(definition)}
+            component.update(collision_bounds(vfs, definition))
+            components.append(component)
         output.mkdir(parents=True, exist_ok=False)
         extractor = Extractor(vfs, output)
         extractor.enqueue(descriptor_path, 'vehicle_descriptor')
-        # Shared module files provide the original gun/engine definitions whose
-        # inline vehicle overrides are retained in the descriptor above.
-        for node in (gun, next(iter(descriptor.find('engines')), None)):
-            if node is not None and (node.text or '').strip() == 'shared':
-                kind = 'guns' if node is gun else 'engines'
-                extractor.enqueue('scripts/item_defs/vehicles/%s/components/%s.xml' %
-                                  (nation, kind), descriptor_path)
+        # Keep the shared definitions used for mounted mass/power provenance.
+        for resource in drive_resources:
+            extractor.enqueue(resource, 'assembly/drive')
         for component in components:
             extractor.enqueue(component['model'], 'assembly/' + component['name'])
         extractor.extract()
@@ -401,6 +516,14 @@ def prepare(client_root, requested, output, engine_res=None):
             for key in ('name', 'model'):
                 ET.SubElement(item, key).text = component[key]
             ET.SubElement(item, 'position').text = ' '.join(repr(v) for v in component['position'])
+            for key in ('collision_min', 'collision_max'):
+                if key in component:
+                    ET.SubElement(item, key).text = ' '.join(repr(v) for v in component[key])
+        drive_node = ET.SubElement(assembly, 'drive')
+        for name, value in drive.items():
+            ET.SubElement(drive_node, name).text = (
+                ' '.join(repr(v) for v in value) if isinstance(value, list)
+                else repr(value))
         shot, firing_limitation = preview_shot(
             vfs, output / 'res', nation, gun, components[-1])
         if shot is not None:
@@ -419,6 +542,7 @@ def prepare(client_root, requested, output, engine_res=None):
             'configuration': {'selection': 'first authored chassis, turret and gun',
                               'chassis': chassis.tag, 'turret': turret.tag, 'gun': gun.tag},
             'components': components, 'assembly': assembly_path,
+            'drive': drive, 'drive_provenance': drive_provenance,
             'shot': shot,
             'firing_limitation': firing_limitation,
             'resource_paths': [str(output / 'res')],
@@ -438,6 +562,8 @@ def prepare(client_root, requested, output, engine_res=None):
             'limitations': [
                 'Static zero-angle preview; component positions come from the vehicle descriptor.',
                 'Firing uses the first authored shell, base reload and full capacity for that shell; crew, dispersion and turret control are not applied.',
+                'Drive parameters use mounted stock modules and the existing offline-mod laws; no crew/equipment factors or recovered retail contact solver are applied.',
+                'Blocking uses conservative boxes from authored collision_client visual bounds, not exact BSP mesh contacts.',
                 'Authored model nodes, geometry, texture data and LOD parent chains are retained.',
                 'Public lightonly materials use original diffuse textures; original PBS appearance is not restored.',
                 'Add public engine runtime resources after resource_paths, including compiled lightonly effects.',
