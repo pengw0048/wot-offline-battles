@@ -4,6 +4,7 @@
 #include "camera_app.hpp"
 #include "client_camera.hpp"
 #include "connection_control.hpp"
+#include "projectile_scene.hpp"
 
 #include "camera/free_camera.hpp"
 #include "chunk/chunk_manager.hpp"
@@ -201,6 +202,7 @@ public:
 
     virtual void tick( float dGameTime, float /* dRenderTime */ )
     {
+        projectiles_.advance( dGameTime );
         for (EntityEmbodiments::iterator model = models_.begin();
             model != models_.end(); ++model)
         {
@@ -218,6 +220,7 @@ public:
 
     virtual void fini()
     {
+        projectiles_.clear();
         for (EntityEmbodiments::iterator model = models_.begin();
             model != models_.end(); ++model)
         {
@@ -324,12 +327,14 @@ private:
         }
         INFO_MSG( "StandaloneApp: native model assembly attached: %s (%u components)\n",
             resource.c_str(), static_cast<uint32>( components.size() ) );
-        return true;
+        return projectiles_.configure( assembly, origin,
+            mapped_ ? space_ : ClientSpacePtr() );
     }
 
     SpaceID spaceID_;
     ClientSpacePtr space_;
     EntityEmbodiments models_;
+    ProjectileScene projectiles_;
     BW::string path_;
     bool mapped_;
     bool ready_;

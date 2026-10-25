@@ -20,6 +20,10 @@ def onChangeEnvironments(inside):
 
 
 def handleKeyEvent(event):
+    if event.key == BigWorld.stringToKey("KEY_LEFTMOUSE"):
+        if event.isKeyDown() and not event.isRepeatedEvent():
+            BigWorld.standaloneFire()
+        return True
     return BigWorld.camera().handleKeyEvent(event)
 
 

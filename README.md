@@ -326,8 +326,13 @@ assembly and the chosen world position:
 & "$ClientRoot\run-client.cmd" --res "$VehicleRes;$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia --assembly standalone/vehicles/ussr_R04_T-34/assembly.xml --model-position 0,50,0
 ```
 
-`--model` also accepts a single model resource. These are scene-preview entry
-points; vehicle movement and the native battle core are not connected yet.
+`--model` also accepts a single model resource. Left click fires the assembly's
+first authored shell from its original `HP_gunFire` bind position in the camera
+direction. Native terrain/static collision ends the trajectory; a line and
+impact cross show the result. The preview applies the exact descriptor's speed
+factor, base reload and ammunition capacity. Magazine/burst guns remain visual
+previews. Crew, dispersion, turret control, armor damage and driving are not
+connected yet.
 
 ## Build it yourself
 

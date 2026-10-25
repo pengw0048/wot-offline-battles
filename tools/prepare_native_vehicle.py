@@ -97,6 +97,77 @@ def add(left, right):
     return [a + b for a, b in zip(left, right)]
 
 
+def model_node_position(resource_root, model_resource, identifier):
+    """Resolve the authored bind pose using the public engine's row matrices."""
+    model = ET.parse(resource_root / model_resource).getroot()
+    visual = model.findtext('nodefullVisual')
+    if not visual:
+        raise ValueError('gun model has no nodefullVisual: ' + model_resource)
+    root = ET.parse(resource_root / (normalized(visual) + '.visual')).getroot()
+    identity = [[float(row == col) for col in range(4)] for row in range(4)]
+    matches = []
+
+    def visit(node, parent):
+        transform = node.find('transform')
+        if transform is None:
+            raise ValueError('model node has no bind transform: ' + identifier)
+        local = [vector(transform, 'row%d' % row) + [float(row == 3)]
+                 for row in range(4)]
+        world = [[sum(local[row][k] * parent[k][col] for k in range(4))
+                  for col in range(4)] for row in range(4)]
+        if node.findtext('identifier') == identifier:
+            matches.append(world[3][:3])
+        for child in node.findall('node'):
+            visit(child, world)
+
+    for node in root.findall('node'):
+        visit(node, identity)
+    if len(matches) != 1:
+        raise ValueError('expected one %s in %s' % (identifier, visual))
+    return matches[0]
+
+
+def preview_shot(vfs, resource_root, nation, gun, gun_component):
+    """Export #1513 GunShot values and base reload for static firing preview.
+
+    items/readers/gun_readers.readShot applies projectileSpeedFactor to speed
+    and its square to gravity. items/vehicles._readGunLocals overrides shared
+    reloadTime/maxAmmo while retaining shared shots. Crew effects are not yet
+    part of this static assembly preview.
+    """
+    shared = (gun.text or '').strip() == 'shared'
+    definition = gun
+    if shared:
+        definitions = xml_root(vfs.read(
+            'scripts/item_defs/vehicles/%s/components/guns.xml' % nation))
+        definition = definitions.find('shared/' + gun.tag)
+        if definition is None:
+            raise ValueError('missing shared gun: ' + gun.tag)
+    # The preview has one chamber and one base reload timer. Preserve the model
+    # preview without misrepresenting magazine or multi-round firing behavior.
+    if any(node.find(field) is not None for node in (gun, definition)
+           for field in ('burst', 'clip')):
+        return None, 'Magazine and burst firing are not implemented in the static preview.'
+    shots = definition.find('shots')
+    if shots is None or not len(shots):
+        raise ValueError('gun has no authored shots: ' + gun.tag)
+    shot = shots[0]
+    common = xml_root(vfs.read('scripts/item_defs/vehicles/common/vehicle.xml'))
+    factor = float(common.findtext('miscParams/projectileSpeedFactor'))
+    reload_time = gun.findtext('reloadTime', definition.findtext('reloadTime'))
+    max_ammo = gun.findtext('maxAmmo', definition.findtext('maxAmmo'))
+    muzzle = model_node_position(resource_root, gun_component['model'], 'HP_gunFire')
+    return {
+        'shell': nation + ':' + shot.tag,
+        'speed': float(shot.findtext('speed')) * factor,
+        'gravity': float(shot.findtext('gravity')) * factor ** 2,
+        'maxDistance': float(shot.findtext('maxDistance')),
+        'reloadTime': float(reload_time),
+        'maxAmmo': int(max_ammo),
+        'muzzlePosition': add(gun_component['position'], muzzle),
+    }, None
+
+
 def descriptor_data(node):
     """Preserve repeated fields and source units instead of inventing physics."""
     return {'name': node.tag, 'value': (node.text or '').strip(),
@@ -330,6 +401,14 @@ def prepare(client_root, requested, output, engine_res=None):
             for key in ('name', 'model'):
                 ET.SubElement(item, key).text = component[key]
             ET.SubElement(item, 'position').text = ' '.join(repr(v) for v in component['position'])
+        shot, firing_limitation = preview_shot(
+            vfs, output / 'res', nation, gun, components[-1])
+        if shot is not None:
+            shot_node = ET.SubElement(assembly, 'shot')
+            for name, value in shot.items():
+                ET.SubElement(shot_node, name).text = (
+                    ' '.join(repr(v) for v in value) if isinstance(value, list)
+                    else str(value))
         write_xml(output / 'res' / assembly_path, assembly)
         report = {
             'scene_kind': 'vehicle_resource_preview',
@@ -340,6 +419,8 @@ def prepare(client_root, requested, output, engine_res=None):
             'configuration': {'selection': 'first authored chassis, turret and gun',
                               'chassis': chassis.tag, 'turret': turret.tag, 'gun': gun.tag},
             'components': components, 'assembly': assembly_path,
+            'shot': shot,
+            'firing_limitation': firing_limitation,
             'resource_paths': [str(output / 'res')],
             'resources': sorted(extractor.files, key=lambda row: row['resource']),
             'dependency_edges': extractor.edges,
@@ -356,6 +437,7 @@ def prepare(client_root, requested, output, engine_res=None):
             'public_skin_helper_adapted': engine_res is not None and palette_rows > 51,
             'limitations': [
                 'Static zero-angle preview; component positions come from the vehicle descriptor.',
+                'Firing uses the first authored shell, base reload and full capacity for that shell; crew, dispersion and turret control are not applied.',
                 'Authored model nodes, geometry, texture data and LOD parent chains are retained.',
                 'Public lightonly materials use original diffuse textures; original PBS appearance is not restored.',
                 'Add public engine runtime resources after resource_paths, including compiled lightonly effects.',

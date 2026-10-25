@@ -60,6 +60,7 @@ jobs:
           try {
             $deadline = [DateTime]::UtcNow.AddSeconds(120)
             $started = $false
+            $rendered = $false
             do {
               $exited = $monitor.WaitForExit(1000)
               if (-not $process) {
@@ -70,12 +71,15 @@ jobs:
               if (Test-Path "$client\standalone.log") {
                 $started = [bool](Select-String -Path "$client\standalone.log" `
                   -SimpleMatch 'StandaloneApp: native application started' -Quiet)
+                $rendered = [bool](Select-String -Path "$client\standalone.log" `
+                  -SimpleMatch 'StandaloneApp: first native frame rendered' -Quiet)
               }
-            } while (-not $exited -and -not $started -and [DateTime]::UtcNow -lt $deadline)
+            } while (-not $exited -and -not $rendered -and [DateTime]::UtcNow -lt $deadline)
             if ($process) { $process.Refresh() }
             @{
               exited = $exited
               native_application_started = $started
+              first_native_frame_rendered = $rendered
               exit_code = $(if ($process -and $process.HasExited) { $process.ExitCode } else { $null })
               window_title = $(if ($process) { $process.MainWindowTitle } else { '' })
               window_handle = $(if ($process) { $process.MainWindowHandle.ToInt64() } else { 0 })

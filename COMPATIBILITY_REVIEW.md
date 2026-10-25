@@ -3243,7 +3243,8 @@ launcher languages. A Chinese stock garage alone does not validate GUI.Text.
 The opt-in `native/standalone_client` target begins a separate executable,
 using C++17 without a runtime dependency on the original game executable.
 The existing launcher, mod, server and mandatory worker are unchanged. The
-native target currently provides an audit CLI, not a playable replacement.
+native target provides an audit CLI and a separate engine scene preview; it is
+not yet a playable replacement.
 
 The engine candidate is public BigWorld 14.4.1, revision
 `3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb` from
@@ -3253,9 +3254,11 @@ collision and compiled-space modules. Its build still embeds Python 2.7.
 `tools/build_bigworld_client.ps1` builds a reproducible Win32/Hybrid MSVC
 build, using the pinned Microsoft.DXSDK.D3DX 9.29.952.8 package. It keeps source,
 SDK staging, build adaptation and logs in a caller-selected new directory.
-The independent engine and native application entry have compiled on Windows.
-A successful build is evidence of an engine binary, not WoT resource loading
-or behavior. No client assets or original executable are bundled by this target.
+The independent engine and native application entry have compiled and opened
+their own window/local space on Windows. Public FX sources compile locally;
+compiled effects load without the upstream legacy compiler flag. This startup
+does not establish WoT resource rendering or behavior. No client assets or
+original executable are bundled by this target.
 
 The native entry creates a local space and free camera, loads optional model
 assemblies through the engine's model/embodiment path, and releases attachments
@@ -3269,6 +3272,17 @@ geometry bytes; the public D3D9 target conversion handles UV packing. Shader
 palette capacity is derived from the actual model's node count. These resource
 adapters have been exercised on real assets, but their Windows rendering and
 complete scene behavior remain unproved.
+
+The native projectile scene consumes the ported trajectory/substep functions
+and the engine's static collision queries. It freezes a shot at admission,
+consumes ammunition, retains base reload, and records hit/range/time/teardown
+outcomes. Assembly export reads the first authored gun shot; exact
+`items/readers/gun_readers.readShot` multiplies speed by
+`miscParams/projectileSpeedFactor` and gravity by its square. The gun-local
+reload/maxAmmo overrides follow `items/vehicles._readGunLocals`. The muzzle is
+the original `HP_gunFire` hierarchy's bind transform. This static firing preview
+does not implement crew modifiers, dispersion, turret aiming, magazine guns,
+moving vehicle collision or armor damage.
 
 ### Compiled-space metadata
 
