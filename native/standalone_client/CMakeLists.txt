@@ -10,6 +10,7 @@ add_library(wot_battle_core STATIC
     src/vehicle_dynamics.cpp
     src/vehicle_drive.cpp
     src/vehicle_control.cpp
+    src/vehicle_collision.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -53,4 +54,7 @@ if(BUILD_TESTING)
     add_executable(test_vehicle_control tests/test_vehicle_control.cpp)
     target_link_libraries(test_vehicle_control PRIVATE wot_battle_core)
     add_test(NAME vehicle_control COMMAND test_vehicle_control)
+    add_executable(test_vehicle_collision tests/test_vehicle_collision.cpp)
+    target_link_libraries(test_vehicle_collision PRIVATE wot_battle_core)
+    add_test(NAME vehicle_collision COMMAND test_vehicle_collision)
 endif()
