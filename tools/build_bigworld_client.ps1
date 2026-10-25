@@ -196,7 +196,9 @@ bwclient_h.exe -noConversion %*
     }
     $Runtime = Get-ChildItem -Path (Join-Path $VsRoot `
         'VC\Redist\MSVC\*\x86\Microsoft.VC*.CRT\vcruntime140.dll') |
-        Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
+        Sort-Object { [version]::new($_.VersionInfo.FileMajorPart,
+            $_.VersionInfo.FileMinorPart, $_.VersionInfo.FileBuildPart,
+            $_.VersionInfo.FilePrivatePart) } -Descending |
         Select-Object -First 1
     if (-not $Runtime -or -not (Test-Path (Join-Path $Runtime.DirectoryName 'msvcp140.dll'))) {
         throw "The x86 Visual C++ runtime is incomplete."

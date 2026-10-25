@@ -1,0 +1,3 @@
+<material>
+    <fx>shaders/std_effects/forward_decal.fx</fx>
+</material>

@@ -40,6 +40,19 @@ jobs:
           gh run download $env:CLIENT_BUILD_RUN --repo $env:GITHUB_REPOSITORY `
             -n bigworld-client-win32 -D "$root\client"
           if ($LASTEXITCODE -ne 0) { throw 'Unable to retrieve the selected build' }
+          # Reuse compiled code while testing the current application's resources.
+          Copy-Item 'native\standalone_client\bigworld\res\*' `
+            -Destination "$root\client\res" -Recurse -Force
+          $env:STANDALONE_CLIENT_ROOT = "$root\client"
+          @'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'native/standalone_client/bigworld')
+          from fetch_resources import write_overlay_resources
+          root = Path(os.environ['STANDALONE_CLIENT_ROOT'])
+          write_overlay_resources(root / 'engine-res/resources.xml', root / 'res/resources.xml')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to merge application resource mappings' }
       - name: Capture first startup diagnostics
         continue-on-error: true
         shell: pwsh
@@ -120,7 +133,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Upload standalone engine binary
-        if: ${{ !inputs.client_build_run }}
         uses: actions/upload-artifact@v4
         with:
           name: bigworld-client-win32
