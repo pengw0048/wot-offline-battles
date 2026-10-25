@@ -253,10 +253,47 @@ bool ProjectileScene::fire()
         WARNING_MSG( "ProjectileScene: fire refused; target damage requires exported combat shot data\n" );
         return false;
     }
+    const Vector3 cameraOrigin = Moo::rc().invView().applyToOrigin();
     Vector3 direction = Moo::rc().invView().applyToUnitAxisVector( 2 );
-    if (!finite( direction ) || direction.lengthSquared() <= 0.f)
+    if (!finite( cameraOrigin ) || !finite( direction ) || direction.lengthSquared() <= 0.f)
     {
         WARNING_MSG( "ProjectileScene: fire refused; invalid native camera direction\n" );
+        return false;
+    }
+    direction.normalise();
+    // A third-person camera is offset from the real muzzle. Copying its
+    // direction as a parallel muzzle ray makes a centred target miss sideways.
+    // Select the camera ray's nearest actual surface, then converge the muzzle
+    // on that point. This query never applies damage or corrects ballistic drop.
+    Vector3 aim = cameraOrigin + direction * static_cast<float>( state.maxDistance );
+    const float rayLength = (aim - cameraOrigin).length();
+    if (!finite( aim ) || !std::isfinite( rayLength ) || rayLength <= 0.f)
+    {
+        WARNING_MSG( "ProjectileScene: fire refused; invalid camera aiming ray\n" );
+        return false;
+    }
+    StaticCollision aimCollision;
+    const float aimDistance = state.space->collide( cameraOrigin, aim, aimCollision );
+    if (!std::isfinite( aimDistance ) || aimDistance > rayLength)
+    {
+        WARNING_MSG( "ProjectileScene: fire refused; invalid native aiming query\n" );
+        return false;
+    }
+    if (aimDistance >= 0.f)
+        aim = cameraOrigin + (aim - cameraOrigin) * (aimDistance / rayLength);
+    if (target_)
+    {
+        Vector3 targetAim;
+        if (!target_->aimPoint( cameraOrigin, aim, targetAim ))
+            return false;
+        aim = targetAim;
+    }
+    // A clear camera ray's range endpoint is directional input only, never a
+    // fabricated hit. Actual damage still waits for the advancing projectile.
+    direction = aim - state.muzzle;
+    if (!finite( direction ) || direction.lengthSquared() <= 0.f)
+    {
+        WARNING_MSG( "ProjectileScene: fire refused; aiming point coincides with muzzle\n" );
         return false;
     }
     direction.normalise();
@@ -440,8 +477,8 @@ void ProjectileScene::draw()
         target_->draw();
     if (state.configured && Moo::rc().device())
     {
-        // Presentation only: the camera-forward aiming direction crosses the
-        // screen centre. The muzzle and ballistic trajectory remain physical.
+        // Presentation only: the centre selects the camera ray's aiming point.
+        // The muzzle trajectory still has its real offset and ballistic drop.
         const float centerX = Moo::rc().screenWidth() * 0.5f;
         const float centerY = Moo::rc().screenHeight() * 0.5f;
         const Moo::Colour colour( 0.85f, 1.f, 0.85f, 1.f );

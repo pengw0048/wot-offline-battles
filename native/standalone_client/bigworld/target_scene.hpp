@@ -27,6 +27,9 @@ public:
     bool configure( DataSectionPtr assembly, const Vector3 & origin,
         const EntityEmbodiments & models );
     bool active() const;
+    // Read-only camera-ray selection. A clear ray returns its supplied endpoint.
+    bool aimPoint( const Vector3 & start, const Vector3 & finish,
+        Vector3 & point ) const;
     std::shared_ptr<ShotState> createShot( const wot::CombatShot & shot,
         double penetrationFactor, double damageRoll ) const;
     TraceResult trace( ShotState & shot, const Vector3 & origin,

@@ -327,8 +327,8 @@ assembly and the chosen world position:
 ```
 
 `--model` also accepts a single model resource. Left click fires the assembly's
-first authored shell from its original `HP_gunFire` bind position in the camera
-direction. Native terrain/static collision ends the trajectory; a line and
+first authored shell from its original `HP_gunFire` bind position toward the
+camera reticle's surface point. Native terrain/static collision ends the trajectory; a line and
 impact cross show the result. The preview applies the exact descriptor's speed
 factor, base reload and ammunition capacity. Magazine/burst guns remain visual
 previews. W/S drive, A/D steer and Space applies the handbrake using the ported

@@ -203,9 +203,17 @@ public:
         BaseCameraPtr camera( new FreeCamera(),
             PyObjectPtr::STEAL_REFERENCE );
         Matrix view;
-        view.lookAt( config->readVector3( "standalone/cameraPosition",
-            Vector3( 0.f, 25.f, 0.f ) ), Vector3( 0.f, 0.f, 1.f ),
-            Vector3( 0.f, 1.f, 0.f ) );
+        Vector3 eye = config->readVector3( "standalone/cameraPosition",
+            Vector3( 0.f, 25.f, 0.f ) );
+        Vector3 direction( 0.f, 0.f, 1.f );
+        if (!assemblyPath.empty())
+        {
+            // Chunk streaming follows the camera. Start near the requested
+            // vehicle so ground loading cannot wait on a distant map camera.
+            eye = modelPosition + Vector3( 8.f, 5.f, -12.f );
+            direction = modelPosition + Vector3( 0.f, 1.f, 0.f ) - eye;
+        }
+        view.lookAt( eye, direction, Vector3( 0.f, 1.f, 0.f ) );
         camera->set( view );
         camera->spaceID( spaceID_ );
         CameraApp::instance().clientCamera().camera( camera );

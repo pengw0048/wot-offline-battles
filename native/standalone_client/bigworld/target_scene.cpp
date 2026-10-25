@@ -110,6 +110,18 @@ struct TargetScene::State
     FontPtr font;
     BW::string feedback;
 
+    std::vector<wot::VehicleCollisionComponent> collisionComponents() const
+    {
+        std::vector<wot::VehicleCollisionComponent> result;
+        for (size_t index = 0; index < components.size(); ++index)
+        {
+            const Component & component = components[index];
+            result.push_back( { std::string( component.name.c_str() ), &component.mesh,
+                collisionMatrix( component.model->worldTransform() ) } );
+        }
+        return result;
+    }
+
     void removeModels()
     {
         for (size_t index = 0; index < components.size(); ++index)
@@ -195,6 +207,27 @@ bool TargetScene::configure( DataSectionPtr assembly, const Vector3 & origin,
 
 bool TargetScene::active() const { return state_->configured && state_->health > 0; }
 
+bool TargetScene::aimPoint( const Vector3 & start, const Vector3 & finish,
+    Vector3 & point ) const
+{
+    point = finish;
+    if (!active() || (finish - start).lengthSquared() <= 0.f)
+        return true;
+    try
+    {
+        const std::vector<wot::VehicleCollisionHit> hits = wot::collide_vehicle_segment(
+            state_->collisionComponents(), collisionVector( start ), collisionVector( finish ) );
+        if (!hits.empty())
+            point = nativeVector( hits.front().point );
+        return true;
+    }
+    catch (const std::exception & error)
+    {
+        WARNING_MSG( "TargetScene: read-only aim query failed: %s\n", error.what() );
+        return false;
+    }
+}
+
 std::shared_ptr<TargetScene::ShotState> TargetScene::createShot(
     const wot::CombatShot & combat, double factor, double damageRoll ) const
 {
@@ -215,15 +248,8 @@ TargetScene::TraceResult TargetScene::trace( ShotState & shot,
     State & state = *state_;
     try
     {
-        std::vector<wot::VehicleCollisionComponent> components;
-        for (size_t index = 0; index < state.components.size(); ++index)
-        {
-            const State::Component & component = state.components[index];
-            components.push_back( { std::string( component.name.c_str() ), &component.mesh,
-                collisionMatrix( component.model->worldTransform() ) } );
-        }
         const std::vector<wot::VehicleCollisionHit> hits = wot::collide_vehicle_segment(
-            components, collisionVector( start ), collisionVector( finish ) );
+            state.collisionComponents(), collisionVector( start ), collisionVector( finish ) );
         for (size_t index = 0; index < hits.size(); ++index)
         {
             const wot::VehicleCollisionHit & hit = hits[index];
