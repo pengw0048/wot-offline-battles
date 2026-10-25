@@ -111,7 +111,8 @@ struct VehicleScene::State
         const double rightHeight = (right - left) / width;
         plane.y = center - groundBottom;
         plane.pitch = -std::atan2( front - rear, length );
-        plane.roll = std::atan2( rightHeight, std::hypot( 1.0, forwardHeight ) );
+        plane.roll = std::atan2( rightHeight,
+            std::sqrt( 1.0 + forwardHeight * forwardHeight ) );
         return std::isfinite( plane.y ) && std::isfinite( plane.pitch ) &&
             std::isfinite( plane.roll );
     }

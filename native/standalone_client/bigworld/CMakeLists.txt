@@ -28,6 +28,13 @@ if(MSVC)
         "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
         PROPERTIES COMPILE_DEFINITIONS
         "_HAS_AUTO_PTR_ETC=1;_HAS_TR1_NAMESPACE=1;_ENFORCE_MATCHING_ALLOCATORS=0")
+    # The bundled Python 2.7 declarations still use register parameters.
+    # Keep that legacy-header warning local to the engine adapters.
+    set_property(SOURCE
+        "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
+        APPEND PROPERTY COMPILE_OPTIONS "/wd5033")
 else()
     set_source_files_properties(${WOT_NUMERICAL_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
