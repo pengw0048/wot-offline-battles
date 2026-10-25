@@ -1,0 +1,21 @@
+<root>
+    <personality>WotStandalone</personality>
+    <entities>
+        <disablePreloads>true</disablePreloads>
+    </entities>
+    <renderer>
+        <cacheEffects>false</cacheEffects>
+    </renderer>
+    <soundMgr>
+        <enabled>false</enabled>
+    </soundMgr>
+    <camera>
+        <farPlane>1000</farPlane>
+    </camera>
+    <standalone>
+        <!-- Set to a public-engine-compatible space resource directory. -->
+        <!-- Original #1513 BWST data needs its own format adapter. -->
+        <space></space>
+        <cameraPosition>0 25 0</cameraPosition>
+    </standalone>
+</root>

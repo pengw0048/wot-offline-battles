@@ -5,10 +5,6 @@ on:
     paths:
       - native/standalone_client/**
       - .github/workflows/native-core.yml
-  pull_request:
-    paths:
-      - native/standalone_client/**
-      - .github/workflows/native-core.yml
   workflow_dispatch:
 
 permissions:

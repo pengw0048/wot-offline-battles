@@ -2,9 +2,10 @@ name: Build standalone BigWorld client
 
 on:
   workflow_dispatch:
-  pull_request:
+  push:
     paths:
       - 'tools/build_bigworld_client.ps1'
+      - 'native/standalone_client/bigworld/**'
       - '.github/workflows/bigworld-client.yml'
 
 permissions:

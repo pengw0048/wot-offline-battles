@@ -14,6 +14,12 @@ if (-not $IsWindows) {
 
 $Revision = "3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb"
 $D3dxVersion = "9.29.952.8"
+$RepositoryRoot = Split-Path -Parent $PSScriptRoot
+$StandaloneRoot = Join-Path $RepositoryRoot "native\standalone_client\bigworld"
+$StandaloneCmake = Join-Path $StandaloneRoot "CMakeLists.txt"
+if (-not (Test-Path -LiteralPath $StandaloneCmake)) {
+    throw "The standalone application CMake fragment is missing: $StandaloneCmake"
+}
 $WorkRoot = [IO.Path]::GetFullPath($WorkDirectory)
 if (Test-Path -LiteralPath $WorkRoot) {
     throw "Use a new work directory; existing files will not be replaced: $WorkRoot"
@@ -67,6 +73,16 @@ try {
         }
     }
 
+    # The pinned source predates the current SDK's API deprecations and the
+    # standard library's nodiscard annotations. Keep /WX for other diagnostics.
+    $CompilerOptions = Join-Path $EngineRoot "build\cmake\BWCompilerAndLinkerOptions.cmake"
+    $CompilerOptionsText = Get-Content -LiteralPath $CompilerOptions -Raw
+    if ([regex]::Matches($CompilerOptionsText, '/WX').Count -ne 1) {
+        throw "The pinned compiler warning policy changed."
+    }
+    $CompilerOptionsText.Replace('/WX', '/WX /wd4996 /wd4834') |
+        Set-Content -LiteralPath $CompilerOptions -Encoding utf8
+
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.
     $D3dxArchive = Join-Path $WorkRoot "d3dx.nupkg"
@@ -101,6 +117,9 @@ try {
     # must define its GUIDs without inheriting the client's precompiled header.
     Add-Content -LiteralPath (Join-Path $EngineRoot "client\CMakeLists.txt") `
         -Value "`nTARGET_SOURCES(bwclient PRIVATE d3dx_guids.cpp)`n" -Encoding utf8
+    $StandaloneCmakePath = $StandaloneCmake.Replace('\', '/')
+    Add-Content -LiteralPath (Join-Path $EngineRoot "client\CMakeLists.txt") `
+        -Value "`nINCLUDE(`"$StandaloneCmakePath`")`n" -Encoding utf8
 
     @{
         upstream = "https://github.com/v2v3v4/BigWorld-Engine-14.4.1"
@@ -110,7 +129,11 @@ try {
         toolset = "v142"
         platform = "Win32"
         configuration = "Hybrid"
-        source_adaptation = "Define D3DX9 GUIDs for the modern Windows SDK"
+        source_adaptation = @(
+            "Define D3DX9 GUIDs for the modern Windows SDK",
+            "Suppress observed legacy API/nodiscard warnings C4996 and C4834; retain /WX",
+            "Link the repository's native standalone application bootstrap"
+        )
     } | ConvertTo-Json | Set-Content -LiteralPath `
         (Join-Path $ArtifactRoot "build-inputs.json") -Encoding utf8
 
@@ -128,6 +151,8 @@ try {
     }
     New-Item -ItemType Directory -Path $ClientOutput | Out-Null
     Copy-Item -Path (Join-Path $UpstreamOutput "*") -Destination $ClientOutput -Recurse
+    Copy-Item -LiteralPath (Join-Path $StandaloneRoot "res") `
+        -Destination (Join-Path $ClientOutput "res") -Recurse
     Copy-Item -Path (Join-Path $D3dxNative "release\bin\x86\*.dll") `
         -Destination $ClientOutput
     Copy-Item -LiteralPath (Join-Path $SourceRoot "LICENSE") `
@@ -139,7 +164,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $D3dxRoot "NOTICE.md") `
         -Destination (Join-Path $ClientOutput "D3DX-NOTICE.md")
     Write-Host "Built standalone BigWorld engine binary: $ClientOutput"
-    Write-Host "No game resources or WoT battle implementation are included."
+    Write-Host "Includes the standalone bootstrap resource overlay; no WoT game resources are included."
 }
 catch {
     Write-Host ($_ | Out-String)

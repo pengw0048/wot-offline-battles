@@ -1,0 +1,7 @@
+<root>
+    <system>
+        <engineConfigXML>standalone/engine_config.xml</engineConfigXML>
+        <scriptsConfigXML>standalone/scripts_config.xml</scriptsConfigXML>
+        <graphicsSettingsXML>standalone/graphics_settings.xml</graphicsSettingsXML>
+    </system>
+</root>

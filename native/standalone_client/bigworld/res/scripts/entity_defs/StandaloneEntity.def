@@ -1,0 +1,11 @@
+<root>
+    <Distribution>
+        <Client>true</Client>
+        <Base>false</Base>
+        <Cell>false</Cell>
+    </Distribution>
+    <Properties />
+    <ClientMethods />
+    <BaseMethods />
+    <CellMethods />
+</root>

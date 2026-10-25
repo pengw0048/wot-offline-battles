@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(wot_standalone_core LANGUAGES CXX)
 
 add_library(wot_battle_core STATIC
+    src/ballistics.cpp
     src/compiled_space.cpp
     src/point_velocity.cpp
 )
@@ -29,4 +30,7 @@ if(BUILD_TESTING)
     add_executable(test_point_velocity tests/test_point_velocity.cpp)
     target_link_libraries(test_point_velocity PRIVATE wot_battle_core)
     add_test(NAME point_velocity COMMAND test_point_velocity)
+    add_executable(test_ballistics tests/test_ballistics.cpp)
+    target_link_libraries(test_ballistics PRIVATE wot_battle_core)
+    add_test(NAME ballistics COMMAND test_ballistics)
 endif()
