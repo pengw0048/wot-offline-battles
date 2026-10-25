@@ -165,6 +165,13 @@ try {
     </Paths>
 </root>
 '@ | Set-Content -LiteralPath (Join-Path $ClientOutput "paths.xml") -Encoding utf8
+    # The standalone package reads prepared resources directly. The upstream
+    # developer executable otherwise waits for an asset-conversion server.
+    @'
+@echo off
+cd /d "%~dp0"
+bwclient_h.exe -noConversion %*
+'@ | Set-Content -LiteralPath (Join-Path $ClientOutput "run-client.cmd") -Encoding ascii
     Copy-Item -Path (Join-Path $D3dxNative "release\bin\x86\*.dll") `
         -Destination $ClientOutput
     Copy-Item -LiteralPath (Join-Path $SourceRoot "LICENSE") `

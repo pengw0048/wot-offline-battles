@@ -1,5 +1,7 @@
 """Public-engine lifecycle glue; scene and battle ownership are native."""
 
+import BigWorld
+
 
 def init(*args):
     pass
@@ -18,12 +20,12 @@ def onChangeEnvironments(inside):
 
 
 def handleKeyEvent(event):
-    return False
+    return BigWorld.camera().handleKeyEvent(event)
 
 
 def handleMouseEvent(event):
-    return False
+    return BigWorld.camera().handleMouseEvent(event)
 
 
 def handleAxisEvent(event):
-    return False
+    return BigWorld.camera().handleAxisEvent(event)

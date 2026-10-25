@@ -29,7 +29,7 @@ jobs:
           $client = "$env:RUNNER_TEMP\bigworld-client\artifacts\client"
           $logs = "$env:RUNNER_TEMP\bigworld-client\artifacts\logs"
           $process = Start-Process -FilePath "$client\bwclient_h.exe" `
-            -WorkingDirectory $client -PassThru `
+            -ArgumentList '-noConversion' -WorkingDirectory $client -PassThru `
             -RedirectStandardOutput "$logs\startup-stdout.log" `
             -RedirectStandardError "$logs\startup-stderr.log"
           try {

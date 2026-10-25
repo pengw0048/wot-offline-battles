@@ -282,7 +282,8 @@ CMake and PowerShell 7, use a new temporary work directory:
 It downloads source, Microsoft's D3DX package and the public engine runtime
 resources into that directory. The resulting `artifacts/client` directory
 contains `bwclient_h.exe`, a native local-space/free-camera entry and its
-bootstrap resources. The upstream engine still embeds Python 2.7; the
+bootstrap resources. Start it through `run-client.cmd`, which selects local
+prepared resources without the upstream development asset server. The upstream engine still embeds Python 2.7; the
 independent battle core does not. An engine build alone is not a playable WoT
 client: #1513 scene loading, vehicle simulation and native battle integration
 remain separate implementation work.
@@ -300,7 +301,7 @@ built client directory and `$SceneRes` to the preview's `res` directory, then
 run the independently built executable:
 
 ```powershell
-& "$ClientRoot\bwclient_h.exe" --res "$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia
+& "$ClientRoot\run-client.cmd" --res "$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia
 ```
 
 ## Build it yourself
