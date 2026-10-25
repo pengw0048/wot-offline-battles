@@ -6,6 +6,7 @@ add_library(wot_battle_core STATIC
     src/combat_rules.cpp
     src/compiled_space.cpp
     src/point_velocity.cpp
+    src/projectile_motion.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -37,4 +38,7 @@ if(BUILD_TESTING)
     add_executable(test_combat_rules tests/test_combat_rules.cpp)
     target_link_libraries(test_combat_rules PRIVATE wot_battle_core)
     add_test(NAME combat_rules COMMAND test_combat_rules)
+    add_executable(test_projectile_motion tests/test_projectile_motion.cpp)
+    target_link_libraries(test_projectile_motion PRIVATE wot_battle_core)
+    add_test(NAME projectile_motion COMMAND test_projectile_motion)
 endif()
