@@ -73,13 +73,80 @@ bool StockDx9EffectRuntime::create(IDirect3DDevice9* device, ID3DXEffectStateMan
 StockDx9EffectMaterial::StockDx9EffectMaterial(std::shared_ptr<StockDx9EffectRuntime> runtime,
     StockEffectUniformContext& uniform_context) : runtime_(std::move(runtime)),
     binding_(required_definition(runtime_), uniform_context),
-    textures_(runtime_->definition_->resource_views.size()) {}
+    textures_(runtime_->definition_->resource_views.size()),
+    automatic_textures_(textures_.size(),false) {
+    register_material();
+}
 
 StockDx9EffectMaterial::StockDx9EffectMaterial(const StockDx9EffectMaterial& source,
     StockEffectUniformContext& uniform_context) : runtime_(source.runtime_),
-    binding_(runtime_->definition_, uniform_context), textures_(source.textures_) {
+    binding_(runtime_->definition_, uniform_context), textures_(source.textures_),
+    automatic_textures_(source.automatic_textures_) {
     std::string error;
     if (!binding_.copy_values_from(source.binding_, error)) throw std::runtime_error(error);
+    register_material();
+}
+
+void StockDx9EffectMaterial::register_material() {
+    std::lock_guard<std::mutex> lock(runtime_->materials_mutex_);
+    runtime_->materials_.push_back(this);
+}
+
+StockDx9EffectMaterial::~StockDx9EffectMaterial() {
+    std::lock_guard<std::mutex> lock(runtime_->materials_mutex_);
+    auto& materials=runtime_->materials_;
+    materials.erase(std::remove(materials.begin(),materials.end(),this),materials.end());
+}
+
+bool StockDx9EffectRuntime::on_lost_device(std::string& error) {
+    std::lock_guard<std::mutex> lock(materials_mutex_);
+    bool success=true;
+    for (auto* material:materials_) {
+        std::string failure;
+        if (!material->release_automatic_device_textures(failure)) {
+            if (success) error=failure;
+            success=false;
+        }
+    }
+    if (success) error.clear();
+    return success;
+}
+
+bool StockDx9EffectMaterial::release_automatic_device_textures(std::string& error) {
+    for (std::size_t i=0;i<textures_.size();++i) {
+        auto* texture=textures_[i].get();
+        if (!texture || !automatic_textures_[i]) continue;
+        D3DPOOL pool;
+        HRESULT result;
+        switch (texture->GetType()) {
+        case D3DRTYPE_TEXTURE: {
+            D3DSURFACE_DESC desc{};
+            result=static_cast<IDirect3DTexture9*>(texture)->GetLevelDesc(0,&desc);
+            pool=desc.Pool;
+            break;
+        }
+        case D3DRTYPE_CUBETEXTURE: {
+            D3DSURFACE_DESC desc{};
+            result=static_cast<IDirect3DCubeTexture9*>(texture)->GetLevelDesc(0,&desc);
+            pool=desc.Pool;
+            break;
+        }
+        case D3DRTYPE_VOLUMETEXTURE: {
+            D3DVOLUME_DESC desc{};
+            result=static_cast<IDirect3DVolumeTexture9*>(texture)->GetLevelDesc(0,&desc);
+            pool=desc.Pool;
+            break;
+        }
+        default:
+            return invalid("Automatic effect texture has an invalid resource type",error);
+        }
+        if (failed(result,"GetLevelDesc(automatic effect texture)",error)) return false;
+        // Managed and manually supplied resources keep their own lifecycle.
+        // The real semantic producer republishes a new default-pool target on
+        // the next draw after Reset; retaining the old target prevents Reset.
+        if (pool==D3DPOOL_DEFAULT) textures_[i].reset();
+    }
+    error.clear();return true;
 }
 
 IDirect3DBaseTexture9* StockDx9EffectMaterial::texture(std::size_t resource_view) const {
@@ -87,7 +154,7 @@ IDirect3DBaseTexture9* StockDx9EffectMaterial::texture(std::size_t resource_view
 }
 
 bool StockDx9EffectMaterial::set_texture(std::size_t resource_view,
-    IDirect3DBaseTexture9* texture, std::string& error) {
+    IDirect3DBaseTexture9* texture, std::string& error, bool automatic) {
     const auto& definition = *runtime_->definition_;
     if (resource_view >= definition.resource_views.size())
         return invalid("Texture is outside the effect resource table", error);
@@ -97,6 +164,7 @@ bool StockDx9EffectMaterial::set_texture(std::size_t resource_view,
     if (texture) texture->AddRef();
     textures_[resource_view] = std::shared_ptr<IDirect3DBaseTexture9>(texture,
         [](IDirect3DBaseTexture9* object) { if (object) object->Release(); });
+    automatic_textures_[resource_view]=automatic;
     error.clear(); return true;
 }
 

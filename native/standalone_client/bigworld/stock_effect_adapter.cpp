@@ -55,6 +55,9 @@ struct StockEffectSharedContext::Impl {
   };
   std::map<std::size_t, Shared> declarations;
   std::map<std::pair<std::size_t, std::size_t>, std::string> failures;
+  // A Properties owner may retain a previous Definition after shader reload.
+  // Current Moo Definitions still notify those live runtimes at device loss.
+  std::vector<std::weak_ptr<StockDx9EffectRuntime>> runtimes;
 };
 
 class StockEffectAdapter final : public ID3DXEffect {
@@ -218,6 +221,7 @@ private:
     std::size_t declaration = 0;
   };
   void initialise();
+  void register_runtime();
   std::vector<std::string> automatic_semantics() const;
   const Destination *destination(D3DXHANDLE handle) const;
   std::uint32_t parameter_number(D3DXHANDLE handle) const;
@@ -279,7 +283,20 @@ std::vector<std::string> StockEffectAdapter::automatic_semantics() const {
         names.push_back(resource.semantic);
   return names;
 }
+void StockEffectAdapter::register_runtime() {
+  std::lock_guard<std::recursive_mutex> lock(context_.impl_->mutex);
+  if (runtime_) {
+    auto& runtimes = context_.impl_->runtimes;
+    runtimes.erase(std::remove_if(runtimes.begin(), runtimes.end(),
+        [](const auto& entry) { return entry.expired(); }), runtimes.end());
+    if (std::none_of(runtimes.begin(), runtimes.end(),
+        [this](const auto& entry) { return entry.lock() == runtime_; }))
+      runtimes.emplace_back(runtime_);
+  }
+}
 void StockEffectAdapter::initialise() {
+  register_runtime();
+  std::lock_guard<std::recursive_mutex> lock(context_.impl_->mutex);
   if (!technique_)
     technique_ = effect_handle(reflection_.technique(0));
   for (std::size_t i = 0; i < definition_->uniform_buffers.size(); ++i) {
@@ -898,7 +915,8 @@ HRESULT STDMETHODCALLTYPE StockEffectAdapter::SetTexture(
     index = reference->owner;
   }
   std::string error;
-  const auto result = material_->set_texture(index, texture, error);
+  const auto result = material_->set_texture(index, texture, error,
+      destination(parameter) != nullptr);
   if (!result && destination(parameter))
     capture_error_ = error;
   return result ? S_OK : E_INVALIDARG;
@@ -1042,10 +1060,23 @@ StockEffectAdapter::GetDevice(struct IDirect3DDevice9 **device) {
   return S_OK;
 }
 HRESULT STDMETHODCALLTYPE StockEffectAdapter::OnLostDevice() {
-  // D3D9 shader objects survive Reset. No saved state blocks are owned here.
+  // D3D9 shaders survive Reset, but all inactive Properties-owned Bindings
+  // must relinquish their automatic default-pool textures before it starts.
   pass_.reset();
   begun_ = false;
-  return S_OK;
+  std::lock_guard<std::recursive_mutex> lock(context_.impl_->mutex);
+  bool success = true;
+  auto& runtimes = context_.impl_->runtimes;
+  for (auto it = runtimes.begin(); it != runtimes.end();) {
+    if (auto runtime = it->lock()) {
+      std::string error;
+      if (!runtime->on_lost_device(error)) success = false;
+      ++it;
+    } else {
+      it = runtimes.erase(it);
+    }
+  }
+  return success ? S_OK : E_FAIL;
 }
 HRESULT STDMETHODCALLTYPE StockEffectAdapter::OnResetDevice() {
   return runtime_ ? S_OK : D3DERR_INVALIDCALL;

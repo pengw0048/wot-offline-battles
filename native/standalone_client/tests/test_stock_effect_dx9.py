@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import os
 
 
 ROOT = Path(__file__).parents[1]
@@ -18,11 +19,16 @@ using HRESULT = std::int32_t;
 using D3DFORMAT = int;
 using D3DRENDERSTATETYPE = int;
 using D3DSAMPLERSTATETYPE = int;
+using D3DPOOL = int;
 #define FAILED(value) ((value) < 0)
 #define SUCCEEDED(value) ((value) >= 0)
 constexpr DWORD D3DVERTEXTEXTURESAMPLER0 = 257;
 constexpr int D3DDEVTYPE_HAL = 1, D3DUSAGE_QUERY_VERTEXTEXTURE = 0x100000;
 constexpr int D3DRTYPE_TEXTURE = 3, D3DFMT_R32F = 114;
+constexpr int D3DRTYPE_CUBETEXTURE = 5, D3DRTYPE_VOLUMETEXTURE = 4;
+constexpr D3DPOOL D3DPOOL_DEFAULT = 0, D3DPOOL_MANAGED = 1, D3DPOOL_SYSTEMMEM = 2;
+struct D3DSURFACE_DESC { D3DPOOL Pool = D3DPOOL_DEFAULT; };
+struct D3DVOLUME_DESC { D3DPOOL Pool = D3DPOOL_DEFAULT; };
 struct D3DDEVICE_CREATION_PARAMETERS { DWORD AdapterOrdinal = 0; };
 struct D3DDISPLAYMODE { D3DFORMAT Format = 21; };
 struct Object {
@@ -31,7 +37,21 @@ struct Object {
     void AddRef() { ++refs; }
     void Release() { if (!--refs) delete this; }
 };
-struct IDirect3DBaseTexture9 : Object {};
+struct IDirect3DBaseTexture9 : Object { virtual int GetType() { return D3DRTYPE_TEXTURE; } };
+struct IDirect3DTexture9 : IDirect3DBaseTexture9 {
+    D3DPOOL pool = D3DPOOL_DEFAULT;
+    HRESULT GetLevelDesc(unsigned, D3DSURFACE_DESC* out) { out->Pool = pool; return 0; }
+};
+struct IDirect3DCubeTexture9 : IDirect3DBaseTexture9 {
+    D3DPOOL pool = D3DPOOL_DEFAULT;
+    int GetType() override { return D3DRTYPE_CUBETEXTURE; }
+    HRESULT GetLevelDesc(unsigned, D3DSURFACE_DESC* out) { out->Pool = pool; return 0; }
+};
+struct IDirect3DVolumeTexture9 : IDirect3DBaseTexture9 {
+    D3DPOOL pool = D3DPOOL_DEFAULT;
+    int GetType() override { return D3DRTYPE_VOLUMETEXTURE; }
+    HRESULT GetLevelDesc(unsigned, D3DVOLUME_DESC* out) { out->Pool = pool; return 0; }
+};
 struct IDirect3DVertexShader9 : Object {};
 struct IDirect3DPixelShader9 : Object {};
 struct IDirect3D9 : Object {
@@ -68,6 +88,7 @@ struct ID3DXEffectStateManager : Object {
 '''
 PROBE = r'''
 #include "stock_effect_dx9.hpp"
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -128,12 +149,164 @@ void exercise(unsigned stage, bool hole, bool distinctSamplers) {
     }
     runtime.reset(); device->Release(); states->Release();
 }
+void deviceLoss() {
+    auto effect = std::make_shared<wot::StockEffectBinary>();
+    wot::StockEffectType textureType; textureType.basic_type = 5;
+    effect->types.push_back(textureType);effect->resource_views.resize(5);
+    auto* device = new IDirect3DDevice9;
+    auto* states = new ID3DXEffectStateManager;
+    std::shared_ptr<wot::StockDx9EffectRuntime> runtime;
+    std::string error;
+    check(wot::StockDx9EffectRuntime::create(device,states,effect,runtime,error),error.c_str());
+    wot::StockEffectUniformPool pool;wot::StockEffectUniformContext context(pool);
+    auto* depth = new IDirect3DTexture9;
+    auto* cube = new IDirect3DCubeTexture9;
+    auto* volume = new IDirect3DVolumeTexture9;
+    auto* managed = new IDirect3DTexture9;managed->pool = D3DPOOL_MANAGED;
+    auto* manual = new IDirect3DTexture9;
+    {
+        wot::StockDx9EffectMaterial definition(runtime,context);
+        wot::StockDx9EffectMaterial inactive(runtime,context);
+        for (auto* material : {&definition,&inactive}) {
+            check(material->set_texture(0,depth,error,true) && material->set_texture(1,cube,error,true) &&
+                material->set_texture(2,volume,error,true) && material->set_texture(3,managed,error,true) &&
+                material->set_texture(4,manual,error),error.c_str());
+        }
+        auto retired = std::make_unique<wot::StockDx9EffectMaterial>(inactive,context);
+        check(retired->texture(0)==depth,"Clone must inherit the real automatic texture");
+        retired.reset(); // AddressSanitizer checks the removed registration below.
+        check(runtime->on_lost_device(error),error.c_str());
+        for (auto* material : {&definition,&inactive}) {
+            check(material->set_texture(0,depth,error,true) && material->set_texture(1,cube,error,true) &&
+                material->set_texture(2,volume,error,true),error.c_str());
+        }
+        wot::StockDx9EffectMaterial clone(inactive,context);
+        check(depth->refs==3 && cube->refs==3 && volume->refs==3,"All bindings retain the actual resources");
+        check(runtime->on_lost_device(error),error.c_str());
+        for (auto* material : {&definition,&inactive,&clone}) {
+            check(!material->texture(0) && !material->texture(1) && !material->texture(2),
+                "Device loss must clear automatic DEFAULT 2D, cube and volume refs in every binding");
+            check(material->texture(3)==managed && material->texture(4)==manual,
+                "Managed automatic and manually owned textures retain their lifecycle");
+        }
+        check(depth->refs==1 && cube->refs==1 && volume->refs==1,
+            "Inactive and cloned bindings cannot block Reset with stale COM references");
+        check(runtime->on_lost_device(error) && depth->refs==1,"Repeated loss is harmless");
+        auto* replacement = new IDirect3DTexture9;
+        check(inactive.set_texture(0,replacement,error,true),error.c_str());
+        check(inactive.texture(0)==replacement && replacement->refs==2,
+            "The real semantic provider may republish a new target after Reset");
+        check(runtime->on_lost_device(error) && replacement->refs==1,
+            "Republished targets participate in the next loss");
+        replacement->Release();
+        // A manual write supersedes automatic provenance even on the same slot.
+        check(inactive.set_texture(0,depth,error,true) && inactive.set_texture(0,manual,error),error.c_str());
+        check(runtime->on_lost_device(error) && inactive.texture(0)==manual,
+            "A private parameter write must not be released as an automatic target");
+    }
+    check(managed->refs==1 && manual->refs==1,"Material destruction releases preserved references once");
+    check(runtime->on_lost_device(error),"Destroyed materials must leave no dangling registry entry");
+    depth->Release();cube->Release();volume->Release();managed->Release();manual->Release();
+    runtime.reset();device->Release();states->Release();
+}
+// ADAPTER_BRIDGE
 int main() {
     try {
         for (unsigned stage : {1u, 2u}) for (bool hole : {false, true})
             for (bool distinct : {false, true}) exercise(stage, hole, distinct);
+        deviceLoss();
+        bridgeDeviceLoss();
         std::cout << "Production DX9 binding passed both stages, shared/distinct samplers, and sparse slots\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+}
+'''
+
+ADAPTER_BRIDGE = r'''
+#define STDMETHODCALLTYPE
+using D3DXHANDLE = const char*;
+constexpr HRESULT S_OK=0,E_INVALIDARG=-1,E_FAIL=-2;
+using wot::StockDx9EffectRuntime;
+enum class StockEffectParameterKind {resource_view};
+struct Reference {StockEffectParameterKind kind=StockEffectParameterKind::resource_view;std::size_t owner=1;};
+struct Reflection {
+    Reference value;
+    const Reference* parameter_reference(unsigned) {return &value;}
+};
+struct SharedContext {
+    struct Impl {
+        std::recursive_mutex mutex;
+        std::vector<std::weak_ptr<StockDx9EffectRuntime>> runtimes;
+    };
+    std::unique_ptr<Impl> impl_=std::make_unique<Impl>();
+};
+// Reflection lookup is the boundary; SetTexture and OnLostDevice below are
+// copied verbatim from production, including automatic-producer provenance.
+class StockEffectAdapter {
+public:
+    struct Destination {bool resource=true;std::size_t owner=0;};
+    std::shared_ptr<StockDx9EffectRuntime> runtime_;
+    SharedContext& context_;
+    std::unique_ptr<wot::StockDx9EffectMaterial> material_;
+    Reflection reflection_;
+    Destination automatic;
+    std::optional<unsigned> pass_;
+    bool begun_=false;
+    std::string capture_error_;
+    explicit StockEffectAdapter(SharedContext& context):context_(context) {}
+    const Destination* destination(D3DXHANDLE handle) {
+        return handle==reinterpret_cast<D3DXHANDLE>(&automatic)?&automatic:nullptr;
+    }
+    unsigned parameter_number(D3DXHANDLE) {return 0;}
+    HRESULT SetTexture(D3DXHANDLE,IDirect3DBaseTexture9*);
+    HRESULT OnLostDevice();
+    void register_runtime();
+};
+// PRODUCTION_ADAPTER_METHODS
+void bridgeDeviceLoss() {
+    auto effect=std::make_shared<wot::StockEffectBinary>();
+    wot::StockEffectType textureType;textureType.basic_type=5;
+    effect->types.push_back(textureType);effect->resource_views.resize(2);
+    auto* device=new IDirect3DDevice9;
+    auto* states=new ID3DXEffectStateManager;
+    std::shared_ptr<StockDx9EffectRuntime> runtime;
+    std::string error;
+    check(StockDx9EffectRuntime::create(device,states,effect,runtime,error),error.c_str());
+    SharedContext sharedContext;
+    // A stale Properties object still owns this runtime after ManagedEffect
+    // has reloaded its Definition. Only the new Definition receives loss.
+    std::shared_ptr<StockDx9EffectRuntime> reloaded;
+    check(StockDx9EffectRuntime::create(device,states,effect,reloaded,error),error.c_str());
+    wot::StockEffectUniformPool pool;wot::StockEffectUniformContext context(pool);
+    auto* shared=new IDirect3DTexture9;
+    auto* privateTexture=new IDirect3DTexture9;
+    {
+        StockEffectAdapter definition(sharedContext),binding(sharedContext);
+        for (auto* adapter:{&definition,&binding}) {
+            adapter->runtime_=adapter==&definition?reloaded:runtime;
+            adapter->register_runtime();adapter->register_runtime();
+            adapter->material_=std::make_unique<wot::StockDx9EffectMaterial>(adapter->runtime_,context);
+            check(adapter->SetTexture(reinterpret_cast<D3DXHANDLE>(&adapter->automatic),shared)==S_OK,
+                "Actual provider SetTexture must retain automatic provenance");
+            check(adapter->SetTexture("private",privateTexture)==S_OK,
+                "Actual named material SetTexture remains manually owned");
+        }
+        check(sharedContext.impl_->runtimes.size()==2,"Material clones must reuse the runtime registration");
+        {
+            StockEffectAdapter retired(sharedContext);
+            check(StockDx9EffectRuntime::create(device,states,effect,retired.runtime_,error),error.c_str());
+            retired.register_runtime();
+        }
+        definition.pass_=0;definition.begun_=true;
+        check(definition.OnLostDevice()==S_OK && !definition.pass_ && !definition.begun_,
+            "Actual adapter loss closes its pass state and notifies the runtime");
+        check(!binding.material_->texture(0)&&binding.material_->texture(1)==privateTexture,
+            "Definition notification must reach an inactive binding without losing manual data");
+        check(shared->refs==1,"No material may retain the retired automatic target");
+        check(sharedContext.impl_->runtimes.size()==2,"Expired runtimes must be removed without retaining them");
+        check(definition.OnLostDevice()==S_OK,"Definition loss may be repeated");
+    }
+    check(shared->refs==1&&privateTexture->refs==1,"All bridge references settle on teardown");
+    shared->Release();privateTexture->Release();runtime.reset();device->Release();states->Release();
 }
 '''
 
@@ -147,9 +320,22 @@ class StockDx9ResourceTests(unittest.TestCase):
             root = Path(directory)
             (root / "d3d9.h").write_text(DEVICE)
             (root / "d3dx9effect.h").write_text('#include "d3d9.h"\n')
-            (root / "probe.cpp").write_text(PROBE)
+            source = (ROOT / "bigworld/stock_effect_adapter.cpp").read_text()
+            methods = []
+            first = source.index("void StockEffectAdapter::register_runtime()")
+            last = source.index("void StockEffectAdapter::initialise()", first)
+            methods.append(source[first:last])
+            for begin, end in (("SetTexture(", "GetTexture("),
+                               ("OnLostDevice()", "OnResetDevice()")):
+                first = source.index("HRESULT STDMETHODCALLTYPE StockEffectAdapter::" + begin)
+                last = source.rindex("HRESULT STDMETHODCALLTYPE", first,
+                    source.index("StockEffectAdapter::" + end, first))
+                methods.append(source[first:last])
+            bridge = ADAPTER_BRIDGE.replace("// PRODUCTION_ADAPTER_METHODS", "\n".join(methods))
+            (root / "probe.cpp").write_text(PROBE.replace("// ADAPTER_BRIDGE", bridge))
             binary = root / "probe"
             subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                             "-I" + str(root), "-I" + str(ROOT / "include"),
                             "-I" + str(ROOT / "bigworld"), str(root / "probe.cpp"),
                             str(ROOT / "bigworld/stock_effect_dx9.cpp"),
@@ -157,7 +343,8 @@ class StockDx9ResourceTests(unittest.TestCase):
                             str(ROOT / "src/stock_shader_runtime.cpp"),
                             str(ROOT / "src/stock_shader_binary.cpp"),
                             "-o", str(binary)], check=True, capture_output=True, text=True)
-            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            result = subprocess.run([str(binary)], capture_output=True, text=True,
+                                    env=dict(os.environ, ASAN_OPTIONS="detect_stack_use_after_return=1"))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
