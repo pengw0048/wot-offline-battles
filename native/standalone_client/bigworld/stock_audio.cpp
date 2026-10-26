@@ -2,6 +2,7 @@
 #include "stock_audio.hpp"
 #include "stock_audio_io.hpp"
 #include "stock_audio_plugins.hpp"
+#include "app.hpp"
 
 #include "cstdmf/string_utils.hpp"
 #include "cstdmf/timestamp.hpp"
@@ -18,6 +19,12 @@
 #include <AK/MusicEngine/Common/AkMusicEngine.h>
 #include <d3dx9math.h>
 #include <objbase.h>
+#include <initguid.h>
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <propvarutil.h>
+#include <dsound.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <atomic>
@@ -68,9 +75,10 @@ struct Manager {
     double nextReinit = 0.;
     void* window = NULL;
     AkMemPoolId preparePool = AK_INVALID_POOL_ID;
-    StockAudioIO io;
+    std::unique_ptr<StockAudioIO> io;
     DataSectionPtr configuration, profile;
     BW::string language;
+    unsigned userSpeakers = 0;
     std::map<BW::string, LoadedBank> banks;
     std::set<BW::string> permanent, current;
     Matrix camera;
@@ -129,7 +137,7 @@ bool loadBank(const BW::string& name) {
     AK::SoundEngine::RenderAudio(true); // original batch processor 0x01255480
     AKRESULT status;
     if (bank.package) {
-        status = state.io.LoadFilePackage(wide.c_str(), bank.id);
+        status = state.io->LoadFilePackage(wide.c_str(), bank.id);
         // SDK package parsing can succeed with an absent current language.
         // It returns a real package ID and retains the actual lookup table.
         if (status == AK_InvalidLanguage) status = AK_Success;
@@ -147,7 +155,7 @@ bool unloadBank(const BW::string& name) {
     if (found == state.banks.end()) return true;
     AK::SoundEngine::RenderAudio(true);
     const auto status = found->second.package ?
-        state.io.UnloadFilePackage(found->second.id) :
+        state.io->UnloadFilePackage(found->second.id) :
         AK::SoundEngine::UnloadBank(found->second.id, NULL);
     if (!result(status, "UnloadBank", name.c_str())) return false;
     state.banks.erase(found);
@@ -168,6 +176,76 @@ bool bankNames(const BW::string& section, std::vector<BW::string>& output) {
     }
     return true;
 }
+
+struct DeviceInfo {
+    BW::wstring name;
+    unsigned mask = 0;
+};
+struct ScopedCOM {
+    HRESULT status = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    ~ScopedCOM() { if (SUCCEEDED(status)) CoUninitialize(); }
+};
+unsigned speakerPreset(unsigned mask) {
+    return mask == 0x63f ? 7u : mask == 0x60f ? 5u : 2u;
+}
+unsigned speakerMask(unsigned preset) {
+    // Native 0x01253f60. Preference 0 is handled by the actual device query.
+    return preset == 7 ? 0x63fu : preset == 5 ? 0x60fu : 3u;
+}
+bool queryDevice(DeviceInfo& output) {
+    using Microsoft::WRL::ComPtr;
+    ScopedCOM com;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    ComPtr<IMMDevice> device;
+    ComPtr<IPropertyStore> properties;
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    HRESULT status = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL,
+        CLSCTX_ALL, IID_PPV_ARGS(enumerator.GetAddressOf()));
+    if (SUCCEEDED(status))
+        status = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf());
+    if (SUCCEEDED(status)) status = device->OpenPropertyStore(STGM_READ, properties.GetAddressOf());
+    if (SUCCEEDED(status)) {
+        status = properties->GetValue(PKEY_Device_FriendlyName, &value);
+        if (SUCCEEDED(status) && value.vt == VT_LPWSTR && value.pwszVal)
+            output.name = value.pwszVal;
+        PropVariantClear(&value);
+        status = properties->GetValue(PKEY_AudioEndpoint_PhysicalSpeakers, &value);
+        if (SUCCEEDED(status) && value.vt == VT_UI4) {
+            const unsigned mask = value.ulVal;
+            // #1513 0x012540a0 normalizes both back/side 5.1 and 7.1 masks.
+            output.mask = (mask & 0xff) == 0xff || (mask & 0x63f) == 0x63f ? 0x63f :
+                (mask & 0x3f) == 0x3f || (mask & 0x60f) == 0x60f ? 0x60f : 3;
+            PropVariantClear(&value);
+            return true;
+        }
+    }
+    PropVariantClear(&value);
+    // The original consumer falls back to the real DirectSound device.
+    ComPtr<IDirectSound8> sound;
+    status = CoCreateInstance(CLSID_DirectSound8, NULL, CLSCTX_INPROC_SERVER,
+        IID_IDirectSound8, reinterpret_cast<void**>(sound.GetAddressOf()));
+    DWORD configuration = 0;
+    if (SUCCEEDED(status)) status = sound->Initialize(NULL);
+    if (SUCCEEDED(status)) status = sound->GetSpeakerConfig(&configuration);
+    if (FAILED(status)) {
+        ERROR_MSG("StockAudio: output device query unavailable (HRESULT=0x%08lx)\n",
+            static_cast<unsigned long>(status));
+        return false;
+    }
+    switch (configuration & 0xff) {
+    case 6: case 9: output.mask = 0x60f; break;
+    case 7: case 8: output.mask = 0x63f; break;
+    default: output.mask = 3; break;
+    }
+    return true;
+}
+void saveSpeakerPreference(const char* key, unsigned value) {
+    if (!s_scriptsPreferences) return;
+    s_scriptsPreferences->writeUInt(key, value);
+    if (!App::instance().savePreferences())
+        ERROR_MSG("StockAudio: failed to save authored speaker preference\n");
+}
 }
 
 bool stockAudioReady() { return StockAudioDetail::manager().ready; }
@@ -180,7 +258,16 @@ bool initialiseStockAudio(DataSectionPtr root, void* window) {
     state.window = window;
     state.configuration = root;
     DataSectionPtr sound = root ? root->openSection("soundMgr") : NULL;
-    if (!sound || !sound->readBool("enabled", true)) return false;
+    if (!sound || !sound->readBool("enabled", true)) return true;
+    // Native 0x012538a0 reads the same script preference tree returned to the
+    // original settings Python. An explicit disabled preference is not an SDK
+    // failure, and WW_isInitialised must remain false in this case.
+    state.userSpeakers = s_scriptsPreferences ?
+        s_scriptsPreferences->readUInt("soundPrefs/speakerConfig", 0) : 0;
+    if (s_scriptsPreferences && s_scriptsPreferences->readInt("soundPrefs/enable", 0) == 2) {
+        INFO_MSG("StockAudio: disabled by the original sound preference\n");
+        return true;
+    }
     const BW::string active = sound->readString("WWISE_active_profile");
     state.profile = active.empty() ? NULL : sound->openSection(active);
     if (!state.profile) {
@@ -203,9 +290,13 @@ bool initialiseStockAudio(DataSectionPtr root, void* window) {
         AkDeviceSettings device;
         AK::StreamMgr::GetDefaultDeviceSettings(device);
         device.uIOMemorySize = pools->readInt("IOPoolSize", 4) << 20;
-        if (!result(state.io.Init(device), "ResourceIO::Init")) goto failed;
+        // The SDK package resolver registers a per-stream-manager language
+        // observer. Like native 0x01246550, recreate its owner with the stream
+        // manager; reusing a terminated sample object retains its old flag.
+        state.io.reset(new StockAudioIO);
+        if (!result(state.io->Init(device), "ResourceIO::Init")) goto failed;
         state.ioReady = true;
-        if (!result(state.io.setResourcePath(sound->readString("wwmediaPath", "audioww")),
+        if (!result(state.io->setResourcePath(sound->readString("wwmediaPath", "audioww")),
             "ResourceIO::setResourcePath")) goto failed;
         if (!state.language.empty()) {
             BW::wstring language;
@@ -217,6 +308,13 @@ bool initialiseStockAudio(DataSectionPtr root, void* window) {
         AkPlatformInitSettings platform;
         AK::SoundEngine::GetDefaultInitSettings(settings);
         AK::SoundEngine::GetDefaultPlatformInitSettings(platform);
+        DeviceInfo output;
+        const bool outputKnown = queryDevice(output);
+        if (outputKnown)
+            saveSpeakerPreference("soundPrefs/detectedSpeakerConfig", speakerPreset(output.mask));
+        if (state.userSpeakers || outputKnown)
+            settings.settingsMainOutput.channelConfig.SetStandard(state.userSpeakers ?
+                speakerMask(state.userSpeakers) : output.mask);
         settings.uDefaultPoolSize = pools->readInt("defaultPool", 12) << 20;
         settings.fDefaultPoolRatioThreshold = 0.96f;
         settings.uCommandQueueSize *= 8;
@@ -362,7 +460,8 @@ void finiStockAudio() {
     }
     if (state.music) { AK::MusicEngine::Term(); state.music = false; }
     if (state.sound) { AK::SoundEngine::Term(); state.sound = false; }
-    if (state.ioReady) { state.io.Term(); state.ioReady = false; }
+    if (state.ioReady) { state.io->Term(); state.ioReady = false; }
+    state.io.reset();
     if (AK::IAkStreamMgr::Get()) AK::IAkStreamMgr::Get()->Destroy();
     state.banks.clear(); state.permanent.clear(); state.current.clear();
     state.pendingEvents.clear(); state.persistentEvents.clear(); state.failedEvents.clear();
@@ -620,7 +719,7 @@ bool reinitialise() {
     // Python wrappers and the matrix links above remain the same owners across
     // recreation, as in native source-pool re-registration (0x01250d00).
     finiStockAudio();
-    if (!initialiseStockAudio(configuration, window)) {
+    if (!initialiseStockAudio(configuration, window) || !state.ready) {
         ERROR_MSG("StockAudio: device recreation failed; existing sounds are unavailable\n");
         return false;
     }
@@ -913,6 +1012,80 @@ PyObject* py_WW_reinit(PyObject* args) {
     Py_RETURN_NONE;
 }
 PY_MODULE_FUNCTION(WW_reinit, _WWISE)
+
+PyObject* py_WW_getUserSpeakersConfig(PyObject* args) {
+    if (!StockAudioDetail::arity(args, 0, "WW_getUserSpeakersConfig")) return NULL;
+    return PyLong_FromUnsignedLong(StockAudioDetail::manager().userSpeakers);
+}
+PY_MODULE_FUNCTION(WW_getUserSpeakersConfig, _WWISE)
+PyObject* py_WW_setUserSpeakersConfig(PyObject* args) {
+    using namespace StockAudioDetail;
+    unsigned preset;
+    if (!arity(args, 1, "WW_setUserSpeakersConfig") ||
+        Script::setData(PyTuple_GET_ITEM(args, 0), preset)) return NULL;
+    // Native 0x012535d0 writes the real preference. The active value returned
+    // by getUserSpeakersConfig is refreshed by the next device initialization.
+    saveSpeakerPreference("soundPrefs/speakerConfig", preset);
+    Py_RETURN_NONE;
+}
+PY_MODULE_FUNCTION(WW_setUserSpeakersConfig, _WWISE)
+PyObject* py_WW_getSystemSpeakersConfig(PyObject* args) {
+    using namespace StockAudioDetail;
+    if (!arity(args, 0, "WW_getSystemSpeakersConfig")) return NULL;
+    DeviceInfo device;
+    queryDevice(device);
+    // Native 0x01253bb0 reports preset 2 for every mask other than normalized
+    // 5.1/7.1, including its initial zero mask when both OS queries fail. This
+    // UI preset is not a claim that an audio device or SDK backend exists.
+    const unsigned preset = speakerPreset(device.mask);
+    saveSpeakerPreference("soundPrefs/detectedSpeakerConfig", preset);
+    return PyLong_FromUnsignedLong(preset);
+}
+PY_MODULE_FUNCTION(WW_getSystemSpeakersConfig, _WWISE)
+PyObject* py_WW_soundSystemInfo(PyObject* args) {
+    using namespace StockAudioDetail;
+    if (!arity(args, 0, "WW_soundSystemInfo")) return NULL;
+    DeviceInfo device;
+    queryDevice(device);
+    saveSpeakerPreference("soundPrefs/detectedSpeakerConfig", speakerPreset(device.mask));
+    const BW::wstring text = device.name + L"  " + (device.mask == 0x63f ?
+        L"Speaker Setting 7.1" : device.mask == 0x60f ? L"Speaker Setting 5.1" :
+        L"Speaker Setting 2.0");
+    return Script::getData(text);
+}
+PY_MODULE_FUNCTION(WW_soundSystemInfo, _WWISE)
+PyObject* py_WW_setSpeakersConfig(PyObject* args) {
+    using namespace StockAudioDetail;
+    using Microsoft::WRL::ComPtr;
+    unsigned preset;
+    if (!arity(args, 1, "WW_setSpeakersConfig") ||
+        Script::setData(PyTuple_GET_ITEM(args, 0), preset)) return NULL;
+    ScopedCOM com;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    ComPtr<IMMDevice> device;
+    ComPtr<IPropertyStore> properties;
+    HRESULT status = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL,
+        CLSCTX_ALL, IID_PPV_ARGS(enumerator.GetAddressOf()));
+    if (SUCCEEDED(status))
+        status = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf());
+    if (SUCCEEDED(status)) status = device->OpenPropertyStore(STGM_READWRITE, properties.GetAddressOf());
+    if (SUCCEEDED(status)) {
+        PROPVARIANT value;
+        PropVariantInit(&value);
+        value.vt = VT_UI4;
+        // OS endpoint 5.1 uses the physical back-speaker mask. This differs
+        // from the SDK's normalized side-speaker 0x60f configuration above.
+        value.ulVal = preset == 7 ? 0x63f : preset == 5 ? 0x3f : 3;
+        status = properties->SetValue(PKEY_AudioEndpoint_PhysicalSpeakers, value);
+        if (SUCCEEDED(status)) status = properties->Commit();
+        PropVariantClear(&value);
+    }
+    if (FAILED(status))
+        ERROR_MSG("StockAudio: cannot set Windows speakers (HRESULT=0x%08lx)\n",
+            static_cast<unsigned long>(status));
+    return PyBool_FromLong(SUCCEEDED(status));
+}
+PY_MODULE_FUNCTION(WW_setSpeakersConfig, _WWISE)
 
 PyObject* py_WG_loadSoundBank(PyObject* args) {
     if (!StockAudioDetail::arity(args, 1, "WG_loadSoundBank")) return NULL;

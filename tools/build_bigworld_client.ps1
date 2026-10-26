@@ -57,9 +57,36 @@ try {
         $WwiseArchive = Join-Path $WorkRoot "wwise-sdk.tar.xz"
         $WwiseInput = Join-Path $WorkRoot "wwise-sdk"
         New-Item -ItemType Directory -Path $WwiseInput | Out-Null
-        Invoke-WebRequest -Uri $env:WOT_WWISE_SDK_URL -Headers @{
-            Authorization = "Bearer $env:WOT_WWISE_SDK_TOKEN"
-        } -OutFile $WwiseArchive
+        Write-Host "Downloading the licensed Wwise SDK input"
+        @'
+import os, sys, time, urllib.request
+request = urllib.request.Request(os.environ['WOT_WWISE_SDK_URL'], headers={
+    'Authorization': 'Bearer ' + os.environ['WOT_WWISE_SDK_TOKEN']})
+try:
+    started = time.monotonic()
+    received = 0
+    with urllib.request.urlopen(request, timeout=30) as response, open(sys.argv[1], 'wb') as output:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+            received += len(chunk)
+            if time.monotonic() - started > 120:
+                raise TimeoutError('SDK transfer deadline exceeded')
+        expected = response.headers.get('Content-Length')
+        if expected is not None and received != int(expected):
+            raise IOError('Incomplete SDK input')
+    print('Licensed SDK input received: %d bytes' % received)
+except Exception as error:
+    # Do not serialize request objects or URLs containing private input data.
+    print('Licensed SDK download failed: ' + type(error).__name__, file=sys.stderr)
+    sys.exit(1)
+'@ | & python - $WwiseArchive
+        if ($LASTEXITCODE -ne 0) {
+            throw "The licensed Wwise SDK download failed."
+        }
+        Write-Host "Inspecting the licensed Wwise SDK archive"
         $WwiseMembers = @(& tar -tf $WwiseArchive)
         if ($LASTEXITCODE -ne 0 -or $WwiseMembers.Count -eq 0) {
             throw "Cannot inspect the licensed Wwise SDK input."
