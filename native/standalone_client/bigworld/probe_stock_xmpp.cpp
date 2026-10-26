@@ -36,15 +36,15 @@ int main(int argc,char** argv){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
 #endif
     if(argc!=2){std::cerr<<"Usage: probe_stock_xmpp <loopback-port>"<<std::endl;return 2;}
-    int outcome=1;Py_Initialize();
+    int outcome=1;Py_NoSiteFlag=1;Py_Initialize();
     try{
         require(BW::initialiseStockXmpp(),"Cannot register real XMPP owner");
         PyObject* scope=PyModule_GetDict(PyImport_AddModule("__main__"));
         PyObject* port=PyInt_FromLong(std::strtol(argv[1],NULL,10));
         require(port&&PyDict_SetItemString(scope,"port",port)==0,"Cannot publish loopback port");Py_DECREF(port);
         python(R"PY(
-import BigWorld, threading, gc
-main_thread=threading.current_thread().ident
+import BigWorld, thread, gc
+main_thread=thread.get_ident()
 c=BigWorld.XmppClient()
 assert c.connectionState==0 and c.fullJid=='' and c.presence==0
 assert (c.PRESENCE_UNKNOWN,c.PRESENCE_AVAILABLE,c.PRESENCE_UNAVAILABLE)==(0,1,6)
@@ -53,7 +53,7 @@ callbacks=('onConnect','onReady','onDisconnect','onRosterResultReceived','onNewR
 assert all(getattr(c,n) is None for n in callbacks)
 events=[]
 saved=[]
-def check_thread(): assert threading.current_thread().ident==main_thread
+def check_thread(): assert thread.get_ident()==main_thread
 def connected():
     check_thread(); assert c.connectionState!=4; events.append(('connect',))
 def ready(): check_thread(); events.append(('ready',))
