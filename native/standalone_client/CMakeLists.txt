@@ -14,6 +14,7 @@ add_library(wot_battle_core STATIC
     src/gun_ballistics.cpp
     src/stock_gun_history.cpp
     src/stock_effect_binding.cpp
+    src/stock_effect_reflection.cpp
     src/stock_shader_binary.cpp
     src/stock_shader_runtime.cpp
     src/vehicle_physics.cpp
@@ -48,6 +49,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_stock_effect_reflection tests/test_stock_effect_reflection.cpp)
+    target_link_libraries(test_stock_effect_reflection PRIVATE wot_battle_core)
+    add_test(NAME stock_effect_reflection COMMAND test_stock_effect_reflection)
     add_executable(test_stock_shader_runtime tests/test_stock_shader_runtime.cpp)
     target_link_libraries(test_stock_shader_runtime PRIVATE wot_battle_core)
     add_test(NAME stock_shader_runtime COMMAND test_stock_shader_runtime)

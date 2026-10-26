@@ -130,6 +130,10 @@ void ownership_checks() {
           "Selection direct copy preserves native caller byte count");
     check(!first.set_uniform(2, 0, words, 4, 2, error), "Typed setter checks basic type");
     check(!first.set_uniform(0, 0, words, 4, 3, error), "Shared UBB members are not material handles");
+    check(second.copy_values_from(first,error) && second.selection() == first.selection() &&
+          second.uniform_buffer(1)->bytes() == first.uniform_buffer(1)->bytes() &&
+          second.uniform_buffer(1) != first.uniform_buffer(1),
+          "Material value clone retains independent private storage and copies selection");
     auto changed = shared; changed.defaults[0] = 7;
     check(pool.register_buffer(changed) == pool.register_buffer(shared),
           "Declaration identity excludes defaults");

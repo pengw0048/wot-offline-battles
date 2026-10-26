@@ -75,6 +75,17 @@ StockDx9EffectMaterial::StockDx9EffectMaterial(std::shared_ptr<StockDx9EffectRun
     binding_(required_definition(runtime_), uniform_context),
     textures_(runtime_->definition_->resource_views.size()) {}
 
+StockDx9EffectMaterial::StockDx9EffectMaterial(const StockDx9EffectMaterial& source,
+    StockEffectUniformContext& uniform_context) : runtime_(source.runtime_),
+    binding_(runtime_->definition_, uniform_context), textures_(source.textures_) {
+    std::string error;
+    if (!binding_.copy_values_from(source.binding_, error)) throw std::runtime_error(error);
+}
+
+IDirect3DBaseTexture9* StockDx9EffectMaterial::texture(std::size_t resource_view) const {
+    return resource_view < textures_.size() ? textures_[resource_view].get() : nullptr;
+}
+
 bool StockDx9EffectMaterial::set_texture(std::size_t resource_view,
     IDirect3DBaseTexture9* texture, std::string& error) {
     const auto& definition = *runtime_->definition_;

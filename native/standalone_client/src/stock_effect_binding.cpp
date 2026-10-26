@@ -262,4 +262,16 @@ bool StockEffectBinding::select_pass(std::size_t technique, std::size_t pass,
     return select_stock_dx9_pass(*definition_, selection_, technique, pass, output, error);
 }
 
+bool StockEffectBinding::copy_values_from(const StockEffectBinding& source, std::string& error) {
+    if (definition_.get() != source.definition_.get())
+        return invalid(error, "Cannot copy values between different effect definitions");
+    for (std::size_t i = 0; i < buffers_.size(); ++i) {
+        if ((definition_->uniform_buffers[i].flags & 1) || selection_buffer_ == i) continue;
+        const auto& bytes = source.buffers_[i].storage->bytes();
+        if (!buffers_[i].storage->write(0, bytes.data(), bytes.size(), error)) return false;
+    }
+    selection_ = source.selection_;
+    error.clear(); return true;
+}
+
 } // namespace wot

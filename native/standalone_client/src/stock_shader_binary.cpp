@@ -224,7 +224,31 @@ bool decode_stock_dx9_effect(const void* bytes, std::size_t size,
         for (std::uint32_t i = 0; i < table.second; ++i) {
             const auto at = table.first + std::uint64_t(i)*24;
             decoded.types.push_back({string(source.word(at)), source.word(at+4),
-                source.word(at+8), source.word(at+12), source.word(at+16), source.word(at+20)});
+                source.word(at+8), source.word(at+12), source.word(at+16), source.word(at+20), {}});
+        }
+        const auto read_uniform = [&](std::uint64_t member) {
+            source.require(member, 32);
+            StockEffectUniform uniform;
+            uniform.flags = source.word(member);
+            uniform.name = string(source.word(member+4));
+            uniform.semantic = string(source.word(member+8));
+            uniform.semantic_present = source.word(member+8) != 0xffffffff;
+            uniform.type_index = source.word(member+12);
+            uniform.byte_offset = source.word(member+16);
+            uniform.elements = source.word(member+20);
+            uniform.element_padding = source.word(member+24);
+            uniform.annotations = source.word(member+28);
+            if (uniform.type_index >= decoded.types.size())
+                throw std::runtime_error("ARIE uniform type index is invalid");
+            return uniform;
+        };
+        for (std::size_t i = 0; i < decoded.types.size(); ++i) {
+            auto& type = decoded.types[i];
+            if (type.type_class != 5) continue;
+            const auto at = table.first+i*24+type.rows_or_members_offset;
+            source.require(at, std::uint64_t(type.columns_or_member_count)*32);
+            for (std::uint32_t j = 0; j < type.columns_or_member_count; ++j)
+                type.members.push_back(read_uniform(at+std::uint64_t(j)*32));
         }
         table = source.table(0x1c, 28);
         for (std::uint32_t i = 0; i < table.second; ++i) {
@@ -238,19 +262,7 @@ bool decode_stock_dx9_effect(const void* bytes, std::size_t size,
             buffer.defaults = source.bytes(at+source.word(at+24), source.word(at+20));
             for (std::uint32_t j = 0; j < count; ++j) {
                 const auto member = members+std::uint64_t(j)*32;
-                StockEffectUniform uniform;
-                uniform.flags = source.word(member);
-                uniform.name = string(source.word(member+4));
-                uniform.semantic = string(source.word(member+8));
-                uniform.semantic_present = source.word(member+8) != 0xffffffff;
-                uniform.type_index = source.word(member+12);
-                uniform.byte_offset = source.word(member+16);
-                uniform.elements = source.word(member+20);
-                uniform.element_padding = source.word(member+24);
-                uniform.annotations = source.word(member+28);
-                if (uniform.type_index >= decoded.types.size())
-                    throw std::runtime_error("ARIE uniform type index is invalid");
-                buffer.uniforms.push_back(std::move(uniform));
+                buffer.uniforms.push_back(read_uniform(member));
             }
             decoded.uniform_buffers.push_back(std::move(buffer));
         }
@@ -268,7 +280,7 @@ bool decode_stock_dx9_effect(const void* bytes, std::size_t size,
                 const auto at = resources.first+std::uint64_t(i)*24;
                 StockEffectResource resource{source.word(at), string(source.word(at+4)),
                     string(source.word(at+8)), source.word(at+12), source.word(at+16),
-                    source.word(at+20)};
+                    source.word(at+20), source.word(at+8) != 0xffffffff};
                 if (resource.type_index >= decoded.types.size())
                     throw std::runtime_error("ARIE resource type index is invalid");
                 result.push_back(std::move(resource));

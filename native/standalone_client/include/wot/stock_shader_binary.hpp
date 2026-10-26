@@ -74,15 +74,6 @@ bool decode_stock_dx9_shader(const void* bytes, std::size_t size,
 void convert_stock_shader_register_words(StockShaderRegisterConversion conversion,
                                          std::uint32_t* words, std::size_t count);
 
-struct StockEffectType {
-    std::string name;
-    std::uint32_t basic_type = 0;
-    std::uint32_t type_class = 0;
-    std::uint32_t rows_or_members_offset = 0;
-    std::uint32_t columns_or_member_count = 0;
-    std::uint32_t byte_size = 0;
-};
-
 struct StockEffectUniform {
     std::uint32_t flags = 0;
     std::string name;
@@ -93,6 +84,16 @@ struct StockEffectUniform {
     std::uint32_t elements = 0;
     std::uint32_t element_padding = 0;
     std::uint32_t annotations = 0xffffffff;
+};
+
+struct StockEffectType {
+    std::string name;
+    std::uint32_t basic_type = 0;
+    std::uint32_t type_class = 0;
+    std::uint32_t rows_or_members_offset = 0;
+    std::uint32_t columns_or_member_count = 0;
+    std::uint32_t byte_size = 0;
+    std::vector<StockEffectUniform> members;
 };
 
 struct StockEffectUniformBuffer {
@@ -110,6 +111,7 @@ struct StockEffectResource {
     std::uint32_t annotations = 0xffffffff;
     std::uint32_t type_index = 0;
     std::uint32_t elements = 0;
+    bool semantic_present = false;
 };
 
 struct StockEffectAnnotation {

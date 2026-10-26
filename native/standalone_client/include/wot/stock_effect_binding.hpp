@@ -102,6 +102,7 @@ public:
         std::size_t size, std::optional<std::uint32_t> basic_type, std::string& error);
     bool select_pass(std::size_t technique, std::size_t pass,
                      StockDx9PassSelection& output, std::string& error) const;
+    bool copy_values_from(const StockEffectBinding& source, std::string& error);
 private:
     struct Buffer {
         std::size_t declaration = 0;

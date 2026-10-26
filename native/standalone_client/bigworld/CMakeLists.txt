@@ -16,6 +16,7 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_effect_dx9.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_shader_binary.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_effect_binding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/stock_effect_reflection.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_shader_runtime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/point_velocity.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/wwise_bank.cpp"

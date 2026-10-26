@@ -173,6 +173,21 @@ void definition_checks() {
           "Annotation value offsets are relative to each entry");
     check(definition.selector_code == Bytes({0xaa,0xbb}) &&
           definition.selector_data == Bytes({0xcc,0xdd,0xee}), "Selector code/data retained");
+    auto structured = bytes;
+    put(structured, 0x18, 0x300); put(structured, 0x300, 2);
+    for (unsigned i = 0; i < 24; ++i) structured[0x304+i] = bytes[0x94+i];
+    const std::uint32_t structure[] = {26,0,5,24,1,4};
+    for (unsigned i = 0; i < 6; ++i) put(structured, 0x31c+i*4, structure[i]);
+    for (unsigned i = 0; i < 32; ++i) structured[0x334+i] = bytes[0xd0+i];
+    check(wot::decode_stock_dx9_effect(structured.data(), structured.size(), definition, error) &&
+          definition.types[1].members.size() == 1 &&
+          definition.types[1].members[0].name == "value" &&
+          definition.types[1].members[0].semantic == "VALUE" &&
+          definition.types[1].members[0].semantic_present,
+          "Nested type layout uses the same native 32-byte member records");
+    put(structured, 0x328, 0xfffffff0);
+    check(!wot::decode_stock_dx9_effect(structured.data(), structured.size(), definition, error),
+          "Nested type member table must remain inside the original member");
     for (unsigned failure = 0; failure < 6; ++failure) {
         auto changed = bytes;
         if (failure == 0) changed.resize(0x4f);

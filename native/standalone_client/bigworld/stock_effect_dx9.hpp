@@ -23,6 +23,8 @@ public:
         std::shared_ptr<const StockEffectBinary> definition,
         std::shared_ptr<StockDx9EffectRuntime>& output, std::string& error);
     const std::shared_ptr<const StockEffectBinary>& definition() const { return definition_; }
+    IDirect3DDevice9* device() const { return device_.get(); }
+    ID3DXEffectStateManager* state_manager() const { return state_manager_.get(); }
 private:
     friend class StockDx9EffectMaterial;
     StockDx9EffectRuntime(IDirect3DDevice9* device, ID3DXEffectStateManager* state_manager,
@@ -38,8 +40,11 @@ class StockDx9EffectMaterial {
 public:
     StockDx9EffectMaterial(std::shared_ptr<StockDx9EffectRuntime> runtime,
                           StockEffectUniformContext& uniform_context);
+    StockDx9EffectMaterial(const StockDx9EffectMaterial& source,
+                          StockEffectUniformContext& uniform_context);
     StockEffectBinding& binding() { return binding_; }
     bool set_texture(std::size_t resource_view, IDirect3DBaseTexture9* texture, std::string& error);
+    IDirect3DBaseTexture9* texture(std::size_t resource_view) const;
     // Applies real VS/PS, numeric registers, render states, textures, and sampler
     // states. The caller keeps ownership of render targets, streams, declaration,
     // instancing, and draw calls, matching Moo's material boundary.
