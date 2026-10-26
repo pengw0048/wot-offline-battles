@@ -34,6 +34,7 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_dynamic_resolution.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_decal_resources.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_screenshot_callback.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_xmpp.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/client_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gun_ballistics_binding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/offline_vehicle_parameters.cpp"
@@ -62,6 +63,8 @@ target_include_directories(romp PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/../include")
 include("${CMAKE_CURRENT_LIST_DIR}/wwise_sdk.cmake")
 target_link_libraries(bwclient WotWwiseSdk)
+include("${CMAKE_CURRENT_LIST_DIR}/gloox_sdk.cmake")
+target_link_libraries(bwclient WotGloox)
 target_sources(bwclient PRIVATE
     "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFilePackage.cpp"
     "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFilePackageLUT.cpp"
@@ -86,6 +89,18 @@ else()
     set_source_files_properties(${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
 endif()
+
+# Exercise the actual native transport against a loopback-only XMPP peer.
+add_executable(probe_stock_xmpp
+    "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_xmpp.cpp")
+target_include_directories(probe_stock_xmpp PRIVATE
+    "${BW_SOURCE_DIR}/client" "${CMAKE_CURRENT_LIST_DIR}")
+target_compile_definitions(probe_stock_xmpp PRIVATE
+    _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
+target_link_libraries(probe_stock_xmpp pyscript cstdmf WotGloox winmm)
+set_target_properties(probe_stock_xmpp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
 
 # Verify private writes and mounted archive immutability in the real resource
 # manager before the renderer can compile effects against original packages.
@@ -118,5 +133,6 @@ set_target_properties(probe_stock_audio_resources PROPERTIES
 if(MSVC)
     set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/probe_stock_audio_resources.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/probe_resource_write_overlay.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
 endif()

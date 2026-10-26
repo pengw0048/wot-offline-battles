@@ -16,6 +16,7 @@ $Revision = "3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb"
 $D3dxVersion = "9.29.952.8"
 $ScaleformRevision = "7d92be560bf1b2e4ecae9ac69e340d4cae9a557e"
 $ScaleformVersion = "4.2.22"
+$GlooxVersion = "1.0.28"
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $StandaloneRoot = Join-Path $RepositoryRoot "native\standalone_client\bigworld"
 $StandaloneCmake = Join-Path $StandaloneRoot "CMakeLists.txt"
@@ -172,6 +173,25 @@ print('Licensed SDK input extracted: %d files' % len(members))
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_scaleform_sdk.py"),
         $EngineRoot, $ScaleformRoot) "scaleform-source-patch.log"
 
+    $GlooxArchive = Join-Path $WorkRoot "gloox.tar.bz2"
+    $GlooxRoot = Join-Path $WorkRoot "gloox"
+    $GlooxPrefix = "gloox-$GlooxVersion"
+    New-Item -ItemType Directory -Path $GlooxRoot | Out-Null
+    Invoke-WebRequest -Uri "https://camaya.net/download/gloox-$GlooxVersion.tar.bz2" -OutFile $GlooxArchive
+    $GlooxMembers = @(& tar -tjf $GlooxArchive)
+    if ($LASTEXITCODE -ne 0 -or $GlooxMembers.Count -eq 0) {
+        throw "Cannot inspect the pinned gloox source archive."
+    }
+    foreach ($Member in $GlooxMembers) {
+        if (($Member -ne $GlooxPrefix -and
+                -not $Member.StartsWith("$GlooxPrefix/")) -or
+                (($Member -split '/') -contains '..') -or $Member.Contains('\')) {
+            throw "Unexpected gloox source archive member: $Member"
+        }
+    }
+    Invoke-Checked "tar" @("-xjf", $GlooxArchive, "-C", $GlooxRoot,
+        "--strip-components", "1") "gloox-source-extract.log"
+
     # The pinned source predates the current SDK's API deprecations and the
     # standard library's nodiscard annotations. Keep /WX for other diagnostics.
     $CompilerOptions = Join-Path $EngineRoot "build\cmake\BWCompilerAndLinkerOptions.cmake"
@@ -218,6 +238,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
         $EngineRoot) "stock-startup-services-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_script_paths.py"),
         $EngineRoot) "stock-script-paths-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_xmpp.py"),
+        $EngineRoot) "stock-xmpp-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_graphics_settings_consumers.py"),
         $EngineRoot) "stock-graphics-settings-consumers-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_time_of_day.py"),
@@ -277,6 +299,9 @@ print('Licensed SDK input extracted: %d files' % len(members))
         scaleform_revision = $ScaleformRevision
         scaleform_source_version = $ScaleformVersion
         original_client_scaleform_version = "4.6.34"
+        gloox_upstream = "https://camaya.net/download/gloox-$GlooxVersion.tar.bz2"
+        gloox_version = $GlooxVersion
+        gloox_tls = "Windows SChannel"
         scaleform_audio = "GFx abstract SoundRenderer; optional FMOD backend disabled"
         generator = "Visual Studio 17 2022"
         toolset = "v142"
@@ -305,6 +330,7 @@ print('Licensed SDK input extracted: %d files' % len(members))
         "-DWOT_SCALEFORM_D3DX_ROOT=$SdkRoot",
         "-DWOT_SCALEFORM_FMOD_ADDON=OFF",
         "-DWOT_WWISE_SDK_ROOT=$WwiseSdk",
+        "-DWOT_GLOOX_SOURCE_ROOT=$GlooxRoot",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5") "configure.log"
     if ($env:SCCACHE_PATH) {
         $CacheExe = (Get-Command $env:SCCACHE_PATH -ErrorAction Stop).Source
@@ -366,6 +392,10 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
     if ($LASTEXITCODE -ne 0) {
         throw "The mounted audio resource integration probe failed."
     }
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_stock_xmpp", "--parallel", "4") "xmpp-probe-compile.log"
+    Invoke-Checked "python" @((Join-Path $RepositoryRoot "native\standalone_client\tests\run_stock_xmpp_loopback.py"),
+        (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_xmpp.exe")) "xmpp-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "bwclient", "--parallel", "4", "--",
         "/bl:$(Join-Path $LogRoot 'msbuild.binlog')") "compile.log"
@@ -431,6 +461,10 @@ https://visualstudio.microsoft.com/license-terms/
         -Destination (Join-Path $ClientOutput "D3DX-LICENSE.txt")
     Copy-Item -LiteralPath (Join-Path $D3dxRoot "NOTICE.md") `
         -Destination (Join-Path $ClientOutput "D3DX-NOTICE.md")
+    Copy-Item -LiteralPath (Join-Path $GlooxRoot "COPYING") `
+        -Destination (Join-Path $ClientOutput "gloox-COPYING.txt")
+    Copy-Item -LiteralPath (Join-Path $GlooxRoot "LICENSE") `
+        -Destination (Join-Path $ClientOutput "gloox-LICENSE.txt")
     Write-Host "Built standalone BigWorld engine binary: $ClientOutput"
     Write-Host "Includes the standalone bootstrap and public engine resources; no WoT game resources are included."
 }

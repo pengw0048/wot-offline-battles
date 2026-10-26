@@ -37,6 +37,14 @@ def patch_engine(root):
         path = client / name
         source = path.read_text()
         for old, new in replacements:
+            if name == 'script_app.cpp' and old == '\tBigWorldClientScript::fini();':
+                # Other owners may insert teardown between audio and Python.
+                calls = ('\tfiniStockVehicleAudio();', '\tfiniStockAudio();')
+                counts = [source.count(call) for call in calls]
+                if counts == [1, 1]:
+                    continue
+                if any(counts):
+                    raise ValueError('The audio teardown owner is partially patched')
             if old == '#include "pch.hpp"' and new.splitlines()[1] in source:
                 continue
             if new in source:
