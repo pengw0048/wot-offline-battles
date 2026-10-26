@@ -11,6 +11,7 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/../src/gun_ballistics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_gun_history.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_effect_dx9.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_effect_adapter.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_shader_binary.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_effect_binding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_effect_reflection.cpp"
@@ -25,6 +26,7 @@ set(WOT_NUMERICAL_SOURCES
 set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_startup_services.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/client_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gun_ballistics_binding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/offline_vehicle_parameters.cpp"
@@ -46,6 +48,10 @@ target_sources(bwclient PRIVATE "${CMAKE_CURRENT_LIST_DIR}/standalone_app.cpp"
     ${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES})
 target_include_directories(bwclient PRIVATE "${BW_SOURCE_DIR}/client"
     "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../include")
+target_include_directories(moo PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../include")
+target_include_directories(romp PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/../include")
 include("${CMAKE_CURRENT_LIST_DIR}/wwise_sdk.cmake")
 target_link_libraries(bwclient WotWwiseSdk)
