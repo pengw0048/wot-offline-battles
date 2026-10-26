@@ -48,7 +48,7 @@ struct StockShaderRegisterRange {
 };
 
 struct StockShaderResourceBinding {
-    // Native groups: 1 SRV, 2 sampler, 3 uniform buffer, 11 UAV.
+    // Native groups: 1 sampler, 2 SRV, 3 uniform buffer, 11 UAV.
     std::uint32_t kind = 0;
     std::uint32_t resource_index = 0;
     std::uint32_t shader_slot = 0;

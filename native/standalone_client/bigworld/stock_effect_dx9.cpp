@@ -19,7 +19,7 @@ std::shared_ptr<const StockEffectBinary> required_definition(
     return runtime->definition();
 }
 bool check_vertex_textures(IDirect3DDevice9* device, std::string& error) {
-    // b2f9b0 counts vertex SRVs; b2fad0 then requires the adapter's actual
+    // b2f9b0 counts vertex sampler bindings; b2fad0 requires the adapter's actual
     // D3DUSAGE_QUERY_VERTEXTEXTURE / R32F capability before creating that VS.
     D3DDEVICE_CREATION_PARAMETERS creation{};
     if (failed(device->GetCreationParameters(&creation), "GetCreationParameters", error)) return false;
@@ -112,11 +112,13 @@ bool StockDx9EffectMaterial::apply_shader(std::uint32_t shader_index, ShaderAppl
     std::uint32_t resource_first = 0xffffffff;
     for (const auto& resource : shader.resources) {
         if (mode == ShaderApply::uniforms && resource.kind != 3) continue;
-        if (mode == ShaderApply::textures && resource.kind != 1) continue;
-        if (mode == ShaderApply::samplers && resource.kind != 2) continue;
+        if (mode == ShaderApply::textures && resource.kind != 2) continue;
+        if (mode == ShaderApply::samplers && resource.kind != 1) continue;
         StockEffectResourceTable table;
-        if (resource.kind == 1) table = StockEffectResourceTable::resource_view;
-        else if (resource.kind == 2) table = StockEffectResourceTable::sampler_state;
+        // b3b3d0 resolves group 1 through sampler RTB; b3e9a0/b3b1f0
+        // resolve group 2 through SRV RTB. Several SRVs can share one sampler.
+        if (resource.kind == 1) table = StockEffectResourceTable::sampler_state;
+        else if (resource.kind == 2) table = StockEffectResourceTable::resource_view;
         else if (resource.kind == 3) table = StockEffectResourceTable::uniform_buffer;
         else if (resource.kind == 11) return invalid("DX9 shader requires an unordered view", error);
         else continue; // b3e080 ignores unrecognized resource groups.
@@ -133,7 +135,7 @@ bool StockDx9EffectMaterial::apply_shader(std::uint32_t shader_index, ShaderAppl
             if (!storage) return invalid("Shader attempts to bind selection data as a UBB", error);
             uniform_views[slot] = {storage->bytes().data(), storage->bytes().size()};
             storage_owners.push_back(std::move(storage));
-        } else if (resource.kind == 1) {
+        } else if (resource.kind == 2) {
             if (*index >= textures_.size()) return invalid("Shader refers to an invalid texture view", error);
             if (slot >= resource_slots.size()) resource_slots.resize(std::size_t(slot)+1);
             resource_slots[slot] = index;
