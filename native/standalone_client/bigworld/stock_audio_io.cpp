@@ -3,7 +3,6 @@
 
 #include "cstdmf/string_utils.hpp"
 #include "resmgr/bwresource.hpp"
-#include "resmgr/file_streamer.hpp"
 #include "resmgr/multi_file_system.hpp"
 #include "wot/wwise_bank.hpp"
 #include <AK/Tools/Common/AkPlatformFuncs.h>
@@ -18,9 +17,22 @@
 BW_BEGIN_NAMESPACE
 namespace {
 struct ResourceHandle {
-    FileStreamerPtr stream;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    std::uint64_t base = 0, size = 0;
     std::mutex mutex;
     std::vector<std::uint8_t> header;
+    ~ResourceHandle() {
+        if (file != INVALID_HANDLE_VALUE) ::CloseHandle(file);
+    }
+    bool read(std::uint64_t offset, AkUInt32 count, void* output) {
+        if (offset > size || count > size - offset) return false;
+        std::lock_guard<std::mutex> lock(mutex);
+        LARGE_INTEGER position;
+        position.QuadPart = static_cast<LONGLONG>(base + offset);
+        DWORD received = 0;
+        return ::SetFilePointerEx(file, position, NULL, FILE_BEGIN) &&
+            ::ReadFile(file, output, count, &received, NULL) && received == count;
+    }
 };
 std::uint32_t u32(const std::uint8_t* value) {
     return std::uint32_t(value[0]) | (std::uint32_t(value[1]) << 8) |
@@ -79,17 +91,37 @@ AKRESULT StockAudioResourceIO::openResource(const AkOSChar* path,
     const auto type = fileSystem_->getFileType(resource, &info);
     if (type != IFileSystem::FT_FILE && type != IFileSystem::FT_ARCHIVE)
         return AK_FileNotFound;
+    IFileSystem::FileDataLocation location;
+    if (!fileSystem_->locateFileData(resource, &location)) return AK_Fail;
+    // ZipFileStreamer retains the archive's nonrecursive mutex until close.
+    // Wwise keeps every PCK handle until unload and reads it on its I/O thread;
+    // resolve the mounted range briefly, then give each resource its own handle.
+    const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<LONGLONG>::max());
+    if (location.offset > maximum || info.size > maximum - location.offset)
+        return AK_InvalidFile;
+    BW::wstring host;
+    if (!bw_utf8tow(location.hostResourceID, host)) return AK_InvalidParameter;
     std::unique_ptr<ResourceHandle> handle(new ResourceHandle);
-    handle->stream = fileSystem_->streamFile(resource);
-    if (!handle->stream) return AK_Fail;
+    handle->file = ::CreateFileW(host.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle->file == INVALID_HANDLE_VALUE) return AK_FileNotFound;
+    LARGE_INTEGER hostSize;
+    if (!::GetFileSizeEx(handle->file, &hostSize) || hostSize.QuadPart < 0 ||
+        location.offset + info.size > static_cast<std::uint64_t>(hostSize.QuadPart))
+        return AK_InvalidFile;
+    handle->base = location.offset;
+    handle->size = info.size;
     if (resource.size() >= 4 && resource.substr(resource.size() - 4) == ".bnk") {
         std::uint8_t prefix[8];
-        if (handle->stream->read(sizeof(prefix), prefix) != sizeof(prefix) ||
+        if (!handle->read(0, sizeof(prefix), prefix) ||
             u32(prefix) != 0x44484b42u || info.size < 8 ||
-            u32(prefix + 4) > info.size - 8) return AK_InvalidFile;
-        std::vector<std::uint8_t> encoded(static_cast<std::size_t>(u32(prefix + 4)) + 8);
+            u32(prefix + 4) > info.size - 8)
+            return AK_InvalidFile;
+        const std::uint64_t headerSize = std::uint64_t(u32(prefix + 4)) + 8;
+        if (headerSize > std::numeric_limits<std::size_t>::max()) return AK_InvalidFile;
+        std::vector<std::uint8_t> encoded(static_cast<std::size_t>(headerSize));
         std::copy(prefix, prefix + 8, encoded.begin());
-        if (handle->stream->read(encoded.size() - 8, encoded.data() + 8) != encoded.size() - 8)
+        if (!handle->read(8, u32(prefix + 4), encoded.data() + 8))
             return AK_InvalidFile;
         try { handle->header = wot::decode_wot_1513_wwise_bank_header(encoded); }
         catch (const std::exception& error) {
@@ -126,17 +158,15 @@ AKRESULT StockAudioResourceIO::Open(AkFileID id, AkOpenMode mode,
 AKRESULT StockAudioResourceIO::Read(AkFileDesc& file, const AkIoHeuristics&,
     void* output, AkIOTransferInfo& transfer) {
     auto* handle = reinterpret_cast<ResourceHandle*>(file.hFile);
-    if (!handle || !output || transfer.uRequestedSize > transfer.uBufferSize ||
-        transfer.uFilePosition > std::numeric_limits<std::size_t>::max()) return AK_Fail;
-    std::lock_guard<std::mutex> lock(handle->mutex);
-    const auto offset = static_cast<std::size_t>(transfer.uFilePosition);
-    if (!handle->stream->setOffset(offset) ||
-        handle->stream->read(transfer.uRequestedSize, output) != transfer.uRequestedSize)
+    if (!handle || !output || transfer.uRequestedSize > transfer.uBufferSize) return AK_Fail;
+    const auto offset = transfer.uFilePosition;
+    if (!handle->read(offset, transfer.uRequestedSize, output))
         return AK_Fail;
     if (offset < handle->header.size()) {
+        const auto headerOffset = static_cast<std::size_t>(offset);
         const auto count = std::min<std::size_t>(transfer.uRequestedSize,
-            handle->header.size() - offset);
-        std::memcpy(output, handle->header.data() + offset, count);
+            handle->header.size() - headerOffset);
+        std::memcpy(output, handle->header.data() + headerOffset, count);
     }
     return AK_Success;
 }

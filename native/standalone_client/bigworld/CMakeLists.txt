@@ -82,3 +82,24 @@ else()
     set_source_files_properties(${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
 endif()
+
+# Exercise the production resource adapter with real BW ZIPs and SDK streams.
+# No renderer, SoundEngine, audio device, or original game assets are required.
+add_executable(probe_stock_audio_resources
+    "${CMAKE_CURRENT_LIST_DIR}/probe_stock_audio_resources.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_audio_io.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/wwise_bank.cpp"
+    "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFileLocationBase.cpp")
+target_include_directories(probe_stock_audio_resources BEFORE PRIVATE
+    "${BW_SOURCE_DIR}/lib/resmgr"
+    "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../include")
+target_compile_definitions(probe_stock_audio_resources PRIVATE
+    _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
+target_link_libraries(probe_stock_audio_resources resmgr cstdmf WotWwiseSdk winmm)
+set_target_properties(probe_stock_audio_resources PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
+if(MSVC)
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/probe_stock_audio_resources.cpp"
+        PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
+endif()

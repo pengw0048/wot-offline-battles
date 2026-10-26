@@ -321,6 +321,24 @@ print('Licensed SDK input extracted: %d files' % len(members))
         Invoke-Checked $CacheExe @("--zero-stats") "compiler-cache-start.log"
     }
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_stock_audio_resources", "--parallel", "4") "audio-resources-probe-compile.log"
+    $ResourceProbe = Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_audio_resources.exe"
+    $ResourceFixture = Join-Path $WorkRoot "audio-resources-probe.pkg"
+    # Exercise our actual resource adapter, BigWorld ZIP locking and the Wwise
+    # scheduler together. The SDK-only probe above uses its default disk hook.
+    @'
+import subprocess, sys, zipfile
+with zipfile.ZipFile(sys.argv[2], 'w', compression=zipfile.ZIP_STORED) as archive:
+    for name, multiplier, offset in [('first', 17, 3), ('second', 29, 11)]:
+        archive.writestr('audioww/' + name + '.bin',
+                         bytes((i * multiplier + offset) & 255 for i in range(4096)))
+subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
+'@ | & python - $ResourceProbe $ResourceFixture 2>&1 |
+        Tee-Object -FilePath (Join-Path $LogRoot "audio-resources-probe-run.log")
+    if ($LASTEXITCODE -ne 0) {
+        throw "The mounted audio resource integration probe failed."
+    }
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "bwclient", "--parallel", "4", "--",
         "/bl:$(Join-Path $LogRoot 'msbuild.binlog')") "compile.log"
 
