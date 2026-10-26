@@ -170,6 +170,8 @@ int main(int argc,char** argv){
 
 
 class StockAudioIOTest(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt',
+                     'POSIX host fixture; Windows runs probe_stock_audio_resources')
     def test_mounted_resources_have_independent_bounded_handles(self):
         source = (ROOT / 'bigworld/stock_audio_io.cpp').read_text()
         source = '\n'.join(line for line in source.splitlines()
