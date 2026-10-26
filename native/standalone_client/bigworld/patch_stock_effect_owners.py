@@ -267,6 +267,14 @@ def patch_context(root):
         text = text.replace("\tEffectManager& em = EffectManager::instance();\n", "", 1)
     text = replace_once(text, "EffectVisualContext::~EffectVisualContext()\n{\n\tinitConstants();",
         "EffectVisualContext::~EffectVisualContext()\n{\n\tif (stockEffectContext_) stockEffectContext_->detach_providers();\n\tinitConstants();", "shared provider teardown")
+    text = replace_once(text,
+        "            EffectConstantValuePtr* mapping = getMapping(BW::StringRef(semantic.data(), semantic.size()), false);",
+        """            // #1513 Screen (0x9b03e0) is width, height and their reciprocals.
+            // Legacy public effects retain their own half-screen Screen producer.
+            const BW::StringRef producer = semantic == "Screen" ? BW::StringRef("InvScreen") :
+                BW::StringRef(semantic.data(), semantic.size());
+            EffectConstantValuePtr* mapping = getMapping(producer, false);""",
+        "original screen dimensions")
     path.write_text(text)
 
 

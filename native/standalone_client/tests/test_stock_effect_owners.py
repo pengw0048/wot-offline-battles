@@ -1,8 +1,10 @@
 """Exercise the production Moo owner switch with a strict effect lifecycle."""
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -14,6 +16,88 @@ spec.loader.exec_module(patch)
 
 
 class StockEffectOwnerTests(unittest.TestCase):
+    def test_original_screen_uses_live_reciprocals_without_changing_legacy_effects(self):
+        archive = Path(os.environ.get('WOT_PUBLIC_ENGINE_ARCHIVE', '/tmp/wot-bigworld-engine-14.4.1.tar.gz'))
+        compiler = shutil.which('c++')
+        if not archive.is_file() or not compiler:
+            self.skipTest('Pinned public source archive and host C++ compiler are required')
+        with tempfile.TemporaryDirectory(prefix='wot-screen-producer-') as directory:
+            root = Path(directory)
+            with tarfile.open(archive) as original:
+                for relative in ('lib/moo/effect_visual_context.hpp', 'lib/moo/effect_visual_context.cpp'):
+                    member = next(name for name in original.getnames()
+                                  if name.endswith('/programming/bigworld/' + relative))
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(original.extractfile(member).read())
+            patch.patch_context(root)
+            path = root / 'lib/moo/effect_visual_context.cpp'
+            generated = path.read_text()
+            patch.patch_context(root)
+            self.assertEqual(path.read_text(), generated)
+            # Upgrade an already patched engine, not just a fresh extraction.
+            begin = generated.index('            // #1513 Screen')
+            end = generated.index('            if (!mapping', begin)
+            path.write_text(generated[:begin] +
+                '            EffectConstantValuePtr* mapping = getMapping(BW::StringRef(semantic.data(), semantic.size()), false);\n' +
+                generated[end:])
+            patch.patch_context(root)
+            self.assertEqual(path.read_text(), generated)
+            constants = generated[generated.index('class ScreenConstant'):generated.index('class WorldViewConstant')]
+            begin = generated.index('[this](const std::string& semantic')
+            end = generated.index('}, [](const std::string& error)', begin) + 1
+            provider = generated[begin:end]
+            source = r'''
+#include <cassert>
+#include <string>
+#define BW_GUARD
+namespace BW {using StringRef=std::string;}
+struct Vector4 {float x,y,z,w;Vector4(float a,float b,float c,float d):x(a),y(b),z(c),w(d){}};
+using D3DXHANDLE=const char*;
+struct ID3DXEffect {Vector4 value{0,0,0,0};void SetVector(D3DXHANDLE,const Vector4* v){value=*v;}};
+struct RenderContext {
+    float width=0,height=0;
+    float screenWidth(){return width;} float screenHeight(){return height;}
+    float halfScreenWidth(){return width*.5f;} float halfScreenHeight(){return height*.5f;}
+};
+RenderContext context;
+RenderContext& rc(){return context;}
+struct EffectConstantValue {virtual bool operator()(ID3DXEffect*,D3DXHANDLE)=0;};
+''' + constants + r'''
+struct EffectConstantValuePtr {
+    EffectConstantValue* value;
+    bool exists(){return value!=nullptr;}
+    EffectConstantValue& operator*(){return *value;}
+};
+struct Context {
+    ScreenConstant screen;InvScreenConstant inverse;
+    EffectConstantValuePtr legacy{&screen},current{&inverse};
+    EffectConstantValuePtr* getMapping(const BW::StringRef& name,bool create){
+        assert(!create);
+        return name=="Screen"?&legacy:name=="InvScreen"?&current:nullptr;
+    }
+    void check(){
+        auto provider=PROVIDER;
+        ID3DXEffect effect;
+        assert(provider("Screen",nullptr,nullptr));
+        assert(!provider("Unavailable",nullptr,nullptr));
+        for(auto size:{Vector4(1920,1080,0,0),Vector4(960,540,0,0),Vector4(1279,719,0,0)}){
+            context.width=size.x;context.height=size.y;
+            assert(provider("Screen",&effect,"g_screen"));
+            assert(effect.value.x==size.x&&effect.value.y==size.y);
+            assert(effect.value.z==1.f/size.x&&effect.value.w==1.f/size.y);
+            assert((**getMapping("Screen",false))(&effect,"legacy_screen"));
+            assert(effect.value.z==size.x*.5f&&effect.value.w==size.y*.5f);
+        }
+    }
+};
+int main(){Context owner;owner.check();}
+'''.replace('PROVIDER', provider)
+            (root / 'probe.cpp').write_text(source)
+            subprocess.run([compiler, '-std=c++14', '-Wall', '-Wextra', '-Werror',
+                            str(root / 'probe.cpp'), '-o', str(root / 'probe')], check=True)
+            subprocess.run([str(root / 'probe')], check=True)
+
     def test_changed_source_is_rejected_and_reapplication_is_stable(self):
         self.assertEqual(patch.replace_once("before", "before", "after", "probe"), "after")
         self.assertEqual(patch.replace_once("after", "before", "after", "probe"), "after")
