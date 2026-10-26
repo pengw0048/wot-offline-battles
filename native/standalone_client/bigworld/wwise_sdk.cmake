@@ -1,4 +1,5 @@
 # Licensed SDK inputs are supplied privately by the owner and never packaged.
+file(TO_CMAKE_PATH "${WOT_WWISE_SDK_ROOT}" WOT_WWISE_SDK_ROOT)
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "The restored Wwise backend requires the Win32 SDK")
 endif()

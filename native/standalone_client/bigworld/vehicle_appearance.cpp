@@ -223,6 +223,13 @@ public:
         MatrixProvider( false, &s_type_ ), state_( state ), node_( node ) {}
     virtual void matrix( Matrix & result ) const { result = state_->nodes[node_].world; }
     PY_RO_ATTRIBUTE_DECLARE( state_->nodes[node_].name, name )
+    PyObject * pyGet_localMatrix()
+    {
+        // 008dcd90 returns a Math.Matrix value, not a provider or a writable
+        // node alias. A reset compound returns the original identity value.
+        return Script::getData( state_->active ? state_->nodes[node_].local : Matrix::identity );
+    }
+    PY_RO_ATTRIBUTE_SET( localMatrix )
 private:
     CompoundStatePtr state_;
     size_t node_;
@@ -232,6 +239,7 @@ PY_BEGIN_METHODS( PyCompoundNode )
 PY_END_METHODS()
 PY_BEGIN_ATTRIBUTES( PyCompoundNode )
     PY_ATTRIBUTE( name )
+    PY_ATTRIBUTE( localMatrix )
 PY_END_ATTRIBUTES()
 
 class PyCompoundPartBounds : public MatrixProvider

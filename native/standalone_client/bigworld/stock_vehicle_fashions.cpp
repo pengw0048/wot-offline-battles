@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "stock_vehicle_fashions.hpp"
+#include "app.hpp"
 
 #include "duplo/py_material_fashion.hpp"
 #include "duplo/pymodel.hpp"
@@ -80,11 +81,12 @@ struct VehicleTrackTextureState
 
 bool excludedFromCamouflage( const BW::string & material )
 {
-    // 00972a47 appends /camouflage/excludeMaterials to scripts_config.xml;
+    // 005c0239 configures system/scriptsConfigXML; 00972a47 appends
+    // /camouflage/excludeMaterials to that same public App config value.
     // 00af05c0 reads item strings. 00af0f60 treats only a leading '*' as
     // substring matching. Keep the rules in the original resource.
     DataSectionPtr section = BWResource::openSection(
-        "scripts_config.xml/camouflage/excludeMaterials" );
+        s_scriptsConfigXML.value() + "/camouflage/excludeMaterials" );
     if (!section)
         return false;
     BW::vector<DataSectionPtr> items;
