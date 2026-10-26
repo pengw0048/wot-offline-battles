@@ -126,7 +126,7 @@ target_include_directories(probe_stock_wot_module PRIVATE
     "${BW_SOURCE_DIR}/client" "${CMAKE_CURRENT_LIST_DIR}")
 target_compile_definitions(probe_stock_wot_module PRIVATE
     _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
-target_link_libraries(probe_stock_wot_module pyscript script math cstdmf winmm)
+target_link_libraries(probe_stock_wot_module pyscript script resmgr math cstdmf winmm)
 set_target_properties(probe_stock_wot_module PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
 
