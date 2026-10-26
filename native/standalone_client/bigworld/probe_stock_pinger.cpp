@@ -87,9 +87,9 @@ public:
         network_.interfaceTable().serve( message, this );
     }
     ~Responder() { pending_.clear(); }
-    std::string host() const
+    std::string host( const char * name = "127.0.0.1" ) const
     {
-        return "127.0.0.1:" + std::to_string( ntohs( network_.address().port ) );
+        return std::string( name ) + ":" + std::to_string( ntohs( network_.address().port ) );
     }
     void handleMessage( const BW::Mercury::Address & source,
         BW::Mercury::UnpackedMessageHeader & header, BW::BinaryIStream & data ) override
@@ -211,7 +211,7 @@ int main()
             Responder partial( dispatcher, Responder::DROP_MIDDLE );
             Responder dropped( dispatcher, Responder::DROP_ALL );
             Responder cancelled( dispatcher, Responder::DROP_ALL );
-            publish( "fast_host", fast.host() ); publish( "warm_host", warm.host() );
+            publish( "fast_host", fast.host() ); publish( "warm_host", warm.host( "localhost" ) );
             publish( "partial_host", partial.host() ); publish( "dropped_host", dropped.host() );
             publish( "cancelled_host", cancelled.host() );
             require( BW::initialiseStockPinger( dispatcher, tasks ), "Cannot initialize the native pinger" );
