@@ -30,14 +30,22 @@ bool finite( const Vector3 & value )
 class BodyCollision : public CollisionCallback
 {
 public:
+    BodyCollision() : distance_( -1.f ) {}
+    float distance() const { return distance_; }
+
     virtual int operator()( const CollisionObstacle & obstacle,
-        const WorldTriangle & triangle, float /* distance */ )
+        const WorldTriangle & triangle, float distance )
     {
         if (obstacle.isMovingObstacle() ||
             (triangle.flags() & (BW_TRIANGLE_NOCOLLIDE | TRIANGLE_TERRAIN)))
             return COLLIDE_ALL;
+        if (distance_ < 0.f || distance < distance_)
+            distance_ = distance;
         return COLLIDE_BEFORE;
     }
+
+private:
+    float distance_;
 };
 
 struct GroundPlane
@@ -60,7 +68,8 @@ struct VehicleScene::State
 
     State() : configured( false ), supported( false ), reported( false ),
         x( 0 ), y( 0 ), z( 0 ), yaw( 0 ), speed( 0 ), omega( 0 ),
-        length( 0 ), width( 0 ), groundBottom( 0 )
+        length( 0 ), width( 0 ), groundBottom( 0 ), inputReportAge( 1.0 ),
+        acceptedBlocker( false ), invalidQuery( false ), motionStatus( "idle" )
     {
         transform.setIdentity();
     }
@@ -73,6 +82,10 @@ struct VehicleScene::State
     bool reported;
     double x, y, z, yaw, speed, omega;
     double length, width, groundBottom;
+    double inputReportAge;
+    bool acceptedBlocker;
+    bool invalidQuery;
+    const char * motionStatus;
     Matrix transform;
 
     bool height( double sampleX, double sampleZ, double & result ) const
@@ -138,7 +151,7 @@ struct VehicleScene::State
                 index & 4 ? high.z : low.z ) );
     }
 
-    bool clearMotion( const Matrix & from, const Matrix & to, bool rotation ) const
+    bool clearMotion( const Matrix & from, const Matrix & to, bool rotation )
     {
         // Sweep all twelve faces of the real collision-bound box during
         // translation. Rotation uses its eight corner trajectories, so this
@@ -164,9 +177,17 @@ struct VehicleScene::State
                     if (distance <= 0.f)
                         continue;
                     BodyCollision collision;
-                    const float hit = space->collide( start[corner], finish[corner], collision );
-                    if (!std::isfinite( hit ) || hit >= 0.f)
+                    const float reported = space->collide( start[corner], finish[corner], collision );
+                    if (!std::isfinite( reported ) || !std::isfinite( collision.distance() ))
+                    {
+                        invalidQuery = true;
                         return false;
+                    }
+                    if (collision.distance() >= 0.f)
+                    {
+                        acceptedBlocker = true;
+                        return false;
+                    }
                 }
             }
             else
@@ -179,9 +200,20 @@ struct VehicleScene::State
                     const WorldTriangle triangle( start[faces[face][0]],
                         start[faces[face][1]], start[faces[face][2]] );
                     BodyCollision collision;
-                    const float hit = space->collide( triangle, triangle.v0() + delta, collision );
-                    if (!std::isfinite( hit ) || hit >= 0.f)
+                    const float reported = space->collide( triangle, triangle.v0() + delta, collision );
+                    // Native terrain callbacks update their returned distance
+                    // even when our filter returns COLLIDE_ALL. Only a surface
+                    // accepted by this callback is a physical body blocker.
+                    if (!std::isfinite( reported ) || !std::isfinite( collision.distance() ))
+                    {
+                        invalidQuery = true;
                         return false;
+                    }
+                    if (collision.distance() >= 0.f)
+                    {
+                        acceptedBlocker = true;
+                        return false;
+                    }
                 }
             }
         }
@@ -215,6 +247,9 @@ struct VehicleScene::State
 
     void step( double elapsed, double throttle, double steer, bool handbrake )
     {
+        acceptedBlocker = false;
+        invalidQuery = false;
+        motionStatus = "ground_unavailable";
         GroundPlane plane;
         if (!ground( x, z, yaw, plane ))
         {
@@ -223,6 +258,7 @@ struct VehicleScene::State
             return;
         }
         supportStatus( true );
+        motionStatus = "supported";
         y = plane.y;
         const Matrix start = pose( x, z, yaw, plane );
         speed = wot::offline_vehicle_control::longitudinal_step(
@@ -243,8 +279,11 @@ struct VehicleScene::State
             {
                 x = nextX; z = nextZ; plane = endpoint;
                 advanced = true;
+                motionStatus = "clear";
             }
         }
+        else
+            motionStatus = "endpoint_ground_unavailable";
         if (!advanced && speed != 0.0)
         {
             // Existing hard_contact_step's blocked, non-deflected branch.
@@ -265,6 +304,10 @@ struct VehicleScene::State
         }
         else
             omega = 0.0;
+        if (acceptedBlocker)
+            motionStatus = "accepted_obstacle";
+        if (invalidQuery)
+            motionStatus = "invalid_native_query";
         y = plane.y;
         publish( pose( x, z, yaw, plane ) );
     }
@@ -382,17 +425,26 @@ void VehicleScene::advance( float elapsed )
     State & state = *state_;
     if (!state.configured || !std::isfinite( elapsed ) || elapsed <= 0.f)
         return;
-    if (!state.space || state.space->cleared() || state.space->loadStatus() < 1.f)
-    {
-        state.speed = state.omega = 0.0;
-        state.supportStatus( false );
-        return;
-    }
+    state.inputReportAge += elapsed;
     const double throttle = int( InputDevices::isKeyDown( KeyCode::KEY_W ) ) -
         int( InputDevices::isKeyDown( KeyCode::KEY_S ) );
     const double steer = int( InputDevices::isKeyDown( KeyCode::KEY_D ) ) -
         int( InputDevices::isKeyDown( KeyCode::KEY_A ) );
     const bool handbrake = InputDevices::isKeyDown( KeyCode::KEY_SPACE );
+    if (!state.space || state.space->cleared() || state.space->loadStatus() < 1.f)
+    {
+        state.speed = state.omega = 0.0;
+        state.supportStatus( false );
+        state.motionStatus = "scene_unavailable";
+        if ((throttle != 0.0 || steer != 0.0 || handbrake) && state.inputReportAge >= 1.0)
+        {
+            INFO_MSG( "VehicleScene: input throttle=%g steer=%g brake=%d position=(%g,%g,%g) speed=%g omega=%g motion=%s\n",
+                throttle, steer, int( handbrake ), state.x, state.y, state.z,
+                state.speed, state.omega, state.motionStatus );
+            state.inputReportAge = 0.0;
+        }
+        return;
+    }
     // Existing integrator's 0.1-second slice, retaining the complete elapsed
     // interval by substepping instead of dropping a delayed frame's remainder.
     double remaining = elapsed;
@@ -401,6 +453,13 @@ void VehicleScene::advance( float elapsed )
         const double slice = std::min( remaining, 0.1 );
         state.step( slice, throttle, steer, handbrake );
         remaining -= slice;
+    }
+    if ((throttle != 0.0 || steer != 0.0 || handbrake) && state.inputReportAge >= 1.0)
+    {
+        INFO_MSG( "VehicleScene: input throttle=%g steer=%g brake=%d position=(%g,%g,%g) speed=%g omega=%g motion=%s\n",
+            throttle, steer, int( handbrake ), state.x, state.y, state.z,
+            state.speed, state.omega, state.motionStatus );
+        state.inputReportAge = 0.0;
     }
 }
 

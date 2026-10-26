@@ -18,6 +18,7 @@ import zipfile
 
 from bake_navigation_0922 import PackageVFS, _legacy_baker
 from inspect_client import inspect_client
+from prepare_native_vehicle import Extractor, xml_root
 from space_bin_0922 import CompiledSpace as SpaceDirectory
 
 
@@ -37,6 +38,124 @@ def extract_member(archive, member, destination):
     destination.write_bytes(archive.read(member))
 
 
+def public_hdr_settings(source):
+    """Project #1513 exposure settings into the public HDRSettings schema."""
+    if source is None:
+        raise ValueError('map has no authored HDR settings')
+    if source.findtext('version') != '2':
+        raise ValueError('expected the reviewed #1513 HDR version 2')
+    result = ET.Element('HDR')
+    ET.SubElement(result, 'version').text = '1'
+    for name in ('enable', 'adaptationSpeed', 'bloom/enable',
+                 'bloom/brightThreshold', 'bloom/factor',
+                 'environment/skyLumMultiplier',
+                 'environment/ambientLumMultiplier',
+                 'gammaCorrection/enabled'):
+        value = source.find(name)
+        if value is None:
+            raise ValueError('map HDR lacks ' + name)
+        parent, unused, leaf = name.rpartition('/')
+        destination = result
+        if parent:
+            destination = result.find(parent)
+            if destination is None:
+                destination = ET.SubElement(result, parent)
+        ET.SubElement(destination, leaf).text = value.text
+    # #1513 HDRSettings::load (0x00a6f118..0x00a6f192) split the old
+    # surface-light multiplier from the sun disc at schema version 2.
+    # The public HDRParams.y still feeds surface sunDiffuseTerm(), so copying
+    # the newer sunLumMultiplier here would apply disc brightness to geometry.
+    sunlight = source.findtext('environment/sunlightLumMultiplier')
+    if sunlight is None:
+        raise ValueError('map HDR lacks environment/sunlightLumMultiplier')
+    ET.SubElement(result.find('environment'), 'sunLumMultiplier').text = sunlight
+
+    mappings = source.find('tonemappings')
+    if mappings is not None:
+        # #1513 0x00a6f440 reads at most three curves; active is a zero-based
+        # index, defaulting to 1. Public HDRSettings has one parameter set.
+        active = int(mappings.findtext('active', '1'))
+        curves = mappings.findall('tonemapping')[:3]
+        if active < 0 or active >= len(curves):
+            raise ValueError('map HDR has an invalid active tone mapping')
+        tone = curves[active]
+    else:
+        tone = source.find('tonemapping')
+    converted = ET.SubElement(result, 'tonemapping')
+    # Exact #1513 reader 0x00a6f330 defaults. In particular its whitePoint=5
+    # differs from the public engine's 1.5; do not silently use the latter.
+    for name, default in (('eyeDarkLimit', '0.05'), ('eyeLightLimit', '1.5'),
+                          ('middleGray', '0.5'), ('whitePoint', '5.0')):
+        ET.SubElement(converted, name).text = (
+            tone.findtext(name, default) if tone is not None else default)
+    return result
+
+
+class SkyExtractor(Extractor):
+    def preview_materials(self, resource, root):
+        # The public sky effect already projects authored 20-unit sky meshes
+        # at the far plane. A vehicle's diffuse-light material cannot do that.
+        for material in root.findall('.//material'):
+            effect = material.findtext('fx')
+            if effect != 'shaders/environment/sky_box.fx':
+                raise ValueError('unreviewed sky effect: %s/%s' % (resource, effect))
+            self.public_runtime_resources.add(effect)
+            diffuse = next((prop for prop in material.findall('property')
+                            if (prop.text or '').strip() == 'diffuseMap'), None)
+            if diffuse is None or not diffuse.findtext('Texture'):
+                raise ValueError('sky material lacks its authored diffuseMap: ' + resource)
+            # #1513's LDR2HDR map, cloud animation and mask parameters do not
+            # exist in the public shader. Retain the static authored sky image.
+            for prop in list(material.findall('property')):
+                if prop is not diffuse:
+                    material.remove(prop)
+
+
+def prepare_skyboxes(packages, settings, output):
+    vfs = PackageVFS(str(packages))
+    try:
+        extractor = SkyExtractor(vfs, output)
+        resources = []
+        for node in settings.findall('skyDome'):
+            model_resource = (node.text or '').strip()
+            if not model_resource:
+                continue
+            # #1513 stores a Model, while public EnviroMinder::load passes
+            # skyDome directly to VisualManager. Resolve the authored visual.
+            model = xml_root(vfs.read(model_resource))
+            visual = model.findtext('nodelessVisual')
+            if not visual:
+                raise ValueError('sky model has no static nodelessVisual: ' + model_resource)
+            visual += '.visual'
+            resources.append(visual)
+            extractor.enqueue(visual, 'space.settings/skyDome')
+        extractor.extract()
+        if extractor.unresolved:
+            raise ValueError('unresolved sky resources: ' + ', '.join(extractor.unresolved))
+        # Public Visual::draw captures render-node transforms. Add the authored
+        # skyWorld as their parent, since public EnviroMinder has no such field.
+        sky_world = settings.find('skyWorld')
+        if sky_world is not None:
+            for resource in resources:
+                path = output / 'res' / resource
+                tree = ET.parse(path)
+                root = tree.getroot()
+                node = root.find('node')
+                if node is None:
+                    raise ValueError('sky visual lacks an authored node: ' + resource)
+                root.remove(node)
+                parent = ET.SubElement(root, 'node')
+                ET.SubElement(parent, 'identifier').text = 'PrototypeSkyWorld'
+                transform = copy.deepcopy(sky_world)
+                transform.tag = 'transform'
+                parent.append(transform)
+                parent.append(node)
+                write_xml(path, root)
+        return resources, sorted(extractor.public_runtime_resources)
+    finally:
+        vfs.close()
+
+
 def prepare_lighting(packages, settings, scene, scene_path):
     """Project authored forward sunlight/ambient keys into public TimeOfDay."""
     resource = settings.findtext('timeOfDay')
@@ -52,7 +171,8 @@ def prepare_lighting(packages, settings, scene, scene_path):
         raise ValueError('timeOfDay has no day_night_cycle: ' + resource)
     # #1513 stores renderer-specific directional lighting below forward/;
     # public TimeOfDay::load reads angle/lightkey directly below the cycle.
-    # The unchanged root-level ambient curve and clock remain shared.
+    # The unchanged root-level ambient curve and clock remain shared. Both
+    # schemas store RGB keys in 0..255: public TimeOfDay::tick divides by 255.
     forward = cycle.find('forward')
     directional = forward if forward is not None else cycle
     result = ET.Element('root')
@@ -67,7 +187,8 @@ def prepare_lighting(packages, settings, scene, scene_path):
     if not converted.findall('lightkey') or not converted.findall('ambientkey'):
         raise ValueError('timeOfDay lacks sunlight or ambient keys: ' + resource)
     write_xml(scene / 'native_lighting.xml', result)
-    return scene_path + '/native_lighting.xml', resource.strip()
+    return (scene_path + '/native_lighting.xml', resource.strip(),
+            public_hdr_settings(source.find('HDR')))
 
 
 def prepare(client_root, map_name, output):
@@ -133,12 +254,23 @@ def prepare(client_root, map_name, output):
         ET.SubElement(terrain_settings, 'version').text = str(terrain['settings2']['terrain_version'])
         ET.SubElement(terrain_settings, 'heightMapSize').text = str(next(iter(sample_sizes)))
         ET.SubElement(terrain_settings, 'lodMapSize').text = str(terrain['settings2']['lod_map_size'])
-        lighting, lighting_source = prepare_lighting(
+        lighting, lighting_source, hdr_settings = prepare_lighting(
             packages, settings, scene, scene_path)
         ET.SubElement(preview_settings, 'timeOfDay').text = lighting
+        # EnviroMinder::loadHDR reads this inline section when no external
+        # skyGradientDome is configured. Omitting it enables unrelated HDR
+        # defaults, including much stronger exposure and bloom for Karelia.
+        preview_settings.append(hdr_settings)
+        skyboxes, sky_runtime_resources = prepare_skyboxes(packages, settings, output)
+        for resource in skyboxes:
+            ET.SubElement(preview_settings, 'skyDome').text = resource
+        if skyboxes:
+            partition = settings.find('skyDomePartition')
+            if partition is not None:
+                preview_settings.append(copy.deepcopy(partition))
         write_xml(scene / 'space.settings', preview_settings)
         original = output / 'source'
-        original.mkdir()
+        original.mkdir(exist_ok=True)
         (original / 'space.settings').write_bytes(packed_settings)
         # These are the exporter's temporary files, all created by this run.
         for path in exported.rglob('*'):
@@ -184,10 +316,14 @@ def prepare(client_root, map_name, output):
         'landscape_texture_files': len(landscape_files),
         'camera_position': camera,
         'lighting_source': lighting_source,
-        'lighting_adapter': 'Authored forward sunlight and shared ambient keys; public TimeOfDay schema.',
+        'lighting_adapter': 'Authored forward sunlight and shared ambient keys; shared HDR exposure/bloom/gamma settings with v2 surface sunlight mapped to public sun luminance.',
+        'sky_visuals': skyboxes,
+        'sky_public_runtime_resources': sky_runtime_resources,
         'omitted_compiled_sections': sorted(set(directory.sections) - {'BWST', 'BWT2'}),
         'limitations': [
-            'Terrain preview only; compiled statics, water, flora and the original sky are not adapted.',
+            'Terrain preview only; compiled statics, water and flora are not adapted.',
+            'Static authored sky geometry, orientation and diffuse image use the public sky effect; original cloud animation, LDR2HDR lookup and masks are not adapted.',
+            'Public diffuse materials and tone mapping differ from the original PBS renderer and filmic/color-correction pipeline.',
             'Add public engine runtime resources after resource_paths; original client packages are not required at runtime.',
             'File preparation does not establish Windows rendering or battle-map parity.',
         ],

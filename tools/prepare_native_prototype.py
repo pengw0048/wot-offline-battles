@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 
-PREPARATION_VERSION = 1
+PREPARATION_VERSION = 2
 ASSEMBLY = 'standalone/vehicles/ussr_R04_T-34/assembly.xml'
 RESOURCE_PATHS = 'prepared/vehicle/res;prepared/terrain/res;res;engine-res'
 CLIENT_ARGUMENTS = [

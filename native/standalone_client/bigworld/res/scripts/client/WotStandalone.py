@@ -20,11 +20,11 @@ def onChangeEnvironments(inside):
 
 
 def handleKeyEvent(event):
-    if event.key in tuple(BigWorld.stringToKey("KEY_" + key)
+    if event.key in tuple(BigWorld.stringToKey(key)
                           for key in ("W", "S", "A", "D", "SPACE")):
         # The native vehicle scene samples the engine's current key state.
         return True
-    if event.key == BigWorld.stringToKey("KEY_LEFTMOUSE"):
+    if event.key == BigWorld.stringToKey("LEFTMOUSE"):
         if event.isKeyDown() and not event.isRepeatedEvent():
             BigWorld.standaloneFire()
         return True

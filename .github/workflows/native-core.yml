@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - native/standalone_client/**
+      - tools/prepare_native_scene.py
       - .github/workflows/native-core.yml
   workflow_dispatch:
 
@@ -31,6 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # These tests use synthetic data and require no proprietary client files.
+      - name: Check application input and resource conversion
+        run: python -B -m unittest discover -s native/standalone_client/tests -p "test_*.py"
       - name: Configure C++17 core
         run: >-
           cmake -S native/standalone_client -B build/native-core

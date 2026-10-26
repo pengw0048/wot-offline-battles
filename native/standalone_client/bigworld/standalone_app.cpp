@@ -9,6 +9,7 @@
 #include "target_scene.hpp"
 
 #include "camera/free_camera.hpp"
+#include "camera/direction_cursor.hpp"
 #include "chunk/chunk_manager.hpp"
 #include "chunk_scene_adapter/client_chunk_space_adapter.hpp"
 #include "cstdmf/command_line.hpp"
@@ -17,8 +18,14 @@
 #include "cstdmf/main_loop_task.hpp"
 #include "duplo/pymodel.hpp"
 #include "moo/render_context.hpp"
+#include "moo/effect_visual_context.hpp"
+#include "moo/renderer.hpp"
 #include "resmgr/bwresource.hpp"
 #include "resmgr/datasection.hpp"
+#include "romp/enviro_minder.hpp"
+#include "romp/hdr_settings.hpp"
+#include "romp/hdr_support.hpp"
+#include "romp/time_of_day.hpp"
 #include "space/client_space.hpp"
 #include "space/deprecated_space_helpers.hpp"
 #include "space/entity_embodiment.hpp"
@@ -33,6 +40,41 @@ BW_BEGIN_NAMESPACE
 
 namespace
 {
+
+class StandaloneCamera : public FreeCamera
+{
+public:
+    virtual bool handleMouseEvent( const MouseEvent & event )
+    {
+        // Match DirectionCursor's public raw-input angle mapping. FreeCamera's
+        // velocity/inertia path multiplies the same mouse displacement by the
+        // render timestep; pointer displacement should not change with FPS.
+        const DirectionCursor & cursor = DirectionCursor::instance();
+        const float sensitivity = cursor.mouseSensitivity() *
+            Moo::rc().camera().fov() / DEG_TO_RAD( 60.f );
+        const float deltaYaw = event.dx() * cursor.mouseHVBias() * sensitivity;
+        float deltaPitch = event.dy() * (1.f - cursor.mouseHVBias()) * sensitivity;
+        if (cursor.invertVerticalMovement())
+            deltaPitch = -deltaPitch;
+        const float minimumPitch = cursor.minPitch();
+        const float maximumPitch = cursor.maxPitch();
+        const float pitch = Math::clamp( minimumPitch,
+            invView_.pitch() + deltaPitch, maximumPitch );
+        const Vector3 position = invView_.applyToOrigin();
+        invView_.setRotate( invView_.yaw() + deltaYaw, pitch, invView_.roll() );
+        invView_.translation( position );
+        view_.invert( invView_ );
+        return true;
+    }
+
+    void translateWorld( const Vector3 & displacement )
+    {
+        // FreeCamera::set resets keyboard and mouse angular velocities. A
+        // vehicle-follow translation must preserve the camera's input state.
+        invView_.translation( invView_.applyToOrigin() + displacement );
+        view_.invert( invView_ );
+    }
+};
 
 class StandaloneLog : public MainLoopTask
 {
@@ -200,7 +242,7 @@ public:
             }
         }
 
-        BaseCameraPtr camera( new FreeCamera(),
+        BaseCameraPtr camera( new StandaloneCamera(),
             PyObjectPtr::STEAL_REFERENCE );
         Matrix view;
         Vector3 eye = config->readVector3( "standalone/cameraPosition",
@@ -261,18 +303,16 @@ public:
                 const Vector3 eye = origin + Vector3( 8.f, 5.f, -12.f );
                 view.lookAt( eye, origin + Vector3( 0.f, 1.f, 0.f ) - eye,
                     Vector3( 0.f, 1.f, 0.f ) );
+                camera_->set( view );
                 cameraPlaced_ = true;
             }
             else
             {
                 // Follow translation while preserving mouse aim and free-camera
                 // offsets. Arrow keys still allow inspecting the real scene.
-                Matrix inverseView = camera_->invView();
-                inverseView.translation( inverseView.applyToOrigin() +
+                static_cast<StandaloneCamera *>( camera_.get() )->translateWorld(
                     origin - cameraOrigin_ );
-                view.invert( inverseView );
             }
-            camera_->set( view );
             cameraOrigin_ = origin;
         }
         projectiles_.advance( dGameTime );
@@ -288,6 +328,7 @@ public:
             ready_ = true;
             INFO_MSG( "StandaloneApp: native geometry loading completed: %s\n",
                 path_.c_str() );
+            this->logLighting();
         }
     }
 
@@ -325,6 +366,36 @@ public:
     }
 
 private:
+    void logLighting() const
+    {
+        const TimeOfDay * time = space_->enviro().timeOfDay();
+        if (time)
+        {
+            const OutsideLighting & light = time->lighting();
+            const Moo::Colour & ambient = space_->ambientLight();
+            const Moo::SunLight & shaderLight = Moo::rc().effectVisualContext().sunLight();
+            INFO_MSG( "StandaloneApp: lighting time=%g sun=(%g,%g,%g) ambient=(%g,%g,%g) spaceAmbient=(%g,%g,%g) shaderSun=(%g,%g,%g) shaderAmbient=(%g,%g,%g)\n",
+                time->gameTime(), light.sunColour.x, light.sunColour.y, light.sunColour.z,
+                light.ambientColour.x, light.ambientColour.y, light.ambientColour.z,
+                ambient.r, ambient.g, ambient.b,
+                shaderLight.m_color.r, shaderLight.m_color.g, shaderLight.m_color.b,
+                shaderLight.m_ambient.r, shaderLight.m_ambient.g, shaderLight.m_ambient.b );
+        }
+        IRendererPipeline * pipeline = Renderer::instance().pipeline();
+        HDRSupport * hdr = pipeline ? pipeline->hdrSupport() : NULL;
+        if (hdr)
+        {
+            const HDRSettings & settings = hdr->settings();
+            INFO_MSG( "StandaloneApp: HDR enabled=%d sunMultiplier=%g ambientMultiplier=%g eyeDarkLimit=%g middleGray=%g whitePoint=%g bloomFactor=%g\n",
+                int( hdr->enable() ), settings.m_environment.m_sunLumMultiplier,
+                settings.m_environment.m_ambientLumMultiplier,
+                settings.m_tonemapping.m_eyeDarkLimit, settings.m_tonemapping.m_middleGray,
+                settings.m_tonemapping.m_whitePoint, settings.m_bloom.m_factor );
+        }
+        else
+            INFO_MSG( "StandaloneApp: renderer pipeline has no HDR support\n" );
+    }
+
     bool loadModel( const BW::string & resource, const Vector3 & position )
     {
         if (!std::isfinite( position.x ) || !std::isfinite( position.y ) ||

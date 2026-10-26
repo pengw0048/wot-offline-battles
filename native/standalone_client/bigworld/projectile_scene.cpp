@@ -47,16 +47,24 @@ bool finite( const Vector3 & value )
 class StaticCollision : public CollisionCallback
 {
 public:
+    StaticCollision() : distance_( -1.f ) {}
+    float distance() const { return distance_; }
+
     virtual int operator()( const CollisionObstacle & obstacle,
-        const WorldTriangle & triangle, float /* distance */ )
+        const WorldTriangle & triangle, float distance )
     {
         if (obstacle.isMovingObstacle() ||
             (triangle.flags() & BW_TRIANGLE_NOCOLLIDE))
         {
             return COLLIDE_ALL;
         }
+        if (distance_ < 0.f || distance < distance_)
+            distance_ = distance;
         return COLLIDE_BEFORE;
     }
+
+private:
+    float distance_;
 };
 } // namespace
 
@@ -273,8 +281,10 @@ bool ProjectileScene::fire()
         return false;
     }
     StaticCollision aimCollision;
-    const float aimDistance = state.space->collide( cameraOrigin, aim, aimCollision );
-    if (!std::isfinite( aimDistance ) || aimDistance > rayLength)
+    const float reportedAimDistance = state.space->collide( cameraOrigin, aim, aimCollision );
+    const float aimDistance = aimCollision.distance();
+    if (!std::isfinite( reportedAimDistance ) || !std::isfinite( aimDistance ) ||
+        aimDistance > rayLength)
     {
         WARNING_MSG( "ProjectileScene: fire refused; invalid native aiming query\n" );
         return false;
@@ -392,9 +402,12 @@ void ProjectileScene::advance( float elapsed )
                 break;
             }
             StaticCollision collision;
-            const float distance = length > 0.f ?
+            const float reported = length > 0.f ?
                 state.space->collide( start, finish, collision ) : -1.f;
-            if (!std::isfinite( distance ) || distance > length)
+            // The native collision state retains ignored callback distances.
+            // Use our accepted surface, not the engine's last visited triangle.
+            const float distance = collision.distance();
+            if (!std::isfinite( reported ) || !std::isfinite( distance ) || distance > length)
             {
                 terminal = "invalid_native_collision";
                 break;

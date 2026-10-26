@@ -54,7 +54,8 @@ def package(client):
     (client / 'Start-Prototype.cmd').write_bytes(entry.encode('ascii'))
     readme = '''INDEPENDENT NATIVE CLIENT - WINDOWS PROTOTYPE
 
-Extract the complete ZIP to a writable folder on Windows 10/11.
+Extract the complete ZIP to a new writable folder on Windows 10/11.
+Do not copy a previous prototype's prepared folder into this version.
 Double-click Start-Prototype.cmd and paste the path to your installed
 Chinese HD World of Tanks 0.9.22.0.1 #1513 client (the folder containing
 WorldOfTanks.exe). The first run prepares Karelia and the stock T-34 locally,
@@ -71,8 +72,9 @@ Alt+F4: close. Restart to restore target health and ammunition.
 
 CURRENT LIMITS
 This is a local driving and stationary-target firing prototype.
-Buildings, trees, water, the original sky/material appearance, and audio are
-not connected. Driving uses the ported offline controller and terrain support.
+Buildings, trees, water, and audio are not connected. The sky uses its authored
+static image; original animated clouds and PBS materials are not reproduced.
+Driving uses the ported offline controller and terrain support.
 The full retail suspension/contact solver, airborne motion, track animation,
 turret articulation, crew/dispersion modifiers, ricochet continuation, HE
 area damage, Bots, and multiplayer synchronization are pending.
