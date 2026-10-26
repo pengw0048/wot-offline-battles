@@ -2,10 +2,13 @@
 """Connect the independent client to an owned, unmodified #1513 installation."""
 
 import argparse
+from datetime import datetime, timezone
 import io
 import json
+import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -151,6 +154,20 @@ def prepare(client, package):
     return record
 
 
+def archive_previous_logs(package, logger):
+    previous = [package / name for name in ('standalone.log', 'python.log')
+                if (package / name).is_file()]
+    if not previous:
+        return None
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+    archive = package / 'logs' / stamp
+    archive.mkdir(parents=True)
+    logger.info('Archiving previous native logs to %s', archive)
+    for source in previous:
+        shutil.move(str(source), str(archive / source.name))
+    return archive
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--client-root', type=Path, default=os.environ.get('WOT_0922_CLIENT'))
@@ -159,7 +176,13 @@ def main():
     parser.add_argument('--prepare-only', action='store_true')
     args = parser.parse_args()
     package = args.package_root.expanduser().resolve()
+    logger = logging.Logger('native_client_preparation', level=logging.INFO)
+    handler = None
     try:
+        handler = logging.FileHandler(package / 'prepare.log', mode='a', encoding='utf-8')
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        logger.addHandler(handler)
+        logger.info('Preparation started: package=%s', package)
         client = args.client_root
         marker = package / 'original-client.json'
         if client is None and marker.is_file():
@@ -169,15 +192,33 @@ def main():
             if not value:
                 raise ValueError('An owned #1513 client directory is required.')
             client = Path(value)
-        prepare(client, package)
+        logger.info('Original client: %s', client)
+        record = prepare(client, package)
+        logger.info('Preparation succeeded: client=%s build=%s resource_paths=%d',
+                    record['client_version'], record['client_build'],
+                    len(record['resource_paths']))
         if args.prepare_only:
+            logger.info('Preparation-only run completed; native client was not started')
             return 0
         if os.name != 'nt':
             raise ValueError('Launching the native client requires Windows; use --prepare-only here.')
-        return subprocess.call([str(package / 'bwclient_h.exe'), '-noConversion'], cwd=str(package))
-    except (OSError, ValueError, KeyError, EOFError) as error:
+        archive_previous_logs(package, logger)
+        logger.info('Starting native client: %s -noConversion', package / 'bwclient_h.exe')
+        result = subprocess.call([str(package / 'bwclient_h.exe'), '-noConversion'], cwd=str(package))
+        logger.info('Native client exited: code=%d (0x%08X)', result, result & 0xffffffff)
+        if result:
+            print('Native client exited with code %d (0x%08X). See %s.' %
+                  (result, result & 0xffffffff, package / 'prepare.log'), file=sys.stderr)
+        return result
+    except Exception as error:
+        if handler is not None:
+            logger.exception('Native client preparation or launch failed')
         print('Native client preparation failed: %s' % error, file=sys.stderr)
         return 1
+    finally:
+        if handler is not None:
+            handler.close()
+            logger.removeHandler(handler)
 
 
 if __name__ == '__main__':

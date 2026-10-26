@@ -50,7 +50,7 @@ def package(client):
     (runtime / 'SOURCE.txt').write_text(PYTHON_URL + '\n', encoding='ascii')
     entry = ('@echo off\r\ncd /d "%~dp0"\r\n'
              'prepare-runtime\\python.exe -B tools\\prepare_native_client.py %*\r\n'
-             'if errorlevel 1 pause\r\n')
+             'if not "%errorlevel%"=="0" pause\r\n')
     (client / 'Start-Client.cmd').write_bytes(entry.encode('ascii'))
     readme = '''INDEPENDENT NATIVE CLIENT - DEVELOPMENT BUILD
 
@@ -64,7 +64,12 @@ in this package. The included Python runtime only prepares resource paths.
 
 This rewrite is in development. A successful build does not establish
 successful original GUI startup, complete map rendering or playable battles.
-Preserve standalone.log, python.log and any .dmp file when reporting a failure.
+The extracted package folder contains prepare.log (preparation, exceptions
+and native exit codes), standalone.log and python.log (when created).
+Before each native launch, previous standalone.log and python.log files are
+moved to logs/<UTC timestamp>/ in this package folder. prepare.log is appended.
+On failure the console stays open. Preserve its error text, prepare.log,
+the native logs, logs/ and any .dmp file if generated when reporting a failure.
 Matching PDB symbols accompany the executable for crash investigation.
 '''
     (client / 'README-FIRST.txt').write_bytes(readme.replace('\n', '\r\n').encode('ascii'))
