@@ -11,6 +11,7 @@
 #endif
 #include "pch.hpp"
 #include "stock_audio.hpp"
+#include "stock_audio_source.hpp"
 #include "stock_audio_io.hpp"
 #include "stock_audio_plugins.hpp"
 #include "app.hpp"
@@ -978,6 +979,84 @@ PyObject* exportedObjectType() {
 PyModuleResultLink objectTypeLink("_WWISE", "SoundObject", exportedObjectType);
 }
 
+StockAudioSource createStockAudioSource(const BW::string& name, bool auxiliary) {
+    PyObjectPtr object(Script::getData(name), PyObjectPtr::STEAL_REFERENCE);
+    return object ? StockAudioDetail::createSource(object.get(), MatrixProviderPtr(),
+        Vector3::zero(), auxiliary) : StockAudioSource();
+}
+StockAudioVoice createStockAudioVoice(const BW::string& event, const BW::string& name) {
+    StockAudioVoice voice(new StockAudioDetail::Voice);
+    voice->source = createStockAudioSource(name);
+    voice->event = event;
+    return voice;
+}
+StockAudioSource stockAudioVoiceSource(const StockAudioVoice& voice) {
+    return voice ? voice->source : StockAudioSource();
+}
+bool playStockAudioVoice(StockAudioVoice& voice) {
+    if (!voice || voice->playing) return false;
+    if (voice->token) {
+        StockAudioVoice fresh(new StockAudioDetail::Voice);
+        fresh->source = voice->source;
+        fresh->event = voice->event;
+        voice = fresh;
+    }
+    return StockAudioDetail::play(voice);
+}
+void stopStockAudioVoice(const StockAudioVoice& voice) { StockAudioDetail::stop(voice); }
+void stopStockAudioSource(const StockAudioSource& source) {
+    if (!StockAudioDetail::sourceValid(source)) return;
+    AK::SoundEngine::StopAll(source->id);
+    for (const auto& entry : StockAudioDetail::manager().voices)
+        if (entry.second->source == source) StockAudioDetail::stop(entry.second);
+}
+bool playStockAudioSource(const StockAudioSource& source, const BW::string& event) {
+    StockAudioVoice voice(new StockAudioDetail::Voice);
+    voice->source = source;
+    voice->event = event;
+    return StockAudioDetail::play(voice);
+}
+bool setStockAudioSourceMatrix(const StockAudioSource& source, MatrixProviderPtr provider) {
+    if (!StockAudioDetail::sourceValid(source)) return false;
+    source->matrix = provider;
+    return true;
+}
+bool setStockAudioSourceRTPC(const StockAudioSource& source, const BW::string& name, float value) {
+    if (!StockAudioDetail::sourceValid(source)) return false;
+    return StockAudioDetail::result(AK::SoundEngine::SetRTPCValue(name.c_str(), value, source->id),
+        "SetRTPCValue", name.c_str());
+}
+bool setStockAudioSourceSwitch(const StockAudioSource& source, const BW::string& group,
+    const BW::string& value) {
+    if (!StockAudioDetail::sourceValid(source)) return false;
+    return StockAudioDetail::result(AK::SoundEngine::SetSwitch(group.c_str(), value.c_str(), source->id),
+        "SetSwitch", group.c_str());
+}
+bool setStockAudioSourceVolume(const StockAudioSource& source, float volume) {
+    if (!StockAudioDetail::sourceValid(source)) return false;
+    return StockAudioDetail::result(AK::SoundEngine::SetGameObjectOutputBusVolume(source->id,
+        StockAudioDetail::manager().listener, volume), "SetGameObjectOutputBusVolume");
+}
+bool setStockAudioGlobalRTPC(const BW::string& name, float value) {
+    if (!stockAudioReady()) return false;
+    StockAudioDetail::manager().globalRTPCs[name] = value;
+    return StockAudioDetail::result(AK::SoundEngine::SetRTPCValue(name.c_str(), value),
+        "SetRTPCValue", name.c_str());
+}
+bool setStockAudioGlobalState(const BW::string& group, const BW::string& value) {
+    if (!stockAudioReady()) return false;
+    StockAudioDetail::manager().globalStates[group] = value;
+    return StockAudioDetail::result(AK::SoundEngine::SetState(group.c_str(), value.c_str()),
+        "SetState", group.c_str());
+}
+PyObject* wrapStockAudioSource(const StockAudioSource& source) {
+    if (!StockAudioDetail::typesReady()) return NULL;
+    auto* object = PyObject_New(StockAudioDetail::SoundObjectWrapper, &StockAudioDetail::objectType);
+    if (!object) return NULL;
+    object->source = new StockAudioSource(source ? source : StockAudioSource(new StockAudioDetail::Source));
+    return reinterpret_cast<PyObject*>(object);
+}
+
 PyObject* py_WW_isInitialised(PyObject* args) {
     if (!StockAudioDetail::arity(args, 0, "WW_isInitialised")) return NULL;
     return PyBool_FromLong(stockAudioReady());
@@ -1229,11 +1308,7 @@ PyObject* py_WW_setRTCPGlobal(PyObject* args) {
     if (!PyString_Check(name) || (!PyFloat_Check(value) && !PyInt_Check(value))) Py_RETURN_FALSE;
     const float number = static_cast<float>(PyFloat_AsDouble(value));
     if (PyErr_Occurred()) return NULL;
-    if (stockAudioReady()) {
-        manager().globalRTPCs[PyString_AsString(name)] = number;
-        result(AK::SoundEngine::SetRTPCValue(PyString_AsString(name), number),
-            "SetRTPCValue", PyString_AsString(name));
-    }
+    setStockAudioGlobalRTPC(PyString_AsString(name), number);
     Py_RETURN_TRUE;
 }
 PY_MODULE_FUNCTION(WW_setRTCPGlobal, _WWISE)
@@ -1259,11 +1334,7 @@ PyObject* py_WW_setState(PyObject* args) {
     PyObject* group = PyTuple_GET_ITEM(args, 0);
     PyObject* value = PyTuple_GET_ITEM(args, 1);
     if (!PyString_Check(group) || !PyString_Check(value)) Py_RETURN_FALSE;
-    if (stockAudioReady()) {
-        manager().globalStates[PyString_AsString(group)] = PyString_AsString(value);
-        result(AK::SoundEngine::SetState(PyString_AsString(group), PyString_AsString(value)),
-            "SetState", PyString_AsString(group));
-    }
+    setStockAudioGlobalState(PyString_AsString(group), PyString_AsString(value));
     Py_RETURN_TRUE;
 }
 PY_MODULE_FUNCTION(WW_setState, _WWISE)

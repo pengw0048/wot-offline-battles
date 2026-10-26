@@ -1121,6 +1121,7 @@ void tickStockVehicleComponents( float frameTime )
     // Suspension 0149328c. Recoil and Suspension both register phase 2.
     tickStockVehicleRecoil( frameTime );
     updateSuspensions( frameTime );
+    tickStockVehicleAuditions( frameTime );
 }
 
 void tickStockVehicleTrackScrolls( double gameTime )

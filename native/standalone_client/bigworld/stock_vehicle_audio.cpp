@@ -2,6 +2,11 @@
 #include "stock_vehicle_audio.hpp"
 #include "stock_vehicle_components.hpp"
 #include "stock_detailed_engine_state.hpp"
+#include "stock_audio.hpp"
+#include "stock_audio_source.hpp"
+#include "vehicle_appearance.hpp"
+#include <map>
+#include <string>
 #include "app.hpp"
 #include "pyscript/script_math.hpp"
 #include "moo/render_context.hpp"
@@ -365,10 +370,517 @@ void tickStockVehicleAudioTasks() {
     allDetailed.erase(std::remove_if(allDetailed.begin(), allDetailed.end(),
         [](const std::weak_ptr<DetailedState>& value) { return value.expired(); }), allDetailed.end());
 }
+static void finiStockVehicleAuditions();
 void finiStockVehicleAudio() {
+    finiStockVehicleAuditions();
     const auto states = allDetailed;
     for (const auto& weak : states) if (const auto value = weak.lock()) value->destroy();
     periodic.clear();
     allDetailed.clear();
+}
+
+namespace {
+class VehicleAuditionState;
+struct AuditionEntry {
+    std::weak_ptr<VehicleAuditionState> state;
+    uint64 token;
+    float remaining = .25f;
+    uint32 readyFrame = 0;
+};
+std::vector<AuditionEntry> auditions;
+std::vector<std::weak_ptr<VehicleAuditionState>> allAuditions;
+
+class VehicleAuditionState : public StockComponentState {
+public:
+    int entityID = 0;
+    bool player = false, focused = false, active = false, started = false;
+    bool siegeSettled = false, shifted = false;
+    float power = 0.f, weight = 0.f, rotationLimit = 0.f, updatePeriod = -1.f;
+    float lastSpeed = 0.f, scrollSpeed = 0.f;
+    double lastTime = 0.;
+    uint64 token = 0;
+    StockAudioVoice engine, tracks;
+    StockAudioSource gun;
+    std::weak_ptr<DetailedState> detailed;
+    PyObjectPtr materials, speed[2], scroll[4], underwater, flying, inWater;
+    BW::string siegeOn, siegeOff, surface;
+
+    void both(const char* name, float value) {
+        setStockAudioSourceRTPC(stockAudioVoiceSource(engine), name, value);
+        setStockAudioSourceRTPC(stockAudioVoiceSource(tracks), name, value);
+    }
+    void start() {
+        if (!stockAudioReady() || started) return;
+        playStockAudioVoice(engine);
+        playStockAudioVoice(tracks);
+        started = true;
+    }
+    virtual void activate() {
+        if (!valid_ || active) return;
+        if (!stockAudioReady()) { this->deactivate(); return; }
+        const auto detail = detailed.lock();
+        if (!detail || !detail->valid()) {
+            PyErr_SetString(PyExc_ValueError, "VehicleAudition requires its original DetailedEngineState");
+            return;
+        }
+        active = true;
+        token = ++nextToken;
+        auditions.push_back(AuditionEntry{
+            std::static_pointer_cast<VehicleAuditionState>(shared_from_this()), token});
+        if (player) setStockAudioGlobalRTPC("RTPC_ext_engine_power", power);
+        this->both("RTPC_ext_vehicle_weight", weight * .001f);
+        this->both("RTPC_ext_engine_state", 0.f);
+        this->both("RTPC_ext_physic_rpm_rel", 0.f);
+        this->both("RTPC_ext_physic_rpm_abs", 0.f);
+        setStockAudioSourceRTPC(stockAudioVoiceSource(engine), "RTPC_ext_turbine", 0.f);
+        if (detail->data.mode) this->start();
+    }
+    virtual void deactivate() {
+        active = false;
+        ++token;
+        auditions.erase(std::remove_if(auditions.begin(), auditions.end(),
+            [this](const AuditionEntry& entry) {
+                const auto value = entry.state.lock();
+                return !value || value.get() == this;
+            }), auditions.end());
+        stopStockAudioVoice(engine);
+        stopStockAudioVoice(tracks);
+        stopStockAudioSource(gun);
+        started = false;
+    }
+    virtual void destroy() {
+        if (!valid_) return;
+        this->deactivate();
+        valid_ = false;
+        detailed.reset(); materials = NULL;
+        for (auto& value : speed) value = NULL;
+        for (auto& value : scroll) value = NULL;
+        underwater = NULL; flying = NULL; inWater = NULL;
+        engine.reset(); tracks.reset(); gun.reset();
+    }
+    virtual PyObject* wrap(bool owning);
+    bool current(uint64 epoch) const { return valid_ && active && token == epoch; }
+    PyObject* sample(PyObjectPtr callback, uint64 epoch) {
+        if (!this->current(epoch)) return NULL;
+        if (!callback) {
+            PyErr_SetString(PyExc_ValueError, "VehicleAudition data link is unavailable");
+            return NULL;
+        }
+        PyObject* result = PyObject_CallObject(callback.get(), NULL);
+        if (!this->current(epoch)) { Py_XDECREF(result); return NULL; }
+        return result;
+    }
+    bool scalar(PyObjectPtr callback, float& value, uint64 epoch) {
+        PyObjectPtr result(this->sample(callback, epoch), PyObjectPtr::STEAL_REFERENCE);
+        return result && !Script::setData(result.get(), value);
+    }
+    bool boolean(PyObjectPtr callback, bool& value, uint64 epoch) {
+        PyObjectPtr result(this->sample(callback, epoch), PyObjectPtr::STEAL_REFERENCE);
+        return result && !Script::setData(result.get(), value);
+    }
+    bool updateSurface(uint64 epoch) {
+        PyObjectPtr result(this->sample(materials, epoch), PyObjectPtr::STEAL_REFERENCE);
+        BW::vector<BW::string> names;
+        if (!result || Script::setData(result.get(), names)) return false;
+        bool water;
+        if (!this->boolean(inWater, water, epoch)) return false;
+        // #1513's audio material table is separate from physical terrain support.
+        // Its strict maximum scan uses std::map order, including zero-count ties.
+        std::map<BW::string, std::pair<size_t, float>> counts;
+        counts["ground"] = std::make_pair(0, .1f);
+        counts["stone"] = std::make_pair(0, 1.f);
+        counts["wood"] = std::make_pair(0, .5f);
+        counts["snow"] = std::make_pair(0, .3f);
+        counts["sand"] = std::make_pair(0, 0.f);
+        counts["water"] = std::make_pair(0, .2f);
+        if (water) counts["water"].first = names.size();
+        else for (const auto& name : names) {
+            const auto found = counts.find(name);
+            if (found != counts.end()) ++found->second.first;
+        }
+        float hardness = 0.f;
+        size_t maximum = 0;
+        BW::string selected = "ground";
+        for (const auto& item : counts) {
+            hardness += float(item.second.first) * item.second.second;
+            if (item.second.first > maximum) {
+                selected = item.first;
+                maximum = item.second.first;
+            }
+        }
+        if (!names.empty()) hardness /= float(names.size());
+        setStockAudioSourceRTPC(stockAudioVoiceSource(tracks), "RTPC_ext_hardness", hardness);
+        if (selected != surface) {
+            setStockAudioSourceSwitch(stockAudioVoiceSource(tracks),
+                "SWITCH_ext_surfaceType", "SWITCH_ext_surfaceType_" + selected);
+            surface = selected;
+        }
+        return true;
+    }
+    bool update() {
+        const auto detail = detailed.lock();
+        if (!detail || !detail->valid()) {
+            PyErr_SetString(PyExc_ValueError, "VehicleAudition DetailedEngineState is unavailable");
+            return false;
+        }
+        const uint64 epoch = token;
+        // Keep the original state owner alive across Python producer re-entry.
+        const auto& d = detail->data;
+        const float rpm = wot::detailed_engine_clamp(d.rpm, 0.f, 100.f);
+        this->both("RTPC_ext_rpm", rpm);
+        this->both("RTPC_ext_engine_load", float(d.engine_load));
+        if (!player) {
+            setStockAudioSourceRTPC(stockAudioVoiceSource(engine), "RTPC_ext_turbine_npc", rpm);
+            setStockAudioSourceVolume(stockAudioVoiceSource(engine), d.engine_load ? 1.f : 0.f);
+        }
+        if (focused) setStockAudioGlobalRTPC("RTPC_ext_engine_load_global", float(d.engine_load));
+        bool submerged;
+        if (!this->boolean(underwater, submerged, epoch)) return false;
+        this->both("RTPC_ext_submersion", submerged ? 1.f : 0.f);
+        if (focused) setStockAudioGlobalState("STATE_underwater",
+            submerged ? "STATE_underwater_on" : "STATE_underwater_off");
+        this->both("RTPC_ext_speed_abs", wot::detailed_engine_clamp(d.speed, -10.f, 30.f));
+        this->both("RTPC_ext_speed_rel", wot::detailed_engine_clamp(d.relative_speed, -1.f, 1.f));
+        this->both("RTPC_ext_speed_rel2", d.relative_speed);
+        this->both("RTPC_ext_rot_speed_abs", wot::detailed_engine_clamp(d.rotation_speed, -1.f, 1.f));
+        this->both("RTPC_ext_rot_speed_rel", d.relative_rotation_speed);
+        this->both("RTPC_ext_move", std::fabs(d.speed) > 1.f ? 100.f : 0.f);
+        this->both("RTPC_ext_physic_load", d.physics_load);
+        if (focused) {
+            setStockAudioGlobalRTPC("RTPC_ext_physic_load_global", d.physics_load);
+            setStockAudioGlobalRTPC("RTPC_ext_speed_rel_global", wot::detailed_engine_clamp(d.relative_speed, -1.f, 1.f));
+            setStockAudioGlobalRTPC("RTPC_ext_speed_abs_global", d.speed);
+            if (!player) {
+                this->both("RTPC_ext_gear_2", float(d.gear2));
+                this->both("RTPC_ext_gear_3", float(d.gear3));
+                this->both("RTPC_ext_gear_num", wot::detailed_engine_clamp(float(d.gear), 0.f, 4.f));
+            } else {
+                this->both("RTPC_ext_physic_rpm_rel", d.physics_rpm);
+                setStockAudioSourceRTPC(stockAudioVoiceSource(engine), "RTPC_ext_turbine",
+                    d.engine_state == 3 ? 0.f : d.physics_rpm * 100.f);
+                this->both("RTPC_ext_physic_rpm_abs", d.physics_rpm_absolute);
+                this->both("RTPC_ext_physic_gear", float(d.gear));
+                this->both("RTPC_ext_engine_state", uint32(d.gear) - 1u < 126u ? 1.f : 0.f);
+                for (int gear = 1; gear <= 7; ++gear) if (gear != d.gear) {
+                    char name[48];
+                    bw_snprintf(name, sizeof(name), "RTPC_ext_physic_gear_%d", gear);
+                    this->both(name, 0.f);
+                }
+                if (shifted) {
+                    // The native table has exactly seven slots. Reject a missing
+                    // producer value instead of indexing outside that table.
+                    if (d.gear < 1 || d.gear > 7) {
+                        PyErr_SetString(PyExc_ValueError, "VehicleAudition shifted gear has no native RTPC slot");
+                        return false;
+                    }
+                    char name[48];
+                    bw_snprintf(name, sizeof(name), "RTPC_ext_physic_gear_%d", d.gear);
+                    this->both(name, 100.f);
+                    shifted = false;
+                }
+            }
+        }
+        const double now = App::instance().getGameTimeFrameStart();
+        const double dt = now - lastTime;
+        const float acceleration = lastTime > 0. && dt > 0. ?
+            wot::detailed_engine_clamp((d.speed - lastSpeed) / float(dt), -1.5f, 1.5f) : 0.f;
+        lastTime = now; lastSpeed = d.speed;
+        this->both("RTPC_ext_acc_abs", acceleration);
+        bool airborne;
+        if (!this->boolean(flying, airborne, epoch)) return false;
+        setStockAudioSourceRTPC(stockAudioVoiceSource(tracks), "RTPC_ext_flying", airborne ? 1.f : 0.f);
+        if (!focused) return true;
+        if (!this->updateSurface(epoch)) return false;
+        float slideA, slideB, speedA, speedB;
+        if (!this->scalar(scroll[2], slideA, epoch) || !this->scalar(scroll[3], slideB, epoch)) return false;
+        this->both("RTPC_ext_slide_friction", wot::detailed_engine_clamp(std::fmax(slideA, slideB) * .2f, 0.f, 1.f));
+        if (!this->scalar(speed[0], speedA, epoch) || !this->scalar(speed[1], speedB, epoch)) return false;
+        setStockAudioSourceRTPC(stockAudioVoiceSource(tracks), "RTPC_ext_friction",
+            std::fmax(std::fmin(std::fabs(speedA) * .8f, .5f), std::fmin(std::fabs(speedB) * .4f, 1.f)));
+        setStockAudioGlobalRTPC("RTPC_ext_roughness_global", std::fabs(d.roughness));
+        this->both("RTPC_ext_roughness_abs", std::fabs(d.roughness));
+        this->both("RTPC_ext_roughness2", d.roughness);
+        this->both("RTPC_ext_roughness_eng", d.roughness);
+        setStockAudioSourceRTPC(stockAudioVoiceSource(tracks), "RTPC_ext_treads_sum_affect",
+            (std::fabs(d.roughness) + std::fabs(d.rotation_speed / rotationLimit)) * .33f +
+            (wot::detailed_engine_clamp(d.physics_load, .5f, 1.f) - .5f) * .66f);
+        if (player) {
+            // 0x793660 deliberately samples the second scroll producer first.
+            float first, second;
+            if (!this->scalar(scroll[1], second, epoch) || !this->scalar(scroll[0], first, epoch)) return false;
+            scrollSpeed = (std::fmax(std::fabs(first), std::fabs(second)) - scrollSpeed) * updatePeriod * 5.f + scrollSpeed;
+            scrollSpeed = std::fmax(0.f, scrollSpeed);
+            this->both("RTPC_ext_speed_scroll", scrollSpeed);
+        }
+        return true;
+    }
+    void camera(const BW::string& name, int attachedID) {
+        if (!stockAudioReady() || name != "postmortem") return;
+        const bool next = entityID == attachedID;
+        if (focused != next) {
+            const BW::string value = next ? "SWITCH_ext_postMortem_pc" : "SWITCH_ext_postMortem_npc";
+            setStockAudioSourceSwitch(stockAudioVoiceSource(engine), "SWITCH_ext_postMortem", value);
+            setStockAudioSourceSwitch(stockAudioVoiceSource(tracks), "SWITCH_ext_postMortem", value);
+        }
+        focused = next;
+    }
+    bool transition(int previous, int next) {
+        if (!stockAudioReady()) return true;
+        const auto detail = detailed.lock();
+        if (!detail || !detail->valid()) {
+            PyErr_SetString(PyExc_ValueError, "VehicleAudition DetailedEngineState is unavailable");
+            return false;
+        }
+        if (!detail->data.mode && next == 1) previous = 3;
+        if (previous < 0 || previous > 3 || next < 0 || next > 3) {
+            PyErr_SetString(PyExc_ValueError, "VehicleAudition engine state is outside the native transition table");
+            return false;
+        }
+        const StockAudioSource source = stockAudioVoiceSource(engine);
+        const int index = previous * 4 + next;
+        if (index == 2) playStockAudioSource(source, "eng_broken");
+        else if (index == 3 || index == 7 || index == 11) playStockAudioSource(source, "eng_stopping");
+        else if (index == 4 || index == 8) playStockAudioSource(source, "eng_repairing_broken");
+        else if (index == 12) {
+            playStockAudioSource(source, "eng_restoring");
+            playStockAudioSource(source, "eng_repairing_broken");
+        } else if (index == 13 || index == 14) {
+            playStockAudioSource(source, "eng_restoring");
+            playStockAudioSource(source, "eng_still_broken");
+        }
+        return true;
+    }
+};
+}
+
+class VehicleAudition : public StockComponentWrapper {
+    Py_Header(VehicleAudition, StockComponentWrapper)
+public:
+    VehicleAudition(const std::shared_ptr<StockComponentState>& value, bool owning) :
+        StockComponentWrapper(value, &s_type_, owning) {}
+    std::shared_ptr<VehicleAuditionState> state() const {
+        const auto value = std::dynamic_pointer_cast<VehicleAuditionState>(this->component());
+        if (!value) PyErr_SetString(PyExc_ValueError, "VehicleAudition has been destroyed");
+        return value;
+    }
+    PY_FACTORY_DECLARE()
+    PY_METHOD_DECLARE(py_attachToModel)
+    PY_METHOD_DECLARE(py_getSoundObject)
+    PY_METHOD_DECLARE(py_onCameraChanged)
+    PY_METHOD_DECLARE(py_onEngineStart)
+    PY_METHOD_DECLARE(py_onEngineStateChanged)
+    PY_METHOD_DECLARE(py_onEngineGearUp)
+    PY_METHOD_DECLARE(py_onSiegeStateChanged)
+    PY_METHOD_DECLARE(py_setDetailedEngineState)
+    PY_METHOD_DECLARE(py_setEffectMaterialsInfo)
+    PY_METHOD_DECLARE(py_setSpeedInfo)
+    PY_METHOD_DECLARE(py_setTrackScrollInfo)
+    PY_METHOD_DECLARE(py_setIsUnderwaterInfo)
+    PY_METHOD_DECLARE(py_setIsFlyingInfo)
+    PY_METHOD_DECLARE(py_setIsInWaterInfo)
+    PY_METHOD_DECLARE(py_setWeaponEnergy)
+    PY_METHOD_DECLARE(py_setSiegeSoundEvents)
+    PY_METHOD_DECLARE(py_setUpdatePeriod)
+    bool links(PyObject* args, PyObjectPtr* destinations, size_t count) {
+        if (!PyTuple_Check(args) || PyTuple_GET_SIZE(args) != Py_ssize_t(count)) {
+            PyErr_SetString(PyExc_TypeError, "VehicleAudition data link argument count is incorrect");
+            return false;
+        }
+        for (size_t i = 0; i < count; ++i)
+            if (PyTuple_GET_ITEM(args, i) != Py_None && !PyCallable_Check(PyTuple_GET_ITEM(args, i))) {
+                PyErr_SetString(PyExc_TypeError, "VehicleAudition data links require callable producers or None");
+                return false;
+            }
+        for (size_t i = 0; i < count; ++i) {
+            PyObject* object = PyTuple_GET_ITEM(args, i);
+            destinations[i] = object == Py_None ? NULL : object;
+        }
+        return true;
+    }
+};
+
+PyObject* VehicleAuditionState::wrap(bool owning) { return new VehicleAudition(shared_from_this(), owning); }
+PyObject* VehicleAudition::pyNew(PyObject* args) {
+    int id;
+    PyObject* playerObject; PyObject* dataObject; PyObject* engineObject; PyObject* tracksObject;
+    if (!PyArg_ParseTuple(args, "iOOOO:VehicleAudition", &id, &playerObject, &dataObject, &engineObject, &tracksObject)) return NULL;
+    bool player;
+    BW::string engineName, tracksName;
+    Vector3 data;
+    if (Script::setData(playerObject, player) || Script::setData(dataObject, data) ||
+        Script::setData(engineObject, engineName) || Script::setData(tracksObject, tracksName)) return NULL;
+    auto value = std::make_shared<VehicleAuditionState>();
+    value->entityID = id; value->player = player; value->focused = player;
+    value->power = data.x; value->weight = data.y; value->rotationLimit = data.z;
+    if (value->rotationLimit > -.0004f && value->rotationLimit < .0004f) value->rotationLimit = .001f;
+    char name[64];
+    bw_snprintf(name, sizeof(name), "engine%d", id);
+    value->engine = createStockAudioVoice(engineName, name);
+    bw_snprintf(name, sizeof(name), "tracks%d", id);
+    value->tracks = createStockAudioVoice(tracksName, name);
+    bw_snprintf(name, sizeof(name), "gun%d", id);
+    value->gun = createStockAudioSource(name, true);
+    allAuditions.push_back(value);
+    return new VehicleAudition(value, true);
+}
+PyObject* VehicleAudition::py_attachToModel(PyObject* args) {
+    PyObject* compound;
+    if (!PyArg_ParseTuple(args, "O:attachToModel", &compound)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    Matrix local, parent, world;
+    if (!stockVehicleCompoundNode(compound, "hull", local, parent, world)) {
+        PyErr_SetString(PyExc_TypeError, "VehicleAudition requires the loaded PyCompoundModel hull node");
+        return NULL;
+    }
+    if (stockAudioReady()) {
+        PyObjectPtr hull(PyObject_CallMethod(compound, const_cast<char*>("node"), const_cast<char*>("s"), "hull"), PyObjectPtr::STEAL_REFERENCE);
+        PyObjectPtr gun(PyObject_CallMethod(compound, const_cast<char*>("node"), const_cast<char*>("s"), "gun"), PyObjectPtr::STEAL_REFERENCE);
+        MatrixProviderPtr hullMatrix, gunMatrix;
+        if (!hull || !gun || Script::setData(hull.get(), hullMatrix) || Script::setData(gun.get(), gunMatrix)) return NULL;
+        setStockAudioSourceMatrix(stockAudioVoiceSource(value->engine), hullMatrix);
+        setStockAudioSourceMatrix(stockAudioVoiceSource(value->tracks), hullMatrix);
+        setStockAudioSourceMatrix(value->gun, gunMatrix);
+    }
+    Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_getSoundObject(PyObject* args) {
+    int kind;
+    if (!PyArg_ParseTuple(args, "i:getSoundObject", &kind)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    return wrapStockAudioSource(kind == 0 ? stockAudioVoiceSource(value->engine) :
+        kind == 1 ? stockAudioVoiceSource(value->tracks) : kind == 2 ? value->gun : StockAudioSource());
+}
+PyObject* VehicleAudition::py_onCameraChanged(PyObject* args) {
+    PyObject* object; int id;
+    if (!PyArg_ParseTuple(args, "Oi:onCameraChanged", &object, &id)) return NULL;
+    BW::string name; if (Script::setData(object, name)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    value->camera(name, id); Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_onEngineStart(PyObject* args) {
+    if (!PyArg_ParseTuple(args, ":onEngineStart")) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    value->start(); Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_onEngineGearUp(PyObject* args) {
+    if (!PyArg_ParseTuple(args, ":onEngineGearUp")) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    value->shifted = true; Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_onEngineStateChanged(PyObject* args) {
+    int previous, next;
+    if (!PyArg_ParseTuple(args, "ii:onEngineStateChanged", &previous, &next)) return NULL;
+    const auto value = this->state(); if (!value || !value->transition(previous, next)) return NULL;
+    Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_onSiegeStateChanged(PyObject* args) {
+    int state;
+    if (!PyArg_ParseTuple(args, "i:onSiegeStateChanged", &state)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    if (stockAudioReady()) {
+        const auto source = stockAudioVoiceSource(value->engine);
+        if (state == 1 || state == 3) setStockAudioSourceRTPC(source, "RTPC_ext_siege_mode", state == 1 ? 100.f : 0.f);
+        if (value->player) playStockAudioSource(source, state == 2 ? value->siegeOn : value->siegeOff);
+        value->siegeSettled = state == 1 || state == 3;
+    }
+    Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_setDetailedEngineState(PyObject* args) {
+    PyObject* object;
+    if (!PyArg_ParseTuple(args, "O:setDetailedEngineState", &object)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    if (object == Py_None) { value->detailed.reset(); Py_RETURN_NONE; }
+    if (!DetailedEngineState::Check(object)) { value->detailed.reset(); Py_RETURN_NONE; }
+    const auto detail = static_cast<DetailedEngineState*>(object)->state();
+    if (!detail) return NULL;
+    value->detailed = detail; Py_RETURN_NONE;
+}
+#define AUDITION_LINK(NAME, MEMBER, COUNT) \
+PyObject* VehicleAudition::py_##NAME(PyObject* args) { \
+    const auto value = this->state(); if (!value) return NULL; \
+    if (!this->links(args, MEMBER, COUNT)) return NULL; Py_RETURN_NONE; }
+AUDITION_LINK(setEffectMaterialsInfo, &value->materials, 1)
+AUDITION_LINK(setSpeedInfo, value->speed, 2)
+AUDITION_LINK(setTrackScrollInfo, value->scroll, 4)
+AUDITION_LINK(setIsUnderwaterInfo, &value->underwater, 1)
+AUDITION_LINK(setIsFlyingInfo, &value->flying, 1)
+AUDITION_LINK(setIsInWaterInfo, &value->inWater, 1)
+#undef AUDITION_LINK
+PyObject* VehicleAudition::py_setWeaponEnergy(PyObject* args) {
+    float energy;
+    if (!PyArg_ParseTuple(args, "f:setWeaponEnergy", &energy)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    if (stockAudioReady()) setStockAudioSourceRTPC(value->gun, "RTPC_ext_weapon_energy", energy);
+    Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_setSiegeSoundEvents(PyObject* args) {
+    PyObject* on; PyObject* off;
+    if (!PyArg_ParseTuple(args, "OO:setSiegeSoundEvents", &on, &off)) return NULL;
+    BW::string onName, offName;
+    if (Script::setData(on, onName) || Script::setData(off, offName)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    value->siegeOn = onName; value->siegeOff = offName; Py_RETURN_NONE;
+}
+PyObject* VehicleAudition::py_setUpdatePeriod(PyObject* args) {
+    float period;
+    if (!PyArg_ParseTuple(args, "f:setUpdatePeriod", &period)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    value->updatePeriod = period; Py_RETURN_NONE;
+}
+PY_TYPEOBJECT(VehicleAudition)
+PY_BEGIN_METHODS(VehicleAudition)
+    PY_METHOD(attachToModel)
+    PY_METHOD(getSoundObject)
+    PY_METHOD(onCameraChanged)
+    PY_METHOD(onEngineStart)
+    PY_METHOD(onEngineStateChanged)
+    PY_METHOD(onEngineGearUp)
+    PY_METHOD(onSiegeStateChanged)
+    PY_METHOD(setDetailedEngineState)
+    PY_METHOD(setEffectMaterialsInfo)
+    PY_METHOD(setSpeedInfo)
+    PY_METHOD(setTrackScrollInfo)
+    PY_METHOD(setIsUnderwaterInfo)
+    PY_METHOD(setIsFlyingInfo)
+    PY_METHOD(setIsInWaterInfo)
+    PY_METHOD(setWeaponEnergy)
+    PY_METHOD(setSiegeSoundEvents)
+    PY_METHOD(setUpdatePeriod)
+PY_END_METHODS()
+PY_BEGIN_ATTRIBUTES(VehicleAudition)
+PY_END_ATTRIBUTES()
+PY_FACTORY(VehicleAudition, Vehicular)
+
+void tickStockVehicleAuditions(float frameTime) {
+    const uint32 frame = Moo::rc().frameTimestamp();
+    for (auto& entry : auditions) {
+        const float previous = entry.remaining;
+        entry.remaining -= frameTime;
+        if (entry.remaining <= 0.f && previous > 0.f) entry.readyFrame = frame;
+    }
+    const size_t count = std::min<size_t>(3, auditions.size()); // 0x005af430
+    const auto better = [](const AuditionEntry& a, const AuditionEntry& b) {
+        if ((a.remaining <= 0.f) != (b.remaining <= 0.f)) return a.remaining <= 0.f;
+        return a.readyFrame < b.readyFrame;
+    };
+    std::partial_sort(auditions.begin(), auditions.begin() + count, auditions.end(), better);
+    const std::vector<AuditionEntry> work(auditions.begin(), auditions.begin() + count);
+    for (const auto& entry : work) {
+        if (!(entry.remaining <= 0.f)) break;
+        const auto value = entry.state.lock();
+        if (!value || !value->current(entry.token)) continue;
+        if (!value->update() && PyErr_Occurred()) PyErr_Print();
+        if (!value->current(entry.token)) continue;
+        for (auto& current : auditions) if (current.token == entry.token) {
+            current.remaining = value->updatePeriod == -1.f ? .25f : value->updatePeriod;
+            break;
+        }
+    }
+}
+
+static void finiStockVehicleAuditions() {
+    const auto states = allAuditions;
+    for (const auto& weak : states) if (const auto value = weak.lock()) value->destroy();
+    auditions.clear(); allAuditions.clear();
 }
 BW_END_NAMESPACE
