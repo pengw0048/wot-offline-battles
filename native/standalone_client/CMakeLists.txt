@@ -35,6 +35,14 @@ endif()
 add_executable(wot-native-core src/main.cpp)
 target_link_libraries(wot-native-core PRIVATE wot_battle_core)
 
+if(WOT_WWISE_SDK_ROOT)
+    include(bigworld/wwise_sdk.cmake)
+    add_executable(probe_wwise_sdk tests/probe_wwise_sdk.cpp
+        "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Win32/AkDefaultIOHookBlocking.cpp"
+        "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFileLocationBase.cpp")
+    target_link_libraries(probe_wwise_sdk PRIVATE wot_battle_core WotWwiseSdk)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(test_wwise_bank tests/test_wwise_bank.cpp)

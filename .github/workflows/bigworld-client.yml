@@ -26,6 +26,9 @@ jobs:
       - name: Build pinned BigWorld engine with MSVC
         if: ${{ !inputs.client_build_run }}
         shell: pwsh
+        env:
+          WOT_WWISE_SDK_URL: ${{ secrets.WOT_WWISE_SDK_URL }}
+          WOT_WWISE_SDK_TOKEN: ${{ secrets.WOT_WWISE_SDK_TOKEN }}
         run: >-
           ./tools/build_bigworld_client.ps1
           -WorkDirectory "$env:RUNNER_TEMP\bigworld-client"

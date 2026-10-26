@@ -50,6 +50,36 @@ try {
     Get-Command cmake, tar, python | Format-Table Name, Source
     Invoke-Checked "cmake" @("--version") "cmake-version.log"
 
+    # A short-lived authenticated endpoint supplies the owner's licensed SDK.
+    # Never put the URL/token in command arguments, transcripts, or artifacts.
+    if ($env:WOT_WWISE_SDK_URL -and $env:WOT_WWISE_SDK_TOKEN) {
+        $WwiseArchive = Join-Path $WorkRoot "wwise-sdk.tar.xz"
+        $WwiseInput = Join-Path $WorkRoot "wwise-sdk"
+        New-Item -ItemType Directory -Path $WwiseInput | Out-Null
+        Invoke-WebRequest -Uri $env:WOT_WWISE_SDK_URL -Headers @{
+            Authorization = "Bearer $env:WOT_WWISE_SDK_TOKEN"
+        } -OutFile $WwiseArchive
+        $WwiseMembers = @(& tar -tf $WwiseArchive)
+        if ($LASTEXITCODE -ne 0 -or $WwiseMembers.Count -eq 0) {
+            throw "Cannot inspect the licensed Wwise SDK input."
+        }
+        foreach ($Member in $WwiseMembers) {
+            if (-not $Member.StartsWith('SDK/') -or
+                    (($Member -split '/') -contains '..') -or $Member.Contains('\')) {
+                throw "Unexpected licensed SDK archive member."
+            }
+        }
+        Invoke-Checked "tar" @("-xf", $WwiseArchive, "-C", $WwiseInput) "wwise-sdk-extract.log"
+        $WwiseSdk = Join-Path $WwiseInput "SDK"
+        $WwiseProbe = Join-Path $WorkRoot "wwise-probe"
+        Invoke-Checked "cmake" @("-S", (Join-Path $RepositoryRoot "native\standalone_client"),
+            "-B", $WwiseProbe, "-G", "Visual Studio 17 2022", "-A", "Win32", "-T", "v142",
+            "-DBUILD_TESTING=OFF", "-DWOT_WWISE_SDK_ROOT=$WwiseSdk") "wwise-probe-configure.log"
+        Invoke-Checked "cmake" @("--build", $WwiseProbe, "--config", "Release",
+            "--target", "probe_wwise_sdk", "--parallel", "4") "wwise-probe-compile.log"
+        Invoke-Checked (Join-Path $WwiseProbe "Release\probe_wwise_sdk.exe") @() "wwise-probe-run.log"
+    }
+
     $Archive = Join-Path $WorkRoot "bigworld.tar.gz"
     $ArchivePrefix = "BigWorld-Engine-14.4.1-$Revision"
     Write-Host "Downloading BigWorld source at $Revision"
