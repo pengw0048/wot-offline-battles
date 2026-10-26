@@ -91,8 +91,7 @@ foreach(symbol IN LISTS _sf_png_symbols)
     string(APPEND _sf_png_prefix_content "#define ${symbol} wot_sf_${symbol}\n")
 endforeach()
 # Reconfiguration must not invalidate every SDK object when this table is unchanged.
-file(GENERATE OUTPUT "${_sf_png_prefix_header}" CONTENT "${_sf_png_prefix_content}"
-    NEWLINE_STYLE LF)
+file(GENERATE OUTPUT "${_sf_png_prefix_header}" CONTENT "${_sf_png_prefix_content}")
 
 set(_sf_includes
     "${WOT_SCALEFORM_SDK_ROOT}/Include"

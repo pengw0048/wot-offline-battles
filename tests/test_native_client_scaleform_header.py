@@ -58,7 +58,7 @@ class ScaleformHeaderGeneration(unittest.TestCase):
                 path.touch()
             source, build = folder / "source", folder / "build"
             source.mkdir()
-            (source / "CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.20)
+            (source / "CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.18)
 project(generated_header_contract LANGUAGES C CXX)
 # Only the configure-time platform guard is satisfied; no compiler target runs.
 set(WIN32 TRUE)
@@ -67,6 +67,12 @@ set(CMAKE_SIZEOF_VOID_P 4)
 set(WOT_SCALEFORM_SDK_ROOT "{sdk}")
 set(WOT_SCALEFORM_D3DX_ROOT "{directx}")
 include("{module}")
+set(legacy "${{CMAKE_CURRENT_BINARY_DIR}}/legacy-prefix.h")
+file(WRITE "${{legacy}}" "/* Private names for the SDK's original PNG decoder. */\\n#pragma once\\n")
+file(APPEND "${{legacy}}" "#define z_errmsg wot_sf_z_errmsg\\n#define _tr_flush_bits wot_sf_tr_flush_bits\\n")
+foreach(symbol IN LISTS _sf_png_symbols)
+    file(APPEND "${{legacy}}" "#define ${{symbol}} wot_sf_${{symbol}}\\n")
+endforeach()
 '''.format(sdk=sdk.as_posix(), directx=directx.as_posix(), module=MODULE.as_posix()), encoding="utf-8")
 
             def configure():
@@ -77,7 +83,7 @@ include("{module}")
             configure()
             header = build / "wot_scaleform_png_prefix.h"
             initial = header.read_bytes()
-            self.assertNotIn(b"\r", initial)
+            self.assertEqual(initial, (build / "legacy-prefix.h").read_bytes())
             self.assertIn(b"#define png_fixture_public wot_sf_png_fixture_public", initial.splitlines())
             self.assertIn(b"#define png_fixture_private wot_sf_png_fixture_private", initial.splitlines())
             # A known old mtime catches a rewrite without relying on a sleep or
