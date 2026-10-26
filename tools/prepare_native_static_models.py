@@ -7,6 +7,7 @@ animations and BSP resources remain in the owner's original package mounts.
 import copy
 import math
 from pathlib import Path
+import struct
 import xml.etree.ElementTree as ET
 
 from prepare_native_vehicle import xml_root
@@ -293,3 +294,169 @@ class StaticModelStates:
         result = '%s/%d/lod0.model' % (self.prefix, model_id)
         self._written[model_id] = result
         return result
+
+
+class StaticModelInstances:
+    """Join original placements, activity, animation and WGDE item identity.
+
+    The caller owns chunk streaming and obtains identities from the reviewed
+    WGDE decoder. A compiled animation offset identifies a shared node-pose
+    allocation, not an index in the model_animation table.
+    """
+    def __init__(self, compiled, states, identities):
+        self.data = compiled.sections['BSMI']._data
+        self.models = compiled.sections['BSMO']._data
+        self.strings = compiled.sections['BWST']
+        self.states = states
+        self.identities = identities
+        self.animations = {}
+        count = len(self.data['transforms'])
+        for field in ('chunk_models', 'visibility_masks', 'bsmo_models_id', 'animations_id'):
+            if len(self.data[field]) != count:
+                raise ValueError('Compiled model instance arrays have different lengths')
+        for record in self.data['model_animation']:
+            owner = record['model_index']
+            if not 0 <= owner < count:
+                raise ValueError('Compiled animation has an invalid instance owner')
+            offset = self.data['animations_id'][owner]
+            if offset < 0 or offset in self.animations:
+                raise ValueError('Compiled animation has an invalid shared-pose offset')
+            self.animations[offset] = record
+
+    def active(self, index, visibility_mask):
+        # #1513 0x006d1a10 preserves the first flags word, then initializes
+        # activity from bit zero of the second word AND the space visibility
+        # mask. Filtering only the visibility word creates hidden alternatives.
+        flags = self.data['chunk_models'][index]
+        return bool(flags['unknown'] & 1 and
+                    self.data['visibility_masks'][index] & visibility_mask)
+
+    def animation(self, index):
+        offset = self.data['animations_id'][index]
+        if offset < 0:
+            return None
+        if offset not in self.animations:
+            raise ValueError('Compiled instance has no shared animation producer')
+        record = self.animations[offset]
+        animation_id = record['animation_id']
+        if animation_id < 0:
+            return None
+        if animation_id >= len(self.models['animations']):
+            raise ValueError('Compiled instance animation is outside BSMO')
+        animation = self.models['animations'][animation_id]
+        name = self.strings.get(animation['anim_name_fnv'])
+        nodes = self.strings.get(animation['nodes_name_fnv'])
+        model_id = self.data['bsmo_models_id'][index]
+        descriptor = self.states.xml(self.states.source_model(model_id))
+        originals = [row for row in descriptor.findall('animation')
+                     if row.findtext('name') == name]
+        if len(originals) != 1 or originals[0].findtext('nodes', '') + '.animation' != nodes:
+            raise ValueError('Compiled animation differs from the original model: ' + str(name))
+        rate = record['frame_rate_multiplier']
+        if not math.isfinite(rate) or rate < 0:
+            raise ValueError('Compiled animation has an invalid playback multiplier')
+        section = ET.Element('animation')
+        _text(section, 'name', name)
+        _text(section, 'frameRateMultiplier', repr(rate))
+        return section
+
+    def section(self, index, origin=(0., 0.)):
+        """Produce one real chunk model using its chunk-local affine pose."""
+        transform = list(self.data['transforms'][index])
+        if (len(transform) != 16 or not all(math.isfinite(value) for value in transform) or
+                transform[3::4] != [0., 0., 0., 1.]):
+            raise ValueError('Compiled instance transform is not a finite affine matrix')
+        transform[12] -= origin[0]
+        transform[14] -= origin[1]
+        model_id = self.data['bsmo_models_id'][index]
+        animation = self.animation(index)
+        result = ET.Element('wotModel')
+        _text(result, 'resource', self.states.write(model_id))
+        matrix = ET.SubElement(result, 'transform')
+        for row in range(4):
+            _text(matrix, 'row%d' % row, ' '.join(
+                repr(value) for value in transform[row * 4:row * 4 + 3]))
+        flags = self.data['chunk_models'][index]
+        _text(result, 'castsShadow', 'true' if flags['casts_shadow'] else 'false')
+        _text(result, 'reflectionVisible', 'true' if flags['reflection_visible'] else 'false')
+        if animation is not None:
+            result.append(animation)
+        identity = self.identities.get(index)
+        if identity is not None:
+            section = ET.SubElement(result, 'stockIdentity')
+            for key in ('chunkID', 'itemIndex', 'filename'):
+                _text(section, key, identity[key])
+        return result
+
+
+def static_instance_identities(compiled, descriptors):
+    """Use the same reviewed WGDE enumeration as the collision catalog."""
+    from bake_destructibles_0922 import native_wires, model_filename_from_primitive
+
+    instances = compiled.sections['BSMI']._data
+    models = compiled.sections['BSMO']._data
+    strings = compiled.sections['BWST']
+    wgde = compiled.sections['WGDE']._data
+    if not wgde.get('1') and not wgde.get('2') and not wgde.get('3'):
+        return {}
+    row_wires, unused_groups, unused_trees = native_wires(
+        compiled, len(instances['bsmo_models_id']))
+    result = {}
+    for index, wire in row_wires.items():
+        model_id = instances['bsmo_models_id'][index]
+        info = models['model_info_items'][model_id]
+        if info['type'] == 1:
+            kind = 'falling'
+        elif info['type'] == 2:
+            fragile = models['fragile_model_info_items'][info['info_index']]
+            if fragile['entry_type'] not in (0, 1):
+                continue
+            kind = 'fragile' if fragile['entry_type'] == 0 else 'structure'
+        else:
+            continue
+        collider = models['models_colliders'][model_id]
+        filename = model_filename_from_primitive(strings.get(collider['bsp_section_name_fnv']))
+        descriptor = descriptors.get(filename)
+        if descriptor is None or descriptor['kind'] != kind:
+            raise ValueError('Compiled model has no matching destructible identity: ' + filename)
+        result[index] = dict(chunkID=wire[0], itemIndex=wire[1], filename=filename)
+    return result
+
+
+def static_model_chunks(compiled, instances, visibility_mask=1):
+    """Place active compiled models in the public engine's real terrain grid.
+
+    This returns descriptors only. Nested terrain ZIPs and model geometry stay
+    in the mounted original packages and are read by the native resource owner.
+    """
+    terrain = compiled.sections['BWT2']._data
+    size = terrain['settings']['chunk_size']
+    if not math.isfinite(size) or size <= 0:
+        raise ValueError('Compiled space has an invalid terrain grid size')
+    chunks = {}
+    names = {}
+    for row in terrain['cdatas']:
+        location = (row['loc_x'], row['loc_y'])
+        resource = compiled.sections['BWST'].get(row['resource_fnv'])
+        suffix = '.cdata_processed/terrain2'
+        if (not resource.endswith(suffix) or resource.startswith('/') or
+                '..' in resource.split('/') or '\\' in resource):
+            raise ValueError('Compiled terrain has an invalid original resource name')
+        name = resource[:-len(suffix)] + '.chunk'
+        if location in chunks or name in names.values():
+            raise ValueError('Compiled terrain grid has a duplicate chunk')
+        root = ET.Element('root')
+        _text(ET.SubElement(root, 'terrain'), 'resource', resource)
+        chunks[location], names[location] = root, name
+    for index, transform in enumerate(instances.data['transforms']):
+        if not instances.active(index, visibility_mask):
+            continue
+        # Match GeometryMapping::outsideChunkIdentifier's float division and
+        # floorf, including negative coordinates and exact chunk boundaries.
+        location = tuple(math.floor(struct.unpack('<f', struct.pack('<f',
+                         transform[axis] / size))[0]) for axis in (12, 14))
+        if location not in chunks:
+            raise ValueError('Active model is outside the compiled terrain grid')
+        chunks[location].append(instances.section(index,
+            (location[0] * size, location[1] * size)))
+    return {names[location]: root for location, root in chunks.items()}

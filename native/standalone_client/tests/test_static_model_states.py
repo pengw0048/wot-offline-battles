@@ -9,7 +9,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
-from prepare_native_static_models import StaticModelStates
+from prepare_native_static_models import StaticModelStates, StaticModelInstances, static_model_chunks
 
 
 class Resources:
@@ -78,6 +78,62 @@ def fixture():
 
 
 class StaticModelStatesTest(unittest.TestCase):
+    def test_instance_activity_shared_animation_and_identity(self):
+        compiled, resources = fixture()
+        compiled.sections['BWST'].update({12: 'motion', 13: 'assets/motion.animation'})
+        compiled.sections['BSMO']._data['animations'] = [dict(anim_name_fnv=12, nodes_name_fnv=13)]
+        resources.files['assets/object.model'] = resources.files['assets/object.model'].replace(
+            b'</root>', b'<animation><name>motion</name><nodes>assets/motion</nodes></animation></root>')
+        source = compiled.sections['BSMI']._data
+        source.update(transforms=[[1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0.,
+                                   -95., 2., 205., 1.]] * 4,
+                      bsmo_models_id=[0, 1, 0, 0],
+                      animations_id=[21, 21, -1, -1], visibility_masks=[1, 1, 1, 2],
+                      chunk_models=[dict(has_animations=1, casts_shadow=1, reflection_visible=0,
+                                         unknown=1 if i != 2 else 0) for i in range(4)],
+                      model_animation=[dict(model_index=0, animation_id=0, frame_rate_multiplier=.2)])
+        identity = dict(chunkID=32124, itemIndex=7, filename='assets/object.model')
+        with tempfile.TemporaryDirectory() as output:
+            states = StaticModelStates(compiled, resources, output, 'states')
+            instances = StaticModelInstances(compiled, states, {0: identity, 1: identity})
+            self.assertEqual([instances.active(i, 1) for i in range(4)], [True, True, False, False])
+            first, second = [instances.section(i, (-100., 200.)) for i in (0, 1)]
+            self.assertEqual(first.findtext('transform/row3'), '5.0 2.0 5.0')
+            self.assertEqual(first.findtext('stockIdentity/itemIndex'), '7')
+            self.assertEqual(second.findtext('stockIdentity/itemIndex'), '7')
+            self.assertEqual(second.findtext('animation/name'), 'motion')
+            self.assertEqual(second.findtext('animation/frameRateMultiplier'), '0.2')
+            self.assertNotEqual(first.findtext('resource'), second.findtext('resource'))
+            source['animations_id'][1] = 22
+            with self.assertRaisesRegex(ValueError, 'no shared animation producer'):
+                instances.section(1)
+
+    def test_chunk_boundaries_use_native_floor_and_local_coordinates(self):
+        compiled, resources = fixture()
+        compiled.sections['BWST'].update({14: 'ffff0000o.cdata_processed/terrain2',
+                                          15: '00000000o.cdata_processed/terrain2'})
+        compiled.sections['BWT2'] = SimpleNamespace(_data=dict(
+            settings=dict(chunk_size=100.), cdatas=[
+                dict(loc_x=-1, loc_y=0, resource_fnv=14),
+                dict(loc_x=0, loc_y=0, resource_fnv=15)]))
+        source = compiled.sections['BSMI']._data
+        source.update(transforms=[[1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0.,
+                                   x, 2., 5., 1.] for x in (-.5, 0.)],
+                      animations_id=[-1, -1], model_animation=[], visibility_masks=[1, 1],
+                      chunk_models=[dict(has_animations=0, casts_shadow=1,
+                                         reflection_visible=0, unknown=1)] * 2)
+        with tempfile.TemporaryDirectory() as output:
+            states = StaticModelStates(compiled, resources, output, 'states')
+            instances = StaticModelInstances(compiled, states, {})
+            chunks = static_model_chunks(compiled, instances)
+            self.assertEqual(chunks['ffff0000o.chunk'].findtext('wotModel/transform/row3'),
+                             '99.5 2.0 5.0')
+            self.assertEqual(chunks['00000000o.chunk'].findtext('wotModel/transform/row3'),
+                             '0.0 2.0 5.0')
+            source['transforms'][1][12] = 100.
+            with self.assertRaisesRegex(ValueError, 'outside the compiled terrain grid'):
+                static_model_chunks(compiled, instances)
+
     def test_normal_and_damaged_states_are_separate(self):
         compiled, resources = fixture()
         with tempfile.TemporaryDirectory() as output:
