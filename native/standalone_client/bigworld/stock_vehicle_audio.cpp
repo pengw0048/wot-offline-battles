@@ -371,7 +371,9 @@ void tickStockVehicleAudioTasks() {
         [](const std::weak_ptr<DetailedState>& value) { return value.expired(); }), allDetailed.end());
 }
 static void finiStockVehicleAuditions();
+static void finiStockFrictionAuditions();
 void finiStockVehicleAudio() {
+    finiStockFrictionAuditions();
     finiStockVehicleAuditions();
     const auto states = allDetailed;
     for (const auto& weak : states) if (const auto value = weak.lock()) value->destroy();
@@ -883,4 +885,121 @@ static void finiStockVehicleAuditions() {
     for (const auto& weak : states) if (const auto value = weak.lock()) value->destroy();
     auditions.clear(); allAuditions.clear();
 }
+
+namespace {
+class FrictionState;
+std::vector<std::weak_ptr<FrictionState>> allFriction;
+class FrictionState : public StockComponentState {
+public:
+    BW::string event;
+    MatrixProviderPtr matrix;
+    std::map<uint, StockAudioVoice> contacts;
+    uint64 revision = 0;
+    virtual void activate() {} // #1513 vtable slot 0 is the empty 0x00579c00.
+    virtual void deactivate() {
+        ++revision;
+        for (const auto& contact : contacts) stopStockAudioVoice(contact.second);
+        contacts.clear();
+        matrix = NULL;
+    }
+    virtual void destroy() {
+        if (!valid_) return;
+        valid_ = false;
+        this->deactivate();
+    }
+    virtual PyObject* wrap(bool owning);
+    bool process(uint id, const Vector3& position, int state) {
+        MatrixProviderPtr provider = matrix;
+        if (!provider) return true;
+        const uint64 epoch = revision;
+        const StockAudioVoice old = contacts[id];
+        if (state == 3) {
+            stopStockAudioVoice(old);
+            contacts[id].reset();
+        } else if (state == 1 || state == 2) {
+            // The original start guard tests handle allocation, not isPlaying.
+            // A naturally ended event retains its contact handle until state 3.
+            if (state == 1 && stockAudioVoiceValid(old)) return true;
+            Matrix pose;
+            provider->matrix(pose);
+            if (!valid_ || revision != epoch) return false;
+            const Vector3 offset = position - pose.applyToOrigin();
+            if (state == 1) {
+                StockAudioVoice voice = createStockAudioAttachedVoice(event, provider, offset);
+                // Source creation can synchronously sample a Python provider.
+                // Do not retain a contact created by an already retired owner.
+                if (!valid_ || revision != epoch) {
+                    stopStockAudioVoice(voice);
+                    return false;
+                }
+                if (!voice) return false;
+                contacts[id] = voice;
+                playStockAudioVoice(contacts[id]);
+            } else if (stockAudioVoiceValid(old)) {
+                setStockAudioSourceOffset(stockAudioVoiceSource(old), offset);
+            }
+        }
+        return true;
+    }
+};
+}
+class FrictionAudition : public StockComponentWrapper {
+    Py_Header(FrictionAudition, StockComponentWrapper)
+public:
+    FrictionAudition(const std::shared_ptr<StockComponentState>& value, bool owning) :
+        StockComponentWrapper(value, &s_type_, owning) {}
+    std::shared_ptr<FrictionState> state() const {
+        const auto value = std::dynamic_pointer_cast<FrictionState>(this->component());
+        if (!value) PyErr_SetString(PyExc_ValueError, "FrictionAudition has been destroyed");
+        return value;
+    }
+    PY_FACTORY_DECLARE()
+    PY_METHOD_DECLARE(py_processFriction)
+    PY_METHOD_DECLARE(py_setVehicleMatrix)
+};
+PyObject* FrictionState::wrap(bool owning) { return new FrictionAudition(shared_from_this(), owning); }
+PyObject* FrictionAudition::pyNew(PyObject* args) {
+    PyObject* object;
+    if (!PyArg_ParseTuple(args, "O:FrictionAudition", &object)) return NULL;
+    BW::string event;
+    if (Script::setData(object, event)) return NULL;
+    const auto value = std::make_shared<FrictionState>();
+    value->event = event;
+    allFriction.push_back(value);
+    return new FrictionAudition(value, true);
+}
+PyObject* FrictionAudition::py_processFriction(PyObject* args) {
+    PyObject* idObject; PyObject* positionObject; int state;
+    if (!PyArg_ParseTuple(args, "OOi:processFriction", &idObject, &positionObject, &state)) return NULL;
+    uint id; Vector3 position;
+    if (Script::setData(idObject, id) || Script::setData(positionObject, position)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    if (!value->process(id, position, state) && PyErr_Occurred()) return NULL;
+    Py_RETURN_NONE;
+}
+PyObject* FrictionAudition::py_setVehicleMatrix(PyObject* args) {
+    PyObject* object;
+    if (!PyArg_ParseTuple(args, "O:setVehicleMatrix", &object)) return NULL;
+    MatrixProviderPtr provider;
+    if (Script::setData(object, provider)) return NULL;
+    const auto value = this->state(); if (!value) return NULL;
+    ++value->revision;
+    value->matrix = provider;
+    Py_RETURN_NONE;
+}
+PY_TYPEOBJECT(FrictionAudition)
+PY_BEGIN_METHODS(FrictionAudition)
+    PY_METHOD(processFriction)
+    PY_METHOD(setVehicleMatrix)
+PY_END_METHODS()
+PY_BEGIN_ATTRIBUTES(FrictionAudition)
+PY_END_ATTRIBUTES()
+PY_FACTORY(FrictionAudition, Vehicular)
+
+static void finiStockFrictionAuditions() {
+    const auto states = allFriction;
+    for (const auto& weak : states) if (const auto value = weak.lock()) value->destroy();
+    allFriction.clear();
+}
+
 BW_END_NAMESPACE

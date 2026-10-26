@@ -23,7 +23,7 @@ HOST = r'''
 #include <vector>
 #include "stock_detailed_engine_state.hpp"
 namespace BW { using string=std::string;template<class T>using vector=std::vector<T>; }
-using uint64=std::uint64_t;using uint32=std::uint32_t;
+using uint=unsigned;using uint64=std::uint64_t;using uint32=std::uint32_t;
 #define bw_snprintf std::snprintf
 struct PyObject {
     virtual ~PyObject()=default;int refs=1;float number=0;std::vector<std::string> names;
@@ -104,10 +104,20 @@ PyObject* PyTuple_GET_ITEM(PyObject*,size_t){return Py_None;}
 int PyCallable_Check(PyObject*){return 0;}
 PyObject* PyErr_Occurred(){return error?&exception:nullptr;}
 void PyErr_Print(){error=false;}
-struct Matrix {};struct Vector3 {float x=0,y=0,z=0;};
-using MatrixProviderPtr=std::shared_ptr<Matrix>;
+struct Vector3 {float x=0,y=0,z=0;Vector3 operator-(Vector3 v)const{return {x-v.x,y-v.y,z-v.z};}};
+struct Matrix {Vector3 origin;Vector3 applyToOrigin()const{return origin;}};
+struct MatrixProvider {Matrix pose;std::function<void()> callback;void matrix(Matrix& out){out=pose;if(callback)callback();}};
+using MatrixProviderPtr=std::shared_ptr<MatrixProvider>;
+static size_t attachedCreates=0;static Vector3 attachedOffset;
+StockAudioVoice createStockAudioAttachedVoice(const BW::string&,MatrixProviderPtr p,const Vector3& offset){
+    ++attachedCreates;attachedOffset=offset;auto v=std::make_shared<Voice>();v->source=std::make_shared<Source>();v->source->id=4;
+    Matrix pose;p->matrix(pose);return v;
+}
+bool stockAudioVoiceValid(const StockAudioVoice& voice){return voice!=nullptr;}
+bool setStockAudioSourceOffset(const StockAudioSource&,const Vector3& offset){attachedOffset=offset;return true;}
 namespace Script {
 int setData(PyObject*,BW::string&){return 0;}
+int setData(PyObject*,uint&){return 0;}
 int setData(PyObject*,Vector3&){return 0;}
 int setData(PyObject*,MatrixProviderPtr&){return 0;}
 }
@@ -187,6 +197,21 @@ int main(){
     assert(auditions.empty());
     s=std::make_shared<VehicleAuditionState>();s->activate();assert(error && !s->active);
     finiStockVehicleAuditions();finiStockVehicleAuditions();
+    auto f=std::make_shared<FrictionState>();f->event="original_friction";
+    assert(f->process(7,{11,2,3},1) && f->contacts.empty());
+    f->matrix=std::make_shared<MatrixProvider>();f->matrix->pose.origin={10,1,1};
+    assert(f->process(7,{11,2,3},1) && attachedCreates==1);
+    assert(attachedOffset.x==1 && attachedOffset.y==1 && attachedOffset.z==2);
+    const auto held=f->contacts.at(7);assert(f->process(7,{99,99,99},1) && attachedCreates==1);
+    assert(f->process(7,{13,3,6},2) && attachedOffset.x==3 && attachedOffset.y==2 && attachedOffset.z==5);
+    assert(f->process(7,{0,0,0},3) && !f->contacts.at(7));
+    assert(f->process(7,{15,6,7},1) && attachedCreates==2 && f->contacts.at(7)!=held);
+    f->deactivate();assert(f->contacts.empty() && !f->matrix);f->destroy();f->destroy();
+    f=std::make_shared<FrictionState>();f->matrix=std::make_shared<MatrixProvider>();
+    f->matrix->callback=[f]{f->destroy();};
+    const auto count=attachedCreates;assert(!f->process(8,{0,0,0},1));
+    assert(!f->valid() && f->contacts.empty() && attachedCreates==count);
+    finiStockFrictionAuditions();finiStockFrictionAuditions();
 }
 '''
 

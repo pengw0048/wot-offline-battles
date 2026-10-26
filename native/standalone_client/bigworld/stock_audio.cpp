@@ -990,6 +990,19 @@ StockAudioVoice createStockAudioVoice(const BW::string& event, const BW::string&
     voice->event = event;
     return voice;
 }
+StockAudioVoice createStockAudioAttachedVoice(const BW::string& event,
+    MatrixProviderPtr provider, const Vector3& offset) {
+    StockAudioVoice voice(new StockAudioDetail::Voice);
+    PyObjectPtr name(Script::getData(BW::string()), PyObjectPtr::STEAL_REFERENCE);
+    if (!name) return StockAudioVoice();
+    voice->source = StockAudioDetail::createSource(name.get(), provider, offset, true);
+    voice->event = event;
+    return voice;
+}
+bool stockAudioVoiceValid(const StockAudioVoice& voice) {
+    // 0x01384af0 tests the allocated handle, not the playback flag.
+    return voice && StockAudioDetail::sourceValid(voice->source);
+}
 StockAudioSource stockAudioVoiceSource(const StockAudioVoice& voice) {
     return voice ? voice->source : StockAudioSource();
 }
@@ -1019,6 +1032,13 @@ bool playStockAudioSource(const StockAudioSource& source, const BW::string& even
 bool setStockAudioSourceMatrix(const StockAudioSource& source, MatrixProviderPtr provider) {
     if (!StockAudioDetail::sourceValid(source)) return false;
     source->matrix = provider;
+    return true;
+}
+bool setStockAudioSourceOffset(const StockAudioSource& source, const Vector3& offset) {
+    if (!StockAudioDetail::sourceValid(source)) return false;
+    // 0x01251040 only writes the source offset. The normal object tick owns
+    // the subsequent provider sample and SDK SetPosition call.
+    source->offset = offset;
     return true;
 }
 bool setStockAudioSourceRTPC(const StockAudioSource& source, const BW::string& name, float value) {
