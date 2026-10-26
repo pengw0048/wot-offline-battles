@@ -289,7 +289,7 @@ public:
         "Sniper mode grass", 0, false, false)
     {
         addOption("OFF", "Off", true);
-        addOption("ON", "On", true);
+        addOption("ON", "On", true, true);
     }
     virtual void onOptionSelected(int option) { sniperGrassEnabled = option != 0; }
 };

@@ -347,10 +347,54 @@ class DynamicResolutionTest(unittest.TestCase):
                                              for p in root.rglob('*') if p.is_file()})
 
     def test_actual_fullscreen_draw_half_texel_and_failures(self):
-        path = BIGWORLD / 'lib/moo/fullscreen_quad.cpp'
-        if not path.is_file() or 'drawChecked' not in path.read_text():
-            self.skipTest('Requires the patched pinned fullscreen owner fixture')
-        source = path.read_text()
+        archive = Path(os.environ.get('WOT_PUBLIC_BIGWORLD_ARCHIVE',
+            '/tmp/wot-bigworld-engine-14.4.1.tar.gz'))
+        if not archive.is_file():
+            self.skipTest('Requires the unmodified pinned public-source archive')
+        patch_file = ROOT / 'bigworld/patch_stock_dynamic_resolution.py'
+        spec = importlib.util.spec_from_file_location('fullscreen_resolution_patch', patch_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        names = set(re.findall(r"['\"]((?:lib|client)/[^'\"]+\.(?:cpp|hpp|ipp))['\"]", patch_file.read_text()))
+        with tempfile.TemporaryDirectory(prefix='fullscreen-owner-upgrade-') as directory:
+            root = Path(directory)
+            with tarfile.open(archive) as original:
+                prefix = original.getmembers()[0].name.split('/')[0] + '/programming/bigworld/'
+                available = {member.name: member for member in original.getmembers()}
+                for name in names:
+                    member = available.get(prefix + name)
+                    if member:
+                        target = root / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(original.extractfile(member).read())
+                    else:
+                        self.assertIn(name, {'lib/stock_dynamic_resolution.hpp',
+                                             'lib/wot/stock_dynamic_resolution.hpp'})
+            module.patch(root)
+            source = (root / 'lib/moo/fullscreen_quad.cpp').read_text()
+            # Cached clients from the previous patch must gain the overload
+            # without changing the already restored material-pass lifecycle.
+            self.assertEqual(source.count('bool scaleHalfTexel)'), 1)
+            signature = '    bool FullscreenQuad::drawChecked(const EffectMaterial& material, uint width, uint height)'
+            explicit_signature = signature[:-1] + ', bool scaleHalfTexel)'
+            prior = source.replace(signature + '\n    {\n'
+                '        return drawChecked(material, width, height, Moo::rc().stockSceneResolution());\n'
+                '    }\n\n' + explicit_signature, signature)
+            prior = prior.replace('        const StockDynamicResolutionSupport* resolution = stockDynamicResolution();\n'
+                '        const uint effectiveWidth = scaleHalfTexel && resolution ?\n'
+                '            resolution->state().scene_dimension(static_cast<float>(width), true) : width;\n'
+                '        const uint effectiveHeight = scaleHalfTexel && resolution ?\n'
+                '            resolution->state().scene_dimension(static_cast<float>(height), true) : height;',
+                '        const uint effectiveWidth = stockSceneDimension(width);\n'
+                '        const uint effectiveHeight = stockSceneDimension(height);')
+            self.assertNotEqual(source, prior)
+            (root/'lib/moo/fullscreen_quad.cpp').write_text(prior)
+            header = root/'lib/moo/fullscreen_quad.hpp'
+            header.write_text(header.read_text().replace('\n\t\tbool drawChecked(const EffectMaterial& material, uint width, uint height, bool scaleHalfTexel);', ''))
+            module.patch(root)
+            self.assertEqual(source, (root/'lib/moo/fullscreen_quad.cpp').read_text())
+            module.patch(root)
+            self.assertEqual(source, (root/'lib/moo/fullscreen_quad.cpp').read_text())
 
         def function(marker):
             start = source.index(marker)
@@ -362,8 +406,10 @@ class DynamicResolutionTest(unittest.TestCase):
             return source[start:end + 1]
 
         mesh = function('template <typename MeshType>')
-        draw = function('bool FullscreenQuad::drawChecked')
+        draw = function('bool FullscreenQuad::drawChecked') + '\n' + function(
+            'bool FullscreenQuad::drawChecked(const EffectMaterial& material, uint width, uint height, bool scaleHalfTexel)')
         host = r'''
+#include "wot/stock_dynamic_resolution.hpp"
 #include <cassert>
 #include <cmath>
 #include <string>
@@ -388,8 +434,16 @@ struct ID3DXEffect {
     }
 };
 namespace wot { bool is_stock_effect(ID3DXEffect*) { return stock; } }
-uint32 stockSceneDimension(uint32 n) { return applies?uint32(n*.73f+.5f):n; }
+struct StockDynamicResolutionSupport {
+    wot::StockDynamicResolution resolution;
+    const wot::StockDynamicResolution& state() const { return resolution; }
+};
+StockDynamicResolutionSupport resolution;
+bool hasOwner=true;
+StockDynamicResolutionSupport* stockDynamicResolution() { return hasOwner?&resolution:nullptr; }
 namespace Moo {
+struct RenderContext { bool stockSceneResolution() const { return applies; } };
+RenderContext& rc() { static RenderContext context;return context; }
 struct VertexDeclaration {};
 struct VertexXYZUV { Vector3 pos_;Vector2 uv_; };
 std::vector<VertexXYZUV> vertices;
@@ -416,6 +470,7 @@ class FullscreenQuad {
 public:
     VertexDeclaration declaration;VertexDeclaration* m_vecDclr=&declaration;
     bool drawChecked(const EffectMaterial&,uint,uint);
+    bool drawChecked(const EffectMaterial&,uint,uint,bool);
 };
 }
 using namespace Moo;
@@ -423,6 +478,7 @@ using namespace Moo;
         cases = r'''
 int main() {
     FullscreenQuad quad;EffectMaterial material;
+    resolution.resolution.set_scale(.73f);
     assert(quad.drawChecked(material,101,55));
     assert(trace==std::vector<char>({'B','U','P','D','Q','E'}));
     assert(std::fabs(adjustment[0]-.5f/74)<.000001f);
@@ -434,6 +490,15 @@ int main() {
     assert(std::fabs(vertices[0].pos_.x-(-1.f-1.f/74))<.000001f);
     stock=true;applies=false;assert(quad.drawChecked(material,101,55));
     assert(std::fabs(adjustment[0]-.5f/101)<.000001f);
+    // Physical COPY_DEPTH viewport with an independently scaled half texel.
+    assert(quad.drawChecked(material,101,55,true));
+    assert(!applies && std::fabs(adjustment[0]-.5f/74)<.000001f);
+    assert(std::fabs(adjustment[1]-.5f/40)<.000001f);
+    // A scene viewport does not force a caller's explicit physical offset.
+    applies=true;assert(quad.drawChecked(material,101,55,false));
+    assert(std::fabs(adjustment[0]-.5f/101)<.000001f);
+    hasOwner=false;assert(quad.drawChecked(material,101,55,true));
+    assert(std::fabs(adjustment[0]-.5f/101)<.000001f);hasOwner=true;
     for(failure=1;failure<=6;++failure) {
         trace.clear();const int before=draws;
         assert(!quad.drawChecked(material,101,55));
@@ -450,7 +515,8 @@ int main() {
             root = Path(directory)
             (root / 'probe.cpp').write_text(host + mesh + '\n' + draw + cases)
             subprocess.run([os.environ.get('CXX', 'clang++'), '-std=c++14', '-Wall',
-                '-Wextra', '-Werror', str(root / 'probe.cpp'), '-o', str(root / 'probe')], check=True)
+                '-Wextra', '-Werror', '-I', str(ROOT/'include'),
+                str(root / 'probe.cpp'), '-o', str(root / 'probe')], check=True)
             subprocess.run([str(root / 'probe')], check=True)
 
     def test_guarded_renderer_lifecycle_and_actual_consumers(self):

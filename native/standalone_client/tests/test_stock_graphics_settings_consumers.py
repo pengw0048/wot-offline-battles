@@ -161,11 +161,11 @@ bool copyBackBuffer(RenderTarget* target){assert(target&&activeTarget=="output")
 class GraphicsSetting {
 public:
     using GraphicsSettingPtr=Ptr<GraphicsSetting>;
-    std::string label;int active;std::vector<std::string> options;
+    std::string label;int active;std::vector<std::string> options;std::vector<bool> advanced;
     GraphicsSetting(const char* name,const char*,int initial,bool,bool):label(name),active(initial){}
     virtual ~GraphicsSetting()=default;
     virtual void onOptionSelected(int)=0;
-    void addOption(const char* name,const char*,bool){options.push_back(name);}
+    void addOption(const char* name,const char*,bool supported,bool isAdvanced=false){assert(supported);options.push_back(name);advanced.push_back(isAdvanced);}
     static std::map<std::string,GraphicsSettingPtr>& registry(){static std::map<std::string,GraphicsSettingPtr> r;return r;}
     static GraphicsSettingPtr getFromLabel(const char* name){return registry()[name];}
     static void add(GraphicsSettingPtr setting){registry()[setting->label]=setting;}
@@ -192,6 +192,7 @@ int main(){
     assert(initialiseStockSniperFloraSetting());assert(initialiseStockSniperFloraSetting());
     auto setting=Moo::GraphicsSetting::getFromLabel("SNIPER_MODE_GRASS_ENABLED");
     assert(setting->options==std::vector<std::string>({"OFF","ON"}));
+    assert(setting->advanced==std::vector<bool>({false,true}));
     // Constructor option zero does not invoke the native callback.
     owner->state.enabled=true;assert(stockSniperFloraVisible());
     setting->onOptionSelected(0);assert(!stockSniperFloraVisible());

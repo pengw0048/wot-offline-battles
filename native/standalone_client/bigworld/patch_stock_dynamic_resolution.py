@@ -235,6 +235,34 @@ def patch(root):
         buildFSQuadMesh(quadMesh, effectiveWidth, effectiveHeight, !stock);
         bool success = material.numPasses() != 0;''')
 
+    # 99bdc0 controls the half-texel adjustment independently of 999220's
+    # viewport descriptor. COPY_DEPTH keeps a physical allocation viewport
+    # while still using a DRR-scaled half texel. Upgrade cached patches too.
+    declaration = '\t\tbool drawChecked(const EffectMaterial& material, uint width, uint height);'
+    replace(header, declaration, declaration + '\n'
+            '\t\tbool drawChecked(const EffectMaterial& material, uint width, uint height, bool scaleHalfTexel);')
+    text = read(source)
+    signature = '    bool FullscreenQuad::drawChecked(const EffectMaterial& material, uint width, uint height)'
+    explicit_signature = signature[:-1] + ', bool scaleHalfTexel)'
+    if explicit_signature not in text:
+        old = signature + '\n    {\n        BW_GUARD;'
+        new = signature + '\n    {\n' \
+            '        return drawChecked(material, width, height, Moo::rc().stockSceneResolution());\n' \
+            '    }\n\n' + explicit_signature + '\n    {\n        BW_GUARD;'
+        if text.count(old) != 1:
+            raise ValueError('Dynamic-resolution fullscreen signature changed')
+        text = text.replace(old, new, 1)
+        old = ('        const uint effectiveWidth = stockSceneDimension(width);\n'
+               '        const uint effectiveHeight = stockSceneDimension(height);')
+        new = ('        const StockDynamicResolutionSupport* resolution = stockDynamicResolution();\n'
+               '        const uint effectiveWidth = scaleHalfTexel && resolution ?\n'
+               '            resolution->state().scene_dimension(static_cast<float>(width), true) : width;\n'
+               '        const uint effectiveHeight = scaleHalfTexel && resolution ?\n'
+               '            resolution->state().scene_dimension(static_cast<float>(height), true) : height;')
+        if text.count(old) != 1:
+            raise ValueError('Dynamic-resolution fullscreen half-texel owner changed')
+        pending[source] = text.replace(old, new, 1)
+
     # Only scene-space textures opt in. Merely matching the window dimensions
     # is deliberately insufficient: reflection and atlas owners use them too.
     def mark_targets(source, names):
