@@ -240,6 +240,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
         $EngineRoot) "stock-script-paths-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_xmpp.py"),
         $EngineRoot) "stock-xmpp-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_display_modes.py"),
+        $EngineRoot) "stock-display-modes-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_graphics_settings_consumers.py"),
         $EngineRoot) "stock-graphics-settings-consumers-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_time_of_day.py"),
@@ -396,6 +398,32 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
         "--target", "probe_stock_xmpp", "--parallel", "4") "xmpp-probe-compile.log"
     Invoke-Checked "python" @((Join-Path $RepositoryRoot "native\standalone_client\tests\run_stock_xmpp_loopback.py"),
         (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_xmpp.exe")) "xmpp-probe-run.log"
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_stock_replay_file", "--parallel", "4") "replay-file-probe-compile.log"
+    # CPython ships an independent, same-architecture OpenSSL DLL. The native
+    # Win32 probe below uses Mercury's separately linked bundled block cipher.
+    $ReplayCrypto = @'
+import ctypes, sys
+from pathlib import Path
+root = Path(sys.executable).parent
+for folder in (root, root / 'DLLs'):
+    for path in sorted(folder.glob('libcrypto*.dll')):
+        try:
+            library = ctypes.CDLL(str(path))
+            library.BF_set_key
+            library.BF_ecb_encrypt
+        except (OSError, AttributeError):
+            continue
+        print(path)
+        sys.exit(0)
+raise RuntimeError('The build Python must ship libcrypto with real Blowfish exports')
+'@ | & python -
+    if ($LASTEXITCODE -ne 0 -or -not $ReplayCrypto) {
+        throw "Cannot load the build Python's independent replay fixture cipher."
+    }
+    Invoke-Checked "python" @((Join-Path $RepositoryRoot "native\standalone_client\tests\run_stock_replay_file_probe.py"),
+        (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_replay_file.exe"),
+        "--crypto-library", $ReplayCrypto) "replay-file-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "bwclient", "--parallel", "4", "--",
         "/bl:$(Join-Path $LogRoot 'msbuild.binlog')") "compile.log"

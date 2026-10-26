@@ -29,6 +29,7 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_numeric_format.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_graphics_initialization.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_graphics_settings_consumers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_display_modes.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_dynamic_resolution.cpp"
@@ -102,6 +103,21 @@ target_link_libraries(probe_stock_xmpp pyscript cstdmf WotGloox winmm)
 set_target_properties(probe_stock_xmpp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
 
+# This file/packet foundation has no Python controller export. Cross-check its
+# real Mercury cipher and zlib output against independently generated fixtures.
+add_executable(probe_stock_replay_file
+    "${CMAKE_CURRENT_LIST_DIR}/probe_stock_replay_file.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_replay_file.cpp")
+target_include_directories(probe_stock_replay_file PRIVATE
+    "${BW_SOURCE_DIR}/client" "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../include"
+    "${BW_SOURCE_DIR}/third_party/zip")
+target_compile_definitions(probe_stock_replay_file PRIVATE
+    _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
+target_link_libraries(probe_stock_replay_file network cstdmf zip)
+set_target_properties(probe_stock_replay_file PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
+
 # Verify private writes and mounted archive immutability in the real resource
 # manager before the renderer can compile effects against original packages.
 add_executable(probe_resource_write_overlay
@@ -137,4 +153,8 @@ if(MSVC)
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
     set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
         APPEND PROPERTY COMPILE_OPTIONS "/wd5033")
+    set_source_files_properties(
+        "${CMAKE_CURRENT_LIST_DIR}/probe_stock_replay_file.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/stock_replay_file.cpp"
+        PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict;/wd5033")
 endif()
