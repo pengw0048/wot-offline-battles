@@ -13,6 +13,7 @@ add_library(wot_battle_core STATIC
     src/vehicle_collision.cpp
     src/gun_ballistics.cpp
     src/stock_gun_history.cpp
+    src/stock_shader_binary.cpp
     src/vehicle_physics.cpp
     src/vehicle_constraint_solver.cpp
     src/vehicle_suspension.cpp
@@ -45,6 +46,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_stock_shader_binary tests/test_stock_shader_binary.cpp)
+    target_link_libraries(test_stock_shader_binary PRIVATE wot_battle_core)
+    add_test(NAME stock_shader_binary COMMAND test_stock_shader_binary)
     add_executable(test_wwise_bank tests/test_wwise_bank.cpp)
     target_link_libraries(test_wwise_bank PRIVATE wot_battle_core)
     add_test(NAME wwise_bank COMMAND test_wwise_bank)
