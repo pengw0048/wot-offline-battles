@@ -21,6 +21,21 @@ class StockEffectOwnerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 patch.replace_once(text, "before", "after", "probe")
 
+    def test_binding_accessor_upgrades_fresh_and_cached_properties(self):
+        old = patch.PROPERTIES.replace(
+            "        ID3DXEffect* existingStockBinding() const { return binding_.pComObject(); }\n", "")
+        for properties in ("typedef BW::map< D3DXHANDLE, EffectPropertyPtr > Properties;", old):
+            with self.subTest(properties=properties[:30]), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                header = root / 'lib/moo/effect_material.hpp'
+                header.parent.mkdir(parents=True)
+                header.write_text('prefix\n' + properties + '\nsuffix\n')
+                patch.patch_properties(root)
+                expected = 'prefix\n' + patch.PROPERTIES + '\nsuffix\n'
+                self.assertEqual(header.read_text(), expected)
+                patch.patch_properties(root)
+                self.assertEqual(header.read_text(), expected)
+
     def test_material_switch_preserves_pass_and_independent_values(self):
         compiler = shutil.which("c++")
         if not compiler:
@@ -115,9 +130,11 @@ int main() {
     definition->Release();
     definition->value = 99; // An independent utility draw must not seed materials.
     EffectMaterial::Properties first, second;
+    assert(!first.existingStockBinding());
     assert(first.select(effect));
     auto* first_binding = effect.pEffect();
     assert(first_binding != definition && first_binding->value == 0);
+    assert(first.existingStockBinding() == first_binding);
     first_binding->value = 11;
     assert(!FAILED(first_binding->SetTechnique(effect.currentTechnique())));
     assert(!FAILED(first_binding->Begin(&effect.numPasses_, D3DXFX_DONOTSAVESTATE)));
@@ -147,6 +164,9 @@ int main() {
     assert(effect.pEffect()->begun && effect.pEffect()->pass);
     const auto* before_recompile = effect.pEffect();
     ++effect.compileMark_;
+    wot::fail_create = true;
+    assert(failure.existingStockBinding() == before_recompile);
+    wot::fail_create = false;
     assert(failure.select(effect));
     assert(effect.pEffect() != before_recompile);
     assert(effect.pEffect()->begun && effect.pEffect()->pass);

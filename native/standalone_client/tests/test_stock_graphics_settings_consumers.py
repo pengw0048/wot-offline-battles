@@ -64,6 +64,8 @@ namespace DX { struct BaseTexture { std::string name; }; }
 struct D3DSURFACE_DESC { uint Width=101,Height=55;int Format=1; };
 bool copy_ok=true,push_ok=true,draw_ok=true,effect_ok=true,target_ok=true,bind_ok=true;
 int copies=0,pushes=0,pops=0;
+int created_bindings=0;
+std::map<DX::BaseTexture*,unsigned> effectTextureReferences;
 struct Snapshot {
     std::string technique,target;
     std::map<std::string,DX::BaseTexture*> textures;
@@ -72,11 +74,18 @@ struct Snapshot {
 };
 std::vector<Snapshot> draws;
 struct ID3DXEffect {
+    bool stock=true;
     Snapshot state;
+    ~ID3DXEffect(){for(const auto& binding:state.textures)if(binding.second)--effectTextureReferences[binding.second];}
     int SetFloat(const char* name,float value){state.floats[name]=value;return bind_ok?0:-1;}
     int SetBool(const char*,bool value){state.lens=value;return bind_ok?0:-1;}
-    int SetTexture(const char* name,DX::BaseTexture* value){state.textures[name]=value;return bind_ok?0:-1;}
+    int SetTexture(const char* name,DX::BaseTexture* value){
+        auto& stored=state.textures[name];
+        if(stored)--effectTextureReferences[stored];stored=value;
+        if(stored)++effectTextureReferences[stored];return bind_ok?0:-1;
+    }
 };
+namespace wot { bool is_stock_effect(ID3DXEffect* effect){return effect&&effect->stock;} }
 namespace Moo {
 template<class T> struct Ptr : std::shared_ptr<T> {
     Ptr()=default;Ptr(T* p):std::shared_ptr<T>(p){}
@@ -87,16 +96,21 @@ struct ManagedEffect {
     ID3DXEffect definition,binding;
     ID3DXEffect* active=&definition;
     ID3DXEffect* pEffect(){return active;}
+    void end(){active=&definition;}
 };
 class EffectMaterial {
 public:
     struct Properties {
+        ID3DXEffect* stored=nullptr;
+        ID3DXEffect* existingStockBinding()const{return stored;}
         bool select(ManagedEffect& effect){
             if(!bind_ok)return false;
+            if(!effect.definition.stock){effect.active=&effect.definition;return true;}
             // Production Properties switches the active ARIE material binding.
             // Callers must retrieve pEffect() after this selection.
             effect.binding.state.technique=effect.active->state.technique;
-            effect.active=&effect.binding;
+            if(!stored){stored=&effect.binding;++created_bindings;}
+            effect.active=stored;
             return true;
         }
     } props;
@@ -120,6 +134,7 @@ std::string activeTarget="output";
 class RenderTarget {
 public:
     DX::BaseTexture texture;
+    ~RenderTarget(){assert(effectTextureReferences[&texture]==0);}
     bool push(){++pushes;if(!push_ok)return false;assert(activeTarget=="output");activeTarget=texture.name;return true;}
     void pop(){++pops;assert(activeTarget!="output");activeTarget="output";}
     DX::BaseTexture* pTexture(){return &texture;}
@@ -128,7 +143,7 @@ using RenderTargetPtr=Ptr<RenderTarget>;
 struct FullscreenQuad {
     bool drawChecked(EffectMaterial& material,uint w,uint h){
         assert(w==101&&h==55);auto value=material.effect->pEffect()->state;
-        value.target=activeTarget;draws.push_back(value);return draw_ok;
+        value.target=activeTarget;draws.push_back(value);material.effect->end();return draw_ok;
     }
 };
 struct RenderContext {
@@ -171,6 +186,9 @@ int main(){
     assert(run("import consumers\nassert consumers.get() is None\n")==0);
     assert(initialiseStockGraphicsSettingsConsumers());
     assert(initialiseStockGraphicsSettingsConsumers());
+    const int beforeFirstDraw=created_bindings;
+    owner->deleteUnmanagedObjects();assert(created_bindings==beforeFirstDraw);
+    owner->createUnmanagedObjects();
     assert(initialiseStockSniperFloraSetting());assert(initialiseStockSniperFloraSetting());
     auto setting=Moo::GraphicsSetting::getFromLabel("SNIPER_MODE_GRASS_ENABLED");
     assert(setting->options==std::vector<std::string>({"OFF","ON"}));
@@ -197,6 +215,9 @@ int main(){
     assert(!draws[0].textures["g_backgroundTexture"]&&!copies);
     Renderer::instance().type=IRendererPipeline::TYPE_DEFERRED_SHADING;
     owner->createUnmanagedObjects();draws.clear();
+    const int unused=created_bindings;
+    owner->deleteUnmanagedObjects();assert(created_bindings==unused);
+    owner->createUnmanagedObjects();
     assert(drawStockBinoculars());assert(draws.size()==2&&copies==1&&pushes==1&&pops==1);
     assert(draws[0].technique=="RGB_CUBE"&&draws[0].target=="stock/Binoculars colour grading");
     assert(draws[0].textures["g_backgroundTexture"]->name=="stock/Binoculars scene copy");
@@ -213,8 +234,15 @@ int main(){
     draw_ok=true;push_ok=false;assert(!drawStockBinoculars());assert(Moo::activeTarget=="output");
     push_ok=true;copy_ok=false;assert(!drawStockBinoculars());copy_ok=true;
     bind_ok=false;assert(!drawStockBinoculars());bind_ok=true;
+    assert(drawStockBinoculars()); // End closes the actual material pass.
+    assert(owner->material->effect->active==&owner->material->effect->definition);
+    owner->material->effect->definition.stock=false;
+    assert(drawStockBinoculars()); // A legacy reload may coexist with the stored stock Binding.
+    const int beforeCleanup=created_bindings;
     owner->deleteUnmanagedObjects();
-    for(const auto& binding:owner->material->effect->pEffect()->state.textures)assert(!binding.second);
+    assert(created_bindings==beforeCleanup);
+    for(const auto& binding:owner->material->properties().existingStockBinding()->state.textures)assert(!binding.second);
+    assert(owner->material->effect->active==&owner->material->effect->definition);
     assert(!drawStockBinoculars());
     owner->createUnmanagedObjects();assert(drawStockBinoculars());
     owner->resetTextures();draws.clear();assert(drawStockBinoculars()&&draws.empty());

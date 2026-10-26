@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "stock_dynamic_resolution.hpp"
+#include "stock_effect_adapter.hpp"
 #include "app_config.hpp"
 
 #include "moo/effect_visual_context.hpp"
@@ -126,8 +127,16 @@ void StockDynamicResolutionSupport::deleteUnmanagedObjects()
     sceneConstantsActive_ = false;
     // SetTexture retains a COM reference. Release it before the default-pool
     // render target is retired for a device reset or renderer teardown.
-    if (material_ && material_->pEffect() && material_->pEffect()->pEffect())
-        material_->pEffect()->pEffect()->SetTexture("g_bbCopyMap", NULL);
+    if (material_ && material_->pEffect())
+    {
+        // end() returns ManagedEffect::pEffect() to its Definition. The
+        // Properties still own the actual (possibly pre-reload) Binding.
+        ID3DXEffect* binding=material_->properties().existingStockBinding();
+        if (binding) binding->SetTexture("g_bbCopyMap",NULL);
+        ID3DXEffect* current=material_->pEffect()->pEffect();
+        if (current && current!=binding && !wot::is_stock_effect(current))
+            current->SetTexture("g_bbCopyMap",NULL);
+    }
     copy_ = NULL;
 }
 

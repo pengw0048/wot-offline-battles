@@ -1,6 +1,7 @@
 #ifndef WOT_STOCK_GRAPHICS_SETTINGS_CONSUMERS_PORTABLE
 #include "pch.hpp"
 #include "stock_graphics_settings_consumers.hpp"
+#include "stock_effect_adapter.hpp"
 #include "wot/stock_graphics_settings_consumers.hpp"
 #include "moo/base_texture.hpp"
 #include "moo/device_callback.hpp"
@@ -79,13 +80,20 @@ public:
     {
         // ID3DXEffect::SetTexture retains COM references. Unbind before the
         // default-pool targets are released, including a lost-device reset.
-        if (material && material->pEffect() && material->pEffect()->pEffect())
+        if (material && material->pEffect())
         {
-            ID3DXEffect* fx = material->pEffect()->pEffect();
-            fx->SetTexture("g_backgroundTexture", NULL);
-            fx->SetTexture("g_vignetteTexture", NULL);
-            fx->SetTexture("g_distortNormalMap", NULL);
-            fx->SetTexture("g_rgbCubeTexture", NULL);
+            const auto clear=[](ID3DXEffect* fx)
+            {
+                if (!fx) return;
+                fx->SetTexture("g_backgroundTexture", NULL);
+                fx->SetTexture("g_vignetteTexture", NULL);
+                fx->SetTexture("g_distortNormalMap", NULL);
+                fx->SetTexture("g_rgbCubeTexture", NULL);
+            };
+            ID3DXEffect* binding=material->properties().existingStockBinding();
+            clear(binding);
+            ID3DXEffect* current=material->pEffect()->pEffect();
+            if (current!=binding && current && !wot::is_stock_effect(current)) clear(current);
         }
         source = NULL;
         graded = NULL;

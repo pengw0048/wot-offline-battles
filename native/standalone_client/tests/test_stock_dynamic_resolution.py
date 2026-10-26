@@ -61,10 +61,12 @@ public:
 bool effect_ok=true,target_ok=true,copy_ok=true,binding_ok=true,draw_ok=true,viewport_ok=true;
 bool texture_ok=true;
 int copies=0,draws=0,selected=0;
+int created_bindings=0;
 std::vector<std::string> order;
 std::vector<float> upsample_parameters;
 std::map<void*,unsigned> effectTextureReferences;
 struct ID3DXEffect {
+    bool stock=true;
     std::map<std::string,std::vector<float>> values;
     void* boundTexture=nullptr;
     ~ID3DXEffect() { if(boundTexture) --effectTextureReferences[boundTexture]; }
@@ -79,6 +81,7 @@ struct ID3DXEffect {
         order.push_back(texture?"texture":"unbind");return 0;
     }
 };
+namespace wot { bool is_stock_effect(ID3DXEffect* effect) {return effect&&effect->stock;} }
 namespace Moo {
 template<class T> struct Ptr : std::shared_ptr<T> {
     Ptr()=default;Ptr(T* p):std::shared_ptr<T>(p) {}
@@ -87,12 +90,23 @@ template<class T> struct Ptr : std::shared_ptr<T> {
 class DeviceCallback { public: virtual ~DeviceCallback()=default; };
 class EffectConstantValue { public:virtual ~EffectConstantValue()=default;virtual bool operator()(ID3DXEffect*,D3DXHANDLE)=0; };
 class ManagedEffect {
-public: ID3DXEffect value; ID3DXEffect* pEffect() { return &value; }
+public:
+    ID3DXEffect definition,binding;
+    ID3DXEffect* active=&definition;
+    ID3DXEffect* pEffect() { return active; }
+    void end() {active=&definition;}
 };
 class EffectMaterial {
 public:
     struct Properties {
-        bool select(ManagedEffect&) { ++selected;order.push_back("select");return binding_ok; }
+        ID3DXEffect* stored=nullptr;
+        ID3DXEffect* existingStockBinding()const{return stored;}
+        bool select(ManagedEffect& effect) {
+            ++selected;order.push_back("select");if(!binding_ok)return false;
+            if(!effect.definition.stock){effect.active=&effect.definition;return true;}
+            if(!stored){stored=&effect.binding;++created_bindings;}
+            effect.active=stored;return true;
+        }
     };
     std::string technique;
     Properties properties_;
@@ -102,6 +116,7 @@ public:
     Ptr<ManagedEffect>& pEffect() { return effect; }
 };
 using EffectMaterialPtr=Ptr<EffectMaterial>;
+EffectMaterial* lastMaterial=nullptr;
 class RenderTarget {
 public:
     // A device reset requires every default-pool reference to be released.
@@ -147,11 +162,12 @@ RenderContext& rc() { static RenderContext value;return value; }
 bool FullscreenQuad::drawChecked(const EffectMaterial& material,uint width,uint height) {
     assert(!rc().scene && width==rc().output.Width && height==rc().output.Height);
     assert(material.technique=="drr");++draws;order.push_back("draw");
-    upsample_parameters=rc().context.captures.values["DRRParams"];return draw_ok;
+    upsample_parameters=rc().context.captures.values["DRRParams"];
+    material.effect->end();return draw_ok;
 }
 bool createEffect(EffectMaterialPtr& material,const char* name) {
     assert(std::string(name)=="shaders/drr/wg_drr.fx");
-    material=effect_ok?new EffectMaterial:nullptr;return effect_ok;
+    material=effect_ok?new EffectMaterial:nullptr;lastMaterial=material.get();return effect_ok;
 }
 bool createRenderTarget(RenderTargetPtr& target,unsigned width,unsigned height,int,
     const char*,bool,bool) {
@@ -193,6 +209,9 @@ int main() {
         assert(!initialiseStockDynamicResolutionSetting());
         support.createManagedObjects();support.createUnmanagedObjects();
         assert(support.ready() && Moo::rc().context.constants.size()==2);
+        const int neverDrawn=created_bindings;
+        support.deleteUnmanagedObjects();assert(created_bindings==neverDrawn);
+        support.createUnmanagedObjects();
         support.createManagedObjects(); // Re-creation replaces, rather than duplicates, providers.
         assert(Moo::rc().context.constants.size()==2);
         assert(initialiseStockDynamicResolutionSetting());
@@ -230,9 +249,21 @@ int main() {
         assert(!finishStockDynamicResolutionScene());draw_ok=true;
         support.state().set_scale(1.f);const int before=copies;
         beginStockDynamicResolutionScene();assert(finishStockDynamicResolutionScene() && copies==before);
+        assert(Moo::lastMaterial->effect->pEffect()==&Moo::lastMaterial->effect->definition);
+        assert(Moo::lastMaterial->properties().existingStockBinding()->boundTexture);
+        // Reload can leave the old stock Binding cached while a legacy
+        // Definition now owns a second manually assigned reference.
+        Moo::lastMaterial->effect->definition.stock=false;
+        support.state().set_scale(.73f);beginStockDynamicResolutionScene();assert(finishStockDynamicResolutionScene());
+        assert(Moo::lastMaterial->effect->definition.boundTexture);
         support.deleteUnmanagedObjects();support.deleteUnmanagedObjects();
+        assert(!Moo::lastMaterial->effect->definition.boundTexture);
+        assert(!Moo::lastMaterial->properties().existingStockBinding()->boundTexture);
+        const int beforeUnused=created_bindings;
         assert(!support.ready());
         support.createUnmanagedObjects();assert(support.ready());
+        support.deleteUnmanagedObjects();assert(created_bindings==beforeUnused);
+        support.createUnmanagedObjects();
         texture_ok=false;assert(!support.ready());texture_ok=true;
         support.deleteManagedObjects();support.deleteManagedObjects();
         assert(!support.ready() && Moo::rc().context.constants.empty());

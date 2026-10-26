@@ -44,6 +44,7 @@ PROPERTIES = r"""class Properties : public BW::map< D3DXHANDLE, EffectPropertyPt
         {
             return effect.selectMaterialBinding(binding_, definition_, compileMark_);
         }
+        ID3DXEffect* existingStockBinding() const { return binding_.pComObject(); }
     private:
         void resetBinding()
         {
@@ -120,11 +121,21 @@ bool ManagedEffect::selectMaterialBinding(ComObjectWrap<ID3DXEffect>& binding,
 """
 
 
+def patch_properties(root):
+    moo = Path("lib/moo")
+    previous_properties = PROPERTIES.replace(
+        "        ID3DXEffect* existingStockBinding() const { return binding_.pComObject(); }\n", "")
+    old_properties = (previous_properties if previous_properties in
+        (root / moo / "effect_material.hpp").read_text() else
+        "typedef BW::map< D3DXHANDLE, EffectPropertyPtr > Properties;")
+    apply_file(root, moo / "effect_material.hpp", [
+        (old_properties, PROPERTIES, "material binding owner"),
+    ])
+
+
 def patch(root):
     moo = Path("lib/moo")
-    apply_file(root, moo / "effect_material.hpp", [
-        ("typedef BW::map< D3DXHANDLE, EffectPropertyPtr > Properties;", PROPERTIES, "material binding owner"),
-    ])
+    patch_properties(root)
     apply_file(root, moo / "managed_effect.hpp", [
         ("ID3DXEffect* pEffect();", "ID3DXEffect* pEffect();\n\tbool selectMaterialBinding(ComObjectWrap<ID3DXEffect>& binding,\n\t\tComObjectWrap<ID3DXEffect>& definition, CompileMark& mark);", "binding selection API"),
         ("pEffect_->SetValue( h, &val, sizeof(T) );", "pEffect()->SetValue( h, &val, sizeof(T) );", "typed object constant destination"),
