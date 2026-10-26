@@ -1,8 +1,11 @@
 #include "pch.hpp"
 #include "vehicle_physics_binding.hpp"
+#include "stock_scene_collision.hpp"
 
 #include "pyscript/script_math.hpp"
 #include "wot/vehicle_physics.hpp"
+
+#include <memory>
 
 BW_BEGIN_NAMESPACE
 
@@ -33,7 +36,11 @@ class PyWGVehiclePhysics : public PyObjectPlusWithWeakReference
     Py_Header( PyWGVehiclePhysics, PyObjectPlusWithWeakReference )
 
 public:
-    PyWGVehiclePhysics() : PyObjectPlusWithWeakReference( &s_type_ ) {}
+    PyWGVehiclePhysics() : PyObjectPlusWithWeakReference( &s_type_ ),
+        collisionProvider_( makeStockGroundCollisionProvider() )
+    {
+        core_.set_collision_provider( collisionProvider_.get() );
+    }
 
     wot::VehiclePhysics & core() { return core_; }
 
@@ -72,6 +79,23 @@ public:
         core_.set_inputs( inputs );
     }
     PY_RW_ACCESSOR_ATTRIBUTE_DECLARE( uint32, cruiseSignals, cruiseSignals )
+
+    bool staticMode() const { return core_.static_mode(); }
+    void staticMode( bool value ) { core_.set_static_mode( value ); }
+    PY_RW_ACCESSOR_ATTRIBUTE_DECLARE( bool, staticMode, staticMode )
+
+    uint32 visibilityMask() const { return core_.visibility_mask(); }
+    void visibilityMask( uint32 value ) { core_.set_visibility_mask( value ); }
+    PY_RW_ACCESSOR_ATTRIBUTE_DECLARE( uint32, visibilityMask, visibilityMask )
+
+    void setArenaBounds( Vector2 minimum, Vector2 maximum )
+    {
+        // #1513 f4ab00 stores both Vector2 inputs without local reordering.
+        core_.set_arena_bounds( {{ minimum.x, minimum.y }},
+            {{ maximum.x, maximum.y }} );
+    }
+    PY_AUTO_METHOD_DECLARE( RETVOID, setArenaBounds,
+        ARG( Vector2, ARG( Vector2, END ) ) )
 
     void removeAllDamperSprings()
     {
@@ -138,6 +162,9 @@ public:
     PY_AUTO_FACTORY_DECLARE( PyWGVehiclePhysics, END )
 
 private:
+    // #1513 creates one scene-obstacle query cache per physics wrapper.
+    // Its lifetime encloses the core's non-owning provider reference.
+    std::unique_ptr<wot::VehicleCollisionProvider> collisionProvider_;
     wot::VehiclePhysics core_;
 };
 
@@ -189,6 +216,7 @@ PY_BEGIN_METHODS( PyWGVehiclePhysics )
     PY_METHOD( applyImpulse )
     PY_METHOD( applyImpulseToCoM )
     PY_METHOD( setDamperSpringsLength )
+    PY_METHOD( setArenaBounds )
 PY_END_METHODS()
 PY_BEGIN_ATTRIBUTES( PyWGVehiclePhysics )
     PY_ATTRIBUTE( matrix )
@@ -197,6 +225,8 @@ PY_BEGIN_ATTRIBUTES( PyWGVehiclePhysics )
     PY_ATTRIBUTE( centerOfMass )
     PY_ATTRIBUTE( movementSignals )
     PY_ATTRIBUTE( cruiseSignals )
+    PY_ATTRIBUTE( staticMode )
+    PY_ATTRIBUTE( visibilityMask )
     PY_ATTRIBUTE( leftTrackScroll )
     PY_ATTRIBUTE( rightTrackScroll )
 PY_END_ATTRIBUTES()

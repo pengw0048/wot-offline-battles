@@ -1,10 +1,49 @@
 #pragma once
 
 #include "wot/point_velocity.hpp"
+#include "wot/vehicle_dynamics.hpp"
 
+#include <array>
 #include <cstdint>
 
 namespace wot {
+
+struct VehicleEngineConfiguration;
+
+struct VehicleEngineLossPoint {
+    float angular_velocity;
+    float torque;
+};
+
+// Native Engine::Settings output, separate from the source dictionary's RPMs.
+struct VehicleEngineTorqueSettings {
+    std::array<VehicleEngineLossPoint, 3> losses;
+    float power;
+    float start_angular_velocity;
+};
+
+struct VehicleEngineTorque {
+    float gross;
+    float losses;
+};
+
+// #1513 Engine::Settings 0x00f7ecd0: the loss-curve abscissae use the
+// pre-existing constructor settings before the new RPM keys are assigned.
+VehicleEngineTorqueSettings build_vehicle_engine_torque_settings(
+    const VehicleEngineConfiguration& configuration);
+
+// #1513 0x00f7ec00 with PointCurve 0x00f78b50 and EngineTorqueCurve
+// 0x00f56ea0. Power scale and rotation state are original native inputs.
+VehicleEngineTorque prepare_vehicle_engine_torque(
+    const VehicleEngineTorqueSettings& settings, float angular_velocity,
+    float power_scale, bool use_start_torque);
+
+// #1513 0x00f7e940 adds torque to the engine rigid body. The engine remains
+// a real body joined to the wheels by constraint rows; this does not apply a
+// substitute longitudinal force to the hull.
+void accumulate_vehicle_engine_torque(VehicleRigidBody& engine_body,
+    VehicleEngineTorque torque, bool running, float throttle,
+    float inertial_torque, std::int32_t movement_state);
 
 // #1513 native ground record fields sideFriction, fwdFriction and
 // hbSideFrictionAddition; the chassis supplies sideFrictionConstantRatio.

@@ -44,6 +44,10 @@ struct Tuning {
     double slope_cohesion_decay = 0.25;
     double slope_cohesion_decay_y = 0.72;
     double cohesion_decay_bound = 0.5;
+    double slide_max = 7.0;
+    double slide_drag = 1.5;
+    double fall_safe_speed = 10.0;
+    double fall_damage_per_speed = 0.03;
 };
 
 double longitudinal_slope_grip(double slope_pitch, const Tuning& tuning = {});

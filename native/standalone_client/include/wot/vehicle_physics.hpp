@@ -11,6 +11,43 @@ namespace wot {
 
 class DynamicsSimulator;
 
+struct VehicleCollisionBounds {
+    Vector3 minimum;
+    Vector3 maximum;
+};
+
+struct VehicleCollisionRay {
+    Vector3 origin;
+    Vector3 direction;
+    float length;
+};
+
+struct VehicleCollisionRayHit {
+    float distance;
+    Vector3 normal;
+    // Native ray output #3 is a terrain/static byte, not a material kind.
+    bool is_terrain;
+};
+
+// The filter and world-step share one scene-query owner. The #1513 factory
+// 0x00f64730 creates SceneObstaclesCollider only for CompiledSpace; providing
+// public-engine scene queries is an explicit host responsibility. A missing
+// provider must not be reported as a successfully queried empty world.
+// The original SceneObstaclesCollider::collidePolyhedra at 0x00f5f0f0 logs
+// "SceneObstaclesCollider::collidePolyhedra: UNIMPLEMENTED\n" and returns false
+// without populating contacts. Vehicle 0x00f4e9c1 ignores that return value and
+// consumes the empty output lists. This interface does not invent a replacement
+// hull-scene algorithm; pair collisions are a separate world-solver path.
+class VehicleCollisionProvider {
+public:
+    virtual ~VehicleCollisionProvider() = default;
+    virtual bool prepare(const VehicleCollisionBounds& bounds,
+                          std::uint32_t space_id,
+                          std::uint32_t visibility_mask) = 0;
+    virtual bool query_ray(const VehicleCollisionRay& ray,
+                            VehicleCollisionRayHit& hit) = 0;
+};
+
 // Typed source-side mode fields read by #1513 Vehicle::Settings (0x00f846c0).
 // These have no substitute vehicle tunings; the original configuration
 // producer must supply each required value before native construction.
@@ -257,6 +294,14 @@ public:
         arena_maximum_ = maximum;
     }
 
+    VehicleCollisionProvider* collision_provider() const {
+        return collision_provider_;
+    }
+    // Non-owning: the host's space/session outlives its registered vehicles.
+    void set_collision_provider(VehicleCollisionProvider* provider) {
+        collision_provider_ = provider;
+    }
+
     void clear_damper_springs();
     void add_damper_spring(VehicleDamperSpring spring);
     const std::vector<VehicleDamperSpring>& damper_springs(bool left) const;
@@ -284,6 +329,7 @@ private:
     // #1513 constructor 0x00f48c5a..0x00f48c78, before setArenaBounds.
     std::array<float, 2> arena_minimum_{{-1000.0f, -1000.0f}};
     std::array<float, 2> arena_maximum_{{1000.0f, 1000.0f}};
+    VehicleCollisionProvider* collision_provider_ = nullptr;
     std::array<std::vector<VehicleDamperSpring>, 2> damper_springs_;
 };
 

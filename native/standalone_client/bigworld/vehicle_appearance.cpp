@@ -686,13 +686,21 @@ struct CompoundLoadRequest
     bool loaded;
 };
 
+class StockResourceRefs : public PyResourceRefs
+{
+public:
+    StockResourceRefs() : PyResourceRefs( ResourceRefs() ) {}
+    const ResourceRefs & loadedResources() const { return resourceRefs_; }
+    const BW::vector<BW::string> & failedResources() const { return pFailedIDs_; }
+};
+
 class CompoundResourceLoader : public BackgroundTask
 {
 public:
     CompoundResourceLoader( const std::vector<CompoundLoadRequest> & requests,
         PyObject * callback, int priority ) :
         BackgroundTask( "StockCompoundResourceLoader" ), requests_( requests ),
-        callback_( callback ), result_( new PyResourceRefs( ResourceRefs() ),
+        callback_( callback ), result_( new StockResourceRefs(),
             PyObjectPtr::STEAL_REFERENCE )
     {
         FileIOTaskManager::instance().addBackgroundTask( this, priority );
@@ -825,5 +833,139 @@ PyObject * py_loadStockVehicleResourcesBG( PyObject * args )
     Py_RETURN_NONE;
 }
 PY_MODULE_FUNCTION( loadStockVehicleResourcesBG, BigWorld )
+
+class StockPrerequisitesRequest : public PyObjectPlus
+{
+    Py_Header( StockPrerequisitesRequest, PyObjectPlus )
+public:
+    StockPrerequisitesRequest() : PyObjectPlus( &s_type_ ), cancelled_( false ), ready_( false ) {}
+    PY_METHOD_DECLARE( pyCall )
+    void cancel() { cancelled_ = true; result_ = NULL; failures_.clear(); }
+    void fail( PyObject * resources )
+    {
+        const Py_ssize_t count = PySequence_Size( resources );
+        for (Py_ssize_t index = 0; index < count; ++index)
+        {
+            PyObjectPtr item( PySequence_GetItem( resources, index ), PyObjectPtr::STEAL_REFERENCE );
+            BW::string id;
+            if (item && PyCompoundAssembler::Check( item.get() ))
+                id = static_cast<PyCompoundAssembler *>( item.get() )->resourceID();
+            else if (item && PyString_Check( item.get() ))
+                id = PyString_AsString( item.get() );
+            else
+            {
+                PyErr_Clear();
+                continue;
+            }
+            failures_.push_back( ResourceRef( NULL, NULL, id, NULL ) );
+        }
+        ready_ = true;
+    }
+    bool collect( ResourceRefs & resources ) const
+    {
+        if (!ready_)
+            return false;
+        if (!result_)
+        {
+            resources = failures_;
+            return true;
+        }
+        const StockResourceRefs * result = static_cast<StockResourceRefs *>( result_.get() );
+        resources = result->loadedResources();
+        const BW::vector<BW::string> & failures = result->failedResources();
+        for (size_t index = 0; index < failures.size(); ++index)
+            resources.push_back( ResourceRef( NULL, NULL, failures[index], NULL ) );
+        return true;
+    }
+private:
+    bool cancelled_;
+    bool ready_;
+    PyObjectPtr result_;
+    ResourceRefs failures_;
+};
+
+PyObject * StockPrerequisitesRequest::pyCall( PyObject * args )
+{
+    PyObject * result;
+    if (!PyArg_ParseTuple( args, "O:prerequisites", &result ))
+        return NULL;
+    if (!PyResourceRefs::Check( result ))
+    {
+        PyErr_SetString( PyExc_TypeError, "Expected native prerequisite resource refs" );
+        return NULL;
+    }
+    if (!cancelled_ && !ready_)
+    {
+        result_ = result;
+        ready_ = true;
+    }
+    Py_RETURN_NONE;
+}
+PY_TYPEOBJECT_WITH_CALL( StockPrerequisitesRequest )
+PY_BEGIN_METHODS( StockPrerequisitesRequest )
+PY_END_METHODS()
+PY_BEGIN_ATTRIBUTES( StockPrerequisitesRequest )
+PY_END_ATTRIBUTES()
+
+bool beginStockVehiclePrerequisites( PyObject * resources, PyObjectPtr & request )
+{
+    if (!resources || !PySequence_Check( resources ))
+        return false;
+    const Py_ssize_t count = PySequence_Size( resources );
+    bool containsAssembler = false;
+    for (Py_ssize_t index = 0; index < count; ++index)
+    {
+        PyObjectPtr value( PySequence_GetItem( resources, index ), PyObjectPtr::STEAL_REFERENCE );
+        if (!value)
+            return false;
+        if (PyCompoundAssembler::Check( value.get() ))
+            containsAssembler = true;
+    }
+    if (!containsAssembler)
+        return false;
+    // Publish the request before scheduling: the callback owns only this
+    // request and never captures an Entity or an unguarded native pointer.
+    request = PyObjectPtr( new StockPrerequisitesRequest(), PyObjectPtr::STEAL_REFERENCE );
+    PyObjectPtr args( Py_BuildValue( "(OO)", resources, request.get() ),
+        PyObjectPtr::STEAL_REFERENCE );
+    if (!args)
+    {
+        PyErr_Print();
+        static_cast<StockPrerequisitesRequest *>( request.get() )->fail( resources );
+        return true;
+    }
+    PyObjectPtr result( py_loadStockVehicleResourcesBG( args.get() ), PyObjectPtr::STEAL_REFERENCE );
+    if (!result)
+    {
+        // An identified assembler request must not fall through the public
+        // string-only path and become a successful empty prerequisite list.
+        PyErr_Print();
+        static_cast<StockPrerequisitesRequest *>( request.get() )->fail( resources );
+        return true;
+    }
+    return true;
+}
+
+bool pollStockVehiclePrerequisites( PyObject * request, ResourceRefs & resources )
+{
+    return static_cast<StockPrerequisitesRequest *>( request )->collect( resources );
+}
+
+void cancelStockVehiclePrerequisites( PyObject * request )
+{
+    if (request)
+        static_cast<StockPrerequisitesRequest *>( request )->cancel();
+}
+
+bool stockVehicleModelBounds( PyObject * model, BoundingBox & bounds )
+{
+    if (PyCompoundModel::Check( model ))
+        static_cast<PyCompoundModel *>( model )->localBoundingBox( bounds );
+    else if (PyModel::Check( model ))
+        static_cast<PyModel *>( model )->localBoundingBox( bounds );
+    else
+        return false;
+    return true;
+}
 
 BW_END_NAMESPACE

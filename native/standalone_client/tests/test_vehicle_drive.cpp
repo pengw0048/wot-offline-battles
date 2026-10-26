@@ -1,4 +1,5 @@
 #include "wot/vehicle_drive.hpp"
+#include "wot/vehicle_physics.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -104,11 +105,47 @@ bool native_min_and_constraint_bounds() {
            bounds.side_lower == -750 && bounds.side_upper == 750;
 }
 
+bool native_engine_torque_and_body() {
+    wot::VehicleEngineConfiguration configuration{};
+    configuration.losses = {1, 2};
+    configuration.simple_engine_power = 1000;
+    configuration.simple_min_rpm = 900;
+    configuration.start_rpm = 600;
+    const auto settings = wot::build_vehicle_engine_torque_settings(configuration);
+    // The loss curve precedes the new RPM assignment in the native reader.
+    if (settings.losses[0].angular_velocity != 52.3598785400390625f ||
+        settings.losses[1].angular_velocity != 209.43951416015625f ||
+        settings.losses[2].torque != 12) return false;
+    auto torque = wot::prepare_vehicle_engine_torque(settings, 0, 1, false);
+    if (!close(torque.gross, 1000.0f / 31.415928f + 1) ||
+        torque.losses != 1) return false;
+    torque = wot::prepare_vehicle_engine_torque(settings, 1000, 0.5f, false);
+    if (torque.gross != 12.5f || torque.losses != 12) return false;
+    torque = wot::prepare_vehicle_engine_torque(settings, 1000, 0.5f, true);
+    if (!close(torque.gross, 0.5f * (1000 / (600 * 0.10471976f)) + 12))
+        return false;
+    torque = wot::prepare_vehicle_engine_torque(settings,
+        std::numeric_limits<float>::quiet_NaN(), 1, false);
+    if (torque.losses != 12 ||
+        !close(torque.gross, 1000.0f / 31.415928f + 12)) return false;
+
+    wot::VehicleRigidBody engine;
+    engine.transform = wot::vehicle_identity_matrix();
+    engine.loads.torque = {1, 2, 3};
+    wot::accumulate_vehicle_engine_torque(engine, {10, 3}, true, 0.5f, 4, 1);
+    if (engine.loads.torque.x != 7 || engine.loads.torque.y != 2 ||
+        engine.loads.torque.z != 3 || engine.loads.force.x != 0) return false;
+    wot::accumulate_vehicle_engine_torque(engine, {10, 3}, false, 0.5f, 4, 1);
+    return engine.loads.torque.x == 7 && engine.loads.torque.y == 2 &&
+           engine.loads.torque.z == 3;
+}
+
 } // namespace
 
 int main() {
     if (!slip_and_constant_friction() || !current_contact_velocity_and_blend() ||
-        !normal_reactions_and_track_state() || !native_min_and_constraint_bounds()) {
+        !normal_reactions_and_track_state() || !native_min_and_constraint_bounds() ||
+        !native_engine_torque_and_body()) {
         std::cerr << "vehicle drive contact regressions failed\n";
         return 1;
     }

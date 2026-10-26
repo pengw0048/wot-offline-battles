@@ -93,6 +93,8 @@ try {
         $EngineRoot) "shader-compiler-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_resource_packages.py"),
         $EngineRoot) "resource-packages-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_vehicle_resources.py"),
+        $EngineRoot) "vehicle-resources-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_client_session.py"),
         $EngineRoot) "client-session-patch.log"
 

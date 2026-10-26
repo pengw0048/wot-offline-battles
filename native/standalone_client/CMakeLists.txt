@@ -14,6 +14,8 @@ add_library(wot_battle_core STATIC
     src/gun_ballistics.cpp
     src/stock_gun_history.cpp
     src/vehicle_physics.cpp
+    src/vehicle_constraint_solver.cpp
+    src/vehicle_suspension.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -57,6 +59,12 @@ if(BUILD_TESTING)
     add_executable(test_vehicle_dynamics tests/test_vehicle_dynamics.cpp)
     target_link_libraries(test_vehicle_dynamics PRIVATE wot_battle_core)
     add_test(NAME vehicle_dynamics COMMAND test_vehicle_dynamics)
+    add_executable(test_vehicle_constraint_solver tests/test_vehicle_constraint_solver.cpp)
+    target_link_libraries(test_vehicle_constraint_solver PRIVATE wot_battle_core)
+    add_test(NAME vehicle_constraint_solver COMMAND test_vehicle_constraint_solver)
+    add_executable(test_vehicle_suspension tests/test_vehicle_suspension.cpp)
+    target_link_libraries(test_vehicle_suspension PRIVATE wot_battle_core)
+    add_test(NAME vehicle_suspension COMMAND test_vehicle_suspension)
     add_executable(test_vehicle_drive tests/test_vehicle_drive.cpp)
     target_link_libraries(test_vehicle_drive PRIVATE wot_battle_core)
     add_test(NAME vehicle_drive COMMAND test_vehicle_drive)
