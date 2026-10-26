@@ -18,6 +18,16 @@ def tag(name):
     return "{%s}%s" % (NAMESPACE, name)
 
 
+def normalize_option_prefixes(options):
+    # MSVC accepts both prefixes. sccache passes unknown dash switches through,
+    # but treats unknown slash switches (for example /d2Zi+) as input filenames.
+    # Rewrite only the beginning of each option; quoted macro values and paths
+    # must retain their original text and escaping.
+    return re.sub(r'(?:[^\s"]|"(?:\\.|[^"\\])*")+',
+                  lambda match: re.sub(r'^("?)/(?=[A-Za-z])', r'\1-', match[0]),
+                  options)
+
+
 def configure_projects(build, compiler):
     """Validate every project before writing any changed project files."""
     projects = sorted(Path(build).glob("wot_sf_*.vcxproj"))
@@ -51,6 +61,8 @@ def configure_projects(build, compiler):
         # /Z7 embeds compile debug information in each cached object. The
         # unchanged final /DEBUG link still produces the matching client PDB.
         debug.text = "OldStyle"
+        for options in compile_options.findall(tag("AdditionalOptions")):
+            options.text = normalize_option_prefixes(options.text or "")
         properties = ET.Element(tag("PropertyGroup"), {"Condition": HYBRID})
         for name, value in (("TrackFileAccess", "false"),
                             ("UseMultiToolTask", "true"),

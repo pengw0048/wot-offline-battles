@@ -56,12 +56,31 @@ class NativeBuildCacheTests(unittest.TestCase):
             group_path = CACHE.tag("ItemDefinitionGroup")
             before.find(group_path).find(CACHE.tag("ClCompile")).find(
                 CACHE.tag("DebugInformationFormat")).text = "OldStyle"
+            before.find(group_path).find(CACHE.tag("ClCompile")).find(
+                CACHE.tag("AdditionalOptions")).text = "-d2Zi+ -Zp8 %(AdditionalOptions)"
             self.assertEqual(ET.tostring(before.find(group_path)),
                              ET.tostring(root.find(group_path)))
             self.assertEqual([item.attrib for item in before.iter(CACHE.tag("ClCompile"))],
                              [item.attrib for item in root.iter(CACHE.tag("ClCompile"))])
             for name in ("bwclient", "moo", "probe_wwise_sdk"):
                 self.assertEqual((build / (name + ".vcxproj")).read_text(), PROJECT)
+
+    def test_switch_prefixes_preserve_diagnostic_flags_and_quoted_payloads(self):
+        examples = [
+            ("/w34302 /d2Zi+ /w34263 /Zm282", "-w34302 -d2Zi+ -w34263 -Zm282"),
+            ('/D"VALUE=leave /slashes /d2inside" /d1nodatetime',
+             '-D"VALUE=leave /slashes /d2inside" -d1nodatetime'),
+            ('"/FID:/SDK path/prefix.h" /Zp8', '"-FID:/SDK path/prefix.h" -Zp8'),
+            ('/D "NAME=\\"Hybrid /value\\"" /d2Zi+',
+             '-D "NAME=\\"Hybrid /value\\"" -d2Zi+'),
+            ('/I"D:/SDK path/"\t/WX-\n%(AdditionalOptions)',
+             '-I"D:/SDK path/"\t-WX-\n%(AdditionalOptions)'),
+            ('-d2Zi+ D:/SDK/source.cpp @"D:/SDK path/args.rsp"',
+             '-d2Zi+ D:/SDK/source.cpp @"D:/SDK path/args.rsp"'),
+        ]
+        for original, expected in examples:
+            with self.subTest(options=original):
+                self.assertEqual(CACHE.normalize_option_prefixes(original), expected)
 
     def test_unreviewed_compiler_contract_does_not_partially_enable_cache(self):
         changes = [
