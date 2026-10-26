@@ -6,6 +6,7 @@
 #include "resmgr/multi_file_system.hpp"
 #include "resmgr/zip_file_system.hpp"
 #include "resmgr/zip_section.hpp"
+#include "resmgr/stock_effect_cache.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -143,7 +144,7 @@ void roundTripCache(BW::MultiFileSystem* files, const char* name,
     hashNode->setParent(NULL);
     cache = NULL;
     require(encoded && BW::ZipFileSystem::zipTest(encoded), "Detached cache did not serialize as ZIP");
-    require(files->writeFile(name, encoded, true), "Cannot save the detached cache into the private overlay");
+    require(BW::saveCompiledEffectCache(name, encoded), "Cannot save the detached cache into the private overlay");
     require(equal(files->readFile(name), encoded), "Private cache bytes differ from detached serialization");
     BW::IFileSystem::FileDataLocation saved;
     require(files->locateFileData(name, &saved) && saved.offset == 0,
@@ -177,6 +178,9 @@ void exercise(const BW::string& overlay, const BW::string& package, const BW::st
     checkOriginals(files, archive, package, source, packageBefore, before);
     roundTripCache(files, "shaders/fixture/runtime.1.fxo", "GENERATED EFFECT ONE", "GENERATED HASH ONE");
     roundTripCache(files, "terrain/shaders/runtime.7.fxo", "GENERATED EFFECT TWO", "GENERATED HASH TWO");
+    // Reopening the first cache leaves its native ZIP handle in the resource
+    // cache. Replacement must release that reader before the atomic rename.
+    roundTripCache(files, "shaders/fixture/runtime.1.fxo", "REPLACED EFFECT", "REPLACED HASH");
     checkOriginals(files, archive, package, source, packageBefore, before);
     std::cout << "Real resource overlay ownership probe passed; generated source package remains unchanged" << std::endl;
 }

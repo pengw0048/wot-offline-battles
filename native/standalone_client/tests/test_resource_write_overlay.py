@@ -113,7 +113,7 @@ int main(int argc,char** argv){
  }
  failWrite=failFlush=failClose=overlay->rejectMove=false;
  assert(saveCompiledEffectCache(name,binary("COMPLETE CACHE")));
- assert(fs.readFile(name)->bytes=="COMPLETE CACHE"&&BWResource::purges==1);
+ assert(fs.readFile(name)->bytes=="COMPLETE CACHE"&&BWResource::purges>0);
  assert(saveCompiledEffectCache("terrain/deep/another.7.fxo",binary("SECOND CACHE")));
  assert(fs.readFile("terrain/deep/another.7.fxo")->bytes=="SECOND CACHE");
  assert(original->readFile(name)->bytes=="ORIGINAL");
@@ -147,7 +147,8 @@ class ResourceWriteOverlayTest(unittest.TestCase):
 
     def test_patch_is_idempotent_and_cache_has_no_source_parent(self):
         names = ('lib/resmgr/multi_file_system.cpp', 'lib/resmgr/zip_file_system.cpp',
-                 'lib/resmgr/zip_file_system.hpp', 'lib/moo/effect_compiler.cpp')
+                 'lib/resmgr/zip_file_system.hpp', 'lib/resmgr/stock_effect_cache.hpp',
+                 'lib/moo/effect_compiler.cpp')
         before = [(self.engine / name).read_bytes() for name in names]
         PATCH.patch(self.engine)
         self.assertEqual(before, [(self.engine / name).read_bytes() for name in names])

@@ -32,7 +32,7 @@ def replace_body(source, signature, body):
 CACHE_SAVE = r'''
     // Publish a complete, standalone FXO into the private overlay. No source
     // archive or previously valid cache entry changes until the final rename.
-    bool saveCompiledEffectCache( const BW::string& name, BinaryPtr data )
+    inline bool saveCompiledEffectCache( const BW::string& name, BinaryPtr data )
     {
         if (!data) return false;
         BWResource::ensurePathExists( name );
@@ -49,7 +49,15 @@ CACHE_SAVE = r'''
                 static_cast<size_t>(data->len());
         if (fflush( output ) != 0) complete = false;
         if (fclose( output ) != 0) complete = false;
-        if (complete) complete = files->moveFileOrDirectory( temporary, name );
+        if (complete)
+        {
+            // checkModified opened the previous FXO as a ZipSection. Its
+            // cached file handle denies replacement on Windows until purged.
+            // This releases only cached readers; the old file stays intact
+            // until the complete temporary file replaces it atomically.
+            BWResource::instance().purge( name, true );
+            complete = files->moveFileOrDirectory( temporary, name );
+        }
         if (!complete)
         {
             files->eraseFileOrDirectory( temporary );
@@ -62,6 +70,11 @@ CACHE_SAVE = r'''
 
 
 def patch(engine):
+    helper = engine / 'lib/resmgr/stock_effect_cache.hpp'
+    helper.write_text('#pragma once\n#include "bwresource.hpp"\n'
+                      '#include "multi_file_system.hpp"\n'
+                      '#include "cstdmf/cstdmf_windows.hpp"\n'
+                      'BW_BEGIN_NAMESPACE\n' + CACHE_SAVE + '\nBW_END_NAMESPACE\n')
     paths = {name: engine / relative for name, relative in (
         ('multi', 'lib/resmgr/multi_file_system.cpp'),
         ('zip', 'lib/resmgr/zip_file_system.cpp'),
@@ -74,6 +87,16 @@ def patch(engine):
                 ('header', 'bool mountedReadOnly_ = false;'),
                 ('compiler', 'saveCompiledEffectCache( fxoName,'))):
             raise ValueError('Incomplete resource overlay patch')
+        compiler = contents['compiler']
+        if 'bool saveCompiledEffectCache(' in compiler:
+            start = compiler.index('    // Publish a complete, standalone FXO')
+            unused, end = function_span(compiler, 'bool saveCompiledEffectCache(')
+            compiler = compiler[:start] + compiler[end:]
+        if '#include "resmgr/stock_effect_cache.hpp"' not in compiler:
+            compiler = replace_once(compiler, '#include "pch.hpp"',
+                '#include "pch.hpp"\n#include "resmgr/stock_effect_cache.hpp"',
+                'compiled cache helper')
+        paths['compiler'].write_text(compiler)
         return
 
     multi = contents['multi']
@@ -147,8 +170,9 @@ def patch(engine):
     }
 ''' + zip_source[opening + 1:]
 
-    compiler = replace_once(contents['compiler'], 'namespace {\n',
-        'namespace {\n' + CACHE_SAVE, 'atomic compiled cache writer')
+    compiler = replace_once(contents['compiler'], '#include "pch.hpp"',
+        '#include "pch.hpp"\n#include "resmgr/stock_effect_cache.hpp"',
+        'compiled cache helper')
     start = compiler.index('\t\tBWResource::instance().fileSystem()->eraseFileOrDirectory(')
     end = compiler.index('\n\t\tIF_NOT_MF_ASSERT_DEV( pSection )', start)
     compiler = compiler[:start] + r'''
