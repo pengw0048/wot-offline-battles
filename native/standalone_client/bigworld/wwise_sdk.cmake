@@ -12,7 +12,7 @@ target_include_directories(WotWwiseSdk INTERFACE
     "${WOT_WWISE_SDK_ROOT}/include"
     "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common"
     "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Win32")
-target_compile_definitions(WotWwiseSdk INTERFACE AK_OPTIMIZED)
+target_compile_definitions(WotWwiseSdk INTERFACE AK_OPTIMIZED UNICODE _UNICODE)
 foreach(library IN ITEMS
         AkSoundEngine AkMemoryMgr AkMusicEngine AkStreamMgr
         AkVorbisDecoder AkSineSource AkSilenceSource AkParametricEQFX
