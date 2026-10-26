@@ -23,6 +23,7 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_suspension.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_authority.cpp")
 set(WOT_STOCK_ADAPTER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/stock_startup_services.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/client_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gun_ballistics_binding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/offline_vehicle_parameters.cpp"
