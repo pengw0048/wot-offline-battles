@@ -32,6 +32,7 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_display_modes.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_math.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_wot_module.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_battleground_elements.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_deferred_lighting.cpp"
@@ -94,6 +95,15 @@ else()
     set_source_files_properties(${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
 endif()
+
+add_executable(probe_stock_battleground_elements
+    "${CMAKE_CURRENT_LIST_DIR}/../tests/probe_stock_battleground_elements.cpp")
+target_compile_features(probe_stock_battleground_elements PRIVATE cxx_std_14)
+if(MSVC)
+    target_compile_options(probe_stock_battleground_elements PRIVATE /fp:strict)
+endif()
+set_target_properties(probe_stock_battleground_elements PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
 
 # Exercise the actual native transport against a loopback-only XMPP peer.
 add_executable(probe_stock_xmpp

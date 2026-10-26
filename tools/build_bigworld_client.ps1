@@ -258,6 +258,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
         $EngineRoot) "stock-decals-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_screenshots.py"),
         $EngineRoot) "stock-screenshots-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_battleground_elements.py"),
+        $EngineRoot) "stock-battleground-elements-patch.log"
 
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.
@@ -410,6 +412,9 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
     Copy-Item -Path (Join-Path $D3dxNative "release\bin\x86\*.dll") `
         -Destination (Join-Path $BuildRoot "native-probes\Hybrid") -Force
     Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_wot_module.exe") @() "wot-module-probe-run.log"
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_stock_battleground_elements", "--parallel", "4") "battleground-elements-probe-compile.log"
+    Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_battleground_elements.exe") @() "battleground-elements-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "probe_stock_replay_file", "--parallel", "4") "replay-file-probe-compile.log"
     # CPython ships an independent, same-architecture OpenSSL DLL. The native
