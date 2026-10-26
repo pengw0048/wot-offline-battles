@@ -135,4 +135,6 @@ if(MSVC)
         "${CMAKE_CURRENT_LIST_DIR}/probe_resource_write_overlay.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
+    set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
+        APPEND PROPERTY COMPILE_OPTIONS "/wd5033")
 endif()
