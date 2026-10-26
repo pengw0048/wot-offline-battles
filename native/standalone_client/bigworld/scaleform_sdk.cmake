@@ -83,6 +83,10 @@ list(REMOVE_DUPLICATES _sf_png_symbols)
 list(SORT _sf_png_symbols)
 set(_sf_png_prefix_header "${CMAKE_CURRENT_BINARY_DIR}/wot_scaleform_png_prefix.h")
 file(WRITE "${_sf_png_prefix_header}" "/* Private names for the SDK's original PNG decoder. */\n#pragma once\n")
+# zlib 1.2.7's Z_PREFIX table omits these two externally linked internals.
+# Keep its original decoder isolated from BigWorld's separate zip library.
+file(APPEND "${_sf_png_prefix_header}"
+    "#define z_errmsg wot_sf_z_errmsg\n#define _tr_flush_bits wot_sf_tr_flush_bits\n")
 foreach(symbol IN LISTS _sf_png_symbols)
     file(APPEND "${_sf_png_prefix_header}" "#define ${symbol} wot_sf_${symbol}\n")
 endforeach()
@@ -121,6 +125,19 @@ endfunction()
 _wot_scaleform_library(wot_sf_gfx Projects/Win32/Msvc10/SDK/GFx/GFx.vcxproj libgfx)
 _wot_scaleform_library(wot_sf_as2 Projects/Win32/Msvc10/SDK/GFx/AS2.vcxproj libgfx_as2)
 _wot_scaleform_library(wot_sf_as3 Projects/Win32/Msvc10/SDK/GFx/AS3.vcxproj libgfx_as3)
+# The pinned VS2010 manifest omits these runtime producers. The SDK's
+# AS3_All.cpp and Obj/System/AS3_Obj_System_All.cpp still list them; the
+# active ClassRegistrationTable and AS3 Socket/MovieRoot require their symbols.
+# AIR classes and AOTC2 are inactive and are deliberately not added.
+foreach(source IN ITEMS
+        Src/GFx/AS3/AS3_SocketBuffer.cpp
+        Src/GFx/AS3/AS3_SocketThreadMgr.cpp
+        Src/GFx/AS3/Obj/System/AS3_Obj_System_Domain.cpp)
+    if(NOT EXISTS "${WOT_SCALEFORM_SDK_ROOT}/${source}")
+        message(FATAL_ERROR "Required AS3 runtime source is missing: ${source}")
+    endif()
+    target_sources(wot_sf_as3 PRIVATE "${WOT_SCALEFORM_SDK_ROOT}/${source}")
+endforeach()
 _wot_scaleform_library(wot_sf_d3d9 Projects/Win32/Msvc10/SDK/Render/Render_D3D9.vcxproj libgfxrender_d3d9)
 _wot_scaleform_library(wot_sf_xml Projects/Win32/Msvc10/SDK/Expat/Expat.vcxproj libgfxexpat)
 _wot_scaleform_library(wot_sf_sound Projects/Win32/Msvc10/SDK/Sound/Sound.vcxproj libgfxsound)
