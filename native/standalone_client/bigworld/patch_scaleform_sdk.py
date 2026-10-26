@@ -28,6 +28,29 @@ def sdk_edits(sdk_root, edit):
              '// Preserve the private static-build prefix for ' + symbol + '.',
              'PNG static symbol isolation ' + symbol)
 
+    simd = sdk_root / 'Src/Kernel/SF_SIMD_SSE.h'
+    # MSVC's first __m128i union member is signed char. Explicit conversion
+    # preserves every byte of the constant without list-initialization narrowing.
+    for index in range(4):
+        for mask, shift in (('000000FF', '0 '), ('0000FF00', '8'),
+                            ('00FF0000', '16'), ('FF000000', '24')):
+            value = '((i%d&0x%s) >> %s)' % (index, mask, shift)
+            edit(simd, value, 'static_cast<char>(%s)' % value,
+                 'MSVC SIMD constant byte %d %s' % (index, mask))
+
+    byte_array = sdk_root / 'Src/GFx/AS3/Obj/Utils/AS3_Obj_Utils_ByteArray.cpp'
+    edit(byte_array,
+         '#endif // SF_ENABLE_ZLIB\n//##protect##"methods"',
+         '#endif // SF_ENABLE_ZLIB\n'
+         '// Z_PREFIX must not rename the ActionScript ByteArray methods.\n'
+         '// The native ZStream helper above has already used the prefixed API.\n'
+         '#undef compress\n#undef uncompress\n#undef deflate\n#undef inflate\n'
+         '//##protect##"methods"', 'zlib and ActionScript method names')
+    edit(sdk_root / 'Src/GFx/AS3/Obj/AS3_Obj_Date.cpp',
+         'NumberUtil::IsNaNOrInfinity(time) || (abs(time) > 8.64e15)',
+         'NumberUtil::IsNaNOrInfinity(time) || (fabs(time) > 8.64e15)',
+         'Date floating-point absolute value')
+
 
 def patch_engine(engine_root, sdk_root):
     engine_root, sdk_root = Path(engine_root), Path(sdk_root)
