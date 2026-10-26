@@ -16,9 +16,9 @@ def patch(root):
     def read(name):
         return pending.get(name, (root / name).read_text())
 
-    def replace(name, old, new):
+    def replace(name, old, new, present=None):
         text = read(name)
-        if new in text:
+        if (present or new) in text:
             return
         # The fullscreen replacement is built in stages below. Its final body
         # deliberately replaces those intermediate anchors as one transaction.
@@ -30,7 +30,8 @@ def patch(root):
 
     def include(name):
         replace(name, '#include "pch.hpp"',
-                '#include "pch.hpp"\n#include "stock_dynamic_resolution.hpp"')
+                '#include "pch.hpp"\n#include "stock_dynamic_resolution.hpp"',
+                '#include "stock_dynamic_resolution.hpp"')
 
     header = 'lib/moo/render_context.hpp'
     replace(header, '\t\tHRESULT\t\t\t\t\t\tsetViewport( DX::Viewport* viewport );',
@@ -123,7 +124,8 @@ def patch(root):
     source = 'client/device_app.cpp'
     include(source)
     replace(source, '    Moo::rc().nextFrame();',
-            '    Moo::rc().nextFrame();\n    tickStockDynamicResolution(dRenderTime);')
+            '    Moo::rc().nextFrame();\n    tickStockDynamicResolution(dRenderTime);',
+            '    tickStockDynamicResolution(dRenderTime);')
     replace(source, '    Renderer::instance().pipeline()->begin();',
             '    beginStockDynamicResolutionScene();\n    Renderer::instance().pipeline()->begin();')
     replace(source, '    Moo::rc().setViewport( &viewport );',

@@ -35,6 +35,9 @@ def patch_engine(root):
         for before, after in replacements:
             if before == '#include "pch.hpp"' and after.splitlines()[1] in source:
                 continue
+            if ('Moo::rc().nextFrame();' in before and
+                    '    tickStockVehicleComponents( dGameTime );\n' in source):
+                continue
             if after in source:
                 continue
             if source.count(before) != 1:

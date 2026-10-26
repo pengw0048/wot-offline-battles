@@ -284,14 +284,17 @@ class DynamicResolutionTest(unittest.TestCase):
         if not archive.is_file():
             self.skipTest('Requires the unmodified pinned public-source archive')
         names = ('stock_dynamic_resolution', 'stock_decals', 'stock_screenshots',
-                 'resource_write_overlay', 'stock_startup_services')
+                 'resource_write_overlay', 'stock_startup_services', 'stock_vehicle_visuals')
         modules = {}
-        files = {'lib/moo/renderer.hpp', 'lib/moo/renderer.cpp', 'lib/moo/sticker_decal.cpp'}
+        files = {'lib/moo/renderer.hpp', 'lib/moo/renderer.cpp', 'lib/moo/sticker_decal.cpp',
+                 'client/device_app.cpp', 'client/world_app.cpp'}
         for name in names:
             path = ROOT / 'bigworld' / ('patch_' + name + '.py')
             spec = importlib.util.spec_from_file_location('combined_' + name, path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            if name == 'stock_vehicle_visuals':
+                module.patch = module.patch_engine
             modules[name] = module
             files.update(re.findall(r"['\"]((?:lib|client)/[^'\"]+\.(?:cpp|hpp|ipp))['\"]", path.read_text()))
         with tarfile.open(archive) as original:
@@ -315,6 +318,7 @@ class DynamicResolutionTest(unittest.TestCase):
                         target = root / name
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(content)
+                    sequence = (names[5],) + sequence
                     for name in sequence:
                         modules[name].patch(root)
                     header = (root / 'lib/moo/renderer.hpp').read_text()
@@ -328,6 +332,10 @@ class DynamicResolutionTest(unittest.TestCase):
                     self.assertLess(constructor.index('m_inited('), constructor.index('m_type('))
                     self.assertLess(header.index(' m_dynamicResolution;'), header.index(' m_inited;'))
                     self.assertLess(header.index(' m_inited;'), header.index(' m_type;'))
+                    device = (root / 'client/device_app.cpp').read_text()
+                    self.assertEqual(device.count('tickStockDynamicResolution(dRenderTime);'), 1)
+                    self.assertEqual(device.count('tickStockVehicleComponents( dGameTime );'), 2)
+                    self.assertEqual(device.count('#include "stock_dynamic_resolution.hpp"'), 1)
                     context_header = (root / 'lib/moo/render_context.hpp').read_text()
                     self.assertNotIn('stock_screenshot_callback.hpp', context_header)
                     self.assertNotIn('make_shared<wot::StockScreenshotCallback>', context_header)
