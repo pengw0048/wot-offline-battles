@@ -7,6 +7,7 @@
 #include "projectile_scene.hpp"
 #include "vehicle_scene.hpp"
 #include "target_scene.hpp"
+#include "stock_vehicle_filter.hpp"
 
 #include "camera/free_camera.hpp"
 #include "camera/direction_cursor.hpp"
@@ -106,6 +107,24 @@ private:
 };
 
 StandaloneLog s_standaloneLog;
+
+class StockVehicleFilterStatistics : public MainLoopTask
+{
+public:
+    StockVehicleFilterStatistics()
+    {
+        // Script/App advances EntityManager and its attached native filters.
+        // Sample their real extrapolation state before the GUI is updated.
+        MainLoopTasks::root().add( this, "StockVehicleFilterStatistics",
+            ">Script", "<Camera", NULL );
+    }
+    void tick( float, float ) override
+    {
+        tickStockVehicleFilterLagDetection();
+    }
+};
+
+StockVehicleFilterStatistics s_stockVehicleFilterStatistics;
 
 // Scene ownership stays native. The personality module only satisfies the
 // public engine's scripting lifecycle; it does not create a stock WoT client.

@@ -230,6 +230,48 @@ PY_BEGIN_ATTRIBUTES( PyCompoundNode )
     PY_ATTRIBUTE( name )
 PY_END_ATTRIBUTES()
 
+class PyCompoundPartBounds : public MatrixProvider
+{
+    Py_Header( PyCompoundPartBounds, MatrixProvider )
+public:
+    PyCompoundPartBounds( const CompoundStatePtr & state, size_t part ) :
+        MatrixProvider( false, &s_type_ ), state_( state ), part_( part ),
+        last_( Matrix::identity )
+    {
+        this->matrix( last_ );
+    }
+    virtual void matrix( Matrix & result ) const
+    {
+        if (state_->active)
+        {
+            // #1513 008dd280 transforms this part's authored minimum by its
+            // mount node and scales each basis row by the matching extent.
+            const CompoundPart & part = state_->parts[part_];
+            BoundingBox bounds;
+            part.model->localBoundingBox( bounds );
+            const Matrix & world = state_->nodes[part.mount].world;
+            const Vector3 extent = bounds.maxBounds() - bounds.minBounds();
+            last_ = world;
+            last_.translation( world.applyPoint( bounds.minBounds() ) );
+            last_[0] *= extent.x;
+            last_[1] *= extent.y;
+            last_[2] *= extent.z;
+        }
+        // As with retained node adapters, teardown keeps the last committed
+        // snapshot rather than dereferencing the reset compound's resources.
+        result = last_;
+    }
+private:
+    CompoundStatePtr state_;
+    size_t part_;
+    mutable Matrix last_;
+};
+PY_TYPEOBJECT( PyCompoundPartBounds )
+PY_BEGIN_METHODS( PyCompoundPartBounds )
+PY_END_METHODS()
+PY_BEGIN_ATTRIBUTES( PyCompoundPartBounds )
+PY_END_ATTRIBUTES()
+
 class PyCompoundModel : public PyAttachment
 {
     Py_Header( PyCompoundModel, PyAttachment )
@@ -368,6 +410,26 @@ public:
     PY_AUTO_METHOD_DECLARE( RETOWN, node,
         ARG( BW::string, OPTARG( MatrixProviderPtr, NULL, END ) ) )
 
+    PyObject * getBoundsForPart( int index )
+    {
+        if (!state_->active || index < 0 || static_cast<size_t>( index ) >= state_->parts.size())
+        {
+            PyErr_SetString( PyExc_ValueError, "CompoundModel has no such active part" );
+            return NULL;
+        }
+        return new PyCompoundPartBounds( state_, static_cast<size_t>( index ) );
+    }
+    PY_AUTO_METHOD_DECLARE( RETOWN, getBoundsForPart, ARG( int, END ) )
+
+    bool isHighPriorityReflection() const { return highPriorityReflection_; }
+    void isHighPriorityReflection( bool value )
+    {
+        highPriorityReflection_ = value;
+        for (size_t index = 0; index < state_->parts.size(); ++index)
+            state_->parts[index].model->highPriorityReflection( value );
+    }
+    PY_RW_ACCESSOR_ATTRIBUTE_DECLARE( bool, isHighPriorityReflection, isHighPriorityReflection )
+
     MatrixProviderPtr matrix() const { return state_->matrix; }
     void matrix( MatrixProviderPtr value ) { state_->matrix = value; }
     PY_RW_ACCESSOR_ATTRIBUTE_DECLARE( MatrixProviderPtr, matrix, matrix )
@@ -391,15 +453,18 @@ private:
     CompoundStatePtr state_;
     std::map<size_t, PyObjectPtr> handles_;
     bool visible_;
+    bool highPriorityReflection_ = false;
 };
 PY_TYPEOBJECT( PyCompoundModel )
 PY_BEGIN_METHODS( PyCompoundModel )
     PY_METHOD( node )
     PY_METHOD( reset )
+    PY_METHOD( getBoundsForPart )
 PY_END_METHODS()
 PY_BEGIN_ATTRIBUTES( PyCompoundModel )
     PY_ATTRIBUTE( matrix )
     PY_ATTRIBUTE( visible )
+    PY_ATTRIBUTE( isHighPriorityReflection )
 PY_END_ATTRIBUTES()
 
 namespace
