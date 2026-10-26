@@ -1,3 +1,6 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include "wot/stock_particle_quality.hpp"
 
 #include <cassert>

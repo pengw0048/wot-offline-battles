@@ -1,3 +1,6 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include "wot/stock_fog.hpp"
 
 #include <cassert>
