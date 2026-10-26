@@ -5,6 +5,7 @@ host deliberately does not claim Python C ABI or Windows engine validation.
 """
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -45,7 +46,7 @@ void PyErr_Restore(PyObject* type,PyObject*,PyObject*) { error=type!=nullptr; }
 #define Py_RETURN_NONE do { Py_INCREF(Py_None);return Py_None; } while(0)
 #define Py_Header(Name,Base) public:static bool Check(PyObject* p) { return dynamic_cast<Name*>(p)!=nullptr; }
 #define PY_RO_ATTRIBUTE_DECLARE(Member,Name)
-#define PY_METHOD_DECLARE(Name) PyObject* py_##Name(PyObject*);
+#define PY_METHOD_DECLARE(Name) PyObject* Name(PyObject*);
 class PyObjectPtr {
 public:
     PyObjectPtr(PyObject* p=nullptr):p_(p) { Py_XINCREF(p_); }
@@ -161,6 +162,17 @@ int main() {
 
 
 class StockComponentOwnershipTest(unittest.TestCase):
+    def test_public_manual_method_macro_names(self):
+        # The SDK's PY_METHOD_DECLARE declares its literal argument, while
+        # PY_METHOD(foo) references _py_foo. It does not prepend py_ itself.
+        # Numeric body extraction cannot catch a mismatched class declaration.
+        for name in ('stock_vehicle_components.hpp', 'stock_vehicle_components.cpp',
+                     'stock_vehicle_visuals.cpp'):
+            source = (ROOT / 'bigworld' / name).read_text()
+            for method in re.findall(r'PY_METHOD_DECLARE\(\s*(\w+)\s*\)', source):
+                self.assertTrue(method.startswith('py_') or method == 'pyCall',
+                                '%s declares %s without the public SDK prefix' % (name, method))
+
     def test_actual_owner_and_callback_bodies(self):
         header = (ROOT / 'bigworld/stock_vehicle_components.hpp').read_text()
         classes = header[header.index('class StockComponentState'):header.index('\nextern int')]

@@ -610,12 +610,12 @@ public:
     {
         return std::dynamic_pointer_cast<SuspensionState>( this->component() );
     }
-    PY_METHOD_DECLARE( addGroundNode )
-    PY_METHOD_DECLARE( addGroundNodesGroup )
-    PY_METHOD_DECLARE( setParameters )
-    PY_METHOD_DECLARE( setLodLink )
-    PY_METHOD_DECLARE( setLodSettings )
-    PY_METHOD_DECLARE( stopAnimating )
+    PY_METHOD_DECLARE( py_addGroundNode )
+    PY_METHOD_DECLARE( py_addGroundNodesGroup )
+    PY_METHOD_DECLARE( py_setParameters )
+    PY_METHOD_DECLARE( py_setLodLink )
+    PY_METHOD_DECLARE( py_setLodSettings )
+    PY_METHOD_DECLARE( py_stopAnimating )
     PY_FACTORY_DECLARE()
 private:
     std::shared_ptr<SuspensionState> requireState() const
@@ -804,7 +804,7 @@ public:
     PY_RO_ATTRIBUTE_DECLARE( this->sideFlying( true ), isLeftSideFlying )
     PY_RO_ATTRIBUTE_DECLARE( this->sideFlying( false ), isRightSideFlying )
     PY_RO_ATTRIBUTE_DECLARE( this->sideFlying( true ) && this->sideFlying( false ), isFlying )
-    PY_METHOD_DECLARE( setData )
+    PY_METHOD_DECLARE( py_setData )
     static FlyingInfoProvider * New()
     {
         return new FlyingInfoProvider( std::make_shared<FlyingState>(), true );
@@ -972,9 +972,9 @@ public:
     float rightScroll() const { return right_.residual; }
     bool leftContact() const { return leftContact_; }
     bool rightContact() const { return rightContact_; }
-    PY_METHOD_DECLARE( setData )
-    PY_METHOD_DECLARE( setFlyingInfo )
-    PY_METHOD_DECLARE( setMode )
+    PY_METHOD_DECLARE( py_setData )
+    PY_METHOD_DECLARE( py_setFlyingInfo )
+    PY_METHOD_DECLARE( py_setMode )
     PY_AUTO_METHOD_DECLARE( RETVOID, activate, END )
     PY_AUTO_METHOD_DECLARE( RETVOID, deactivate, END )
     PY_AUTO_METHOD_DECLARE( RETVOID, setExternal, ARG( float, ARG( float, END ) ) )

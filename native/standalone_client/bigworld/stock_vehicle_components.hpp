@@ -33,9 +33,9 @@ public:
     std::shared_ptr<StockComponentState> component() const;
     std::shared_ptr<StockComponentState> transfer();
     PY_RO_ATTRIBUTE_DECLARE( owning_, isOwning )
-    PY_METHOD_DECLARE( activate )
-    PY_METHOD_DECLARE( deactivate )
-    PY_METHOD_DECLARE( destroy )
+    PY_METHOD_DECLARE( py_activate )
+    PY_METHOD_DECLARE( py_deactivate )
+    PY_METHOD_DECLARE( py_destroy )
 
 private:
     void clear();

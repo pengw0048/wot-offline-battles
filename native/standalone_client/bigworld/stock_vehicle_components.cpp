@@ -262,9 +262,9 @@ class StockComponentSystem : public StockComponentWrapper
 public:
     StockComponentSystem( const std::shared_ptr<StockComponentState> & state, bool owning ) :
         StockComponentWrapper( state, &s_type_, owning ) {}
-    PY_METHOD_DECLARE( addComponent )
-    PY_METHOD_DECLARE( findComponent )
-    PY_METHOD_DECLARE( removeComponent )
+    PY_METHOD_DECLARE( py_addComponent )
+    PY_METHOD_DECLARE( py_findComponent )
+    PY_METHOD_DECLARE( py_removeComponent )
     static StockComponentSystem * New()
     {
         return new StockComponentSystem( std::make_shared<SystemState>(), true );
