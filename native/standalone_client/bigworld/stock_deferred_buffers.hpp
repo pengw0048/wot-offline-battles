@@ -13,6 +13,7 @@ class IRendererPipeline;
 void loadStockDeferredMaterialSettings(DataSectionPtr source,
     wot::StockDeferredMaterialSettings& settings);
 void activateStockDeferredMaterialSettings(const wot::StockDeferredMaterialSettings& settings);
+wot::StockDeferredMaterialSettings stockDeferredMaterialSettings();
 void loadStockScreenSpaceShadowSettings(DataSectionPtr source,wot::StockScreenSpaceShadowSettings& settings);
 void activateStockScreenSpaceShadowSettings(const wot::StockScreenSpaceShadowSettings& settings);
 bool setStockDeferredDecalConversion(ID3DXEffect* effect);

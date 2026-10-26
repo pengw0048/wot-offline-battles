@@ -169,6 +169,10 @@ void activateStockDeferredMaterialSettings(const wot::StockDeferredMaterialSetti
 {
     activeSettings=settings;
 }
+wot::StockDeferredMaterialSettings stockDeferredMaterialSettings()
+{
+    return activeSettings;
+}
 
 void loadStockScreenSpaceShadowSettings(DataSectionPtr source,wot::StockScreenSpaceShadowSettings& settings)
 {
