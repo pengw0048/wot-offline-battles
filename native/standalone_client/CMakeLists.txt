@@ -22,6 +22,7 @@ add_library(wot_battle_core STATIC
     src/vehicle_suspension.cpp
     src/vehicle_authority.cpp
     src/wwise_bank.cpp
+    bigworld/stock_tree_materials.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -49,6 +50,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_stock_tree_materials tests/test_stock_tree_materials.cpp)
+    target_include_directories(test_stock_tree_materials PRIVATE bigworld)
+    target_link_libraries(test_stock_tree_materials PRIVATE wot_battle_core)
+    add_test(NAME stock_tree_materials COMMAND test_stock_tree_materials)
     add_executable(test_stock_dynamic_resolution tests/test_stock_dynamic_resolution.cpp)
     target_link_libraries(test_stock_dynamic_resolution PRIVATE wot_battle_core)
     add_test(NAME stock_dynamic_resolution COMMAND test_stock_dynamic_resolution)
