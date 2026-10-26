@@ -248,6 +248,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
         $EngineRoot) "stock-graphics-settings-consumers-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_time_of_day.py"),
         $EngineRoot) "stock-time-of-day-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_deferred_lighting.py"),
+        $EngineRoot) "stock-deferred-lighting-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_preferences_path.py"),
         $EngineRoot) "stock-preferences-path-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_dynamic_resolution.py"),
