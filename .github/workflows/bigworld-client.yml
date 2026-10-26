@@ -10,6 +10,7 @@ on:
   push:
     paths:
       - 'tools/build_bigworld_client.ps1'
+      - 'tools/configure_bigworld_build_cache.py'
       - 'tools/build_scaleform_sdk.ps1'
       - 'native/standalone_client/bigworld/**'
 
@@ -23,10 +24,18 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+      - name: Set up the native compilation cache
+        if: ${{ !inputs.client_build_run }}
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.15.0
+          disable_annotations: true
       - name: Build pinned BigWorld engine with MSVC
         if: ${{ !inputs.client_build_run }}
         shell: pwsh
         env:
+          SCCACHE_GHA_ENABLED: 'true'
+          SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
           WOT_WWISE_SDK_URL: ${{ secrets.WOT_WWISE_SDK_URL }}
           WOT_WWISE_SDK_TOKEN: ${{ secrets.WOT_WWISE_SDK_TOKEN }}
         run: >-

@@ -45,6 +45,8 @@ function Invoke-Checked {
 }
 
 $PreviousDxSdk = $env:DXSDK_DIR
+$PreviousPath = $env:PATH
+$CacheExe = $null
 Start-Transcript -Path (Join-Path $LogRoot "build-transcript.log") | Out-Null
 try {
     Get-Command cmake, tar, python | Format-Table Name, Source
@@ -292,6 +294,32 @@ print('Licensed SDK input extracted: %d files' % len(members))
         "-DWOT_SCALEFORM_FMOD_ADDON=OFF",
         "-DWOT_WWISE_SDK_ROOT=$WwiseSdk",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5") "configure.log"
+    if ($env:SCCACHE_PATH) {
+        $CacheExe = (Get-Command $env:SCCACHE_PATH -ErrorAction Stop).Source
+        # Use sccache's reviewed MSBuild integration, not CMake's compiler
+        # launcher (which is implemented only by Ninja/Make generators).
+        # The renamed executable resolves the real v142 compiler through PATH.
+        $CompilerConfigs = @(Get-ChildItem -Path (Join-Path $BuildRoot "CMakeFiles") `
+            -Filter "CMakeCXXCompiler.cmake" -Recurse)
+        if ($CompilerConfigs.Count -ne 1) {
+            throw "Cannot identify the configured C++ compiler for the cache."
+        }
+        $CompilerMatch = [regex]::Match(
+            (Get-Content -LiteralPath $CompilerConfigs[0].FullName -Raw),
+            '(?m)^set\(CMAKE_CXX_COMPILER "([^"]+)"\)')
+        if (-not $CompilerMatch.Success -or
+                -not (Test-Path -LiteralPath $CompilerMatch.Groups[1].Value)) {
+            throw "The configured C++ compiler path is unavailable."
+        }
+        $env:PATH = "$(Split-Path -Parent $CompilerMatch.Groups[1].Value);$PreviousPath"
+        $CacheCompilerRoot = Join-Path $WorkRoot "cache-compiler"
+        New-Item -ItemType Directory -Path $CacheCompilerRoot | Out-Null
+        $CacheCompiler = Join-Path $CacheCompilerRoot "cl.exe"
+        Copy-Item -LiteralPath $CacheExe -Destination $CacheCompiler
+        Invoke-Checked "python" @((Join-Path $PSScriptRoot "configure_bigworld_build_cache.py"),
+            $BuildRoot, $CacheCompiler) "compiler-cache-configure.log"
+        Invoke-Checked $CacheExe @("--zero-stats") "compiler-cache-start.log"
+    }
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "bwclient", "--parallel", "4", "--",
         "/bl:$(Join-Path $LogRoot 'msbuild.binlog')") "compile.log"
@@ -365,9 +393,19 @@ catch {
     throw
 }
 finally {
+    if ($CacheExe) {
+        # Preserve hit/miss/bypass reasons even when a compiler or linker fails.
+        # Only compiled public SDK objects enter sccache; no SDK inputs,
+        # request URLs, tokens, PCH files, or build directories are uploaded.
+        & $CacheExe --show-adv-stats 2>&1 |
+            Tee-Object -FilePath (Join-Path $LogRoot "compiler-cache-stats.log")
+        & $CacheExe --show-stats --stats-format json 2>&1 |
+            Set-Content -LiteralPath (Join-Path $LogRoot "compiler-cache-stats.json") -Encoding utf8
+    }
     if (Test-Path -LiteralPath (Join-Path $BuildRoot "CMakeCache.txt")) {
         Copy-Item -LiteralPath (Join-Path $BuildRoot "CMakeCache.txt") -Destination $LogRoot
     }
     $env:DXSDK_DIR = $PreviousDxSdk
+    $env:PATH = $PreviousPath
     Stop-Transcript | Out-Null
 }
