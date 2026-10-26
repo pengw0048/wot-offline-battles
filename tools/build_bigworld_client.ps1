@@ -405,6 +405,8 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
     Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_pinger.exe") @() "pinger-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "probe_stock_wot_module", "--parallel", "4") "wot-module-probe-compile.log"
+    Copy-Item -Path (Join-Path $D3dxNative "release\bin\x86\*.dll") `
+        -Destination (Join-Path $BuildRoot "native-probes\Hybrid") -Force
     Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_wot_module.exe") @() "wot-module-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "probe_stock_replay_file", "--parallel", "4") "replay-file-probe-compile.log"
