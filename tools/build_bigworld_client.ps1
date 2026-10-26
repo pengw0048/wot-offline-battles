@@ -73,8 +73,7 @@ try {
         Invoke-Checked "tar" @("-xf", $WwiseArchive, "-C", $WwiseInput) "wwise-sdk-extract.log"
         $WwiseSdk = Join-Path $WwiseInput "SDK"
     }
-    if (-not $WwiseSdk -or -not (Test-Path -LiteralPath
-            (Join-Path $WwiseSdk "include\AK\AkWwiseSDKVersion.h"))) {
+    if (-not $WwiseSdk -or -not (Test-Path -LiteralPath (Join-Path $WwiseSdk "include\AK\AkWwiseSDKVersion.h"))) {
         throw "Supply the licensed Wwise 2017.1.9 SDK through WOT_WWISE_SDK_ROOT or the private build input."
     }
     if ($WwiseSdk) {
