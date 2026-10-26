@@ -6,6 +6,7 @@
 
 #include "avatar_filter.hpp"
 #include "py_avatar_filter.hpp"
+#include "romp/resource_ref.hpp"
 #include "entity.hpp"
 #include "py_entity.hpp"
 #include "script_player.hpp"
