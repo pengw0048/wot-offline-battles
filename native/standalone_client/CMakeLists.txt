@@ -24,6 +24,7 @@ add_library(wot_battle_core STATIC
     src/wwise_bank.cpp
     bigworld/stock_tree_materials.cpp
     bigworld/stock_tree_geometry.cpp
+    bigworld/stock_tree_lod.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -59,6 +60,10 @@ if(BUILD_TESTING)
         target_compile_options(test_stock_battleground_elements PRIVATE -fno-fast-math -ffp-contract=off)
     endif()
     add_test(NAME stock_battleground_elements COMMAND test_stock_battleground_elements)
+    add_executable(test_stock_tree_lod tests/test_stock_tree_lod.cpp)
+    target_include_directories(test_stock_tree_lod PRIVATE bigworld)
+    target_link_libraries(test_stock_tree_lod PRIVATE wot_battle_core)
+    add_test(NAME stock_tree_lod COMMAND test_stock_tree_lod)
     add_executable(test_stock_tree_geometry tests/test_stock_tree_geometry.cpp)
     target_include_directories(test_stock_tree_geometry PRIVATE bigworld)
     target_link_libraries(test_stock_tree_geometry PRIVATE wot_battle_core)
