@@ -4,6 +4,7 @@
 #include "stock_audio_plugins.hpp"
 
 #include "cstdmf/string_utils.hpp"
+#include "cstdmf/timestamp.hpp"
 #include "pyscript/script.hpp"
 #include "pyscript/script_math.hpp"
 #include "romp/enviro_minder.hpp"
@@ -16,6 +17,7 @@
 #include <AK/SoundEngine/Common/AkSoundEngine.h>
 #include <AK/MusicEngine/Common/AkMusicEngine.h>
 #include <d3dx9math.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <atomic>
@@ -53,6 +55,7 @@ typedef std::shared_ptr<Voice> VoicePtr;
 void updateSources();
 void deliverCallbacks();
 void releaseSources();
+bool reinitialise();
 
 struct LoadedBank {
     AkUInt32 id;
@@ -61,9 +64,13 @@ struct LoadedBank {
 struct Manager {
     bool memory = false, sound = false, music = false, ready = false, com = false;
     bool ioReady = false;
+    bool renderConfigured = false, pendingReinit = false;
+    double nextReinit = 0.;
+    void* window = NULL;
     AkMemPoolId preparePool = AK_INVALID_POOL_ID;
     StockAudioIO io;
     DataSectionPtr configuration, profile;
+    BW::string language;
     std::map<BW::string, LoadedBank> banks;
     std::set<BW::string> permanent, current;
     Matrix camera;
@@ -72,6 +79,8 @@ struct Manager {
     float cameraRTPCElapsed = 0.f;
     MatrixProviderPtr cameraShift;
     float masterVolume = 1.f;
+    std::map<BW::string, float> globalRTPCs;
+    std::map<BW::string, BW::string> globalStates;
     AkUniqueID auxiliaryBus = 0;
     float auxiliaryGain = 0.f;
     std::vector<AkUniqueID> pendingEvents, persistentEvents;
@@ -81,6 +90,7 @@ struct Manager {
     AkGameObjectID nextObject = 1;
     std::uint64_t epoch = 0, nextVoice = 1;
     std::map<AkGameObjectID, std::weak_ptr<Source>> sources;
+    SourcePtr globalSource;
     std::map<std::uint64_t, VoicePtr> voices;
     std::mutex completionsMutex;
     std::vector<std::pair<std::uint64_t, AkPlayingID>> completions;
@@ -167,6 +177,7 @@ bool initialiseStockAudio(DataSectionPtr root, void* window) {
     Manager& state = manager();
     if (state.ready) return true;
     finiStockAudio();
+    state.window = window;
     state.configuration = root;
     DataSectionPtr sound = root ? root->openSection("soundMgr") : NULL;
     if (!sound || !sound->readBool("enabled", true)) return false;
@@ -196,6 +207,12 @@ bool initialiseStockAudio(DataSectionPtr root, void* window) {
         state.ioReady = true;
         if (!result(state.io.setResourcePath(sound->readString("wwmediaPath", "audioww")),
             "ResourceIO::setResourcePath")) goto failed;
+        if (!state.language.empty()) {
+            BW::wstring language;
+            if (!bw_utf8tow(state.language, language) ||
+                !result(AK::StreamMgr::SetCurrentLanguage(language.c_str()), "SetCurrentLanguage"))
+                goto failed;
+        }
         AkInitSettings settings;
         AkPlatformInitSettings platform;
         AK::SoundEngine::GetDefaultInitSettings(settings);
@@ -229,7 +246,8 @@ bool initialiseStockAudio(DataSectionPtr root, void* window) {
         int voices = processor.dwNumberOfProcessors > 2 ? 110 : 50;
         int threshold = processor.dwNumberOfProcessors > 2 ? -50 : -30;
         DataSectionPtr render = state.profile->openSection("soundRender");
-        if (render && render->readBool("use_config", false)) {
+        state.renderConfigured = render && render->readBool("use_config", false);
+        if (state.renderConfigured) {
             voices = render->readInt("max_voices", voices);
             threshold = render->readInt("HDR_lower_threshold", threshold);
         }
@@ -279,6 +297,10 @@ void tickStockAudio(const Matrix& cameraWorld, float elapsed) {
     using namespace StockAudioDetail;
     Manager& state = manager();
     if (!state.ready) return;
+    if (state.pendingReinit && double(timestamp()) / stampsPerSecondD() >= state.nextReinit) {
+        reinitialise();
+        return;
+    }
     const auto epoch = state.epoch;
     state.camera = cameraWorld;
     const AkTransform camera = transform(cameraWorld);
@@ -344,6 +366,9 @@ void finiStockAudio() {
     if (AK::IAkStreamMgr::Get()) AK::IAkStreamMgr::Get()->Destroy();
     state.banks.clear(); state.permanent.clear(); state.current.clear();
     state.pendingEvents.clear(); state.persistentEvents.clear(); state.failedEvents.clear();
+    state.globalRTPCs.clear(); state.globalStates.clear();
+    state.pendingReinit = false;
+    state.nextReinit = 0.;
     state.hasPreviousCamera = false;
     state.cameraRTPCElapsed = 0.f;
     if (state.preparePool != AK_INVALID_POOL_ID) {
@@ -402,7 +427,6 @@ SourcePtr createSource(PyObject* name, MatrixProviderPtr matrix, const Vector3& 
     Manager& state = manager();
     SourcePtr source(new Source);
     source->epoch = state.epoch;
-    source->matrix = matrix;
     source->offset = position;
     source->auxSend = auxSend;
     source->pose.setIdentity();
@@ -411,8 +435,14 @@ SourcePtr createSource(PyObject* name, MatrixProviderPtr matrix, const Vector3& 
     // empty string, from the non-string sentinel selecting the global object.
     source->global = !(name && PyString_Check(name));
     if (!state.ready) return source;
+    if (source->global && state.globalSource) return state.globalSource;
     source->id = source->global ? state.global : state.nextObject++;
+    if (source->global) {
+        source->offset = Vector3::zero();
+        state.globalSource = source;
+    }
     if (!source->global) {
+        source->matrix = matrix;
         if (!result(AK::SoundEngine::RegisterGameObj(source->id, source->name.c_str()),
             "RegisterGameObj", source->name.c_str())) {
             source->id = AK_INVALID_GAME_OBJECT;
@@ -434,7 +464,7 @@ SourcePtr createSource(PyObject* name, MatrixProviderPtr matrix, const Vector3& 
     return source;
 }
 
-void AK_CALLBACK ended(AkCallbackType type, AkCallbackInfo* info) {
+void AKSOUNDENGINE_CALL ended(AkCallbackType type, AkCallbackInfo* info) {
     if (type != AK_EndOfEvent) return;
     const auto* cookie = static_cast<const Voice*>(info->pCookie);
     const auto* event = static_cast<AkEventCallbackInfo*>(info);
@@ -534,6 +564,109 @@ void releaseSources() {
         }
     }
     state.sources.clear();
+    if (state.globalSource) {
+        state.globalSource->id = AK_INVALID_GAME_OBJECT;
+        state.globalSource.reset();
+    }
+}
+
+bool reinitialise() {
+    Manager& state = manager();
+    if (!state.ready) return false;
+    const double now = double(timestamp()) / stampsPerSecondD();
+    if (now < state.nextReinit) {
+        state.pendingReinit = true;
+        return true;
+    }
+    const double deadline = now + 1.5; // #1513 0x01248320
+    struct SourceSnapshot {
+        SourcePtr source;
+        AkGameObjectID id;
+        MatrixProviderPtr matrix;
+    };
+    std::map<Source*, SourceSnapshot> sources;
+    if (state.globalSource)
+        sources.emplace(state.globalSource.get(), SourceSnapshot{
+            state.globalSource, state.globalSource->id, state.globalSource->matrix});
+    for (const auto& entry : state.sources) {
+        if (SourcePtr source = entry.second.lock())
+            sources.emplace(source.get(), SourceSnapshot{source, source->id, source->matrix});
+    }
+    std::vector<VoicePtr> voices;
+    for (const auto& entry : state.voices) {
+        VoicePtr voice = entry.second;
+        if (!voice->playing) continue;
+        voices.push_back(voice);
+        if (voice->source)
+            sources.emplace(voice->source.get(), SourceSnapshot{
+                voice->source, voice->source->id, voice->source->matrix});
+    }
+    std::vector<BW::string> banks;
+    for (const auto& bank : state.banks) banks.push_back(bank.first);
+    const auto current = state.current;
+    const auto rtpcs = state.globalRTPCs;
+    const auto states = state.globalStates;
+    const auto pending = state.pendingEvents;
+    const auto persistent = state.persistentEvents;
+    DataSectionPtr configuration = state.configuration;
+    void* window = state.window;
+    MatrixProviderPtr shift = state.cameraShift;
+    const Matrix camera = state.camera;
+    const float volume = state.masterVolume;
+    const AkUniqueID auxiliaryBus = state.auxiliaryBus;
+    const float auxiliaryGain = state.auxiliaryGain;
+
+    // SDK termination joins its callback workers before freeing old cookies.
+    // Python wrappers and the matrix links above remain the same owners across
+    // recreation, as in native source-pool re-registration (0x01250d00).
+    finiStockAudio();
+    if (!initialiseStockAudio(configuration, window)) {
+        ERROR_MSG("StockAudio: device recreation failed; existing sounds are unavailable\n");
+        return false;
+    }
+    state.nextReinit = deadline;
+    state.cameraShift = shift;
+    state.camera = camera;
+    state.masterVolume = volume;
+    state.auxiliaryBus = auxiliaryBus;
+    state.auxiliaryGain = auxiliaryGain;
+    bool accepted = true;
+    for (const auto& bank : banks) accepted = loadBank(bank) && accepted;
+    state.current = current;
+    for (const auto& saved : sources) {
+        Source& source = *saved.second.source;
+        source.epoch = state.epoch;
+        source.matrix = saved.second.matrix;
+        source.id = source.global ? state.global : saved.second.id;
+        if (source.global) state.globalSource = saved.second.source;
+        if (!source.global) {
+            if (!result(AK::SoundEngine::RegisterGameObj(source.id, source.name.c_str()),
+                "RegisterGameObj", source.name.c_str())) {
+                source.id = AK_INVALID_GAME_OBJECT;
+                accepted = false;
+                continue;
+            }
+            state.sources[source.id] = saved.second.source;
+            AK::SoundEngine::SetPosition(source.id, transform(source.pose, source.offset));
+        }
+    }
+    AK::SoundEngine::SetPosition(state.listener, transform(camera));
+    AK::SoundEngine::SetPosition(state.global, transform(camera));
+    setStockAudioAuxiliarySend(auxiliaryBus, auxiliaryGain);
+    // 0x0124f240 restarts only leases that still had a playing ID. Explicitly
+    // stopped sounds and their suppressed completion callbacks stay stopped.
+    for (const auto& voice : voices) accepted = play(voice) && accepted;
+    state.globalRTPCs = rtpcs;
+    state.globalStates = states;
+    for (const auto& rtpc : rtpcs)
+        AK::SoundEngine::SetRTPCValue(rtpc.first.c_str(), rtpc.second);
+    for (const auto& value : states)
+        AK::SoundEngine::SetState(value.first.c_str(), value.second.c_str());
+    AK::SoundEngine::RenderAudio(true);
+    state.pendingEvents = pending;
+    state.persistentEvents = persistent;
+    state.pendingEvents.insert(state.pendingEvents.end(), persistent.begin(), persistent.end());
+    return accepted;
 }
 
 bool arity(PyObject* args, Py_ssize_t count, const char* name) {
@@ -608,8 +741,9 @@ PyObject* setRTPC(PyObject* self, PyObject* args, bool sound) {
         Script::setData(PyTuple_GET_ITEM(args, 0), name) ||
         Script::setData(PyTuple_GET_ITEM(args, 1), value)) return NULL;
     SourcePtr source = sourceOf(self, sound);
-    if (sourceValid(source))
+    if (sourceValid(source)) {
         result(AK::SoundEngine::SetRTPCValue(name.c_str(), value, source->id), "SetRTPCValue", name.c_str());
+    }
     Py_RETURN_NONE;
 }
 PyObject* setSwitch(PyObject* self, PyObject* args, bool sound) {
@@ -740,6 +874,45 @@ PyObject* py_WW_isInitialised(PyObject* args) {
     return PyBool_FromLong(stockAudioReady());
 }
 PY_MODULE_FUNCTION(WW_isInitialised, _WWISE)
+
+PyObject* py_WG_isMSR(PyObject* args) {
+    if (!StockAudioDetail::arity(args, 0, "WG_isMSR")) return NULL;
+    SYSTEM_INFO processor;
+    GetSystemInfo(&processor);
+    // 0x012476f0 uses the same real processor count as SDK initialization.
+    return PyBool_FromLong(processor.dwNumberOfProcessors <= 2);
+}
+PY_MODULE_FUNCTION(WG_isMSR, _WWISE)
+PyObject* py_WW_setLowQuality(PyObject* args) {
+    using namespace StockAudioDetail;
+    bool low;
+    if (!arity(args, 1, "WW_setLowQuality") || Script::setData(PyTuple_GET_ITEM(args, 0), low))
+        return NULL;
+    if (stockAudioReady() && !manager().renderConfigured) {
+        result(AK::SoundEngine::SetMaxNumVoicesLimit(low ? 50 : 110), "SetMaxNumVoicesLimit");
+        result(AK::SoundEngine::SetVolumeThreshold(low ? -30.f : -50.f), "SetVolumeThreshold");
+    }
+    Py_RETURN_NONE;
+}
+PY_MODULE_FUNCTION(WW_setLowQuality, _WWISE)
+PyObject* py_WW_setSoundSystem(PyObject* args) {
+    using namespace StockAudioDetail;
+    int system;
+    if (!arity(args, 1, "WW_setSoundSystem") || Script::setData(PyTuple_GET_ITEM(args, 0), system))
+        return NULL;
+    if (stockAudioReady()) {
+        result(AK::SoundEngine::SetPanningRule(system > 0 ? AkPanningRule_Headphones :
+            AkPanningRule_Speakers, AkOutput_Main, 0), "SetPanningRule");
+    }
+    Py_RETURN_NONE;
+}
+PY_MODULE_FUNCTION(WW_setSoundSystem, _WWISE)
+PyObject* py_WW_reinit(PyObject* args) {
+    if (!StockAudioDetail::arity(args, 0, "WW_reinit")) return NULL;
+    StockAudioDetail::reinitialise();
+    Py_RETURN_NONE;
+}
+PY_MODULE_FUNCTION(WW_reinit, _WWISE)
 
 PyObject* py_WG_loadSoundBank(PyObject* args) {
     if (!StockAudioDetail::arity(args, 1, "WG_loadSoundBank")) return NULL;
@@ -874,8 +1047,11 @@ PyObject* py_WW_setRTCPGlobal(PyObject* args) {
     if (!PyString_Check(name) || (!PyFloat_Check(value) && !PyInt_Check(value))) Py_RETURN_FALSE;
     const float number = static_cast<float>(PyFloat_AsDouble(value));
     if (PyErr_Occurred()) return NULL;
-    if (stockAudioReady()) result(AK::SoundEngine::SetRTPCValue(PyString_AsString(name), number),
-        "SetRTPCValue", PyString_AsString(name));
+    if (stockAudioReady()) {
+        manager().globalRTPCs[PyString_AsString(name)] = number;
+        result(AK::SoundEngine::SetRTPCValue(PyString_AsString(name), number),
+            "SetRTPCValue", PyString_AsString(name));
+    }
     Py_RETURN_TRUE;
 }
 PY_MODULE_FUNCTION(WW_setRTCPGlobal, _WWISE)
@@ -901,8 +1077,11 @@ PyObject* py_WW_setState(PyObject* args) {
     PyObject* group = PyTuple_GET_ITEM(args, 0);
     PyObject* value = PyTuple_GET_ITEM(args, 1);
     if (!PyString_Check(group) || !PyString_Check(value)) Py_RETURN_FALSE;
-    if (stockAudioReady()) result(AK::SoundEngine::SetState(PyString_AsString(group), PyString_AsString(value)),
-        "SetState", PyString_AsString(group));
+    if (stockAudioReady()) {
+        manager().globalStates[PyString_AsString(group)] = PyString_AsString(value);
+        result(AK::SoundEngine::SetState(PyString_AsString(group), PyString_AsString(value)),
+            "SetState", PyString_AsString(group));
+    }
     Py_RETURN_TRUE;
 }
 PY_MODULE_FUNCTION(WW_setState, _WWISE)
@@ -932,6 +1111,7 @@ PyObject* py_setLanguage(PyObject* args) {
     if (!arity(args, 1, "setLanguage")) return NULL;
     BW::string language;
     if (Script::setData(PyTuple_GET_ITEM(args, 0), language)) return NULL;
+    manager().language = language; // original manager keeps this across device recreation
     if (stockAudioReady()) {
         std::vector<BW::string> names;
         if (!bankNames("voice_soundbanks", names)) {
