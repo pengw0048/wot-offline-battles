@@ -1,5 +1,13 @@
-#include <GFx.h>
+#ifdef _MSC_VER
+#pragma warning(push)
+// The SDK's Render_HAL header implicitly narrows a double blend factor.
+#pragma warning(disable: 4244)
+#endif
+#include <GFx/GFx_Loader.h>
 #include <GFx/AMP/Amp_Server.h>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 #include <cstdio>
 #include <cstring>
 #include <windows.h>
