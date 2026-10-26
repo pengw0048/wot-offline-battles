@@ -52,6 +52,7 @@ try {
 
     # A short-lived authenticated endpoint supplies the owner's licensed SDK.
     # Never put the URL/token in command arguments, transcripts, or artifacts.
+    $WwiseSdk = $env:WOT_WWISE_SDK_ROOT
     if ($env:WOT_WWISE_SDK_URL -and $env:WOT_WWISE_SDK_TOKEN) {
         $WwiseArchive = Join-Path $WorkRoot "wwise-sdk.tar.xz"
         $WwiseInput = Join-Path $WorkRoot "wwise-sdk"
@@ -71,6 +72,12 @@ try {
         }
         Invoke-Checked "tar" @("-xf", $WwiseArchive, "-C", $WwiseInput) "wwise-sdk-extract.log"
         $WwiseSdk = Join-Path $WwiseInput "SDK"
+    }
+    if (-not $WwiseSdk -or -not (Test-Path -LiteralPath
+            (Join-Path $WwiseSdk "include\AK\AkWwiseSDKVersion.h"))) {
+        throw "Supply the licensed Wwise 2017.1.9 SDK through WOT_WWISE_SDK_ROOT or the private build input."
+    }
+    if ($WwiseSdk) {
         $WwiseProbe = Join-Path $WorkRoot "wwise-probe"
         Invoke-Checked "cmake" @("-S", (Join-Path $RepositoryRoot "native\standalone_client"),
             "-B", $WwiseProbe, "-G", "Visual Studio 17 2022", "-A", "Win32", "-T", "v142",
@@ -160,6 +167,8 @@ try {
         $EngineRoot) "stock-vehicle-filter-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_vehicle_reflections.py"),
         $EngineRoot) "vehicle-reflections-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_audio.py"),
+        $EngineRoot) "stock-audio-patch.log"
 
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.
@@ -234,6 +243,7 @@ try {
         "-DWOT_SCALEFORM_SDK_ROOT=$ScaleformRoot",
         "-DWOT_SCALEFORM_D3DX_ROOT=$SdkRoot",
         "-DWOT_SCALEFORM_FMOD_ADDON=OFF",
+        "-DWOT_WWISE_SDK_ROOT=$WwiseSdk",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5") "configure.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "bwclient", "--parallel", "4", "--",

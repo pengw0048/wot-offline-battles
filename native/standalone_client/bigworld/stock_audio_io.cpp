@@ -1,0 +1,161 @@
+#include "pch.hpp"
+#include "stock_audio_io.hpp"
+
+#include "cstdmf/string_utils.hpp"
+#include "resmgr/bwresource.hpp"
+#include "resmgr/file_streamer.hpp"
+#include "resmgr/multi_file_system.hpp"
+#include "wot/wwise_bank.hpp"
+#include <AK/Tools/Common/AkPlatformFuncs.h>
+
+#include <algorithm>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+BW_BEGIN_NAMESPACE
+namespace {
+struct ResourceHandle {
+    FileStreamerPtr stream;
+    std::mutex mutex;
+    std::vector<std::uint8_t> header;
+};
+std::uint32_t u32(const std::uint8_t* value) {
+    return std::uint32_t(value[0]) | (std::uint32_t(value[1]) << 8) |
+        (std::uint32_t(value[2]) << 16) | (std::uint32_t(value[3]) << 24);
+}
+}
+
+StockAudioResourceIO::StockAudioResourceIO() : m_deviceID(AK_INVALID_DEVICE_ID) {}
+StockAudioResourceIO::~StockAudioResourceIO() { Term(); }
+
+AKRESULT StockAudioResourceIO::Init(const AkDeviceSettings& authored) {
+    if (m_deviceID != AK_INVALID_DEVICE_ID) return AK_Fail;
+    fileSystem_ = BWResource::instance().fileSystem();
+    if (!fileSystem_) return AK_Fail;
+    AkDeviceSettings settings = authored;
+    settings.uSchedulerTypeFlags = AK_SCHEDULER_BLOCKING;
+    AK::StreamMgr::SetFileLocationResolver(this);
+    m_deviceID = AK::StreamMgr::CreateDevice(settings, this);
+    if (m_deviceID == AK_INVALID_DEVICE_ID) {
+        AK::StreamMgr::SetFileLocationResolver(NULL);
+        fileSystem_ = NULL;
+        return AK_Fail;
+    }
+    return AK_Success;
+}
+
+void StockAudioResourceIO::Term() {
+    if (m_deviceID != AK_INVALID_DEVICE_ID) {
+        AK::StreamMgr::DestroyDevice(m_deviceID);
+        m_deviceID = AK_INVALID_DEVICE_ID;
+    }
+    if (AK::StreamMgr::GetFileLocationResolver() == this)
+        AK::StreamMgr::SetFileLocationResolver(NULL);
+    fileSystem_ = NULL;
+}
+
+AKRESULT StockAudioResourceIO::setResourcePath(const BW::string& path) {
+    BW::wstring wide;
+    if (!bw_utf8tow(path, wide)) return AK_InvalidParameter;
+    const AKRESULT result = SetBasePath(wide.c_str());
+    // The SDK's pathname builder stores the path before checking the host OS.
+    // A mounted resource directory has no host-directory counterpart.
+    if (result == AK_PathNotFound && fileSystem_ &&
+        fileSystem_->getFileType(path) == IFileSystem::FT_DIRECTORY)
+        return AK_Success;
+    return result;
+}
+
+AKRESULT StockAudioResourceIO::openResource(const AkOSChar* path,
+    AkOpenMode mode, AkFileDesc& output) {
+    if (mode != AK_OpenModeRead || !fileSystem_) return AK_NotImplemented;
+    BW::string resource;
+    if (!bw_wtoutf8(path, resource)) return AK_InvalidParameter;
+    std::replace(resource.begin(), resource.end(), '\\', '/');
+    IFileSystem::FileInfo info;
+    const auto type = fileSystem_->getFileType(resource, &info);
+    if (type != IFileSystem::FT_FILE && type != IFileSystem::FT_ARCHIVE)
+        return AK_FileNotFound;
+    std::unique_ptr<ResourceHandle> handle(new ResourceHandle);
+    handle->stream = fileSystem_->streamFile(resource);
+    if (!handle->stream) return AK_Fail;
+    if (resource.size() >= 4 && resource.substr(resource.size() - 4) == ".bnk") {
+        std::uint8_t prefix[8];
+        if (handle->stream->read(sizeof(prefix), prefix) != sizeof(prefix) ||
+            u32(prefix) != 0x44484b42u || info.size < 8 ||
+            u32(prefix + 4) > info.size - 8) return AK_InvalidFile;
+        std::vector<std::uint8_t> encoded(static_cast<std::size_t>(u32(prefix + 4)) + 8);
+        std::copy(prefix, prefix + 8, encoded.begin());
+        if (handle->stream->read(encoded.size() - 8, encoded.data() + 8) != encoded.size() - 8)
+            return AK_InvalidFile;
+        try { handle->header = wot::decode_wot_1513_wwise_bank_header(encoded); }
+        catch (const std::exception& error) {
+            ERROR_MSG("StockAudio: bank header %s: %s\n", resource.c_str(), error.what());
+            return AK_InvalidFile;
+        }
+    }
+    output.hFile = reinterpret_cast<AkFileHandle>(handle.release());
+    output.iFileSize = static_cast<AkInt64>(info.size);
+    output.uSector = 0;
+    output.deviceID = m_deviceID;
+    output.pCustomParam = NULL;
+    output.uCustomParamSize = 0;
+    return AK_Success;
+}
+
+AKRESULT StockAudioResourceIO::Open(const AkOSChar* name, AkOpenMode mode,
+    AkFileSystemFlags* flags, bool& synchronous, AkFileDesc& output) {
+    AkOSChar path[AK_MAX_PATH];
+    const auto result = GetFullFilePath(name, flags, mode, path);
+    if (result != AK_Success) return result;
+    synchronous = true;
+    return openResource(path, mode, output);
+}
+AKRESULT StockAudioResourceIO::Open(AkFileID id, AkOpenMode mode,
+    AkFileSystemFlags* flags, bool& synchronous, AkFileDesc& output) {
+    AkOSChar path[AK_MAX_PATH];
+    const auto result = GetFullFilePath(id, flags, mode, path);
+    if (result != AK_Success) return result;
+    synchronous = true;
+    return openResource(path, mode, output);
+}
+
+AKRESULT StockAudioResourceIO::Read(AkFileDesc& file, const AkIoHeuristics&,
+    void* output, AkIOTransferInfo& transfer) {
+    auto* handle = reinterpret_cast<ResourceHandle*>(file.hFile);
+    if (!handle || !output || transfer.uRequestedSize > transfer.uBufferSize ||
+        transfer.uFilePosition > std::numeric_limits<std::size_t>::max()) return AK_Fail;
+    std::lock_guard<std::mutex> lock(handle->mutex);
+    const auto offset = static_cast<std::size_t>(transfer.uFilePosition);
+    if (!handle->stream->setOffset(offset) ||
+        handle->stream->read(transfer.uRequestedSize, output) != transfer.uRequestedSize)
+        return AK_Fail;
+    if (offset < handle->header.size()) {
+        const auto count = std::min<std::size_t>(transfer.uRequestedSize,
+            handle->header.size() - offset);
+        std::memcpy(output, handle->header.data() + offset, count);
+    }
+    return AK_Success;
+}
+AKRESULT StockAudioResourceIO::Write(AkFileDesc&, const AkIoHeuristics&,
+    void*, AkIOTransferInfo&) { return AK_NotImplemented; }
+AKRESULT StockAudioResourceIO::Close(AkFileDesc& file) {
+    delete reinterpret_cast<ResourceHandle*>(file.hFile);
+    file.hFile = NULL;
+    return AK_Success;
+}
+AkUInt32 StockAudioResourceIO::GetBlockSize(AkFileDesc&) { return 1; }
+void StockAudioResourceIO::GetDeviceDesc(AkDeviceDesc& output) {
+    output.deviceID = m_deviceID;
+    output.bCanRead = true;
+    output.bCanWrite = false;
+    AKPLATFORM::SafeStrCpy(output.szDeviceName, AKTEXT("BigWorld mounted resources"),
+        AK_MONITOR_DEVICENAME_MAXLENGTH);
+    output.uStringSize = static_cast<AkUInt32>(wcslen(output.szDeviceName) + 1);
+}
+AkUInt32 StockAudioResourceIO::GetDeviceData() { return 0; }
+
+BW_END_NAMESPACE

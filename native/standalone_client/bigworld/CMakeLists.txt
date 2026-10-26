@@ -14,6 +14,7 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/../src/gun_ballistics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/stock_gun_history.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/point_velocity.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/wwise_bank.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_dynamics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_drive.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_physics.cpp"
@@ -29,12 +30,20 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_scene_identity.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_scene_prediction.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_avatar_filter_helper.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_audio.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_audio_io.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_filter.cpp")
 target_sources(bwclient PRIVATE "${CMAKE_CURRENT_LIST_DIR}/standalone_app.cpp"
     ${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES})
 target_include_directories(bwclient PRIVATE "${BW_SOURCE_DIR}/client"
     "${CMAKE_CURRENT_LIST_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/../include")
+include("${CMAKE_CURRENT_LIST_DIR}/wwise_sdk.cmake")
+target_link_libraries(bwclient WotWwiseSdk)
+target_sources(bwclient PRIVATE
+    "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFilePackage.cpp"
+    "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFilePackageLUT.cpp"
+    "${WOT_WWISE_SDK_ROOT}/samples/SoundEngine/Common/AkFileLocationBase.cpp")
 # These sources are appended after the legacy client's PCH source enumeration.
 # Keep its C++14/PCH contract intact; the recovered numerical core uses C++17.
 if(MSVC)
