@@ -25,6 +25,7 @@ add_library(wot_battle_core STATIC
     bigworld/stock_tree_materials.cpp
     bigworld/stock_tree_geometry.cpp
     bigworld/stock_tree_lod.cpp
+    bigworld/stock_tree_wind.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -52,6 +53,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    # The wind oracle supplies original resource data and a timed input stream.
+    add_executable(test_stock_tree_wind tests/test_stock_tree_wind.cpp)
+    target_include_directories(test_stock_tree_wind PRIVATE bigworld)
+    target_link_libraries(test_stock_tree_wind PRIVATE wot_battle_core)
     add_executable(test_stock_battleground_elements tests/probe_stock_battleground_elements.cpp)
     target_compile_features(test_stock_battleground_elements PRIVATE cxx_std_14)
     if(MSVC)
