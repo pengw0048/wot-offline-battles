@@ -26,7 +26,10 @@ add_library(wot_battle_core STATIC
     bigworld/stock_tree_geometry.cpp
     bigworld/stock_tree_lod.cpp
     bigworld/stock_tree_wind.cpp
+    bigworld/stock_tps_resources.cpp
 )
+set_source_files_properties(bigworld/stock_tps_resources.cpp PROPERTIES
+    COMPILE_DEFINITIONS WOT_STOCK_TPS_RESOURCES_PORTABLE)
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
 set_target_properties(wot_battle_core PROPERTIES CXX_EXTENSIONS OFF)
@@ -53,6 +56,18 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    foreach(kind quality resources emitter particle)
+        add_executable(stock_tps_${kind}_probe tests/stock_tps_${kind}_probe.cpp)
+        target_link_libraries(stock_tps_${kind}_probe PRIVATE wot_battle_core)
+        if(MSVC)
+            target_compile_options(stock_tps_${kind}_probe PRIVATE /W4 /WX /fp:strict /UNDEBUG)
+        else()
+            target_compile_options(stock_tps_${kind}_probe PRIVATE
+                -Wall -Wextra -Werror -pedantic -fno-fast-math -ffp-contract=off -UNDEBUG)
+        endif()
+    endforeach()
+    add_test(NAME stock_tps_quality COMMAND stock_tps_quality_probe)
+    add_test(NAME stock_tps_emitter COMMAND stock_tps_emitter_probe)
     add_executable(test_stock_vehicle_traces tests/test_stock_vehicle_traces.cpp)
     target_link_libraries(test_stock_vehicle_traces PRIVATE wot_battle_core)
     add_test(NAME stock_vehicle_traces COMMAND test_stock_vehicle_traces)

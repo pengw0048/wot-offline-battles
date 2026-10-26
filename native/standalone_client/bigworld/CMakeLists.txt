@@ -24,6 +24,8 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_suspension.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_authority.cpp")
 set(WOT_STOCK_ADAPTER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/stock_tps_quality.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_tps_resources.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_startup_services.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_preferences_path.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_numeric_format.cpp"
