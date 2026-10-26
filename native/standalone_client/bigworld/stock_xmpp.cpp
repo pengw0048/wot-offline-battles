@@ -574,7 +574,7 @@ void deliver(PyClient* client,const Event& event){PyObject* handler=client->hand
 bool initialiseStockXmpp(){using namespace StockXmppDetail;if(!prepareTypes())return false;PyObject* module=PyImport_AddModule("BigWorld");if(!module)return false;
     if(PyObject_SetAttrString(module,"XmppClient",reinterpret_cast<PyObject*>(&clientType))!=0||PyObject_SetAttrString(module,"PyGlooxTag",reinterpret_cast<PyObject*>(&tagType))!=0)return false;return true;}
 void tickStockXmpp(){using namespace StockXmppDetail;std::vector<PyClient*> snapshot(clients.begin(),clients.end());for(auto* client:snapshot)Py_INCREF(client);
-    for(auto* client:snapshot){auto run=client->session->run;std::deque<Event> events;if(run){std::lock_guard<std::mutex> lock(run->mutex);events.swap(run->events);}std::deque<Event> local;local.swap(client->session->localEvents);
+    for(auto* client:snapshot){auto run=client->session->run;std::deque<StockXmppDetail::Event> events;if(run){std::lock_guard<std::mutex> lock(run->mutex);events.swap(run->events);}std::deque<StockXmppDetail::Event> local;local.swap(client->session->localEvents);
         for(const auto& event:local)deliver(client,event);
         for(const auto& event:events){if(client->session->run!=run)break;deliver(client,event);}Py_DECREF(client);}reap(false);}
 void finiStockXmpp(){using namespace StockXmppDetail;std::vector<PyClient*> snapshot(clients.begin(),clients.end());for(auto* client:snapshot)Py_INCREF(client);for(auto* client:snapshot){clientClear(client);Py_DECREF(client);}reap(true);}
