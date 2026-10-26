@@ -116,6 +116,8 @@ def main():
     args = parser.parse_args()
     output = args.output.resolve()
     fetch_resources(output)
+    from patch_stock_deferred_buffers import patch_resources
+    patch_resources(output)
     if args.overlay_resources is not None:
         write_overlay_resources(output / "resources.xml",
                                 args.overlay_resources.resolve())

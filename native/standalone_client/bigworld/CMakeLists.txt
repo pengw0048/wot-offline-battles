@@ -36,6 +36,8 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_deferred_lighting.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_deferred_buffers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_traces.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_dynamic_resolution.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_decal_resources.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_screenshot_callback.cpp"

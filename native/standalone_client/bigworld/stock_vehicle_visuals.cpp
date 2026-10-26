@@ -301,6 +301,12 @@ PY_END_METHODS()
 PY_BEGIN_ATTRIBUTES( StockLodLink )
 PY_END_ATTRIBUTES()
 
+bool sampleStockLodLink( PyObject * link, uint32 & priority, float & distance )
+{
+    return link && StockLodLink::Check( link ) &&
+        static_cast<StockLodLink *>( link )->sample( priority, distance );
+}
+
 class LodCalculator : public StockComponentWrapper
 {
     Py_Header( LodCalculator, StockComponentWrapper )

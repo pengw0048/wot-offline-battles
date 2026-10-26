@@ -16,6 +16,7 @@ void tickStockVehicleTrackScrolls( double gameTime );
 // mismatched link types without invoking arbitrary Python callables.
 bool sampleStockBoolLink( PyObject * link, bool & value );
 bool sampleStockFloatLink( PyObject * link, float & value );
+bool sampleStockLodLink( PyObject * link, uint32 & priority, float & distance );
 bool isStockFloatLink( PyObject * link );
 bool sampleStockTranslationLink( PyObject * link, Vector3 & value );
 BW_END_NAMESPACE

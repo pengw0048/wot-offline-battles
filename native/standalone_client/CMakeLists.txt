@@ -53,6 +53,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_stock_vehicle_traces tests/test_stock_vehicle_traces.cpp)
+    target_link_libraries(test_stock_vehicle_traces PRIVATE wot_battle_core)
+    add_test(NAME stock_vehicle_traces COMMAND test_stock_vehicle_traces)
     # The wind oracle supplies original resource data and a timed input stream.
     add_executable(test_stock_tree_wind tests/test_stock_tree_wind.cpp)
     target_include_directories(test_stock_tree_wind PRIVATE bigworld)
