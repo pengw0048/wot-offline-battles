@@ -87,6 +87,7 @@ struct StockEffectUniform {
     std::uint32_t flags = 0;
     std::string name;
     std::string semantic;
+    bool semantic_present = false;
     std::uint32_t type_index = 0;
     std::uint32_t byte_offset = 0;
     std::uint32_t elements = 0;
@@ -118,9 +119,11 @@ struct StockEffectAnnotation {
     std::vector<unsigned char> value;
 };
 
-struct StockEffectSampler {
-    std::array<std::uint32_t, 3> descriptor{};
-    std::vector<unsigned char> data;
+struct StockEffectSelectionDomain {
+    std::uint32_t source_offset = 0;
+    std::uint32_t value_size = 0;
+    std::uint32_t slot = 0;
+    std::vector<unsigned char> values;
 };
 
 struct StockEffectPass {
@@ -148,10 +151,10 @@ struct StockEffectBinary {
     std::vector<unsigned char> strings;
     std::vector<StockEffectType> types;
     std::vector<StockEffectUniformBuffer> uniform_buffers;
-    std::vector<StockEffectSampler> samplers;
+    std::vector<StockEffectSelectionDomain> selection_domains;
     std::vector<StockEffectResource> resource_views;
     std::vector<StockEffectResource> unordered_views;
-    std::array<std::vector<std::uint32_t>, 6> stage_resources;
+    std::array<std::vector<std::uint32_t>, 6> resource_indirections;
     std::vector<StockEffectTechnique> techniques;
     std::vector<std::array<std::uint32_t, 5>> sampler_states;
     std::vector<std::array<std::uint32_t, 6>> render_states;

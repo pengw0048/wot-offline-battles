@@ -160,8 +160,8 @@ void definition_checks() {
           definition.uniform_buffers[0].uniforms[0].semantic == "VALUE" &&
           definition.uniform_buffers[0].defaults == Bytes({0,0,0x80,0x3f}),
           "Uniform record-relative members and defaults");
-    check(definition.samplers[0].descriptor[2] == 9 &&
-          definition.samplers[0].data == Bytes({1,2,3}), "Sampler-local payload");
+    check(definition.selection_domains[0].slot == 9 &&
+          definition.selection_domains[0].values == Bytes({1,2,3}), "Selection-domain local payload");
     check(definition.techniques.size() == 2 && definition.techniques[1].name == "second" &&
           definition.techniques[1].passes[0].name == "pass" &&
           definition.techniques[1].passes[0].descriptor[0] == 7 &&

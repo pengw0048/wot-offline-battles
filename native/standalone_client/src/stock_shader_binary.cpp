@@ -242,6 +242,7 @@ bool decode_stock_dx9_effect(const void* bytes, std::size_t size,
                 uniform.flags = source.word(member);
                 uniform.name = string(source.word(member+4));
                 uniform.semantic = string(source.word(member+8));
+                uniform.semantic_present = source.word(member+8) != 0xffffffff;
                 uniform.type_index = source.word(member+12);
                 uniform.byte_offset = source.word(member+16);
                 uniform.elements = source.word(member+20);
@@ -257,7 +258,7 @@ bool decode_stock_dx9_effect(const void* bytes, std::size_t size,
         for (std::uint32_t i = 0; i < table.second; ++i) {
             const auto at = table.first+std::uint64_t(i)*16;
             const auto payload = at+source.word(at+12);
-            decoded.samplers.push_back({{source.word(at), source.word(at+4), source.word(at+8)},
+            decoded.selection_domains.push_back({source.word(at), source.word(at+4), source.word(at+8),
                 source.bytes(payload+4, source.word(payload))});
         }
         const auto read_resources = [&](std::uint32_t header,
@@ -283,7 +284,7 @@ bool decode_stock_dx9_effect(const void* bytes, std::size_t size,
                 const auto count = source.word(at);
                 source.require(at+4, std::uint64_t(count)*4);
                 for (std::uint32_t i = 0; i < count; ++i)
-                    decoded.stage_resources[stage].push_back(source.word(at+4+std::uint64_t(i)*4));
+                    decoded.resource_indirections[stage].push_back(source.word(at+4+std::uint64_t(i)*4));
             }
         }
         table = source.table(0x30, 16);
