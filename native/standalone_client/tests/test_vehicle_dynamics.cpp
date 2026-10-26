@@ -169,12 +169,48 @@ bool orthonormalization_cadence() {
            b.transform.rows[2][2] == 1 && b.history_next == 1;
 }
 
+bool pose_install_and_velocity_samples() {
+    auto b = body();
+    b.loads.force = {3, 4, 5};
+    b.last_step = 2;
+    b.inverse_body_inertia.rows[0][0] = 2;
+    b.inverse_body_inertia.rows[1][1] = 3;
+    b.inverse_body_inertia.rows[2][2] = 4;
+    wot::set_vehicle_rigid_body_velocity(b, {1, 2, 3}, {4, 5, 6});
+    auto pose = wot::vehicle_identity_matrix();
+    pose.rows[0][0] = 0;
+    pose.rows[0][2] = -1;
+    pose.rows[2][0] = 1;
+    pose.rows[2][2] = 0;
+    pose.rows[3][0] = 7;
+    pose.rows[3][1] = 8;
+    pose.rows[3][2] = 9;
+    wot::install_vehicle_rigid_body_transform(b, pose);
+    if (b.last_step != 0 || b.orthonormalization_countdown != 200 ||
+        b.solver_id != -1 || !close(b.loads.force, {3, 4, 5}) ||
+        !close(b.linear_velocity, {1, 2, 3}) ||
+        !close(b.angular_velocity, {4, 5, 6}) ||
+        !close(b.inverse_transform.rows[3][0], 9) ||
+        !close(b.inverse_transform.rows[3][1], -8) ||
+        !close(b.inverse_transform.rows[3][2], -7) ||
+        !close(b.inverse_world_inertia.rows[0][0], 4) ||
+        !close(b.inverse_world_inertia.rows[1][1], 3) ||
+        !close(b.inverse_world_inertia.rows[2][2], 2)) return false;
+    for (std::size_t i = 0; i != 3; ++i) {
+        if (!close(b.interpolation.transforms[i].rows[3][2], 9) ||
+            !close(b.interpolation.linear_velocities[i], {1, 2, 3}) ||
+            !close(b.interpolation.angular_velocities[i], {4, 5, 6})) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
     if (!forces_and_translation() || !torque_and_transient_motion() ||
         !angular_pose_and_inertia() || !impulses() ||
-        !invalid_speed_and_history() || !orthonormalization_cadence()) {
+        !invalid_speed_and_history() || !orthonormalization_cadence() ||
+        !pose_install_and_velocity_samples()) {
         std::cerr << "vehicle dynamics regressions failed\n";
         return 1;
     }

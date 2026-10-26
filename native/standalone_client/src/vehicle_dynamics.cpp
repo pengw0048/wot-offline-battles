@@ -117,6 +117,14 @@ void record_snapshot(VehicleRigidBody& body) {
     body.history_next = (body.history_next + 1) % body.history.size();
 }
 
+void refresh_inverse_state(VehicleRigidBody& body) {
+    body.inverse_transform = inverse_orthonormal(body.transform);
+    multiply_rotation_rows(body.inverse_world_inertia, body.inverse_transform,
+                            body.inverse_body_inertia);
+    multiply_rotation_rows(body.inverse_world_inertia, body.inverse_world_inertia,
+                            body.transform);
+}
+
 } // namespace
 
 VehicleMatrix vehicle_identity_matrix() {
@@ -127,6 +135,22 @@ VehicleMatrix vehicle_identity_matrix() {
 
 void clear_vehicle_loads(VehicleRigidBody& body) {
     body.loads = {};
+}
+
+void install_vehicle_rigid_body_transform(VehicleRigidBody& body,
+                                          const VehicleMatrix& transform) {
+    body.transform = transform;
+    body.last_step = 0;
+    refresh_inverse_state(body);
+    body.interpolation.transforms.fill(transform);
+}
+
+void set_vehicle_rigid_body_velocity(VehicleRigidBody& body, Vector3 linear,
+                                     Vector3 angular) {
+    body.linear_velocity = linear;
+    body.angular_velocity = angular;
+    body.interpolation.linear_velocities.fill(linear);
+    body.interpolation.angular_velocities.fill(angular);
 }
 
 void apply_vehicle_impulse_to_com(VehicleRigidBody& body, Vector3 impulse) {
@@ -232,11 +256,7 @@ bool step_vehicle_rigid_body(VehicleRigidBody& body, float elapsed) {
     body.angular_motion_acceleration = {};
 
     // #1513 0x00f6ffc7..0x00f6fff2: world inverse inertia = R^-1 I^-1 R.
-    body.inverse_transform = inverse_orthonormal(body.transform);
-    multiply_rotation_rows(body.inverse_world_inertia, body.inverse_transform,
-                            body.inverse_body_inertia);
-    multiply_rotation_rows(body.inverse_world_inertia, body.inverse_world_inertia,
-                            body.transform);
+    refresh_inverse_state(body);
     return true;
 }
 

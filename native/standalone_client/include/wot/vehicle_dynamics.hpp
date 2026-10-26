@@ -28,6 +28,14 @@ struct VehicleMotionSnapshot {
     Vector3 angular_velocity{};
 };
 
+// Extended rigid-body samples at native +0x1e0..0x2e8. These are distinct
+// from the optional recorder used by the base-body integration routine.
+struct VehicleBodyInterpolation {
+    std::array<VehicleMatrix, 3> transforms{};
+    std::array<Vector3, 3> angular_velocities{};
+    std::array<Vector3, 3> linear_velocities{};
+};
+
 struct VehicleRigidBody {
     // Descriptor/configuration owners must supply the actual mass, inertia,
     // transform and velocities. This kernel supplies no vehicle tuning.
@@ -47,6 +55,12 @@ struct VehicleRigidBody {
     Vector3 motion_angular_velocity{};
     float last_step = 0;
     std::uint32_t orthonormalization_countdown = 0;
+
+    // #1513 body +0x1c4: the current solver-context body index. The solver
+    // assigns it while assembling rows and resets it to -1 after each solve.
+    std::int32_t solver_id = -1;
+
+    VehicleBodyInterpolation interpolation;
 
     bool record_history = false;
     std::array<VehicleMotionSnapshot, 3> history{};
@@ -68,5 +82,16 @@ void apply_vehicle_impulse(VehicleRigidBody& body, Vector3 point,
 // last-bit behavior is not promised by this portable implementation.
 bool step_vehicle_rigid_body(VehicleRigidBody& body, float elapsed);
 void clear_vehicle_loads(VehicleRigidBody& body);
+
+// #1513 0x00f80870: install the body pose, reset elapsed time, rebuild the
+// inverse pose/inertia and reset the three pose samples. Velocities, loads,
+// their interpolation samples and the normalization countdown are retained.
+void install_vehicle_rigid_body_transform(VehicleRigidBody& body,
+                                          const VehicleMatrix& transform);
+
+// The per-body writes of #1513 0x00f85ba0 / 0x00f82f80. The owning vehicle
+// separately computes each wheel's point velocity before calling this.
+void set_vehicle_rigid_body_velocity(VehicleRigidBody& body, Vector3 linear,
+                                     Vector3 angular);
 
 } // namespace wot

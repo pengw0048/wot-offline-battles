@@ -91,6 +91,10 @@ try {
         Set-Content -LiteralPath $EngineConfig -Encoding utf8
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_shader_compiler.py"),
         $EngineRoot) "shader-compiler-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_resource_packages.py"),
+        $EngineRoot) "resource-packages-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_client_session.py"),
+        $EngineRoot) "client-session-patch.log"
 
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.

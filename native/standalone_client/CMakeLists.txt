@@ -11,6 +11,9 @@ add_library(wot_battle_core STATIC
     src/vehicle_drive.cpp
     src/vehicle_control.cpp
     src/vehicle_collision.cpp
+    src/gun_ballistics.cpp
+    src/stock_gun_history.cpp
+    src/vehicle_physics.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -39,6 +42,12 @@ if(BUILD_TESTING)
     add_executable(test_ballistics tests/test_ballistics.cpp)
     target_link_libraries(test_ballistics PRIVATE wot_battle_core)
     add_test(NAME ballistics COMMAND test_ballistics)
+    add_executable(test_gun_ballistics tests/test_gun_ballistics.cpp)
+    target_link_libraries(test_gun_ballistics PRIVATE wot_battle_core)
+    add_test(NAME gun_ballistics COMMAND test_gun_ballistics)
+    add_executable(test_stock_gun_history tests/test_stock_gun_history.cpp)
+    target_link_libraries(test_stock_gun_history PRIVATE wot_battle_core)
+    add_test(NAME stock_gun_history COMMAND test_stock_gun_history)
     add_executable(test_combat_rules tests/test_combat_rules.cpp)
     target_link_libraries(test_combat_rules PRIVATE wot_battle_core)
     add_test(NAME combat_rules COMMAND test_combat_rules)

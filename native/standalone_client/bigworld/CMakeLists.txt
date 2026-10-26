@@ -10,15 +10,28 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/../src/projectile_motion.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_control.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/combat_rules.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_collision.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_collision.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/gun_ballistics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/stock_gun_history.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/point_velocity.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_dynamics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_drive.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_physics.cpp")
+set(WOT_STOCK_ADAPTER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/client_session.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/gun_ballistics_binding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/vehicle_appearance.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/vehicle_physics_binding.cpp")
+list(APPEND WOT_STOCK_ADAPTER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/vehicle_physics_configuration.cpp")
 target_sources(bwclient PRIVATE "${CMAKE_CURRENT_LIST_DIR}/standalone_app.cpp"
-    ${WOT_NUMERICAL_SOURCES})
+    ${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES})
 target_include_directories(bwclient PRIVATE "${BW_SOURCE_DIR}/client"
     "${CMAKE_CURRENT_LIST_DIR}/../include")
 # These sources are appended after the legacy client's PCH source enumeration.
 # Keep its C++14/PCH contract intact; the recovered numerical core uses C++17.
 if(MSVC)
-    set_source_files_properties(${WOT_NUMERICAL_SOURCES}
+    set_source_files_properties(${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
     # These adapters include the public engine's C++14 STL declarations.
     # Retain that observed surface in their otherwise C++17 translation units.
@@ -26,6 +39,7 @@ if(MSVC)
         "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
+        ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_DEFINITIONS
         "_HAS_AUTO_PTR_ETC=1;_HAS_TR1_NAMESPACE=1;_ENFORCE_MATCHING_ALLOCATORS=0")
     # The bundled Python 2.7 declarations still use register parameters.
@@ -34,8 +48,9 @@ if(MSVC)
         "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
+        ${WOT_STOCK_ADAPTER_SOURCES}
         APPEND PROPERTY COMPILE_OPTIONS "/wd5033")
 else()
-    set_source_files_properties(${WOT_NUMERICAL_SOURCES}
+    set_source_files_properties(${WOT_NUMERICAL_SOURCES} ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
 endif()
