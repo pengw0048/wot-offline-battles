@@ -24,6 +24,7 @@ set(WOT_NUMERICAL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_suspension.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_authority.cpp")
 set(WOT_STOCK_ADAPTER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/stock_tps_renderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_scene_settings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_tps_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_tps_resources.cpp"
@@ -72,6 +73,8 @@ target_include_directories(bwclient PRIVATE "${BW_SOURCE_DIR}/client"
 target_include_directories(moo PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/../include")
 target_include_directories(romp PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../include")
+target_include_directories(particle PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/../include")
 include("${CMAKE_CURRENT_LIST_DIR}/wwise_sdk.cmake")
 target_link_libraries(bwclient WotWwiseSdk)
