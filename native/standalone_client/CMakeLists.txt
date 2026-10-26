@@ -23,6 +23,7 @@ add_library(wot_battle_core STATIC
     src/vehicle_authority.cpp
     src/wwise_bank.cpp
     bigworld/stock_tree_materials.cpp
+    bigworld/stock_tree_geometry.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -50,6 +51,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_stock_tree_geometry tests/test_stock_tree_geometry.cpp)
+    target_include_directories(test_stock_tree_geometry PRIVATE bigworld)
+    target_link_libraries(test_stock_tree_geometry PRIVATE wot_battle_core)
+    add_test(NAME stock_tree_geometry COMMAND test_stock_tree_geometry)
     add_executable(test_stock_tree_materials tests/test_stock_tree_materials.cpp)
     target_include_directories(test_stock_tree_materials PRIVATE bigworld)
     target_link_libraries(test_stock_tree_materials PRIVATE wot_battle_core)
