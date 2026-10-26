@@ -96,6 +96,7 @@ struct CompoundNode
     BW::string name;
     BW::string parentName;
     int parent;
+    Matrix authoredLocal;
     Matrix local;
     Matrix world;
     MatrixProviderPtr source;
@@ -119,8 +120,9 @@ struct CompoundState
     MatrixProviderPtr matrix;
     bool active;
     uint32 frame;
+    uint32 spaceID;
 
-    CompoundState() : active( true ), frame( 0 ) {}
+    CompoundState() : active( true ), frame( 0 ), spaceID( 0 ) {}
 
     bool evaluate( size_t index, std::vector<unsigned char> & visiting )
     {
@@ -409,6 +411,47 @@ public:
     }
     PY_AUTO_METHOD_DECLARE( RETOWN, node,
         ARG( BW::string, OPTARG( MatrixProviderPtr, NULL, END ) ) )
+    // Exact #1513 008dd020 delegates to node("", NULL); 008dd500 resolves
+    // that name to index zero and returns the same cached node adapter.
+    PyObject * pyGet_root() { return this->node( "", MatrixProviderPtr() ); }
+    PY_RO_ATTRIBUTE_SET( root )
+
+    bool context( uint32 & spaceID, BoundingBox & worldBounds )
+    {
+        if (!state_->active || !state_->evaluate())
+            return false;
+        spaceID = state_->spaceID;
+        this->worldBoundingBox( worldBounds, Matrix::identity );
+        return true;
+    }
+    bool readNode( const BW::string & name, Matrix & authoredLocal,
+        Matrix & parentWorld, Matrix & world )
+    {
+        if (!state_->active || !state_->evaluate())
+            return false;
+        const std::map<BW::string, size_t>::const_iterator found = state_->names.find( name );
+        const size_t index = name.empty() ? 0 :
+            (found == state_->names.end() ? state_->nodes.size() : found->second);
+        if (index >= state_->nodes.size())
+            return false;
+        authoredLocal = state_->nodes[index].authoredLocal;
+        const int parent = state_->nodes[index].parent;
+        parentWorld = parent < 0 ? Matrix::identity : state_->nodes[parent].world;
+        world = state_->nodes[index].world;
+        return true;
+    }
+    bool writeNodeLocal( const BW::string & name, const Matrix & local )
+    {
+        if (!state_->active)
+            return false;
+        const std::map<BW::string, size_t>::const_iterator found = state_->names.find( name );
+        const size_t index = name.empty() ? 0 :
+            (found == state_->names.end() ? state_->nodes.size() : found->second);
+        if (index >= state_->nodes.size())
+            return false;
+        state_->nodes[index].local = local;
+        return true;
+    }
 
     PyObject * getBoundsForPart( int index )
     {
@@ -462,6 +505,7 @@ PY_BEGIN_METHODS( PyCompoundModel )
     PY_METHOD( getBoundsForPart )
 PY_END_METHODS()
 PY_BEGIN_ATTRIBUTES( PyCompoundModel )
+    PY_ATTRIBUTE( root )
     PY_ATTRIBUTE( matrix )
     PY_ATTRIBUTE( visible )
     PY_ATTRIBUTE( isHighPriorityReflection )
@@ -488,6 +532,7 @@ size_t appendNode( CompoundState & state, const BW::string & name,
     node.name = name;
     node.parentName = parent;
     node.parent = -2;
+    node.authoredLocal = local;
     node.local = local;
     node.world = local;
     const size_t index = state.nodes.size();
@@ -496,9 +541,10 @@ size_t appendNode( CompoundState & state, const BW::string & name,
     return index;
 }
 
-PyObject * buildCompound( const std::vector<AssemblyOperation> & operations )
+PyObject * buildCompound( const std::vector<AssemblyOperation> & operations, uint32 spaceID )
 {
     CompoundStatePtr state( new CompoundState() );
+    state->spaceID = spaceID;
     std::vector<std::pair<BW::string, BW::string> > aliases;
     bool haveRoot = false;
     for (size_t operationIndex = 0; operationIndex < operations.size(); ++operationIndex)
@@ -682,7 +728,7 @@ public:
     {
         // #1513 0x008d8630 caches the compound product on its assembler.
         if (!product_)
-            product_ = PyObjectPtr( buildCompound( operations ), PyObjectPtr::STEAL_REFERENCE );
+            product_ = PyObjectPtr( buildCompound( operations, spaceID_ ), PyObjectPtr::STEAL_REFERENCE );
         if (!product_)
             return NULL;
         Py_INCREF( product_.get() );
@@ -1031,6 +1077,27 @@ bool stockVehicleModelBounds( PyObject * model, BoundingBox & bounds )
     else
         return false;
     return true;
+}
+
+bool stockVehicleCompoundContext( PyObject * compound, uint32 & spaceID,
+    BoundingBox & worldBounds )
+{
+    return compound && PyCompoundModel::Check( compound ) &&
+        static_cast<PyCompoundModel *>( compound )->context( spaceID, worldBounds );
+}
+
+bool stockVehicleCompoundNode( PyObject * compound, const BW::string & name,
+    Matrix & authoredLocal, Matrix & parentWorld, Matrix & world )
+{
+    return compound && PyCompoundModel::Check( compound ) &&
+        static_cast<PyCompoundModel *>( compound )->readNode( name, authoredLocal, parentWorld, world );
+}
+
+bool writeStockVehicleCompoundNodeLocal( PyObject * compound,
+    const BW::string & name, const Matrix & local )
+{
+    return compound && PyCompoundModel::Check( compound ) &&
+        static_cast<PyCompoundModel *>( compound )->writeNodeLocal( name, local );
 }
 
 BW_END_NAMESPACE

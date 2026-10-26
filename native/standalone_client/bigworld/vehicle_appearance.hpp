@@ -3,6 +3,7 @@
 #include "cstdmf/bw_namespace.hpp"
 #include "romp/py_resource_refs.hpp"
 #include "math/boundbox.hpp"
+#include "pyscript/script_math.hpp"
 
 BW_BEGIN_NAMESPACE
 
@@ -16,5 +17,11 @@ bool beginStockVehiclePrerequisites( PyObject * resources, PyObjectPtr & request
 bool pollStockVehiclePrerequisites( PyObject * request, ResourceRefs & resources );
 void cancelStockVehiclePrerequisites( PyObject * request );
 bool stockVehicleModelBounds( PyObject * model, BoundingBox & bounds );
+bool stockVehicleCompoundContext( PyObject * compound, uint32 & spaceID,
+    BoundingBox & worldBounds );
+bool stockVehicleCompoundNode( PyObject * compound, const BW::string & name,
+    Matrix & authoredLocal, Matrix & parentWorld, Matrix & world );
+bool writeStockVehicleCompoundNodeLocal( PyObject * compound,
+    const BW::string & name, const Matrix & local );
 
 BW_END_NAMESPACE

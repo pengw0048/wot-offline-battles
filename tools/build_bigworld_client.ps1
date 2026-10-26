@@ -168,6 +168,8 @@ try {
         $EngineRoot) "vehicle-reflections-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_audio.py"),
         $EngineRoot) "stock-audio-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_vehicle_visuals.py"),
+        $EngineRoot) "stock-vehicle-visuals-patch.log"
 
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.
