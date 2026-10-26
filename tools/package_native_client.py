@@ -28,6 +28,8 @@ def package(client):
     target.mkdir(exist_ok=True)
     for name in TOOL_FILES:
         shutil.copy2(ROOT / 'tools' / name, target / name)
+    schema = ROOT / 'src/res/scripts/client/gui/mods/offline_lan_0922/navigation_graph_schema.py'
+    shutil.copy2(schema, target / schema.name)
     ignore = shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo')
     for name in ('navigation_baseline_f5b0173', 'wot_space_bin_utils'):
         shutil.copytree(ROOT / 'tools/vendor' / name, target / 'vendor' / name,

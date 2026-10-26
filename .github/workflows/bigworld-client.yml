@@ -65,7 +65,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Unable to package resource preparation' }
           & "$client\prepare-runtime\python.exe" -B "$client\tools\prepare_native_client.py" --help
           if ($LASTEXITCODE -ne 0) { throw 'Bundled resource preparation cannot start' }
-          & "$client\prepare-runtime\python.exe" -B -c "import prepare_native_client, prepare_native_static_models; from bake_navigation_0922 import _legacy_baker; _legacy_baker()"
+          & "$client\prepare-runtime\python.exe" -B -c "import prepare_native_client, prepare_native_static_models, bake_destructibles_0922; from bake_navigation_0922 import _legacy_baker; _legacy_baker()"
           if ($LASTEXITCODE -ne 0) { throw 'Bundled resource readers cannot load' }
       # The original resource installation is intentionally absent on this
       # public runner. Startup/gameplay acceptance runs with locally owned data.

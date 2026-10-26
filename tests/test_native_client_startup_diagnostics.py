@@ -109,6 +109,9 @@ class NativeClientStartupDiagnostics(unittest.TestCase):
                          'tools/vendor/wot_space_bin_utils',
                          'native/standalone_client/bigworld/res'):
             (source / relative).mkdir(parents=True)
+        schema = source / 'src/res/scripts/client/gui/mods/offline_lan_0922/navigation_graph_schema.py'
+        schema.parent.mkdir(parents=True)
+        schema.write_bytes(b'SUPPORTED_MAPS = ()\n')
         (self.package / 'bwclient_h.exe').touch()
         runtime = io.BytesIO()
         with zipfile.ZipFile(runtime, 'w') as archive:
@@ -119,6 +122,8 @@ class NativeClientStartupDiagnostics(unittest.TestCase):
                 patch.object(packaging, 'urlopen', return_value=runtime), \
                 contextlib.redirect_stdout(io.StringIO()):
             packaging.package(self.package)
+        self.assertEqual((self.package / 'tools/navigation_graph_schema.py').read_bytes(),
+                         schema.read_bytes())
         command = (self.package / 'Start-Client.cmd').read_bytes()
         self.assertIn(b'prepare_native_client.py %*\r\n', command)
         self.assertIn(b'if not "%errorlevel%"=="0" pause\r\n', command)

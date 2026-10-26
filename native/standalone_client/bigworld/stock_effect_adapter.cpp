@@ -184,7 +184,7 @@ public:
   HRESULT STDMETHODCALLTYPE ValidateTechnique(D3DXHANDLE technique) override;
   HRESULT STDMETHODCALLTYPE FindNextValidTechnique(
       D3DXHANDLE technique, D3DXHANDLE *next_technique) override;
-  WINBOOL STDMETHODCALLTYPE IsParameterUsed(D3DXHANDLE parameter,
+  BOOL STDMETHODCALLTYPE IsParameterUsed(D3DXHANDLE parameter,
                                             D3DXHANDLE technique) override;
   HRESULT STDMETHODCALLTYPE Begin(UINT *passes, DWORD flags) override;
   HRESULT STDMETHODCALLTYPE BeginPass(UINT pass) override;
@@ -986,7 +986,7 @@ HRESULT STDMETHODCALLTYPE StockEffectAdapter::FindNextValidTechnique(
   }
   return S_FALSE;
 }
-WINBOOL STDMETHODCALLTYPE StockEffectAdapter::IsParameterUsed(
+BOOL STDMETHODCALLTYPE StockEffectAdapter::IsParameterUsed(
     D3DXHANDLE parameter, D3DXHANDLE technique) {
   (void)technique;
   return reflection_.parameter_used(parameter_number(parameter)) ? TRUE : FALSE;
