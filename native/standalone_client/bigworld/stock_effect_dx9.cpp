@@ -137,7 +137,7 @@ bool StockDx9EffectMaterial::apply_shader(std::uint32_t shader_index, ShaderAppl
             if (*index >= textures_.size()) return invalid("Shader refers to an invalid texture view", error);
             if (slot >= resource_slots.size()) resource_slots.resize(std::size_t(slot)+1);
             resource_slots[slot] = index;
-            resource_first = std::min(resource_first, slot);
+            resource_first = (std::min)(resource_first, slot);
         } else {
             if (*index >= definition.sampler_states.size())
                 return invalid("Shader refers to an invalid sampler state", error);
