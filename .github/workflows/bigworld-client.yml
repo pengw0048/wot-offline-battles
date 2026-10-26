@@ -61,81 +61,14 @@ jobs:
         shell: pwsh
         run: |
           $client = "$env:RUNNER_TEMP\bigworld-client\artifacts\client"
-          python tools/package_native_prototype.py --client-output $client
+          python tools/package_native_client.py --client-output $client
           if ($LASTEXITCODE -ne 0) { throw 'Unable to package resource preparation' }
-          & "$client\prepare-runtime\python.exe" -B "$client\tools\prepare_native_prototype.py" --help
+          & "$client\prepare-runtime\python.exe" -B "$client\tools\prepare_native_client.py" --help
           if ($LASTEXITCODE -ne 0) { throw 'Bundled resource preparation cannot start' }
-          & "$client\prepare-runtime\python.exe" -B -c "import prepare_native_scene, prepare_native_vehicle; from bake_navigation_0922 import _legacy_baker; _legacy_baker()"
+          & "$client\prepare-runtime\python.exe" -B -c "import prepare_native_client, prepare_native_static_models; from bake_navigation_0922 import _legacy_baker; _legacy_baker()"
           if ($LASTEXITCODE -ne 0) { throw 'Bundled resource readers cannot load' }
-      - name: Capture first startup diagnostics
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $client = "$env:RUNNER_TEMP\bigworld-client\artifacts\client"
-          $logs = "$env:RUNNER_TEMP\bigworld-client\artifacts\logs"
-          $debugger = "$env:RUNNER_TEMP\procdump"
-          Invoke-WebRequest 'https://download.sysinternals.com/files/Procdump.zip' `
-            -OutFile "$debugger.zip"
-          Expand-Archive "$debugger.zip" $debugger
-          $monitor = Start-Process -FilePath "$debugger\procdump.exe" `
-            -ArgumentList @('-accepteula', '-ma', '-e', '-x', $logs, `
-              "$client\bwclient_h.exe", '-noConversion', '-unattended') `
-            -WorkingDirectory $client -PassThru `
-            -RedirectStandardOutput "$logs\startup-stdout.log" `
-            -RedirectStandardError "$logs\startup-stderr.log"
-          $process = $null
-          try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(120)
-            $started = $false
-            $rendered = $false
-            do {
-              $exited = $monitor.WaitForExit(1000)
-              if (-not $process) {
-                $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($monitor.Id)" |
-                  Where-Object Name -eq 'bwclient_h.exe' | Select-Object -First 1
-                if ($child) { $process = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue }
-              }
-              if (Test-Path "$client\standalone.log") {
-                $started = [bool](Select-String -Path "$client\standalone.log" `
-                  -SimpleMatch 'StandaloneApp: native application started' -Quiet)
-                $rendered = [bool](Select-String -Path "$client\standalone.log" `
-                  -SimpleMatch 'StandaloneApp: first native frame rendered' -Quiet)
-              }
-            } while (-not $exited -and -not $rendered -and [DateTime]::UtcNow -lt $deadline)
-            if ($process) { $process.Refresh() }
-            @{
-              exited = $exited
-              native_application_started = $started
-              first_native_frame_rendered = $rendered
-              exit_code = $(if ($process -and $process.HasExited) { $process.ExitCode } else { $null })
-              window_title = $(if ($process) { $process.MainWindowTitle } else { '' })
-              window_handle = $(if ($process) { $process.MainWindowHandle.ToInt64() } else { 0 })
-              scope = "First startup on a hosted runner; no map or gameplay acceptance"
-            } | ConvertTo-Json | Set-Content "$logs\startup.json"
-            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-            $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-            $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
-            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            try {
-              $graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bitmap.Size)
-              $bitmap.Save("$logs\startup.png")
-            } finally {
-              $graphics.Dispose()
-              $bitmap.Dispose()
-            }
-          } finally {
-            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-            if (-not $monitor.WaitForExit(10000)) { Stop-Process -Id $monitor.Id -Force }
-            Get-ChildItem $client -Filter *.log | Copy-Item -Destination $logs
-            Get-ChildItem $client -Filter *.dmp | Copy-Item -Destination $logs
-          }
-          $cdb = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x86\cdb.exe"
-          if (Test-Path $cdb) {
-            Get-ChildItem $logs -Filter *.dmp | ForEach-Object {
-              & $cdb -z $_.FullName -i $client -y $client -c '.ecxr;kv;lm;qd' 2>&1 |
-                Out-File "$logs\native-stack.txt" -Append
-            }
-          }
+      # The original resource installation is intentionally absent on this
+      # public runner. Startup/gameplay acceptance runs with locally owned data.
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4

@@ -167,7 +167,8 @@ class StockComponentOwnershipTest(unittest.TestCase):
         # PY_METHOD(foo) references _py_foo. It does not prepend py_ itself.
         # Numeric body extraction cannot catch a mismatched class declaration.
         for name in ('stock_vehicle_components.hpp', 'stock_vehicle_components.cpp',
-                     'stock_vehicle_visuals.cpp'):
+                     'stock_vehicle_visuals.cpp', 'stock_vehicle_fashions.cpp',
+                     'stock_vehicle_animators.cpp', 'vehicle_appearance.cpp'):
             source = (ROOT / 'bigworld' / name).read_text()
             for method in re.findall(r'PY_METHOD_DECLARE\(\s*(\w+)\s*\)', source):
                 self.assertTrue(method.startswith('py_') or method == 'pyCall',

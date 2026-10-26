@@ -1,3 +1,14 @@
+// The public engine still declares an XP header target. This Windows audio
+// translation unit uses the actual Windows 10 endpoint/WRL contract; keep the
+// change local and establish it before any Windows or engine header is read.
+#if defined(_WIN32)
+#undef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000000
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#undef WINVER
+#define WINVER 0x0A00
+#endif
 #include "pch.hpp"
 #include "stock_audio.hpp"
 #include "stock_audio_io.hpp"
@@ -22,7 +33,7 @@
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
-#include <propvarutil.h>
+#include <mmreg.h>
 #include <dsound.h>
 #include <wrl/client.h>
 
@@ -198,8 +209,7 @@ bool queryDevice(DeviceInfo& output) {
     ComPtr<IMMDeviceEnumerator> enumerator;
     ComPtr<IMMDevice> device;
     ComPtr<IPropertyStore> properties;
-    PROPVARIANT value;
-    PropVariantInit(&value);
+    PROPVARIANT value = {};
     HRESULT status = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL,
         CLSCTX_ALL, IID_PPV_ARGS(enumerator.GetAddressOf()));
     if (SUCCEEDED(status))
@@ -1070,8 +1080,7 @@ PyObject* py_WW_setSpeakersConfig(PyObject* args) {
         status = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf());
     if (SUCCEEDED(status)) status = device->OpenPropertyStore(STGM_READWRITE, properties.GetAddressOf());
     if (SUCCEEDED(status)) {
-        PROPVARIANT value;
-        PropVariantInit(&value);
+        PROPVARIANT value = {};
         value.vt = VT_UI4;
         // OS endpoint 5.1 uses the physical back-speaker mask. This differs
         // from the SDK's normalized side-speaker 0x60f configuration above.

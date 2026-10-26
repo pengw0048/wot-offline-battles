@@ -4,9 +4,6 @@ if(NOT TARGET bwclient)
 endif()
 
 set(WOT_NUMERICAL_SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/projectile_motion.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/vehicle_control.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../src/combat_rules.cpp"
@@ -38,6 +35,8 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_audio.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_audio_io.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_components.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_animators.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_audio.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_fashions.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_visuals.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_vehicle_filter.cpp")
@@ -60,18 +59,12 @@ if(MSVC)
     # These adapters include the public engine's C++14 STL declarations.
     # Retain that observed surface in their otherwise C++17 translation units.
     set_source_files_properties(
-        "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
         ${WOT_STOCK_ADAPTER_SOURCES}
         PROPERTIES COMPILE_DEFINITIONS
         "_HAS_AUTO_PTR_ETC=1;_HAS_TR1_NAMESPACE=1;_ENFORCE_MATCHING_ALLOCATORS=0")
     # The bundled Python 2.7 declarations still use register parameters.
     # Keep that legacy-header warning local to the engine adapters.
     set_property(SOURCE
-        "${CMAKE_CURRENT_LIST_DIR}/projectile_scene.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/vehicle_scene.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/target_scene.cpp"
         ${WOT_STOCK_ADAPTER_SOURCES}
         APPEND PROPERTY COMPILE_OPTIONS "/wd5033")
 else()

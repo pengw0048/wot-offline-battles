@@ -14,10 +14,10 @@ PYTHON_VERSION = '3.14.9'
 PYTHON_URL = ('https://www.python.org/ftp/python/{0}/'
               'python-{0}-embed-win32.zip').format(PYTHON_VERSION)
 TOOL_FILES = (
-    'prepare_native_prototype.py', 'prepare_native_scene.py',
+    'prepare_native_client.py', 'prepare_native_static_models.py',
     'prepare_native_vehicle.py', 'bake_navigation_0922.py',
-    'bw_primitives_geometry.py', 'inspect_client.py', 'packed_xml.py',
-    'space_bin_0922.py',
+    'bake_destructibles_0922.py', 'bw_primitives_geometry.py',
+    'inspect_client.py', 'packed_xml.py', 'space_bin_0922.py',
 )
 
 
@@ -49,38 +49,22 @@ def package(client):
                                           encoding='ascii')
     (runtime / 'SOURCE.txt').write_text(PYTHON_URL + '\n', encoding='ascii')
     entry = ('@echo off\r\ncd /d "%~dp0"\r\n'
-             'prepare-runtime\\python.exe -B tools\\prepare_native_prototype.py %*\r\n'
+             'prepare-runtime\\python.exe -B tools\\prepare_native_client.py %*\r\n'
              'if errorlevel 1 pause\r\n')
-    (client / 'Start-Prototype.cmd').write_bytes(entry.encode('ascii'))
-    readme = '''INDEPENDENT NATIVE CLIENT - WINDOWS PROTOTYPE
+    (client / 'Start-Client.cmd').write_bytes(entry.encode('ascii'))
+    readme = '''INDEPENDENT NATIVE CLIENT - DEVELOPMENT BUILD
 
 Extract the complete ZIP to a new writable folder on Windows 10/11.
-Do not copy a previous prototype's prepared folder into this version.
-Double-click Start-Prototype.cmd and paste the path to your installed
-Chinese HD World of Tanks 0.9.22.0.1 #1513 client (the folder containing
-WorldOfTanks.exe). The first run prepares Karelia and the stock T-34 locally,
-then starts the prototype. Later runs reuse the prepared files.
-Your original installation is read only; its executable is not started.
-No original game maps, vehicles, or textures are included in this download.
-The package includes public engine resources, runtime DLLs, and a portable
-Python used only by the preparation tools. No separate Python install is needed.
+Run Start-Client.cmd and enter the path to your installed Chinese HD
+World of Tanks 0.9.22.0.1 #1513 client (the WorldOfTanks.exe folder).
+The original installation is read only. Its game entry, entity scripts,
+models, maps, interface and audio are resolved through the original paths.
+The original executable is never started. Game assets are not distributed
+in this package. The included Python runtime only prepares resource paths.
 
-CONTROLS
-W/S: forward/reverse. A/D: steer. Space: handbrake.
-Mouse: camera aim. Left click: fire. Arrows/Page Up/Page Down: move camera.
-Alt+F4: close. Restart to restore target health and ammunition.
-
-CURRENT LIMITS
-This is a local driving and stationary-target firing prototype.
-Buildings, trees, water, and audio are not connected. The sky uses its authored
-static image; original animated clouds and PBS materials are not reproduced.
-Driving uses the ported offline controller and terrain support.
-The full retail suspension/contact solver, airborne motion, track animation,
-turret articulation, crew/dispersion modifiers, ricochet continuation, HE
-area damage, Bots, and multiplayer synchronization are pending.
-Firing follows the camera aim and is not constrained to the visible barrel.
-The hosted Windows startup test does not prove original resource rendering
-or gameplay. Preserve standalone.log and any .dmp file if a local run fails.
+This rewrite is in development. A successful build does not establish
+successful original GUI startup, complete map rendering or playable battles.
+Preserve standalone.log, python.log and any .dmp file when reporting a failure.
 Matching PDB symbols accompany the executable for crash investigation.
 '''
     (client / 'README-FIRST.txt').write_bytes(readme.replace('\n', '\r\n').encode('ascii'))

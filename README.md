@@ -287,73 +287,31 @@ CMake and PowerShell 7, use a new temporary work directory:
 ./tools/build_bigworld_client.ps1 -WorkDirectory "$env:TEMP\bigworld-client-build"
 ```
 
-It downloads source, Microsoft's D3DX package and the public engine runtime
-resources into that directory. The resulting `artifacts/client` directory
-contains `bwclient_h.exe`, a native local-space/free-camera entry, the x86
-Visual C++ and D3DX runtimes, and bootstrap resources. Start it through
-`run-client.cmd`, which selects local
-prepared resources without the upstream development asset server. The upstream
-engine still embeds Python 2.7; the independent battle core does not. This is
-a prototype, with the resource and gameplay limits described below. It does
-not start the original game executable or a hidden original client.
+The build uses source-built Scaleform and a privately supplied licensed Wwise
+2017.1.9 SDK. Set `WOT_WWISE_SDK_ROOT` to that SDK when building locally. SDK
+inputs are not included in the output package. The engine embeds Python 2.7
+and runs the original installed client scripts through the restored native
+interfaces; it never starts the original executable or a hidden client.
 
-The workflow's download includes `Start-Prototype.cmd` and a portable resource
-preparation tool. On another Windows computer, run it and enter the path to
-your installed Chinese HD #1513 client. It prepares Karelia and a stock T-34
-under the package's `prepared` directory, then starts the scene; subsequent
-runs reuse those files. Original game resources are not included in the
-download, and preparation does not modify or start the original installation.
+The download includes `Start-Client.cmd` and a portable resource preparation
+runtime. Run it on Windows and enter your installed Chinese HD #1513 client
+path. Preparation retains the installed HD package precedence and original
+`game` personality, entity table, GUI and audio configuration. Native adapters
+and public engine resources are lower-priority additions. The original
+installation stays read only, and its game assets are not redistributed.
 
-Prepare a terrain preview from your own client into a new directory:
+For path preparation without launching:
 
 ```bash
-python3 tools/prepare_native_scene.py --client-root "$WOT_0922_CLIENT" \
-  --map 01_karelia --output /path/to/new/terrain-preview
+python3 tools/prepare_native_client.py --client-root "$WOT_0922_CLIENT" \
+  --package-root /path/to/independent-client --prepare-only
 ```
 
-The tool preserves original terrain payloads and textures. Buildings, water,
-flora and vehicles are not included yet. On Windows, set `$ClientRoot` to the
-built client directory and `$SceneRes` to the preview's `res` directory, then
-run the independently built executable:
-
-```powershell
-& "$ClientRoot\run-client.cmd" --res "$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia
-```
-
-The native free camera uses the mouse to look, arrow keys to move, and
-Page Up/Page Down to change height. To prepare a static vehicle assembly,
-point `--engine-res` at the built package's public engine resources:
-
-```bash
-python3 tools/prepare_native_vehicle.py --client-root "$WOT_0922_CLIENT" \
-  --vehicle ussr:R04_T-34 --engine-res /path/to/client/engine-res \
-  --output /path/to/new/vehicle-preview
-```
-
-The output's `vehicle.json` records the selected stock modules and assembly
-resource path. Geometry, model nodes, textures and LODs come from the original
-resources. The preview adapts packed vertex declarations and uses public
-diffuse materials; it does not reproduce the original PBS appearance. Add the
-vehicle `res` directory first in the resource search path, then pass its
-assembly and the chosen world position:
-
-```powershell
-& "$ClientRoot\run-client.cmd" --res "$VehicleRes;$SceneRes;$ClientRoot\res;$ClientRoot\engine-res" --space spaces/01_karelia --assembly standalone/vehicles/ussr_R04_T-34/assembly.xml --model-position 0,50,0
-```
-
-`--model` also accepts a single model resource. Left click fires the assembly's
-first authored shell from its original `HP_gunFire` bind position toward the
-camera reticle's surface point. Native terrain/static collision ends the trajectory; a line and
-impact cross show the result. The preview applies the exact descriptor's speed
-factor, base reload and ammunition capacity. Magazine/burst guns remain visual
-previews. W/S drive, A/D steer and Space applies the handbrake using the ported
-offline controller. Native terrain queries support the vehicle; collision-bound
-box sweeps block static obstacles. Add `--target-assembly` with a prepared
-assembly and `--target-position x,y,z` to place a stationary target. Original
-collision triangles and armor materials determine penetration and damage;
-the HUD shows health, ammunition and reload. A destroyed target leaves the scene.
-Crew, dispersion, turret control, suspension, airborne motion, track animation,
-ricochet continuation and HE area damage are not connected yet.
+This rewrite is still in development. Numerical and resource contract tests,
+and a successful Windows build, do not prove original GUI startup, complete
+map rendering or a playable offline battle. Those require a Windows run with
+the owned installation. Preserve `standalone.log`, `python.log`, any dump and
+the matching executable/PDB when reporting a failure.
 
 ## Build it yourself
 

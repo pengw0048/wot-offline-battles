@@ -9,6 +9,7 @@ def patch_engine(root):
     client = Path(root) / 'client'
     patches = {
         'device_app.cpp': [
+            ('#include "pch.hpp"', '#include "pch.hpp"\n#include "stock_vehicle_audio.hpp"'),
             ('#include "pch.hpp"', '#include "pch.hpp"\n#include "stock_audio.hpp"'),
             ('    // 4. Sound\n#if FMOD_SUPPORT\n    soundEnabled_',
              '    // 4. Sound\n'
@@ -25,16 +26,19 @@ def patch_engine(root):
              '        dRenderTime_);\n'),
             ('void DeviceApp::fini()\n{\n    BW_GUARD;\n',
              'void DeviceApp::fini()\n{\n    BW_GUARD;\n'
-             '    finiStockAudio();\n')],
+             '    finiStockVehicleAudio();\n    finiStockAudio();\n')],
         'script_app.cpp': [
+            ('#include "pch.hpp"', '#include "pch.hpp"\n#include "stock_vehicle_audio.hpp"'),
             ('#include "pch.hpp"', '#include "pch.hpp"\n#include "stock_audio.hpp"'),
             ('\tBigWorldClientScript::fini();',
-             '\tfiniStockAudio();\n\tBigWorldClientScript::fini();')],
+             '\tfiniStockVehicleAudio();\n\tfiniStockAudio();\n\tBigWorldClientScript::fini();')],
     }
     for name, replacements in patches.items():
         path = client / name
         source = path.read_text()
         for old, new in replacements:
+            if old == '#include "pch.hpp"' and new.splitlines()[1] in source:
+                continue
             if new in source:
                 continue
             if source.count(old) != 1:

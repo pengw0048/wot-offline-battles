@@ -20,17 +20,21 @@ def patch_engine(root):
              '    tickStockVehicleComponents( dGameTime );\n\n'
              '    Moo::rc().disableResourcePreloads();')],
         'world_app.cpp': [
+            ('#include "pch.hpp"', '#include "pch.hpp"\n#include "stock_vehicle_audio.hpp"'),
             ('#include "pch.hpp"',
              '#include "pch.hpp"\n#include "stock_vehicle_visuals.hpp"'),
             ('        GlobalEmbodiments::tick( dGameTime );\n',
              '        GlobalEmbodiments::tick( dGameTime );\n'
-             '        tickStockVehicleTrackScrolls( App::instance().getGameTimeFrameStart() );\n')],
+             '        tickStockVehicleTrackScrolls( App::instance().getGameTimeFrameStart() );\n'
+             '        tickStockVehicleAudioTasks();\n')],
     }
     updates = []
     for name, replacements in patches.items():
         path = client / name
         source = path.read_text()
         for before, after in replacements:
+            if before == '#include "pch.hpp"' and after.splitlines()[1] in source:
+                continue
             if after in source:
                 continue
             if source.count(before) != 1:

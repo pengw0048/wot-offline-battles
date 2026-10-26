@@ -2,6 +2,8 @@
 #include "stock_vehicle_visuals.hpp"
 #include "stock_vehicle_filter.hpp"
 #include "stock_vehicle_components.hpp"
+#include "stock_vehicle_animators.hpp"
+#include "stock_vehicle_audio.hpp"
 #include "vehicle_appearance.hpp"
 #include "stock_scene_collision.hpp"
 
@@ -118,6 +120,10 @@ bool sampleStockBoolLink( PyObject * link, bool & value )
         return false;
     value = static_cast<StockBoolLink *>( link )->sample();
     return true;
+}
+bool isStockFloatLink( PyObject * link )
+{
+    return StockFloatLink::Check( link );
 }
 bool sampleStockFloatLink( PyObject * link, float & value )
 {
@@ -1110,6 +1116,10 @@ PY_FACTORY( PyTrackScroll, BigWorld )
 void tickStockVehicleComponents( float frameTime )
 {
     updateLodCalculators();
+    tickStockDetailedEngineStates( frameTime );
+    // Original static factory order: LOD 01493100, Recoil 01493104,
+    // Suspension 0149328c. Recoil and Suspension both register phase 2.
+    tickStockVehicleRecoil( frameTime );
     updateSuspensions( frameTime );
 }
 

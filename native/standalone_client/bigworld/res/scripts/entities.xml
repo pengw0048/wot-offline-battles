@@ -1,6 +1,0 @@
-<root>
-    <ClientServerEntities>
-        <StandaloneEntity />
-    </ClientServerEntities>
-    <ServerOnlyEntities />
-</root>

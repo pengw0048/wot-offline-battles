@@ -3,7 +3,10 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
@@ -64,9 +67,11 @@ def prepare(client, package):
     originals = original_resource_paths(client)
     root = ET.Element('root')
     paths = ET.SubElement(root, 'Paths')
-    # The application owns its entry point and entity selection. Every stock
-    # script and data reference then resolves through the installed packages.
-    for path in [package / 'res'] + originals + [package / 'engine-res']:
+    # Original resources.xml, game.pyc and entities.xml own startup. The narrow
+    # native-space overlay has no replacement personality or entity table.
+    native_resources = package / 'native-res'
+    native_resources.mkdir(exist_ok=True)
+    for path in [native_resources] + originals + [package / 'res', package / 'engine-res']:
         ET.SubElement(paths, 'Path').text = path.as_posix()
     atomic_write(package / 'paths.xml', ET.tostring(root, encoding='utf-8',
                                                   xml_declaration=True))
@@ -76,6 +81,7 @@ def prepare(client, package):
         'resource_paths': [str(path) for path in originals],
         'resources_copied': False,
         'original_executable_used_at_runtime': False,
+        'personality': 'game',
     }
     atomic_write(package / 'original-client.json',
                  (json.dumps(record, indent=2) + '\n').encode('utf-8'))
@@ -85,11 +91,32 @@ def prepare(client, package):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--client-root', type=Path, required=True)
-    parser.add_argument('--package-root', type=Path, required=True)
+    parser.add_argument('--client-root', type=Path, default=os.environ.get('WOT_0922_CLIENT'))
+    parser.add_argument('--package-root', type=Path,
+                        default=Path(__file__).resolve().parent.parent)
+    parser.add_argument('--prepare-only', action='store_true')
     args = parser.parse_args()
-    prepare(args.client_root, args.package_root)
+    package = args.package_root.expanduser().resolve()
+    try:
+        client = args.client_root
+        marker = package / 'original-client.json'
+        if client is None and marker.is_file():
+            client = Path(json.loads(marker.read_text(encoding='utf-8'))['original_client'])
+        if client is None:
+            value = input('Path to the Chinese HD 0.9.22.0.1 #1513 client: ').strip().strip('"')
+            if not value:
+                raise ValueError('An owned #1513 client directory is required.')
+            client = Path(value)
+        prepare(client, package)
+        if args.prepare_only:
+            return 0
+        if os.name != 'nt':
+            raise ValueError('Launching the native client requires Windows; use --prepare-only here.')
+        return subprocess.call([str(package / 'bwclient_h.exe'), '-noConversion'], cwd=str(package))
+    except (OSError, ValueError, KeyError, EOFError) as error:
+        print('Native client preparation failed: %s' % error, file=sys.stderr)
+        return 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

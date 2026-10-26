@@ -267,8 +267,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
             "Use the source SDK filter policy; the unavailable BW setRestrictFlashFilters extension is not emulated",
             "Keep GFx abstract audio support without introducing an unused FMOD runtime",
             "Suppress observed legacy API/nodiscard warnings C4996 and C4834; retain /WX",
-            "Link the repository's native standalone application bootstrap",
-            "Compile FX sources locally through BWResource and cache native FXO files"
+            "Link the restored stock client adapters and startup diagnostics",
+            "Load original processed effects through the restored native shader runtime"
             "Disable the upstream vendor crash uploader for this independent build"
         )
     } | ConvertTo-Json | Set-Content -LiteralPath `

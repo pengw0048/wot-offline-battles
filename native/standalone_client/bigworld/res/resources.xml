@@ -1,6 +1,6 @@
 <root>
     <system>
-        <engineConfigXML>standalone/engine_config.xml</engineConfigXML>
-        <scriptsConfigXML>standalone/scripts_config.xml</scriptsConfigXML>
+        <engineConfigXML>engine_config.xml</engineConfigXML>
+        <scriptsConfigXML>scripts_config.xml</scriptsConfigXML>
     </system>
 </root>

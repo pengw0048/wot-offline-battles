@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cstdmf/bw_namespace.hpp"
+#include "romp/resource_ref.hpp"
 #include "romp/py_resource_refs.hpp"
 #include "math/boundbox.hpp"
 #include "pyscript/script_math.hpp"
