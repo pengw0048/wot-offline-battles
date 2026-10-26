@@ -334,15 +334,20 @@ class StockDx9ResourceTests(unittest.TestCase):
             bridge = ADAPTER_BRIDGE.replace("// PRODUCTION_ADAPTER_METHODS", "\n".join(methods))
             (root / "probe.cpp").write_text(PROBE.replace("// ADAPTER_BRIDGE", bridge))
             binary = root / "probe"
-            subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                            "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            # The Windows CI's MinGW distribution has no ASan/UBSan runtime.
+            # Exercise the same production probe there; instrument it on Unix.
+            sanitizers = [] if os.name == "nt" else [
+                "-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+            compiled = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            *sanitizers,
                             "-I" + str(root), "-I" + str(ROOT / "include"),
                             "-I" + str(ROOT / "bigworld"), str(root / "probe.cpp"),
                             str(ROOT / "bigworld/stock_effect_dx9.cpp"),
                             str(ROOT / "src/stock_effect_binding.cpp"),
                             str(ROOT / "src/stock_shader_runtime.cpp"),
                             str(ROOT / "src/stock_shader_binary.cpp"),
-                            "-o", str(binary)], check=True, capture_output=True, text=True)
+                            "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True,
                                     env=dict(os.environ, ASAN_OPTIONS="detect_stack_use_after_return=1"))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
