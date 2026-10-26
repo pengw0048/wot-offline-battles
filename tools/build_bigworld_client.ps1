@@ -190,6 +190,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
         Set-Content -LiteralPath $EngineConfig -Encoding utf8
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_shader_compiler.py"),
         $EngineRoot) "shader-compiler-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_resource_write_overlay.py"),
+        $EngineRoot) "resource-write-overlay-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_resource_packages.py"),
         $EngineRoot) "resource-packages-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_processed_resources.py"),
@@ -218,6 +220,12 @@ print('Licensed SDK input extracted: %d files' % len(members))
         $EngineRoot) "stock-time-of-day-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_preferences_path.py"),
         $EngineRoot) "stock-preferences-path-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_dynamic_resolution.py"),
+        $EngineRoot) "stock-dynamic-resolution-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_decals.py"),
+        $EngineRoot) "stock-decals-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_screenshots.py"),
+        $EngineRoot) "stock-screenshots-patch.log"
 
     # Microsoft's D3DX package supplies the legacy headers/import libraries
     # alongside the runner's Windows SDK, without installing the old SDK.
@@ -321,7 +329,23 @@ print('Licensed SDK input extracted: %d files' % len(members))
         Invoke-Checked $CacheExe @("--zero-stats") "compiler-cache-start.log"
     }
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
-        "--target", "probe_stock_audio_resources", "--parallel", "4") "audio-resources-probe-compile.log"
+        "--target", "probe_stock_audio_resources", "probe_resource_write_overlay",
+        "--parallel", "4") "resource-probes-compile.log"
+    $WriteProbe = Join-Path $BuildRoot "native-probes\Hybrid\probe_resource_write_overlay.exe"
+    $WriteFixture = Join-Path $WorkRoot "resource-write-overlay-probe"
+    Invoke-Checked "python" @((Join-Path $RepositoryRoot "native\standalone_client\tests\make_resource_write_overlay_fixture.py"),
+        $WriteFixture) "resource-write-overlay-fixture.log"
+    @'
+from pathlib import Path
+import subprocess, sys
+root = Path(sys.argv[2])
+subprocess.run([sys.argv[1], str(root / 'overlay'), str(root / 'generated-resources.pkg'),
+                str(root / 'source'), '-unattended'], check=True, timeout=60)
+'@ | & python - $WriteProbe $WriteFixture 2>&1 |
+        Tee-Object -FilePath (Join-Path $LogRoot "resource-write-overlay-probe-run.log")
+    if ($LASTEXITCODE -ne 0) {
+        throw "The private resource write integration probe failed."
+    }
     $ResourceProbe = Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_audio_resources.exe"
     $ResourceFixture = Join-Path $WorkRoot "audio-resources-probe.pkg"
     # Exercise our actual resource adapter, BigWorld ZIP locking and the Wwise

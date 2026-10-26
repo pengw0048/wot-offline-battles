@@ -30,6 +30,9 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_graphics_initialization.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_dynamic_resolution.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_decal_resources.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_screenshot_callback.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/client_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gun_ballistics_binding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/offline_vehicle_parameters.cpp"
@@ -83,6 +86,18 @@ else()
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
 endif()
 
+# Verify private writes and mounted archive immutability in the real resource
+# manager before the renderer can compile effects against original packages.
+add_executable(probe_resource_write_overlay
+    "${CMAKE_CURRENT_LIST_DIR}/probe_resource_write_overlay.cpp")
+target_include_directories(probe_resource_write_overlay BEFORE PRIVATE
+    "${BW_SOURCE_DIR}/lib/resmgr")
+target_compile_definitions(probe_resource_write_overlay PRIVATE
+    _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
+target_link_libraries(probe_resource_write_overlay resmgr cstdmf winmm)
+set_target_properties(probe_resource_write_overlay PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
+
 # Exercise the production resource adapter with real BW ZIPs and SDK streams.
 # No renderer, SoundEngine, audio device, or original game assets are required.
 add_executable(probe_stock_audio_resources
@@ -101,5 +116,6 @@ set_target_properties(probe_stock_audio_resources PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
 if(MSVC)
     set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/probe_stock_audio_resources.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/probe_resource_write_overlay.cpp"
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
 endif()
