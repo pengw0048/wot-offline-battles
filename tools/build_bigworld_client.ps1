@@ -240,6 +240,8 @@ print('Licensed SDK input extracted: %d files' % len(members))
         $EngineRoot) "stock-script-paths-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_xmpp.py"),
         $EngineRoot) "stock-xmpp-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_pinger.py"),
+        $EngineRoot) "stock-pinger-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_display_modes.py"),
         $EngineRoot) "stock-display-modes-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_stock_graphics_settings_consumers.py"),
@@ -398,6 +400,12 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
         "--target", "probe_stock_xmpp", "--parallel", "4") "xmpp-probe-compile.log"
     Invoke-Checked "python" @((Join-Path $RepositoryRoot "native\standalone_client\tests\run_stock_xmpp_loopback.py"),
         (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_xmpp.exe")) "xmpp-probe-run.log"
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_stock_pinger", "--parallel", "4") "pinger-probe-compile.log"
+    Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_pinger.exe") @() "pinger-probe-run.log"
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_stock_wot_module", "--parallel", "4") "wot-module-probe-compile.log"
+    Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_wot_module.exe") @() "wot-module-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "probe_stock_replay_file", "--parallel", "4") "replay-file-probe-compile.log"
     # CPython ships an independent, same-architecture OpenSSL DLL. The native

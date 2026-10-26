@@ -31,12 +31,14 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_graphics_settings_consumers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_display_modes.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_math.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_wot_module.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_dynamic_resolution.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_decal_resources.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_screenshot_callback.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_xmpp.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_pinger.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/client_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gun_ballistics_binding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/offline_vehicle_parameters.cpp"
@@ -104,6 +106,30 @@ target_link_libraries(probe_stock_xmpp pyscript cstdmf WotGloox winmm)
 set_target_properties(probe_stock_xmpp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
 
+# Use the genuine Mercury request/reply transport against a loopback peer.
+add_executable(probe_stock_pinger
+    "${CMAKE_CURRENT_LIST_DIR}/probe_stock_pinger.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_pinger.cpp")
+target_include_directories(probe_stock_pinger PRIVATE
+    "${BW_SOURCE_DIR}/client" "${CMAKE_CURRENT_LIST_DIR}")
+target_compile_definitions(probe_stock_pinger PRIVATE
+    _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
+target_link_libraries(probe_stock_pinger network pyscript cstdmf winmm)
+set_target_properties(probe_stock_pinger PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
+
+# Verify the actual Python registry, MatrixProvider conversion and D3DX math.
+add_executable(probe_stock_wot_module
+    "${CMAKE_CURRENT_LIST_DIR}/probe_stock_wot_module.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_wot_module.cpp")
+target_include_directories(probe_stock_wot_module PRIVATE
+    "${BW_SOURCE_DIR}/client" "${CMAKE_CURRENT_LIST_DIR}")
+target_compile_definitions(probe_stock_wot_module PRIVATE
+    _HAS_AUTO_PTR_ETC=1 _HAS_TR1_NAMESPACE=1 _ENFORCE_MATCHING_ALLOCATORS=0)
+target_link_libraries(probe_stock_wot_module pyscript script math cstdmf winmm)
+set_target_properties(probe_stock_wot_module PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
+
 # This file/packet foundation has no Python controller export. Cross-check its
 # real Mercury cipher and zlib output against independently generated fixtures.
 add_executable(probe_stock_replay_file
@@ -151,8 +177,12 @@ if(MSVC)
     set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/probe_stock_audio_resources.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/probe_resource_write_overlay.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/probe_stock_pinger.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/probe_stock_wot_module.cpp"
         PROPERTIES COMPILE_OPTIONS "/std:c++17;/fp:strict")
     set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/probe_stock_xmpp.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/probe_stock_pinger.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/probe_stock_wot_module.cpp"
         APPEND PROPERTY COMPILE_OPTIONS "/wd5033")
     set_source_files_properties(
         "${CMAKE_CURRENT_LIST_DIR}/probe_stock_replay_file.cpp"
