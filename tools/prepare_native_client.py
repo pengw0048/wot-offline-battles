@@ -2,6 +2,7 @@
 """Connect the independent client to an owned, unmodified #1513 installation."""
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
 
 from inspect_client import inspect_client
 
@@ -55,6 +57,66 @@ def atomic_write(path, data):
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
+
+
+class OriginalResources:
+    """Read the same ordered HD mounts as the native resource manager.
+
+    Package filename sorting is not the installed client's resource priority.
+    Loose directories and nested terrain ZIPs retain their original owners.
+    """
+    def __init__(self, client):
+        self.paths = original_resource_paths(Path(client))
+        self.index = {}
+        self.directories = []
+        self.archives = {}
+        for priority, path in enumerate(self.paths):
+            if path.is_dir():
+                self.directories.append((priority, path))
+                continue
+            with zipfile.ZipFile(path) as archive:
+                for name in archive.namelist():
+                    if not name.endswith('/'):
+                        self.index.setdefault(name.lower(), (priority, path, name))
+
+    def read(self, resource):
+        name = resource.replace('\\', '/').strip('/')
+        if not name or '..' in name.split('/') or ':' in name:
+            raise ValueError('Invalid original resource path: ' + resource)
+        entry = self.index.get(name.lower())
+        for priority, directory in self.directories:
+            if entry is not None and priority > entry[0]:
+                break
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate.read_bytes()
+        if entry is not None:
+            unused_priority, path, member = entry
+            if path not in self.archives:
+                self.archives[path] = zipfile.ZipFile(path)
+            return self.archives[path].read(member)
+        # Native ZipFileSystem detects nested archives by their magic rather
+        # than a .zip suffix. Terrain containers use .cdata_processed.
+        parts = name.split('/')
+        for split in range(len(parts) - 1, 0, -1):
+            container = '/'.join(parts[:split])
+            if container.lower() not in self.index:
+                continue
+            data = self.read(container)
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                return archive.read('/'.join(parts[split:]))
+        raise KeyError(name)
+
+    def close(self):
+        for archive in self.archives.values():
+            archive.close()
+        self.archives.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *unused):
+        self.close()
 
 
 def prepare(client, package):

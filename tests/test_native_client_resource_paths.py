@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 import sys
@@ -5,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
+import zipfile
 
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
@@ -22,7 +24,8 @@ class NativeClientResourcePaths(unittest.TestCase):
         packages = self.client / 'res/packages'
         packages.mkdir(parents=True)
         for name in ('scripts.pkg', 'hd.pkg', 'sd.pkg'):
-            (packages / name).touch()
+            with zipfile.ZipFile(packages / name, 'w') as archive:
+                archive.writestr('shared.xml', name.encode('ascii'))
         (self.client / 'paths.xml').write_text('''<root><Paths>
           <Path>res_mods/0.9.22.0.1</Path>
           <Path>res/packages/scripts.pkg</Path>
@@ -65,6 +68,26 @@ class NativeClientResourcePaths(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Missing authored HD package'):
                 prepare.prepare(self.client, self.package)
         self.assertEqual((self.package / 'paths.xml').read_text(), 'previous configuration')
+
+    def test_reader_matches_hd_mount_order_and_nested_terrain(self):
+        nested = io.BytesIO()
+        with zipfile.ZipFile(nested, 'w') as archive:
+            archive.writestr('terrain2/heights', b'original terrain bytes')
+        with zipfile.ZipFile(self.client / 'res/packages/hd.pkg', 'a') as archive:
+            archive.writestr('spaces/test/00000000o.cdata_processed', nested.getvalue())
+        (self.client / 'res/shared.xml').write_bytes(b'loose original')
+        with prepare.OriginalResources(self.client) as resources:
+            self.assertEqual(resources.read('shared.xml'), b'scripts.pkg')
+            self.assertEqual(resources.read('spaces/test/00000000o.cdata_processed/terrain2/heights'),
+                             b'original terrain bytes')
+        tree = ET.parse(self.client / 'paths.xml')
+        paths = tree.find('Paths')
+        loose = paths.findall('Path')[-1]
+        paths.remove(loose)
+        paths.insert(0, loose)
+        tree.write(self.client / 'paths.xml')
+        with prepare.OriginalResources(self.client) as resources:
+            self.assertEqual(resources.read('shared.xml'), b'loose original')
 
 
 if __name__ == '__main__':
