@@ -134,7 +134,7 @@ public:
             std::istringstream(hostname.substr(colon + 1)) >> port;
             hostname.resize(colon);
         }
-        uint32 ip = 0;
+        u_int32_t ip = 0;
         if (Endpoint::convertAddress(hostname.c_str(), ip) == 0 && ip != 0)
             address_ = Mercury::Address(ip, htons(port));
         // No Python or owner access is allowed on the DNS thread. An expired
