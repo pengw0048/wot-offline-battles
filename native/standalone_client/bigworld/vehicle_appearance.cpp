@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "vehicle_appearance.hpp"
+#include "stock_vehicle_fashions.hpp"
 
 #include "pyscript/script_math.hpp"
 #include "cstdmf/bgtask_manager.hpp"
@@ -105,6 +106,7 @@ struct CompoundNode
 struct CompoundPart
 {
     PyModelPtr model;
+    PyObjectPtr fashion;
     BW::string mountName;
     size_t mount;
     // Original model node identifier -> compound node. Scene Root is omitted
@@ -478,6 +480,8 @@ public:
     PY_RW_ACCESSOR_ATTRIBUTE_DECLARE( MatrixProviderPtr, matrix, matrix )
     PY_RW_ATTRIBUTE_DECLARE( visible_, visible )
 
+    PY_METHOD_DECLARE( py_setupFashions )
+
     void reset()
     {
         if (!state_->active)
@@ -498,11 +502,54 @@ private:
     bool visible_;
     bool highPriorityReflection_ = false;
 };
+PyObject * PyCompoundModel::py_setupFashions( PyObject * args )
+{
+    PyObject * object;
+    if (!PyArg_ParseTuple( args, "O:setupFashions", &object ))
+        return NULL;
+    if (!state_->active)
+    {
+        PyErr_SetString( PyExc_ValueError, "CompoundModel has been reset" );
+        return NULL;
+    }
+    PyObjectPtr values( PySequence_Fast( object, "setupFashions requires a fashion sequence" ),
+        PyObjectPtr::STEAL_REFERENCE );
+    if (!values)
+        return NULL;
+    const Py_ssize_t count = PySequence_Fast_GET_SIZE( values.get() );
+    if (static_cast<size_t>( count ) > state_->parts.size())
+    {
+        PyErr_SetString( PyExc_ValueError, "There are more fashions than compound model parts" );
+        return NULL;
+    }
+    // 008dca60 converts the entire vector before touching a part. A
+    // shorter vector updates only its supplied slots, including None.
+    for (Py_ssize_t index = 0; index < count; ++index)
+        if (!isStockVehicleFashion( PySequence_Fast_GET_ITEM( values.get(), index ) ))
+        {
+            PyErr_SetString( PyExc_TypeError, "setupFashions requires native vehicle fashions or None" );
+            return NULL;
+        }
+    for (Py_ssize_t index = 0; index < count; ++index)
+    {
+        CompoundPart & part = state_->parts[index];
+        PyObject * fashion = PySequence_Fast_GET_ITEM( values.get(), index );
+        if ((part.fashion ? part.fashion.get() : Py_None) == fashion)
+            continue;
+        // 008dfd80 detaches an old fashion before attaching its new
+        // replacement. Equal pointers preserve the existing binding.
+        if (!setStockVehiclePartFashion( part.model.get(), fashion ))
+            return NULL;
+        part.fashion = fashion == Py_None ? NULL : fashion;
+    }
+    Py_RETURN_NONE;
+}
 PY_TYPEOBJECT( PyCompoundModel )
 PY_BEGIN_METHODS( PyCompoundModel )
     PY_METHOD( node )
     PY_METHOD( reset )
     PY_METHOD( getBoundsForPart )
+    PY_METHOD( setupFashions )
 PY_END_METHODS()
 PY_BEGIN_ATTRIBUTES( PyCompoundModel )
     PY_ATTRIBUTE( root )

@@ -187,6 +187,8 @@ except Exception as error:
         $EngineRoot) "processed-resources-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_static_collision.py"),
         $EngineRoot) "static-collision-patch.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_vehicle_fashions.py"),
+        $EngineRoot) "vehicle-fashions-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_vehicle_resources.py"),
         $EngineRoot) "vehicle-resources-patch.log"
     Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_client_session.py"),
