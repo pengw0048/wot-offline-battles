@@ -11,4 +11,6 @@ extern int StockVehicleFashions_token;
 // vehicle material fashion, never a generic Python callback.
 bool isStockVehicleFashion( PyObject * object );
 bool setStockVehiclePartFashion( PyModel * model, PyObject * object );
+// Original wg_initCustomSettings loads the shared material exclusion rules.
+void initialiseStockVehicleCamouflageConfig();
 BW_END_NAMESPACE

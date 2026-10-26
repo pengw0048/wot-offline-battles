@@ -24,6 +24,9 @@ int StockVehicleFashions_token = 1;
 
 namespace
 {
+BW::vector<BW::string> camouflageExclusions;
+bool camouflageExclusionsLoaded = false;
+
 // Exact #1513 00a36b60. The public renderer publishes a distance LOD rather
 // than the compiled renderer's inverse screen area. Both the authored
 // thresholds and that real distance are projected through this same kernel.
@@ -81,19 +84,11 @@ struct VehicleTrackTextureState
 
 bool excludedFromCamouflage( const BW::string & material )
 {
-    // 005c0239 configures system/scriptsConfigXML; 00972a47 appends
-    // /camouflage/excludeMaterials to that same public App config value.
-    // 00af05c0 reads item strings. 00af0f60 treats only a leading '*' as
-    // substring matching. Keep the rules in the original resource.
-    DataSectionPtr section = BWResource::openSection(
-        s_scriptsConfigXML.value() + "/camouflage/excludeMaterials" );
-    if (!section)
-        return false;
-    BW::vector<DataSectionPtr> items;
-    section->openSections( "item", items );
-    for (size_t index = 0; index < items.size(); ++index)
+    if (!camouflageExclusionsLoaded)
+        initialiseStockVehicleCamouflageConfig();
+    // 00af0f60: only a leading '*' requests substring matching.
+    for (const BW::string & pattern : camouflageExclusions)
     {
-        const BW::string pattern = items[index]->asString();
         if ((!pattern.empty() && pattern[0] == '*' &&
                 material.find( pattern.substr( 1 ) ) != BW::string::npos) ||
             material == pattern)
@@ -756,6 +751,24 @@ PY_FACTORY( WGVehicleFashion, BigWorld )
 bool isStockVehicleFashion( PyObject * object )
 {
     return object == Py_None || WGBaseFashion::Check( object );
+}
+
+void initialiseStockVehicleCamouflageConfig()
+{
+    // 005c0239 configures system/scriptsConfigXML; 00972a47 appends this
+    // path, then 00af05c0 replaces the same rules consumed by fashions.
+    DataSectionPtr section = BWResource::openSection(
+        s_scriptsConfigXML.value() + "/camouflage/excludeMaterials" );
+    BW::vector<BW::string> replacement;
+    if (section)
+    {
+        BW::vector<DataSectionPtr> items;
+        section->openSections( "item", items );
+        for (const DataSectionPtr & item : items)
+            replacement.push_back( item->asString() );
+    }
+    camouflageExclusions.swap( replacement );
+    camouflageExclusionsLoaded = true;
 }
 bool setStockVehiclePartFashion( PyModel * model, PyObject * object )
 {
