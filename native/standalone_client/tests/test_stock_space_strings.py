@@ -169,7 +169,9 @@ class StockSpaceStringTests(unittest.TestCase):
             bad = bytearray(data)
             struct.pack_into('<I', bad, offset, value)
             cases.append((bad, False, [(7, None)]))
-        cases.append((data + b'x', False, [(7, None)]))
+        # BWSG embeds the same reader before its model/stream arrays. It must
+        # stop at the end of the string pool, not demand the whole stream's EOF.
+        cases.append((data + b'x', True, queries))
         bad = bytearray(data)
         bad[-1] = 1
         cases.append((bad, False, [(7, None)]))
@@ -187,16 +189,18 @@ class StockSpaceStringTests(unittest.TestCase):
                 for name in archive.namelist():
                     if not name.endswith('/space.bin'):
                         continue
-                    data = CompiledSpace(archive.read(name)).section_data('BWST')
-                    stride, count = struct.unpack_from('<II', data)
-                    self.assertEqual(stride, 12)
-                    pool = 12 + count * 12
-                    rows = []
-                    for index in range(count):
-                        key, offset, length = struct.unpack_from('<III', data, 8 + index * 12)
-                        rows.append((key, data[pool + offset:pool + offset + length]))
-                    cases.append((data, True, rows + [(0, None)]))
-                    entries += count
+                    compiled = CompiledSpace(archive.read(name))
+                    for section in ('BWST', 'BWSG'):
+                        data = compiled.section_data(section)
+                        stride, count = struct.unpack_from('<II', data)
+                        self.assertEqual(stride, 12)
+                        pool = 12 + count * 12
+                        rows = []
+                        for index in range(count):
+                            key, offset, length = struct.unpack_from('<III', data, 8 + index * 12)
+                            rows.append((key, data[pool + offset:pool + offset + length]))
+                        cases.append((data, True, rows + [(0, None)]))
+                        entries += count
         self.assertTrue(cases)
         self.run_cases(cases, fixture=True)
         print('Production StringTable read %d original tables and resolved %d resource keys' % (len(cases), entries))

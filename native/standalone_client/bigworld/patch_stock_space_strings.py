@@ -20,7 +20,7 @@ READ = '''bool StringTable::readFromStream( BinaryFormat::Stream* pStream )
         bytes > pStream->size() - pStream->tell())
         return false;
     char* strings = static_cast<char*>( pStream->readRaw( bytes ) );
-    if (!strings || !pStream->eof()) return false;
+    if (!strings) return false;
     size_t accumulated = 0;
     for (uint32 i = 0; i < count; ++i)
     {
@@ -96,6 +96,10 @@ def patch(root):
                           '\t\t\tuint32 offset_; // From beginning of string data')
     implementation = root / 'string_table.cpp'
     source = implementation.read_text(encoding='utf-8-sig')
+    source = source.replace('    if (!strings || !pStream->eof()) return false;',
+                            '    if (!strings) return false;')
+    source = replace_once(source, 'if (!readFromStream( pStream_ ))',
+                          'if (!readFromStream( pStream_ ) || !pStream_->eof())')
     if READ not in source:
         start = source.index('bool StringTable::readFromStream(')
         end = source.index('// ----------------------------------------------------------------------------\nvoid StringTable::close()', start)
