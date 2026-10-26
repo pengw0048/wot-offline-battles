@@ -37,6 +37,10 @@ int main( int argc, char ** argv )
     assert( !wot::decodeStockTreeWindParameters( malformed.data(), malformed.size(), parameters, error ) );
     assert( parameters.matrixCount == 123 );
     parameters = original;
+    const std::string trailing = input + "\nMaxBendAngle 1\nNumWindMatricesAndLeafAngles 5 8\nWindResponseAndLimit malformed\n";
+    assert( wot::decodeStockTreeWindParameters( trailing.data(), trailing.size(), parameters, error ) );
+    assert( parameters.matrixCount == original.matrixCount &&
+        parameters.maximumBend == original.maximumBend && parameters.response == original.response );
     wot::StockTreeWind wind;
     assert( !wind.advance( 0.f, NULL, NULL, error ) );
     assert( wind.initialise( parameters, error ) );
