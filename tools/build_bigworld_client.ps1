@@ -14,9 +14,12 @@ if (-not $IsWindows) {
 
 $Revision = "3d3cc16ae60bb1d71cb014e9b0539e54e6d8c4fb"
 $D3dxVersion = "9.29.952.8"
+$ScaleformRevision = "7d92be560bf1b2e4ecae9ac69e340d4cae9a557e"
+$ScaleformVersion = "4.2.22"
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $StandaloneRoot = Join-Path $RepositoryRoot "native\standalone_client\bigworld"
 $StandaloneCmake = Join-Path $StandaloneRoot "CMakeLists.txt"
+$ScaleformCmake = Join-Path $StandaloneRoot "scaleform_sdk.cmake"
 if (-not (Test-Path -LiteralPath $StandaloneCmake)) {
     throw "The standalone application CMake fragment is missing: $StandaloneCmake"
 }
@@ -72,6 +75,30 @@ try {
             throw "Pinned source is missing $RelativePath"
         }
     }
+
+    # Build the available AS3/D3D9 source SDK, rather than reusing its old /MT
+    # binaries or relabelling it as the original client's different 4.6.34.
+    $ScaleformArchive = Join-Path $WorkRoot "scaleform-sdk.tar.gz"
+    $ScaleformRoot = Join-Path $WorkRoot "scaleform-sdk"
+    $ScaleformPrefix = "scaleform_sdk-$ScaleformRevision"
+    New-Item -ItemType Directory -Path $ScaleformRoot | Out-Null
+    Write-Host "Downloading Scaleform SDK $ScaleformVersion source at $ScaleformRevision"
+    Invoke-WebRequest -Uri "https://codeload.github.com/RetiredSDK/scaleform_sdk/tar.gz/$ScaleformRevision" -OutFile $ScaleformArchive
+    $ScaleformMembers = @(& tar -tzf $ScaleformArchive)
+    if ($LASTEXITCODE -ne 0 -or $ScaleformMembers.Count -eq 0) {
+        throw "Cannot inspect the pinned Scaleform source archive."
+    }
+    foreach ($Member in $ScaleformMembers) {
+        if (($Member -ne $ScaleformPrefix -and
+                -not $Member.StartsWith("$ScaleformPrefix/")) -or
+                (($Member -split '/') -contains '..') -or $Member.Contains('\')) {
+            throw "Unexpected Scaleform source archive member: $Member"
+        }
+    }
+    Invoke-Checked "tar" @("-xzf", $ScaleformArchive, "-C", $ScaleformRoot,
+        "--strip-components", "1") "scaleform-source-extract.log"
+    Invoke-Checked "python" @((Join-Path $StandaloneRoot "patch_scaleform_sdk.py"),
+        $EngineRoot, $ScaleformRoot) "scaleform-source-patch.log"
 
     # The pinned source predates the current SDK's API deprecations and the
     # standard library's nodiscard annotations. Keep /WX for other diagnostics.
@@ -144,6 +171,11 @@ try {
         upstream = "https://github.com/v2v3v4/BigWorld-Engine-14.4.1"
         revision = $Revision
         d3dx_package = "Microsoft.DXSDK.D3DX/$D3dxVersion"
+        scaleform_upstream = "https://github.com/RetiredSDK/scaleform_sdk"
+        scaleform_revision = $ScaleformRevision
+        scaleform_source_version = $ScaleformVersion
+        original_client_scaleform_version = "4.6.34"
+        scaleform_audio = "GFx abstract SoundRenderer; optional FMOD backend disabled"
         generator = "Visual Studio 17 2022"
         toolset = "v142"
         platform = "Win32"
@@ -151,6 +183,9 @@ try {
         runtime_resources = "Public BigWorld SourceForge SVN r10"
         source_adaptation = @(
             "Define D3DX9 GUIDs for the modern Windows SDK",
+            "Build pinned Scaleform 4.2.22 AS2/AS3 and D3D9 projects with the application /MD CRT",
+            "Use the source SDK filter policy; the unavailable BW setRestrictFlashFilters extension is not emulated",
+            "Keep GFx abstract audio support without introducing an unused FMOD runtime",
             "Suppress observed legacy API/nodiscard warnings C4996 and C4834; retain /WX",
             "Link the repository's native standalone application bootstrap",
             "Compile FX sources locally through BWResource and cache native FXO files"
@@ -159,9 +194,14 @@ try {
     } | ConvertTo-Json | Set-Content -LiteralPath `
         (Join-Path $ArtifactRoot "build-inputs.json") -Encoding utf8
 
+    $ScaleformCmakePath = $ScaleformCmake.Replace('\', '/')
     Invoke-Checked "cmake" @("-S", $EngineRoot, "-B", $BuildRoot,
         "-G", "Visual Studio 17 2022", "-A", "Win32", "-T", "v142",
         "-DBW_CMAKE_TARGET=client", "-DBW_UNIT_TESTS_ENABLED=OFF",
+        "-DWOT_SCALEFORM_SOURCE_CMAKE=$ScaleformCmakePath",
+        "-DWOT_SCALEFORM_SDK_ROOT=$ScaleformRoot",
+        "-DWOT_SCALEFORM_D3DX_ROOT=$SdkRoot",
+        "-DWOT_SCALEFORM_FMOD_ADDON=OFF",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5") "configure.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "bwclient", "--parallel", "4", "--",

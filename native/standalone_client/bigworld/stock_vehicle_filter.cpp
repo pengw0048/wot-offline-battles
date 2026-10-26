@@ -168,7 +168,7 @@ struct StockVehicleFilterState
     float width = 0.f;
     float minimumNormalY = 0.f;
     float velocityErrorCompensation = 0.5f;
-    float groundDeformationRate = 0.2f;
+    float groundFilterRate = 0.2f;
     Vector3 hullLocalPosition = Vector3::zero();
     Vector3 velocity = Vector3::zero();
     Vector3 acceleration = Vector3::zero();
@@ -484,7 +484,7 @@ struct StockVehicleFilterState
         up.normalise();
         const float pitch = -asinf( std::max( -1.f, std::min( 1.f, forward.y ) ) );
         const float roll = atan2f( right.y, up.y );
-        const float fraction = elapsed / (0.15923566f / groundDeformationRate + elapsed);
+        const float fraction = elapsed / (0.15923566f / groundFilterRate + elapsed);
         groundFiltered.setRotate( atan2f( forward.x, forward.z ),
             oldPitch + (pitch - oldPitch) * fraction,
             oldRoll + (roll - oldRoll) * fraction );
@@ -551,7 +551,6 @@ public:
     PY_RW_ATTRIBUTE_DECLARE( state_->minimumNormalY, vehicleMinNormalY )
     PY_RW_ATTRIBUTE_DECLARE( state_->allowStrafeCompensation, allowStrafeCompensation )
     PY_RW_ATTRIBUTE_DECLARE( state_->velocityErrorCompensation, velocityErrorCompensation )
-    PY_RW_ATTRIBUTE_DECLARE( state_->groundDeformationRate, groundDeformationRate )
     PY_RW_ATTRIBUTE_DECLARE( state_->hullLocalPosition, hullLocalPosition )
     PY_RW_ATTRIBUTE_DECLARE( state_->placingOnGround, placingOnGround )
     PY_RW_ATTRIBUTE_DECLARE( state_->maxMove, maxMove )
@@ -1255,7 +1254,7 @@ class StockFilterVectorProvider : public Vector4Provider
 public:
     StockFilterVectorProvider( PyWGVehicleFilter * owner, unsigned kind ) :
         Vector4Provider( false, &s_type_ ), owner_( owner ), kind_( kind ) {}
-    virtual void output( Vector4 & result ) const
+    virtual void output( Vector4 & result ) override
     {
         const StockVehicleFilterState & state =
             *static_cast<PyWGVehicleFilter *>( owner_.get() )->state();
@@ -1422,7 +1421,6 @@ PY_BEGIN_ATTRIBUTES( PyWGVehicleFilter )
     PY_ATTRIBUTE( allowStrafeCompensation )
     PY_ATTRIBUTE( velocityErrorCompensation )
     PY_ATTRIBUTE( defaultVelocityErrorCompensation )
-    PY_ATTRIBUTE( groundDeformationRate )
     PY_ATTRIBUTE( hullLocalPosition )
     PY_ATTRIBUTE( placingOnGround )
     PY_ATTRIBUTE( maxMove )
@@ -1448,5 +1446,43 @@ PY_BEGIN_ATTRIBUTES( PyWGVehicleFilter )
     PY_ATTRIBUTE( latencyCurvePower )
 PY_END_ATTRIBUTES()
 PY_FACTORY_NAMED( PyWGVehicleFilter, "WGVehicleFilter", BigWorld )
+
+bool readStockVehicleFilterVisualState( PyObject * filter,
+    StockVehicleFilterVisualState & result )
+{
+    if (!filter || !PyWGVehicleFilter::Check( filter ))
+        return false;
+    const PyWGVehicleFilter * wrapper = static_cast<PyWGVehicleFilter *>( filter );
+    const StockVehicleFilterState & state = *wrapper->state();
+    result.attached = wrapper->attached();
+    result.instantaneousSpeed = result.attached ? state.instantaneousSpeed : 0.f;
+    result.instantaneousRotationSpeed = result.attached ? state.instantaneousRotationSpeed : 0.f;
+    result.averageSpeed = result.attached ? state.averageSpeed : 0.f;
+    result.averageRotationSpeed = result.attached ? state.averageRotationSpeed : 0.f;
+    result.longitudinalSpeed = state.longitudinalSpeed;
+    result.strafeSpeed = state.strafeSpeed;
+    result.angularSpeed = fabsf( state.predictedAngularVelocity.dotProduct( state.body[1] ) );
+    result.suspensionCompressionRate = state.compressionRate;
+    result.leftContacts = state.leftContacts;
+    result.rightContacts = state.rightContacts;
+    result.strafing = state.isStrafing;
+    return true;
+}
+
+bool setStockVehicleTrackOverrides( PyObject * filter, float leftSpeed,
+    float rightSpeed, bool leftLocked, bool rightLocked )
+{
+    if (!filter || !PyWGVehicleFilter::Check( filter ))
+        return false;
+    PyWGVehicleFilter * wrapper = static_cast<PyWGVehicleFilter *>( filter );
+    if (!wrapper->attached())
+        return false;
+    StockVehicleFilterState & state = *wrapper->state();
+    state.leftTrackSpeed = leftSpeed;
+    state.rightTrackSpeed = rightSpeed;
+    state.leftTrackLocked = leftLocked;
+    state.rightTrackLocked = rightLocked;
+    return true;
+}
 
 BW_END_NAMESPACE

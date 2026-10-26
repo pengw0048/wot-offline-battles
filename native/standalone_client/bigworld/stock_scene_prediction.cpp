@@ -100,7 +100,7 @@ public:
 private:
     const PyEntity* owner_;
     EntityPtr entity_;
-    const Filter* filter_;
+    const MovementFilter* filter_;
     Vector3 velocity_;
     ClientSpacePtr space_;
     float nearest_;
@@ -140,7 +140,7 @@ bool queryStockScenePrediction(SpaceID spaceID,const Vector3* endpoints,
         PyErr_SetString(PyExc_RuntimeError,"WGVehicleFilter prediction space is unavailable");
         return false;
     }
-    const Filter* filter=entity->pFilter();
+    const MovementFilter* filter=entity->pFilter();
     for (unsigned i=0;i<4;++i) {
         PredictionEdgeHit query(owner,entity,velocity,space);
         space->collide(endpoints[i*2],endpoints[i*2+1],query);

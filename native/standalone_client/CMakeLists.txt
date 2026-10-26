@@ -17,6 +17,7 @@ add_library(wot_battle_core STATIC
     src/vehicle_constraint_solver.cpp
     src/vehicle_suspension.cpp
     src/vehicle_authority.cpp
+    src/wwise_bank.cpp
 )
 target_include_directories(wot_battle_core PUBLIC include)
 target_compile_features(wot_battle_core PUBLIC cxx_std_17)
@@ -36,6 +37,9 @@ target_link_libraries(wot-native-core PRIVATE wot_battle_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_wwise_bank tests/test_wwise_bank.cpp)
+    target_link_libraries(test_wwise_bank PRIVATE wot_battle_core)
+    add_test(NAME wwise_bank COMMAND test_wwise_bank)
     add_executable(test_compiled_space tests/test_compiled_space.cpp)
     target_link_libraries(test_compiled_space PRIVATE wot_battle_core)
     add_test(NAME compiled_space COMMAND test_compiled_space)

@@ -34,9 +34,10 @@ public:
     virtual ~CollisionCallback()=default;
     virtual int operator()(const CollisionObstacle&,const WorldTriangle&,float)=0;
 };
-struct Filter {};
+struct MovementFilter {};
 struct Entity { int space=1;int spaceID() const { return space; }
-    Filter* pFilter() const { return nullptr; } };
+    MovementFilter* filter=nullptr;
+    MovementFilter* pFilter() const { return filter; } };
 using EntityPtr=std::shared_ptr<Entity>;
 struct PyEntity {
     bool destroyed=false;
@@ -135,6 +136,12 @@ int main() {
     assert(!queryStockScenePrediction(1,edges,owner,{},blocked));
     assert(blocked && pythonError);
     entity.destroyed=false;pythonError=false;
+    MovementFilter replacement;
+    space->calls=0;
+    space->during=[&]{entity.entity->filter=&replacement;};
+    assert(!queryStockScenePrediction(1,edges,owner,{},blocked));
+    assert(blocked && pythonError);
+    entity.entity->filter=nullptr;pythonError=false;
     entity.entity->space=2;
     assert(!queryStockScenePrediction(1,edges,owner,{},blocked));
     entity.entity->space=1;pythonError=false;

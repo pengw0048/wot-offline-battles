@@ -246,7 +246,7 @@ public:
         {
             // #1513 008dd280 transforms this part's authored minimum by its
             // mount node and scales each basis row by the matching extent.
-            const CompoundPart & part = state_->parts[part_];
+            CompoundPart & part = state_->parts[part_];
             BoundingBox bounds;
             part.model->localBoundingBox( bounds );
             const Matrix & world = state_->nodes[part.mount].world;
