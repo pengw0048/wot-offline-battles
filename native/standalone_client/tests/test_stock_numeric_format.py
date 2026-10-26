@@ -17,6 +17,7 @@ SOURCE = ROOT / 'bigworld/stock_numeric_format.cpp'
 HEADER = ROOT / 'bigworld/stock_numeric_format.hpp'
 
 NLS_HOST = r'''
+#include <algorithm>
 #include <cassert>
 #include <cstdarg>
 #include <cwchar>
@@ -55,7 +56,8 @@ static int GetLocaleInfoW(UINT locale,LCTYPE key,wchar_t* out,int size) {
         key==LOCALE_SMONGROUPING?moneyGroups:
         key==LOCALE_SDECIMAL?L",":key==LOCALE_STHOUSAND?L"\u202f":
         key==LOCALE_SMONDECIMALSEP?L".":L"'";
-    assert(static_cast<int>(text.size()+1)<=size);std::wcscpy(out,text.c_str());
+    assert(static_cast<int>(text.size()+1)<=size);
+    std::copy(text.c_str(),text.c_str()+text.size()+1,out);
     return static_cast<int>(text.size()+1);
 }
 static int GetNumberFormatW(UINT locale,UINT flags,const wchar_t* input,
@@ -63,14 +65,18 @@ static int GetNumberFormatW(UINT locale,UINT flags,const wchar_t* input,
     assert(locale==0x400 && flags==0 && size==512);++numberCalls;
     lastInput=input;lastNull=!fmt;if(fmt)lastNumber=*fmt;
     if(formatFailure)return 0;
-    std::wcscpy(out,output.c_str());return static_cast<int>(output.size()+1);
+    assert(static_cast<int>(output.size()+1)<=size);
+    std::copy(output.c_str(),output.c_str()+output.size()+1,out);
+    return static_cast<int>(output.size()+1);
 }
 static int GetCurrencyFormatW(UINT locale,UINT flags,const wchar_t* input,
         const CURRENCYFMTW* fmt,wchar_t* out,int size) {
     assert(locale==0x400 && flags==0 && size==512);++currencyCalls;
     lastInput=input;lastNull=!fmt;if(fmt)lastCurrency=*fmt;
     if(formatFailure)return 0;
-    std::wcscpy(out,output.c_str());return static_cast<int>(output.size()+1);
+    assert(static_cast<int>(output.size()+1)<=size);
+    std::copy(output.c_str(),output.c_str()+output.size()+1,out);
+    return static_cast<int>(output.size()+1);
 }
 template<class T> static HRESULT StringCchPrintfW(wchar_t* out,unsigned size,
         const wchar_t* fmt,T value) {
