@@ -30,6 +30,7 @@ set(WOT_STOCK_ADAPTER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/stock_graphics_initialization.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_graphics_settings_consumers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_display_modes.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/stock_math.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_particle_quality.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_environment_constants.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/stock_dynamic_resolution.cpp"
