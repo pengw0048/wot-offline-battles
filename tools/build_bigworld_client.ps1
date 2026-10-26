@@ -419,6 +419,9 @@ subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=60)
         "--target", "probe_stock_battleground_elements", "--parallel", "4") "battleground-elements-probe-compile.log"
     Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_stock_battleground_elements.exe") @() "battleground-elements-probe-run.log"
     Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
+        "--target", "probe_scaleform_lifecycle", "--parallel", "4") "scaleform-lifecycle-probe-compile.log"
+    Invoke-Checked (Join-Path $BuildRoot "native-probes\Hybrid\probe_scaleform_lifecycle.exe") @() "scaleform-lifecycle-probe-run.log"
+    Invoke-Checked "cmake" @("--build", $BuildRoot, "--config", "Hybrid",
         "--target", "probe_stock_replay_file", "--parallel", "4") "replay-file-probe-compile.log"
     # CPython ships an independent, same-architecture OpenSSL DLL. The native
     # Win32 probe below uses Mercury's separately linked bundled block cipher.

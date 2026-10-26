@@ -100,6 +100,11 @@ def patch_engine(engine_root, sdk_root):
          '\t\t// SDK 4.2.22 uses its stock filter policy; the BW-specific\n'
          '\t\t// setRestrictFlashFilters extension is absent from this source SDK.',
          'unavailable BW filter extension')
+    edit(manager, '\t\t\tAmpServer::Uninit();',
+         '\t\t\t// GFx::System owns the AMP server through teardown. Clearing\n'
+         '\t\t\t// the base singleton here lets GetInstance install a static\n'
+         '\t\t\t// fallback that GFx::System later releases as a heap Server.',
+         'AMP server lifetime while profiling is disabled')
     edit(manager,
          '\t\t/* GFx Sound System initialization */\n',
          '#if FMOD_SUPPORT\n\t\t/* GFx Sound System initialization */\n',

@@ -96,6 +96,12 @@ else()
         PROPERTIES COMPILE_OPTIONS "-std=c++17;-fno-fast-math;-ffp-contract=off")
 endif()
 
+add_executable(probe_scaleform_lifecycle
+    "${CMAKE_CURRENT_LIST_DIR}/../tests/probe_scaleform_lifecycle.cpp")
+target_link_libraries(probe_scaleform_lifecycle PRIVATE wot_sf_gfx)
+set_target_properties(probe_scaleform_lifecycle PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-probes")
+
 add_executable(probe_stock_battleground_elements
     "${CMAKE_CURRENT_LIST_DIR}/../tests/probe_stock_battleground_elements.cpp")
 target_compile_features(probe_stock_battleground_elements PRIVATE cxx_std_14)
