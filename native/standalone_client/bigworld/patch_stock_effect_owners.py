@@ -262,7 +262,7 @@ def patch_context(root):
 def patch_environment(root):
     # These types are included by public engine headers. The pinned build
     # flattens library linkage into bwclient, so target usage requirements do
-    # not reach all header consumers. Publish the two owned interface headers
+    # not reach all header consumers. Publish the owned interface headers
     # under the engine's existing shared lib include root.
     application = Path(__file__).resolve().parent
     for source, destination in (
@@ -270,6 +270,8 @@ def patch_environment(root):
          root / 'lib/wot/stock_fog.hpp'),
         (application / 'stock_environment_constants.hpp',
          root / 'lib/stock_environment_constants.hpp'),
+        (application / 'stock_effect_adapter.hpp',
+         root / 'lib/stock_effect_adapter.hpp'),
     ):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(source.read_text())
