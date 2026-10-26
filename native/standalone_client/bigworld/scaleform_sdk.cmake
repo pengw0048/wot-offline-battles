@@ -82,14 +82,17 @@ endforeach()
 list(REMOVE_DUPLICATES _sf_png_symbols)
 list(SORT _sf_png_symbols)
 set(_sf_png_prefix_header "${CMAKE_CURRENT_BINARY_DIR}/wot_scaleform_png_prefix.h")
-file(WRITE "${_sf_png_prefix_header}" "/* Private names for the SDK's original PNG decoder. */\n#pragma once\n")
+set(_sf_png_prefix_content "/* Private names for the SDK's original PNG decoder. */\n#pragma once\n")
 # zlib 1.2.7's Z_PREFIX table omits these two externally linked internals.
 # Keep its original decoder isolated from BigWorld's separate zip library.
-file(APPEND "${_sf_png_prefix_header}"
+string(APPEND _sf_png_prefix_content
     "#define z_errmsg wot_sf_z_errmsg\n#define _tr_flush_bits wot_sf_tr_flush_bits\n")
 foreach(symbol IN LISTS _sf_png_symbols)
-    file(APPEND "${_sf_png_prefix_header}" "#define ${symbol} wot_sf_${symbol}\n")
+    string(APPEND _sf_png_prefix_content "#define ${symbol} wot_sf_${symbol}\n")
 endforeach()
+# Reconfiguration must not invalidate every SDK object when this table is unchanged.
+file(GENERATE OUTPUT "${_sf_png_prefix_header}" CONTENT "${_sf_png_prefix_content}"
+    NEWLINE_STYLE LF)
 
 set(_sf_includes
     "${WOT_SCALEFORM_SDK_ROOT}/Include"

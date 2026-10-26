@@ -27,6 +27,13 @@ class StartupSettingsTest(unittest.TestCase):
 #define BW_BEGIN_NAMESPACE
 #define BW_END_NAMESPACE
 #define PY_MODULE_FUNCTION(name, module)
+#define PY_AUTO_MODULE_FUNCTION(...)
+namespace BW { using string=std::string; }
+struct BWResource {
+    static BW::string version;
+    static BW::string appProductVersion() { return version; }
+};
+BW::string BWResource::version;
 struct PyObject { long value; };
 PyObject* PyExc_RuntimeError=nullptr;
 int errors=0;
@@ -70,6 +77,9 @@ std::map<std::string,int> GraphicsSetting::latent;
 '''
         cases = r'''
 int main() {
+    assert(wg_getProductVersion().empty());
+    BWResource::version="9.8.7-native-test";
+    assert(wg_getProductVersion()==BWResource::version);
     PyObject zero{0},one{1};
     assert(py_wg_isVehicleDustEnabled(&zero)->value==1);
     assert(py_wg_isSniperModeSwingingEnabled(&zero)->value==1);

@@ -124,6 +124,10 @@ void StockDynamicResolutionSupport::deleteUnmanagedObjects()
 {
     framePending_ = false;
     sceneConstantsActive_ = false;
+    // SetTexture retains a COM reference. Release it before the default-pool
+    // render target is retired for a device reset or renderer teardown.
+    if (material_ && material_->pEffect() && material_->pEffect()->pEffect())
+        material_->pEffect()->pEffect()->SetTexture("g_bbCopyMap", NULL);
     copy_ = NULL;
 }
 

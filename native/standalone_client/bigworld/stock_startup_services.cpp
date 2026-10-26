@@ -2,6 +2,7 @@
 #include "stock_startup_services.hpp"
 
 #include "moo/graphics_settings.hpp"
+#include "resmgr/bwresource.hpp"
 
 BW_BEGIN_NAMESPACE
 int StockStartupServices_token = 1;
@@ -83,5 +84,13 @@ static PyObject * py_wg_isSniperModeSwingingEnabled( PyObject * args )
     return PyInt_FromLong( sniperModeSwingingEnabled ? 1 : 0 );
 }
 PY_MODULE_FUNCTION( wg_isSniperModeSwingingEnabled, BigWorld )
+
+BW::string wg_getProductVersion()
+{
+    // #1513 96f2e0 -> 1184610 queries the running executable's version resource.
+    // The public resource manager retains that same native lookup and cache.
+    return BWResource::appProductVersion();
+}
+PY_AUTO_MODULE_FUNCTION(RETDATA, wg_getProductVersion, END, BigWorld)
 
 BW_END_NAMESPACE

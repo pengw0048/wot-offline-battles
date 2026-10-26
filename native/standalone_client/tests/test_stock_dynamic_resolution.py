@@ -63,14 +63,20 @@ bool texture_ok=true;
 int copies=0,draws=0,selected=0;
 std::vector<std::string> order;
 std::vector<float> upsample_parameters;
+std::map<void*,unsigned> effectTextureReferences;
 struct ID3DXEffect {
     std::map<std::string,std::vector<float>> values;
+    void* boundTexture=nullptr;
+    ~ID3DXEffect() { if(boundTexture) --effectTextureReferences[boundTexture]; }
     HRESULT SetValue(const char* handle,const void* data,unsigned bytes) {
         const auto* f=static_cast<const float*>(data);values[handle]={f,f+bytes/4};return 0;
     }
     HRESULT SetTexture(const char* name,void* texture) {
-        assert(std::string(name)=="g_bbCopyMap" && texture && selected);
-        order.push_back("texture");return 0;
+        assert(std::string(name)=="g_bbCopyMap" && (!texture || selected));
+        if(boundTexture) --effectTextureReferences[boundTexture];
+        boundTexture=texture;
+        if(texture) ++effectTextureReferences[texture];
+        order.push_back(texture?"texture":"unbind");return 0;
     }
 };
 namespace Moo {
@@ -96,7 +102,12 @@ public:
     Ptr<ManagedEffect>& pEffect() { return effect; }
 };
 using EffectMaterialPtr=Ptr<EffectMaterial>;
-class RenderTarget { public: void* pTexture() { return texture_ok?this:nullptr; } };
+class RenderTarget {
+public:
+    // A device reset requires every default-pool reference to be released.
+    ~RenderTarget() { assert(effectTextureReferences[this]==0); }
+    void* pTexture() { return texture_ok?this:nullptr; }
+};
 using RenderTargetPtr=Ptr<RenderTarget>;
 class EffectVisualContext {
 public:
