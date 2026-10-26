@@ -44,7 +44,11 @@ struct ID3DXEffect {
     void* texture=NULL;
     bool fail=false;
     int SetValue(D3DXHANDLE,const void* data,unsigned bytes){
-        if(fail)return -1;assert(bytes==112);uniform.resize(28);std::memcpy(uniform.data(),data,bytes);return 0;
+        if(fail)return -1;
+        assert(bytes==112);
+        uniform.resize(28);
+        std::memcpy(uniform.data(),data,bytes);
+        return 0;
     }
     int SetTexture(D3DXHANDLE,void* value){if(fail)return -1;texture=value;return 0;}
 };
