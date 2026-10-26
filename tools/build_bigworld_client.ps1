@@ -87,17 +87,24 @@ except Exception as error:
             throw "The licensed Wwise SDK download failed."
         }
         Write-Host "Inspecting the licensed Wwise SDK archive"
-        $WwiseMembers = @(& tar -tf $WwiseArchive)
-        if ($LASTEXITCODE -ne 0 -or $WwiseMembers.Count -eq 0) {
-            throw "Cannot inspect the licensed Wwise SDK input."
+        @'
+from pathlib import PurePosixPath
+import sys, tarfile
+with tarfile.open(sys.argv[1], 'r:xz') as archive:
+    members = archive.getmembers()
+    if not members:
+        raise ValueError('The licensed SDK archive is empty')
+    for member in members:
+        path = PurePosixPath(member.name)
+        if (not member.name.startswith('SDK/') or '..' in path.parts or
+                '\\' in member.name or not (member.isfile() or member.isdir())):
+            raise ValueError('Unexpected licensed SDK archive member')
+    archive.extractall(sys.argv[2], members=members, filter='data')
+print('Licensed SDK input extracted: %d files' % len(members))
+'@ | & python - $WwiseArchive $WwiseInput
+        if ($LASTEXITCODE -ne 0) {
+            throw "The licensed Wwise SDK input cannot be extracted."
         }
-        foreach ($Member in $WwiseMembers) {
-            if (-not $Member.StartsWith('SDK/') -or
-                    (($Member -split '/') -contains '..') -or $Member.Contains('\')) {
-                throw "Unexpected licensed SDK archive member."
-            }
-        }
-        Invoke-Checked "tar" @("-xf", $WwiseArchive, "-C", $WwiseInput) "wwise-sdk-extract.log"
         $WwiseSdk = Join-Path $WwiseInput "SDK"
     }
     if (-not $WwiseSdk -or -not (Test-Path -LiteralPath (Join-Path $WwiseSdk "include\AK\AkWwiseSDKVersion.h"))) {
